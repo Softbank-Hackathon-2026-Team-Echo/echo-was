@@ -2,21 +2,21 @@
 
 등록한 서비스의 Git 브랜치나 커밋을 **요청 한 번**으로 빌드해 고른 환경 1곳에 배포한다. 헬스체크를 통과해야 새 버전으로 바꾸고, 대표 주소와 환경별 주소를 돌려준다. 근거: SPEC [specs/api-3-one-touch-deploy.md](../../specs/api-3-one-touch-deploy.md), 원장 F1. 서비스 등록은 [services.md](services.md).
 
-- 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 인증 없음(권한 검사 자리만).
+- 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 경로는 `/api/v1/orgs/{orgId}` 아래이고 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 접수는 **개발자 이상의 사람**이다(에이전트 토큰은 403 `AGENT_READ_ONLY`, [auth.md](auth.md)).
 - **접수만 동기다.** API 는 요청을 `QUEUED` 로 저장하고 202 를 준다. 빌드·배포·헬스체크는 별도 일꾼(`python -m app.worker`)이 진행한다. **일꾼이 없으면 요청은 `QUEUED` 에 남는다.** 진행 상황은 단건 조회로 폴링한다(실시간 푸시 없음).
 - **이번 실행은 가짜다(`simulated: true`).** 빌드·배포·대표 주소 연결·되돌리기·내리기는 가짜 실행기가 흉내 낸다(`EXECUTOR_MODE=fake`, 실제 실행기는 인프라 3·5 이후). 흐름·상태·DB 기록·계약은 실제와 같다. 헬스체크는 기본 가짜(늘 통과)이고 `HEALTH_CHECKER_MODE=http` 로 실제 HTTP 확인을 켤 수 있다. `simulated` 는 요청 행에 저장한 값이다.
 
 ## 엔드포인트
 
-| 메서드 · 경로 | 요청 | 성공 | 실패 |
-|---|---|---|---|
-| `POST /api/v1/services/{id}/deploy-requests` | `CreateDeployRequest` | 202 `DeployRequestDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`·`REPO_NOT_ACCESSIBLE`, 409 `SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`PUBLIC_HOST_CONFLICT`, 422 `VALIDATION_ERROR`·`REF_NOT_FOUND`·`SIMULATE_NOT_ALLOWED`, 502 `SOURCE_PROVIDER_UNAVAILABLE` |
-| `GET /api/v1/services/{id}/deploy-requests?page&size&environmentId` | — | 200 `Page[DeployRequestSummary]`(최신순) | 404 `SERVICE_NOT_FOUND` |
-| `GET /api/v1/deploy-requests/{id}` | — | 200 `DeployRequestDetail` | 404 `DEPLOY_REQUEST_NOT_FOUND` |
+| 메서드 · 경로 | 요청 | 성공 | 실패 | 최소 역할 |
+|---|---|---|---|---|
+| `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests` | `CreateDeployRequest` | 202 `DeployRequestDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`·`REPO_NOT_ACCESSIBLE`, 409 `SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`PUBLIC_HOST_CONFLICT`, 422 `VALIDATION_ERROR`·`REF_NOT_FOUND`·`SIMULATE_NOT_ALLOWED`, 502 `SOURCE_PROVIDER_UNAVAILABLE` | 개발자 |
+| `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests?page&size&environmentId` | — | 200 `Page[DeployRequestSummary]`(최신순) | 404 `SERVICE_NOT_FOUND` | 뷰어·에이전트 |
+| `GET /api/v1/orgs/{orgId}/deploy-requests/{id}` | — | 200 `DeployRequestDetail` | 404 `DEPLOY_REQUEST_NOT_FOUND` | 뷰어·에이전트 |
 
 코드 클래스: `CreateDeployRequest`, `DeployRequestSummary` = `DeployRequestSummaryResponse`, `DeployRequestDetail` = `DeployRequestDetailResponse`(`app/schemas/deploy_request.py`).
 
-### 접수 `POST /api/v1/services/{id}/deploy-requests`
+### 접수 `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
 
 ```json
 {"environmentId": "b87d8364-7724-4cd1-a59d-306860497d18", "branch": "main"}
@@ -59,12 +59,12 @@ stateDiagram-v2
 - **실패와 되돌리기**: 배포 기록이 생긴 뒤의 모든 실패(배포 실패·시간 초과, 헬스 실패 3종, 일꾼 상실)는 되돌리기를 불러 직전 버전을 유지하고 결과를 `revertStatus`(`SUCCEEDED`·`FAILED`)에 적는다. 되돌리기가 실패해도 `errorCode` 는 바꾸지 않는다. 연결의 현재 배포·비율은 그대로다.
 - **일꾼 복구**: 일꾼이 죽어도 임대(30초)가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 작업은 멱등 키로 두 번 만들지 않는다([executors.md](../executors.md)). 같은 요청에서 임대를 3번 잃으면 `WORKER_LOST` 로 끝난다.
 
-### 목록 `GET /api/v1/services/{id}/deploy-requests`
+### 목록 `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
 
 - 쿼리: `page`(0부터), `size`(1~100, 기본 20), `environmentId`(선택, 그 환경 요청만).
 - `createdAt` 내림차순(최신 먼저), 같으면 `id` 내림차순. 삭제가 끝난 서비스는 404.
 
-### 단건 `GET /api/v1/deploy-requests/{id}`
+### 단건 `GET /api/v1/orgs/{orgId}/deploy-requests/{id}`
 
 이력이므로 서비스가 삭제된 뒤에도 조회된다. 배포 요청 행은 지우지 않는다(DB 트리거가 DELETE 를 막는다).
 
@@ -155,7 +155,9 @@ stateDiagram-v2
 | `simulate` 를 가짜가 아닌 실행기 모드에서 보냄 | 422 | `SIMULATE_NOT_ALLOWED` |
 | 브랜치·커밋 없음 | 422 | `REF_NOT_FOUND` |
 | 서비스 없음·삭제됨 | 404 | `SERVICE_NOT_FOUND` |
-| 환경 없음·삭제됨 | 404 | `ENVIRONMENT_NOT_FOUND` |
+| 환경 없음·삭제됨·서비스와 다른 조직의 환경 | 404 | `ENVIRONMENT_NOT_FOUND` |
+| 에이전트 토큰으로 접수 | 403 | `AGENT_READ_ONLY`(거부 기록 남음) |
+| 뷰어의 접수 | 403 | `ROLE_FORBIDDEN`(거부 기록 남음) |
 | 저장소 접근 불가 | 404 | `REPO_NOT_ACCESSIBLE` (+ `installUrl`) |
 | 서비스 삭제 중 | 409 | `SERVICE_DELETING` |
 | 환경 마지막 접속 확인 실패 | 409 | `ENVIRONMENT_UNHEALTHY` |

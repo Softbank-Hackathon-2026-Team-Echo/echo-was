@@ -1,11 +1,12 @@
-# 공통 모델 스키마 — 환경·서비스·배포
+# 공통 모델 스키마 — 환경·서비스·배포·조직
 
 > 서비스 하나가 여러 환경(AWS·GCP·온프레)에 **동시에** 있을 수 있다. 클라우드 간 이전 중에는 같은 이미지를 A·B 두 곳에서 함께 돌리며 트래픽을 옮긴다.
 > 새 환경 종류는 **설정 양식 파일 하나**로 더하고 표는 고치지 않는다(NFR-15).
 
 - 원본: 이 파일(코드와 같은 커밋에서 고친다). 노션 설계 문서는 이 파일을 옮긴 것이다.
 - 물리 DDL: [.claude/rules/db-schema.sql](../.claude/rules/db-schema.sql) (`scripts/dump_schema.sh` 로 뽑음) · 용어: [term-dictionary.md](../.claude/rules/term-dictionary.md)
-- 근거: 원장 F1(원터치 배포·되돌리기), F2(공통 모델·어댑터), F3(환경 카드), F7(단계적 트래픽 전환), NFR-15(이식성)
+- 근거: 원장 F1(원터치 배포·되돌리기), F2(공통 모델·어댑터), F3(환경 카드), F4·F5·F16(역할·거부 기록·에이전트 읽기 전용), F7(단계적 트래픽 전환), NFR-07(권한), NFR-15(이식성)
+- **조직(API 서버 6)**: 서비스·환경은 고객 조직 하나에 속한다(`organization_id`). 배포 연결·배포·배포 요청·빌드·할 일은 서비스를 통해 조직에 속한다. 사람·조직·멤버·초대·세션·에이전트 토큰·거부 기록 표는 ⑨.
 
 ---
 
@@ -121,7 +122,7 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `id` | uuid | N | PK | |
-| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_name_live` | 서비스 이름(예 `shop-api`). 바꿀 수 없다(주소가 이름에서 나온다) |
+| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_name_live` | 서비스 이름(예 `shop-api`). 바꿀 수 없다(주소가 이름에서 나온다). **Echo 전체에서** 유일(조직과 무관) |
 | `description` | text | Y | | 설명 |
 | `repo_url` | varchar(300) | N | | 정규화한 `https://github.com/<owner>/<repo>` |
 | `repo_private` | boolean | N | | 등록·수정 때 GitHub 가 알려 준 비공개 여부 |
@@ -132,6 +133,7 @@ erDiagram
 | `status` | varchar(16) | N | 기본 `ACTIVE`, `ACTIVE`·`DELETING` CHECK | 삭제를 받으면 `DELETING`, 다 내리면 소프트 삭제 |
 | `delete_error` | varchar(32) | Y | `delete_error IS NULL OR status = 'DELETING'` | 내리기 실패 이유(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`) |
 | `simulated` | boolean | N | 기본 false | 가짜 소스 저장소 클라이언트로 등록했는지(저장 값) |
+| `organization_id` | uuid | N | FK `organizations.id`, `ix_services_organization_id` | 서비스가 속한 조직(API 서버 6) |
 
 - 원터치 배포 칸은 기존 표에 `add_column` 으로 더해 DB 에서 맨 뒤에 놓인다(모델은 `sort_order=APPENDED_COLUMN_SORT_ORDER`). 이 revision 은 `services`·`service_environments` 행이 0개라고 가정하고, 행이 있으면 칸을 더하기 전에 분명한 메시지로 실패한다(NOT NULL·기본값 없는 칸).
 
@@ -140,16 +142,17 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `id` | uuid | N | PK | |
-| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_environments_name_live` | 환경 이름(예 `aws-seoul`) |
+| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_environments_org_name_live`(`organization_id`, `name`) | 환경 이름(예 `aws-seoul`). **조직 안에서** 유일 |
 | `kind` | varchar(32) | N | **DB CHECK 없음** — 설정 양식 레지스트리가 검사 | 환경 종류(`aws`·`gcp`·`onprem`) |
 | `config` | jsonb | N | 기본 `{}`, `jsonb_typeof(config) = 'object'` | 종류별 설정. 형식은 종류의 설정 양식이 저장 전에 검사 |
 | `secret_ref` | varchar(255) | Y | API 가 형식 검사(아래) | 접속 자격 증명의 **보관 위치**(값 아님). API 등록 때는 필수 |
 | `connection_status` | varchar(16) | N | 기본 `UNCHECKED`, 3개 값 CHECK(`ck_environments_connection_status_valid`) | 마지막 접속 확인 결과. ④-2 상태 흐름 |
 | `connection_checked_at` | timestamptz | Y | `(status = 'UNCHECKED') = (checked_at IS NULL)` (`ck_environments_connection_checked_at_consistency`) | 마지막 확인 시각 |
 | `connection_error` | varchar(32) | Y | `(status = 'FAILED') = (error IS NOT NULL)` (`ck_environments_connection_error_consistency`). **값 CHECK 없음** — 앱이 `ConnectionErrorCode` 값만 쓴다 | 실패 이유 코드(`TIMEOUT`·`SECRET_NOT_FOUND` …) |
+| `organization_id` | uuid | N | FK `organizations.id` | 환경이 속한 조직(API 서버 6) |
 
 - 접속 상태 세 칸은 기존 표에 `add_column` 으로 더해 DB 에서 맨 뒤(소프트 삭제 칸 뒤)에 놓인다. 모델도 `sort_order=APPENDED_COLUMN_SORT_ORDER`(200)로 같은 순서를 쓴다.
-- `secret_ref` 형식(저장소 이름은 첫 콜론에서 나눈다): `env:ECHO_SECRET_<NAME>`(서버 프로세스 환경변수, 지금 실제 조회하는 유일한 저장소) · `k8s:<namespace>/<secret>/<key>` · `aws-sm:<이름 또는 ARN>` · `gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]`. 자세한 규칙은 [docs/api/environments.md](api/environments.md).
+- `secret_ref` 형식(저장소 이름은 첫 콜론에서 나눈다): `env:ECHO_SECRET_<조직 키>__<NAME>`(서버 프로세스 환경변수, 지금 실제 조회하는 유일한 저장소. 조직 키 = slug 대문자·`-`→`_`) · `k8s:<namespace>/<secret>/<key>` · `aws-sm:<이름 또는 ARN>` · `gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]`. 자세한 규칙은 [docs/api/environments.md](api/environments.md).
 
 ### `service_environments` — 서비스-환경 연결
 
@@ -398,7 +401,7 @@ stateDiagram-v2
 | 배포 요청(`deploy_requests`)과 배포 기록(`deployments`)을 나눔 | 요청은 "원터치 한 번"(빌드·대기·취소·실패 이유 포함), 배포 기록은 "연결에 이미지를 올린 것"이다. 빌드 실패·취소 요청은 배포 기록을 만들지 않는다. `deployments` 표와 상태 값은 그대로 둔다 | 배포 표에 요청 칸 추가: 기존 계약(`DeploymentStatus`)이 바뀐다 |
 | 같은 연결은 실행 1 + 대기 1, 새 요청이 대기 요청을 밀어냄 | 최신 요청이 이긴다(Render·Vercel 기본 동작). 부분 unique 2개가 DB 에서도 막는다 | 무제한 큐: 오래된 커밋이 줄줄이 배포된다 |
 | 할 일 표 + 별도 일꾼(`FOR UPDATE SKIP LOCKED` + 임대) | API 재시작·일꾼 장애에도 일이 남고, 임대가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 호출은 우리 행 id 를 멱등 키로 넘겨 두 번 만들지 않는다 | 요청 안에서 처리·인메모리 큐: 재시작하면 일이 사라진다 |
-| 잠금 순서 하나(환경 → 서비스 → 연결(id 순) → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
+| 잠금 순서 하나(조직(멤버 변경·초대만) → 환경 → 서비스 → 연결(id 순) → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
 | `simulated` 를 행에 저장 | 실제 실행기로 바꾼 뒤에도 과거 가짜 기록을 구분한다(해커톤 목업 공개 규칙) | 응답 때 설정으로 계산: 모드를 바꾸면 과거 기록이 진짜처럼 보인다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
@@ -459,16 +462,47 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 
 ## ⑧ 후속 표
 
-아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3 에서 만들었다.)
+아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3, 사용자·조직·역할·거부 기록은 API 서버 6 에서 만들었다.)
 
 | 표(예정) | 내용 | 담당 태스크 |
 |---|---|---|
 | (배포·빌드·실행 로그) | 로그 저장·조회 | API 서버 4 (배포 이력·되돌리기·로그) |
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
-| 사용자·역할 | 뷰어·운영자·승인자·에이전트 | API 서버 6 (권한) |
-| `audit_logs` | 누가 무엇을 했나(사람·AI). 지우지 않음 | API 서버 7 (감사 로그) |
+| `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
 | `migration_plans` | 이전 계획·승인·실행 | API 서버 8 (이전 계획) |
 | `policies`·`findings` | 공통 정책, 정규화한 보안 결과 | 보안 파트 |
 | 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
 
 삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스는 API 서버 3 에서 정했다 — `DELETING` 으로 바꾸고 대기 요청을 취소한 뒤, 진행 중 요청이 끝나면 일꾼이 연결마다 내리고 소프트 삭제한다(연결도 내린 즉시 소프트 삭제, 배포 기록·배포 요청은 남는다).
+
+---
+
+## ⑨ 사람·조직·권한 (API 서버 6)
+
+```mermaid
+erDiagram
+    users ||--o{ organization_members : "멤버"
+    organizations ||--o{ organization_members : "역할 하나씩"
+    organizations ||--o{ invitations : "대기 초대"
+    users ||--o{ sessions : "브라우저 로그인"
+    organizations ||--o{ agent_tokens : "에이전트 출입증"
+    organizations ||--o{ services : "소유"
+    organizations ||--o{ environments : "소유"
+    organizations |o--o{ audit_logs : "거부 기록"
+```
+
+| 표 | 칸(요약) | 제약 | 뜻 |
+|---|---|---|---|
+| `users` | `github_id` bigint, `github_login` varchar(39), `name`·`avatar_url` NULL | `uq_users_github_id` | GitHub 로 로그인한 사람. 아이디·이름·사진은 로그인마다 갱신. GitHub 토큰은 저장하지 않는다 |
+| `organizations` | `slug` varchar(39), `name` varchar(100), `personal` bool, `created_by_user_id` FK | `uq_organizations_slug`, `ck_organizations_slug_format`(`^[a-z0-9](-?[a-z0-9]){0,38}$`), `ck_organizations_name_not_empty` | 고객 조직(개인 조직 포함). slug 는 바꾸지 않는다 |
+| `organization_members` | `organization_id`·`user_id` FK, `role` | `uq_organization_members_organization_id_user_id`, `ck_…_role_valid`(`ADMIN`·`DEVELOPER`·`VIEWER`), `ix_organization_members_user_id` | 사람 × 조직 × 역할. 내보내기·탈퇴는 행을 지운다 |
+| `invitations` | `organization_id` FK, `github_id` bigint, `github_login`, `role`, `status`, `invited_by_user_id` FK, `expires_at`, `accepted_at` NULL | `ck_…_status_valid`, `ck_…_role_valid`, `ck_…_accepted_at_consistency`(`ACCEPTED ⇔ accepted_at`), **부분 unique** `uq_invitations_organization_id_github_id_pending`(`WHERE status = 'PENDING'`), `ix_invitations_github_id` | GitHub 번호 × 역할 대기. 상태 `PENDING` → `ACCEPTED`·`EXPIRED`·`REVOKED` |
+| `sessions` | `user_id` FK, `token_hash` char(64), `expires_at`, `revoked_at` NULL, `created_at` | `uq_sessions_token_hash` | 쿠키 값의 SHA-256 만. 7일 고정 |
+| `agent_tokens` | `organization_id`·`created_by_user_id` FK, `name`, `token_hash` char(64), `last4` char(4), `expires_at`, `revoked_at`·`last_used_at` NULL, `created_at` | `uq_agent_tokens_token_hash`, `ix_agent_tokens_organization_id_created_at` | 원문 없이 해시와 끝 4자리. 만든 사람이 떠나도 남는다 |
+| `audit_logs` | `organization_id` FK NULL, `actor_type`, `actor_user_id`·`actor_agent_token_id` FK NULL, `action`(메서드 + 경로 틀), `path`, `reason`, `result`, `request_id`, `created_at` | `ck_…_actor_type_valid`, `ck_…_result_valid`(`DENIED`), `ck_…_actor_consistency`(사람·토큰 중 하나), `ix_audit_logs_organization_id_created_at`, **DELETE 금지 트리거** `trg_audit_logs_prevent_delete`(공용 함수 `prevent_append_only_delete()`) | 막힌 요청 한 건(이번에는 403 만). 요청과 따로 커밋 |
+
+- 이 revision(`ce35cab9b2e9`)은 `services`·`environments` 에 `organization_id NOT NULL` 을 기본값 없이 더하므로 두 표가 비어 있다고 가정한다. 행이 있으면 분명한 메시지(`services has N rows …`)로 실패한다.
+- downgrade 는 새 표·칸을 지우고 전역 `uq_environments_name_live` 를 다시 만든다(조직끼리 같은 환경 이름이 있으면 실패). 공용 함수는 API 서버 3 소유라 지우지 않는다.
+- 잠금: 멤버 변경·초대는 조직 행을 `FOR NO KEY UPDATE` 로 잠근 뒤 행위자 역할을 다시 읽는다. 이 잠금은 서비스·환경·멤버 행을 넣을 때의 FK 확인(`FOR KEY SHARE`)과 부딪히지 않는다. 그래서 잠금 순서 맨 앞에 조직을 더해도 배포 접수·일꾼과 교착이 없다.
+- 초대 적용·첫 로그인·개인 조직 slug 는 `ON CONFLICT DO NOTHING` 이라 동시에 와도 중복 키 오류로 트랜잭션이 멈추지 않는다.
+- 권한 규칙·검사 순서는 [docs/api/auth.md](api/auth.md), 조직 API 는 [docs/api/organizations.md](api/organizations.md).

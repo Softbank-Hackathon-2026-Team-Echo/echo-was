@@ -5,19 +5,21 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 ## 시스템 내 위치
 
 ```text
-[웹 콘솔(프론트)] ──HTTP──▶ [echo-was: 관리 평면 API] ──▶ PostgreSQL (환경·서비스·배포 요청·빌드·할 일)
+[웹 콘솔(프론트)] ──HTTP(쿠키)──▶ [echo-was: 관리 평면 API] ──▶ PostgreSQL (조직·사람·환경·서비스·배포 요청·빌드·할 일)
+[AI 에이전트] ──HTTP(Bearer 토큰, 읽기만)──▶ ┘
                                      │                        ▲
                                      │                        │ 할 일 폴링(SKIP LOCKED + 임대)
                                      │                 [echo-was 일꾼: python -m app.worker]
                                      │                        │
                                      │                        └─(실행기, 지금은 가짜)──▶ 빌드 · 배포 · 대표 주소 · 헬스체크 · 내리기
-                                     ├─(GitHub App)──▶ GitHub (저장소 접근·커밋 고정·읽기 토큰)
+                                     ├─(GitHub App)──▶ GitHub (로그인·저장소 접근·커밋 고정·읽기 토큰)
                                      └─(어댑터, API 서버 2~)──▶ AWS EKS · GCP GKE · 온프레 k3s
                                                                   ▲
                                          [고정 도메인 + L7 프록시(Envoy)] ── 트래픽 비율 적용 (이전 엔진)
 ```
 
 - 사용자는 웹 콘솔에서 클러스터를 **환경**으로 등록하고, **서비스**(Git 저장소)를 등록한 뒤 **원터치 배포**(브랜치·커밋 → 빌드 → 배포 → 헬스체크)로 환경에 올리고, 클라우드 사이를 옮긴다.
+- 사람은 **GitHub 로그인**으로 들어와 고객 회사 단위의 **조직** 멤버로서 역할(뷰어 < 개발자 < 어드민)만큼 일한다. 서비스·환경·배포는 조직에 속하고 다른 조직에는 보이지 않는다. AI 에이전트는 조직에서 발급한 토큰으로 그 조직을 **읽기만** 한다. 권한이 없어 막힌 요청은 기록한다.
 - 이 서버는 그 기록(무엇이 어디에 어떤 버전으로 몇 % 돌고 있나)의 주인이다. 실제 클러스터 조작은 환경 종류별 어댑터와 실행기가 한다. **지금 어댑터와 실행기는 가짜(simulated)다** — 네트워크 호출 없이 정해진 결과를 돌려주고 응답에 `simulated: true` 를 단다.
 
 ## 구성
@@ -25,7 +27,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 구성 요소 | 상태 | 설명 |
 |---|---|---|
 | API 골격 | 있음 | 공통 응답 봉투·예외·JSON 로깅·요청 ID·`/healthz`·`/readyz` |
-| 공통 모델 | 있음 | `services`·`environments`·`service_environments`·`deployments` + `builds`·`deploy_requests`·`jobs`, 마이그레이션 3개 |
+| 공통 모델 | 있음 | `services`·`environments`·`service_environments`·`deployments` + `builds`·`deploy_requests`·`jobs` + `users`·`organizations`·`organization_members`·`invitations`·`sessions`·`agent_tokens`·`audit_logs`, 마이그레이션 4개 |
 | 환경 설정 양식 | 있음 | `aws`·`gcp`·`onprem` 설정 검사(저장 전). 새 종류는 파일 하나 |
 | 환경 API | 있음 | 등록·목록·단건·수정·삭제·다시 확인·종류 목록 ([docs/api/environments.md](docs/api/environments.md)) |
 | 어댑터 동작 | 있음(가짜) | 접속 확인·클러스터 정보 읽기. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업 |
@@ -35,6 +37,8 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 일꾼 | 있음 | `python -m app.worker`. 할 일 표 + 임대 + 멱등 키로 복구 |
 | 실행기(빌드·배포·대표 주소·헬스·내리기) | 있음(가짜) | 실제 빌드·배포·라우터·내리기는 인프라 3·5 이후 실행기만 교체 ([docs/executors.md](docs/executors.md)). HTTP 헬스체커는 실제 구현 있음 |
 | 소스 저장소 클라이언트 | 있음 | 가짜(기본) + 실제 GitHub App(공개·비공개 저장소). 실제 App 생성·설치는 별도 승인 |
+| GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
+| 조직·역할 권한 | 있음 | 조직·멤버·초대·에이전트 토큰 API, 모든 라우트의 검사기, 403 거부 기록(`audit_logs`) ([docs/api/organizations.md](docs/api/organizations.md)) |
 
 ## 핵심 흐름
 
@@ -53,9 +57,9 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 원터치 배포(API 서버 3)
 
 ```text
-서비스 등록   POST /services (repoUrl 접근 확인, 대표 주소 {name}.{도메인})
+서비스 등록   POST /orgs/{orgId}/services (repoUrl 접근 확인, 대표 주소 {name}.{도메인})
    │
-배포 요청     POST /services/{id}/deploy-requests (환경 1개 + 브랜치·커밋 → 40자 SHA 고정, 202 QUEUED)
+배포 요청     POST /orgs/{orgId}/services/{id}/deploy-requests (환경 1개 + 브랜치·커밋 → 40자 SHA 고정, 202 QUEUED)
    │          └ 그 환경과 첫 요청이면 연결 생성(주소 {service}.{env}.{도메인}). 같은 연결의 대기 요청은 밀려남
 일꾼          QUEUED → BUILDING(같은 커밋 빌드 재사용) → DEPLOYING(배포 기록) → VERIFYING(환경별 주소 헬스체크)
    │
@@ -73,24 +77,26 @@ Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2.0(async) · PostgreSQL 17(
 ```text
 app/
 ├─ main.py         # FastAPI 앱, /healthz·/readyz, 라우터 등록, 환경 종류 discover()
-├─ routers/        # environment_router · environment_kind_router · service_router · deploy_request_router (/api/v1)
-├─ services/       # Environment*Service · ServiceService · DeployRequestService(접수)
+├─ routers/        # auth · organization · invitation · agent_token · environment · environment_kind · service · deploy_request (/api/v1)
+├─ auth/           # 권한 검사기(guards) · 403 거부 기록 처리기(audit) · 토큰·쿠키
+├─ services/       # Environment*Service · ServiceService · DeployRequestService(접수) · Auth·Organization·Invitation·AgentToken Service
 │                  #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · service_view(역할·버전 상태)
 ├─ repositories/   # Environment·Service·ServiceEnvironment·DeployRequest·Build·Deployment·Job Repository
-├─ clients/        # secret_client · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
+├─ clients/        # secret_client · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App) · github_user(로그인·초대)
 ├─ executors/      # 실행기 인터페이스(base) · 가짜(fake) · HTTP 헬스체커
 ├─ worker/         # 일꾼 (python -m app.worker): 할 일 폴링·임대·종료 신호
 ├─ adapters/       # 환경 종류별 설정 양식 + 동작 클래스 (aws.py · gcp.py · onprem.py) + 레지스트리
-├─ models/         # SQLAlchemy 모델 (표 7개)
+├─ models/         # SQLAlchemy 모델 (표 14개)
+├─ scripts/        # demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ schemas/        # 공통 응답 봉투, 환경·서비스·배포 요청 API 요청·응답
 ├─ core/           # 설정·DB 엔진·예외·로깅·요청 ID 미들웨어·비밀값 타입·시계·저장소 주소
-├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스 클라이언트·시계·권한 자리)
+├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스·GitHub 사용자 클라이언트·시계)
 └─ enums.py        # 배포·배포 요청·빌드·할 일·서비스 상태와 코드
-alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸)
+alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸, 조직·로그인 표·칸)
 scripts/           # dump_schema.sh (db-schema.sql 생성)
 tests/             # 단위 테스트, adapter_contract.py·executor_contract.py(공통 계약), integration/ (실제 PostgreSQL)
 docs/schema.md     # 스키마 설명 원본
-docs/api/          # API 계약 문서 (environments · services · deploy-requests)
+docs/api/          # API 계약 문서 (auth · organizations · environments · services · deploy-requests)
 docs/executors.md  # 실행기 계약(멱등 키·호출 순서·실패 코드)
 .claude/           # 규칙 문서·훅·write-pr 스킬
 ```
@@ -107,16 +113,18 @@ uv run alembic upgrade head              # 4. 표 만들기
 uv run --env-file .env uvicorn app.main:app   # 5. API 실행 → http://127.0.0.1:8000/readyz 가 204, /docs 에 Swagger
 ```
 
-> **인터넷에 열지 않는다.** 환경 API 에는 아직 인증이 없다(권한 검사 자리만 있음, API 서버 6 에서 GitHub 로그인 + 역할). `127.0.0.1` 기본 바인딩 그대로 팀 내부에서만 실행한다.
+> **모든 업무 API 는 로그인이 필요하다.** 로그인은 GitHub 로그인 하나뿐이다(개발용 로그인 없음). GitHub App 의 로그인 설정(아래 "GitHub 로그인 설정")을 채우기 전에는 로그인·콜백이 503 `LOGIN_NOT_CONFIGURED` 이고, 업무 API 는 401 이다. 로컬에서 API 를 직접 불러 보려면 GitHub App 을 설정해 로그인하거나, 시험(`tests/integration/auth_support.py`)처럼 세션 행을 넣는다.
 
 로컬에서 환경 비밀값 넣기 — API 는 비밀값을 받지 않고 위치(`secretRef`)만 받는다. `env:` 저장소는 **서버 프로세스 환경변수**만 읽으므로(`.env` 파일을 직접 읽지 않음) `--env-file` 로 실행한다.
 
 ```bash
-echo 'ECHO_SECRET_AWS_SEOUL_KUBECONFIG=local-dummy-value' >> .env   # 이름은 ECHO_SECRET_ 로 시작
+echo 'ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG=local-dummy-value' >> .env   # ECHO_SECRET_<조직 키>__ 로 시작
 uv run --env-file .env uvicorn app.main:app
-curl -s -X POST localhost:8000/api/v1/environments -H 'content-type: application/json' \
+# 로그인한 브라우저 세션 쿠키(echo_session)와 허용 Origin 으로 부른다. 조직 키 = slug 대문자·`-`→`_`
+curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/environments -H 'content-type: application/json' \
+  -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"name":"aws-seoul","kind":"aws","config":{"region":"ap-northeast-2","clusterName":"echo-eks"},
-       "secretRef":"env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG"}'
+       "secretRef":"env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG"}'
 # → 201, connectionStatus=CONNECTED, clusterInfo.simulated=true (가짜 어댑터)
 ```
 
@@ -126,12 +134,14 @@ curl -s -X POST localhost:8000/api/v1/environments -H 'content-type: application
 uv run --env-file .env python -m app.worker        # 별도 터미널. 일꾼 (SIGTERM·Ctrl+C 면 지금 실행만 끝내고 멈춤)
 # 또는 컨테이너로: docker compose --profile worker up -d worker
 
-curl -s -X POST localhost:8000/api/v1/services -H 'content-type: application/json' \
+curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services -H 'content-type: application/json' \
+  -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"name":"shop-api","repoUrl":"https://github.com/team-echo/shop-api"}'
 # → 201, url=https://shop-api.apps.echo.test, simulated=true (가짜 소스 저장소)
-curl -s -X POST localhost:8000/api/v1/services/<서비스 id>/deploy-requests -H 'content-type: application/json' \
+curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/deploy-requests -H 'content-type: application/json' \
+  -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"environmentId":"<환경 id>","branch":"main"}'
-# → 202 QUEUED. GET /api/v1/deploy-requests/<요청 id> 를 폴링하면 몇 초 뒤 SUCCEEDED (가짜 실행기 단계당 2초)
+# → 202 QUEUED. GET /api/v1/orgs/<조직 id>/deploy-requests/<요청 id> 를 폴링하면 몇 초 뒤 SUCCEEDED (가짜 실행기 단계당 2초)
 ```
 
 가짜 모드 규칙(기본값): 저장소 owner 가 `private-` 면 비공개, `denied-`·`missing-` 면 404, `flaky-` 면 502. 브랜치가 `missing-` 로 시작하면 422 `REF_NOT_FOUND`. `"simulate": {"failAt": "BUILDING"|"DEPLOYING"|"VERIFYING"}` 로 그 단계를 일부러 실패시킬 수 있다(가짜 모드에서만).
@@ -144,6 +154,38 @@ GITHUB_APP_ID=<App ID>
 GITHUB_APP_PRIVATE_KEY_REF=env:ECHO_SECRET_GITHUB_APP_PRIVATE_KEY   # 값(PEM)은 프로세스 환경변수로만
 GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 ```
+
+### GitHub 로그인 설정
+
+로그인 앱은 API 서버 3 의 GitHub App 을 그대로 쓴다(사용자 인증). **App 생성·설정 변경은 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 client secret 하나이고 설정에는 비밀 참조만 둔다.
+
+```bash
+GITHUB_APP_CLIENT_ID=<App 의 Client ID>
+GITHUB_APP_CLIENT_SECRET_REF=env:ECHO_SECRET_GITHUB_APP_CLIENT_SECRET   # 값은 프로세스 환경변수로만
+GITHUB_OAUTH_REDIRECT_URI=https://<이 API 호스트>/api/v1/auth/github/callback
+FRONTEND_BASE_URL=https://<프론트 호스트>
+FRONTEND_ALLOWED_ORIGINS=https://<프론트 호스트>        # 비면 쿠키로 인증한 쓰기 요청이 모두 403
+# LOGIN_ALLOWED_GITHUB_ORG=<GitHub 조직>               # 설정하면 그 조직 active 멤버만 로그인
+```
+
+프론트는 `/api/v1/auth/github/login?next=/원래/경로` 로 보내고, 돌아오면 `GET /api/v1/me` 로 사용자와 조직(역할)을 읽는다(이때 대기 초대가 적용된다). 요청은 `credentials: "include"` 로 보낸다.
+
+### 데모 전날 점검 목록
+
+1. **콜백 주소**: `GITHUB_OAUTH_REDIRECT_URI` 가 **이 API 호스트의** `/api/v1/auth/github/callback` 이고, GitHub App 설정의 Callback URL 목록에 **글자까지 같게**(스킴·호스트·포트·끝 `/` 없음) 들어 있다. 상태 쿠키가 API 호스트에 내려가므로 다른 호스트면 `OAUTH_STATE_MISMATCH` 가 난다.
+2. **client secret 참조**: `GITHUB_APP_CLIENT_SECRET_REF=env:ECHO_SECRET_GITHUB_APP_CLIENT_SECRET` 이고 그 환경변수가 API 프로세스에 들어 있다(`--env-file` 또는 배포 비밀). 없으면 콜백이 `GITHUB_UNAVAILABLE`.
+3. **프론트 주소**: `FRONTEND_BASE_URL` 이 실제 프론트 주소이고, `FRONTEND_ALLOWED_ORIGINS` 에 브라우저가 보내는 Origin(스킴·호스트·포트)이 정확히 있다. HTTPS 가 아니면 `SESSION_COOKIE_SECURE=false` 로 둔다(로컬만).
+4. **허용 스위치**를 쓸 때: App 이 그 GitHub 조직에 설치돼 있고 **Organization permissions → Members: Read** 권한이 있다. 없으면 모두 `LOGIN_NOT_ALLOWED`.
+5. **로그인을 열기 전에** 데모 팀원이 각자 한 번 로그인한 뒤 `demo_seed` 를 실행해 `team-echo` 조직·역할·에이전트 토큰을 만든다(아래). `team-echo` 는 예약 slug 라 API 로는 만들 수 없다.
+6. 출력된 에이전트 토큰으로 배포 요청을 보내 403 `AGENT_READ_ONLY` 와 `audit_logs` 한 줄을 확인한다(데모 거부 장면).
+
+### 데모 준비 명령
+
+```bash
+uv run --env-file .env python -m app.scripts.demo_seed --org team-echo --admin <GitHub 아이디> --viewer <GitHub 아이디>
+```
+
+조직이 없으면 만들고 `--admin` 을 ADMIN, `--viewer` 를 VIEWER 로 맞춘 뒤 에이전트 토큰 하나를 발급해 원문을 표준 출력에 한 번 쓴다. 두 번 돌려도 조직·멤버는 늘지 않는다. 로그인한 적 없는 아이디나 남이 만든 같은 slug 조직이면 실패한다. 자세한 내용은 [docs/api/organizations.md](docs/api/organizations.md#데모-준비-명령).
 
 자주 쓰는 명령
 
@@ -164,12 +206,18 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 없으면 테스트가 만든다 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
-| `ECHO_SECRET_<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<NAME>` 이 가리키는 환경 접속 비밀값. 프로세스 환경변수로만 읽는다 |
+| `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
 | `PUBLIC_BASE_DOMAIN` | `apps.echo.test` | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}.{도메인}`, 환경별 `{서비스}.{환경}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
 | `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`·`GITHUB_APP_INSTALL_URL`·`GITHUB_API_BASE_URL` | | GitHub App 설정. 개인키는 `env:ECHO_SECRET_…` 참조만 |
+| `GITHUB_APP_CLIENT_ID`·`GITHUB_APP_CLIENT_SECRET_REF`·`GITHUB_OAUTH_REDIRECT_URI`·`FRONTEND_BASE_URL` | | GitHub 로그인 설정. 하나라도 비면 로그인·콜백만 503 |
+| `FRONTEND_ALLOWED_ORIGINS` | `https://app.example` | 쉼표 구분. 쿠키 인증 쓰기 요청 허용 Origin + CORS. 비면 쓰기 403 |
+| `SESSION_COOKIE_SECURE`·`SESSION_TTL_SECONDS` | `true`·`604800` | 세션 쿠키 Secure·수명(7일) |
+| `LOGIN_ALLOWED_GITHUB_ORG` | | 설정하면 그 GitHub 조직 active 멤버만 로그인 |
+| `RESERVED_ORG_SLUGS` | `team-echo` | API 로 만들 수 없는 조직 slug(쉼표 구분) |
+| `AGENT_TOKEN_DEFAULT_DAYS`·`AGENT_TOKEN_MAX_DAYS`·`INVITATION_TTL_SECONDS` | `30`·`90`·`604800` | 에이전트 토큰 기간, 초대 유효 기간 |
 | `BUILD_TIMEOUT_SECONDS`·`DEPLOY_TIMEOUT_SECONDS`·`TEARDOWN_TIMEOUT_SECONDS` | `900`·`300`·`300` | 단계별 제한 시간 |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `5` | 헬스체크 재확인 간격(요청 하나 제한 5초) |
 | `FAKE_EXECUTOR_STEP_SECONDS` | `2.0` | 가짜 실행기가 한 작업을 끝내는 시간 |
@@ -183,24 +231,33 @@ docker compose down                                   # DB 끄기 (데이터는 
 |---|---|---|---|
 | GET | `/healthz` | 204 | 프로세스 생존만 본다(DB 와 무관) |
 | GET | `/readyz` | 204 / 503 | DB `SELECT 1` 이 2초 안에 성공하면 204, 아니면 503 |
-| POST | `/api/v1/environments` | 201 | 환경 등록 + 접속 확인(실패해도 201) |
-| GET | `/api/v1/environments` | 200 | 목록(저장 값만, `page`·`size`·`kind`) |
-| GET | `/api/v1/environments/{id}` | 200 | 단건 + 그 자리에서 읽은 클러스터 정보 |
-| PATCH | `/api/v1/environments/{id}` | 200 | name·config·secretRef 수정(kind 변경 422) |
-| DELETE | `/api/v1/environments/{id}` | 204 | 소프트 삭제(사용 중이면 409) |
-| POST | `/api/v1/environments/{id}/connection-check` | 200 | 접속 다시 확인 |
-| GET | `/api/v1/environment-kinds` | 200 | 등록된 종류 + config JSON Schema |
-| POST | `/api/v1/services` | 201 | 서비스 등록(저장소 접근 확인) |
-| GET | `/api/v1/services` | 200 | 서비스 목록(`page`·`size`) |
-| GET | `/api/v1/services/{id}` | 200 | 서비스 + 연결별 역할·버전 상태·주소 |
-| PATCH | `/api/v1/services/{id}` | 200 | 설명·저장소·헬스·포트 수정(이름 변경 422) |
-| DELETE | `/api/v1/services/{id}` | 202 | 모든 환경에서 내린 뒤 소프트 삭제 |
-| POST | `/api/v1/services/{id}/deploy-requests` | 202 | 원터치 배포 접수(환경 1개 + 브랜치·커밋) |
-| GET | `/api/v1/services/{id}/deploy-requests` | 200 | 배포 요청 목록(최신순, `environmentId`) |
-| GET | `/api/v1/deploy-requests/{id}` | 200 | 배포 요청 진행 상황 |
+| GET | `/api/v1/auth/github/login?next` · `/api/v1/auth/github/callback` | 302 | GitHub 로그인 시작·콜백(공개) |
+| POST | `/api/v1/auth/logout` | 204 | 로그아웃(공개) |
+| GET | `/api/v1/me` | 200 | 나 + 내 조직·역할(대기 초대 적용) |
+| POST · GET | `/api/v1/orgs` | 201 · 200 | 조직 만들기(만든 사람 어드민) · 내 조직 목록 |
+| GET | `/api/v1/orgs/{orgId}` | 200 | 조직 하나 |
+| GET · PATCH · DELETE | `/api/v1/orgs/{orgId}/members[/{userId}]` | 200 · 200 · 204 | 멤버 목록 · 역할 변경(어드민) · 내보내기/탈퇴 |
+| POST · GET · DELETE | `/api/v1/orgs/{orgId}/invitations[/{id}]` | 201 · 200 · 204 | 초대(어드민, GitHub 아이디 + 역할) |
+| POST · GET · DELETE | `/api/v1/orgs/{orgId}/agent-tokens[/{id}]` | 201 · 200 · 204 | 에이전트 토큰(개발자, 원문은 발급 때 한 번) |
+| POST | `/api/v1/orgs/{orgId}/environments` | 201 | 환경 등록 + 접속 확인(실패해도 201) |
+| GET | `/api/v1/orgs/{orgId}/environments` | 200 | 목록(저장 값만, `page`·`size`·`kind`) |
+| GET | `/api/v1/orgs/{orgId}/environments/{id}` | 200 | 단건 + 그 자리에서 읽은 클러스터 정보 |
+| PATCH | `/api/v1/orgs/{orgId}/environments/{id}` | 200 | name·config·secretRef 수정(kind 변경 422) |
+| DELETE | `/api/v1/orgs/{orgId}/environments/{id}` | 204 | 소프트 삭제(사용 중이면 409, 어드민) |
+| POST | `/api/v1/orgs/{orgId}/environments/{id}/connection-check` | 200 | 접속 다시 확인 |
+| GET | `/api/v1/environment-kinds` | 200 | 등록된 종류 + config JSON Schema(로그인만) |
+| POST | `/api/v1/orgs/{orgId}/services` | 201 | 서비스 등록(저장소 접근 확인) |
+| GET | `/api/v1/orgs/{orgId}/services` | 200 | 서비스 목록(`page`·`size`) |
+| GET | `/api/v1/orgs/{orgId}/services/{id}` | 200 | 서비스 + 연결별 역할·버전 상태·주소 |
+| PATCH | `/api/v1/orgs/{orgId}/services/{id}` | 200 | 설명·저장소·헬스·포트 수정(이름 변경 422) |
+| DELETE | `/api/v1/orgs/{orgId}/services/{id}` | 202 | 모든 환경에서 내린 뒤 소프트 삭제(어드민) |
+| POST | `/api/v1/orgs/{orgId}/services/{id}/deploy-requests` | 202 | 원터치 배포 접수(개발자, 환경 1개 + 브랜치·커밋) |
+| GET | `/api/v1/orgs/{orgId}/services/{id}/deploy-requests` | 200 | 배포 요청 목록(최신순, `environmentId`) |
+| GET | `/api/v1/orgs/{orgId}/deploy-requests/{id}` | 200 | 배포 요청 진행 상황 |
 
 - 모든 JSON 응답은 `{"success", "code", "message", "data", "details"}` 봉투다. 봉투의 `code`·`message`·`details` 는 값이 없으면 빼고, **성공 응답의 `data` 안 칸은 항상 있고 값이 없으면 null** 이다. 오류도 같은 봉투다(`data` 없음).
 - 다른 파트는 환경을 `id` 로만 가리킨다(`name` 은 바뀔 수 있다). 자세한 계약: [docs/api/environments.md](docs/api/environments.md).
+- 권한: 조회는 뷰어(에이전트 토큰 가능), 등록·수정·배포·토큰은 개발자, 삭제·초대·역할 변경은 어드민. 남의 조직은 404, 역할이 모자라면 403(`audit_logs` 에 기록). 역할 표·검사 순서: [docs/api/auth.md](docs/api/auth.md).
 - 모든 응답에 `X-Request-ID` 헤더가 붙는다. 요청에 형식이 맞는 `X-Request-ID` 가 있으면 그대로 이어 쓴다.
 - 로그는 stdout 에 JSON 한 줄씩(`component=echo-api`, `request_id` 포함).
 
@@ -213,7 +270,10 @@ docker compose down                                   # DB 끄기 (데이터는 
 
 ## 현재 상태와 한계
 
-- 업무 API 는 환경·서비스·배포 요청 API 다. 인증이 없어 인터넷에 열지 않는다(API 서버 6).
+- 업무 API 는 로그인·조직·환경·서비스·배포 요청 API 다. **실제 GitHub 로그인은 GitHub App 설정 뒤에만 된다**(시험은 가짜 GitHub 를 의존성 교체로 쓴다). API 2·3 경로는 모두 `/api/v1/orgs/{orgId}` 아래로 옮겼다(깨지는 변경, 프론트 미연결).
+- **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
+- 롤백(API 서버 4)·이전(API 서버 8)·AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 거부 기록은 있다. 거부 밖의 행위 기록·감사 로그 조회는 API 서버 7.
+- 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
 - 어댑터는 **가짜**다. 접속 확인·클러스터 정보는 고정 값이고 `simulated: true` 로 표시한다. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업에서 같은 인터페이스·계약 검사로 바꾼다.
 - **원터치 배포의 실행은 가짜다.** 빌드·배포·대표 주소 연결·되돌리기·내리기는 가짜 실행기가 흉내 내고 결과에 `simulated: true` 를 저장한다. 흐름·상태·DB 기록·계약은 실제다. 실제 실행기(인프라 3 Argo CD 파이프라인·인프라 5 고정 진입점 프록시)가 준비되면 실행기만 바꾼다. 이 이슈(#3)의 완료 기준은 실제 배포까지라 실제 실행기 연결 전에는 이슈를 닫지 않는다.
 - 대표 주소의 실제 헬스 확인은 실제 라우터 연결 뒤에 더한다(지금은 환경별 주소만 확인). 트래픽 전환·이전은 API 서버 8, 사용자 되돌리기·배포 로그는 API 서버 4.
@@ -228,7 +288,9 @@ docker compose down                                   # DB 끄기 (데이터는 
 
 | 문서 | 내용 |
 |---|---|
-| [docs/schema.md](docs/schema.md) | 공통 모델 스키마 설명(ER·칸·행 예시·상태 흐름·설계 이유·새 환경 추가) |
+| [docs/schema.md](docs/schema.md) | 공통 모델 스키마 설명(ER·칸·행 예시·상태 흐름·설계 이유·새 환경 추가·조직 표) |
+| [docs/api/auth.md](docs/api/auth.md) | 로그인 흐름·쿠키·Origin·권한 검사 순서·역할 표·거부 기록·오류 |
+| [docs/api/organizations.md](docs/api/organizations.md) | 조직·멤버·초대·에이전트 토큰 API, 조직 열쇠 이름, 데모 준비 명령 |
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·스키마·오류 코드·secretRef 형식·null 규칙) |
 | [docs/api/services.md](docs/api/services.md) | 서비스 API 계약(등록·수정·삭제, 역할·버전 상태, `simulated` 뜻) |
 | [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포 API 계약(접수 규칙·진행 단계·실패 코드) |

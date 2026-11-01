@@ -3,23 +3,23 @@
 배포할 앱 하나를 **서비스**로 등록·조회·수정·삭제한다. 근거: SPEC [specs/api-3-one-touch-deploy.md](../../specs/api-3-one-touch-deploy.md), 원장 F1·F2. 배포 요청은 [deploy-requests.md](deploy-requests.md).
 
 - 실행 중인 서버의 OpenAPI: `GET /docs` · `GET /openapi.json`. 이 문서와 같은 계약이다.
-- **인증 없음.** 권한 검사 자리만 있다(API 서버 6). 서버를 인터넷에 열지 않는다.
+- **로그인·조직 범위(API 서버 6).** 경로는 `/api/v1/orgs/{orgId}` 아래이고 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 등록·수정은 개발자, 삭제는 어드민이다([auth.md](auth.md)). 서비스 이름은 대표 주소 때문에 **Echo 전체에서** 유일하다(다른 조직과도 겹치면 409).
 - 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 목록은 `Page`(`items`, `total`, `page` 0부터, `size` 1~100 기본 20).
 - **`simulated: true` 는 목업 표시다.** 서비스의 `simulated` 는 가짜 소스 저장소 클라이언트(`SOURCE_CLIENT_MODE=fake`, 기본)로 등록했다는 뜻이다. 연결의 `simulated` 는 현재 배포를 만든 요청이 가짜 실행기로 처리됐다는 뜻이다(이번에는 빌드·배포·대표 주소 연결·내리기가 모두 가짜). 값은 행에 저장하고 응답 때 설정으로 다시 계산하지 않는다.
 
 ## 엔드포인트
 
-| 메서드 · 경로 | 요청 | 성공 | 실패 |
-|---|---|---|---|
-| `POST /api/v1/services` | `CreateServiceRequest` | 201 `ServiceDetail` | 422 `VALIDATION_ERROR`, 404 `REPO_NOT_ACCESSIBLE`(+`installUrl`), 502 `SOURCE_PROVIDER_UNAVAILABLE`, 409 `SERVICE_NAME_CONFLICT` |
-| `GET /api/v1/services?page&size` | — | 200 `Page[ServiceSummary]` | 422(page·size 범위) |
-| `GET /api/v1/services/{id}` | — | 200 `ServiceDetail` | 404 `SERVICE_NOT_FOUND` |
-| `PATCH /api/v1/services/{id}` | `UpdateServiceRequest` | 200 `ServiceDetail` | 404, 409 `SERVICE_DELETING`, 422 `SERVICE_NAME_IMMUTABLE`·`VALIDATION_ERROR`, 404·502(새 `repoUrl` 확인) |
-| `DELETE /api/v1/services/{id}` | — | 202 `ServiceDetail`(`status = DELETING`) | 404 `SERVICE_NOT_FOUND` |
+| 메서드 · 경로 | 요청 | 성공 | 실패 | 최소 역할 |
+|---|---|---|---|---|
+| `POST /api/v1/orgs/{orgId}/services` | `CreateServiceRequest` | 201 `ServiceDetail` | 422 `VALIDATION_ERROR`, 404 `REPO_NOT_ACCESSIBLE`(+`installUrl`), 502 `SOURCE_PROVIDER_UNAVAILABLE`, 409 `SERVICE_NAME_CONFLICT` | 개발자 |
+| `GET /api/v1/orgs/{orgId}/services?page&size` | — | 200 `Page[ServiceSummary]` | 422(page·size 범위) | 뷰어·에이전트 |
+| `GET /api/v1/orgs/{orgId}/services/{id}` | — | 200 `ServiceDetail` | 404 `SERVICE_NOT_FOUND` | 뷰어·에이전트 |
+| `PATCH /api/v1/orgs/{orgId}/services/{id}` | `UpdateServiceRequest` | 200 `ServiceDetail` | 404, 409 `SERVICE_DELETING`, 422 `SERVICE_NAME_IMMUTABLE`·`VALIDATION_ERROR`, 404·502(새 `repoUrl` 확인) | 개발자 |
+| `DELETE /api/v1/orgs/{orgId}/services/{id}` | — | 202 `ServiceDetail`(`status = DELETING`) | 404 `SERVICE_NOT_FOUND` | 어드민 |
 
 코드 클래스: `CreateServiceRequest`·`UpdateServiceRequest`, `ServiceSummary` = `ServiceSummaryResponse`, `ServiceDetail` = `ServiceDetailResponse`(`app/schemas/service.py`).
 
-### 등록 `POST /api/v1/services`
+### 등록 `POST /api/v1/orgs/{orgId}/services`
 
 ```json
 {
@@ -60,15 +60,15 @@
 
 가짜 소스 저장소 규칙(`SOURCE_CLIENT_MODE=fake`): owner 가 `private-` 로 시작하면 비공개 + 설치 있음, `denied-`·`missing-` 이면 404 `REPO_NOT_ACCESSIBLE`, `flaky-` 면 502 `SOURCE_PROVIDER_UNAVAILABLE`.
 
-### 목록 `GET /api/v1/services`
+### 목록 `GET /api/v1/orgs/{orgId}/services`
 
 살아 있는 서비스(`DELETING` 포함, 소프트 삭제 제외)를 `createdAt` 오름차순(같으면 `id`)으로 준다. 항목은 `ServiceSummary`(연결 정보 없음).
 
-### 단건 `GET /api/v1/services/{id}`
+### 단건 `GET /api/v1/orgs/{orgId}/services/{id}`
 
 `ServiceDetail` = `ServiceSummary` + `environments[]`(이 서비스가 올라간 연결, 만든 순서). `DELETING` 서비스도 조회된다. 소프트 삭제가 끝나면 404.
 
-### 수정 `PATCH /api/v1/services/{id}`
+### 수정 `PATCH /api/v1/orgs/{orgId}/services/{id}`
 
 - 바꿀 수 있는 칸: `description`, `repoUrl`(바뀌면 접근을 다시 확인하고 `private` 를 갱신), `healthCheckPath`, `healthCheckTimeoutSeconds`, `containerPort`. 들어온 칸만 바꾼다.
 - `name` 이 지금과 다르면 422 `SERVICE_NAME_IMMUTABLE`, 같으면 무시한다.
@@ -76,7 +76,7 @@
 - `DELETING` 이면 409 `SERVICE_DELETING`.
 - 바뀐 값은 **다음 배포 요청부터** 쓴다. 이미 접수된 요청은 접수 때 사본(`repoUrl`·설정)을 쓴다.
 
-### 삭제 `DELETE /api/v1/services/{id}`
+### 삭제 `DELETE /api/v1/orgs/{orgId}/services/{id}`
 
 1. 서비스를 `DELETING` 으로 바꾸고 대기(`QUEUED`) 요청을 모두 `CANCELLED`(`cancelReason = SERVICE_DELETED`)로 취소한 뒤 내리기 할 일을 만든다 → **202** + `ServiceDetail`.
 2. 일꾼이 진행 중 요청(`BUILDING`·`DEPLOYING`·`VERIFYING`)이 끝나기를 기다린 뒤 연결마다 클러스터에서 내리고, 내린 연결은 바로 소프트 삭제한다. 진행 중이던 요청의 성공은 예비 따라가기를 만들지 않는다.
@@ -181,6 +181,7 @@
 | 이름 변경 | 422 | `SERVICE_NAME_IMMUTABLE` |
 | 저장소 없음·비공개인데 App 설치 없음 | 404 | `REPO_NOT_ACCESSIBLE` + `details[{field: "installUrl", reason, value}]` |
 | GitHub 한도 초과(403·429 + 한도 헤더)·5xx·시간 초과 | 502 | `SOURCE_PROVIDER_UNAVAILABLE` |
-| 살아 있는 서비스와 이름 중복 | 409 | `SERVICE_NAME_CONFLICT` |
+| 살아 있는 서비스와 이름 중복(다른 조직 포함) | 409 | `SERVICE_NAME_CONFLICT` |
 | 삭제 중 수정 | 409 | `SERVICE_DELETING` |
-| 없거나 삭제된 서비스 | 404 | `SERVICE_NOT_FOUND` |
+| 없거나 삭제된 서비스, 다른 조직의 서비스 | 404 | `SERVICE_NOT_FOUND` |
+| 로그인 안 함 · 조직 멤버 아님 · 역할 모자람 | 401 · 404 · 403 | `UNAUTHENTICATED` · `ORGANIZATION_NOT_FOUND` · `ROLE_FORBIDDEN` 등([auth.md](auth.md)) |
