@@ -11,13 +11,17 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     SmallInteger,
+    String,
     and_,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.enums import TeardownErrorCode
 from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
     LIVE_ROWS_CONDITION,
     Base,
     SoftDeleteMixin,
@@ -33,6 +37,10 @@ if TYPE_CHECKING:
 
 # 마이그레이션이 두 표를 만든 뒤 따로 추가하는 순환 FK 이름.
 CURRENT_DEPLOYMENT_FK_NAME = "fk_service_environments_current_deployment_id_id_deployments"
+PUBLIC_HOST_UNIQUE_INDEX = "uq_service_environments_public_host_live"
+PUBLIC_HOST_MAX_LENGTH = 253
+# 내리기 실행기가 돌려준 작업 번호의 최대 길이.
+EXTERNAL_REF_MAX_LENGTH = 255
 
 
 class ServiceEnvironment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -40,6 +48,11 @@ class ServiceEnvironment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, B
 
     - current_deployment_id: 지금 이 연결에서 돌고 있는 배포. 같은 연결의 배포만 가리킨다(복합 FK).
     - traffic_weight: 마지막으로 앞단 프록시에 적용한 트래픽 비율(0~100). 실제 분배는 프록시가 한다.
+      0 보다 크면 서비스 중, 0 이고 현재 배포가 있으면 예비다(역할은 저장하지 않고 계산한다).
+    - public_host: 환경별 주소 `{서비스}.{환경}.{도메인}`. 만들 때 한 번 정해 저장한다
+      (환경 이름이 바뀌어도 그대로다).
+    - teardown_*: 서비스 삭제 때 이 연결을 내린 기록. 다시 삭제하면 teardown_attempt 가 1 늘고
+      멱등 키(연결 id + attempt)가 바뀐다.
     """
 
     __tablename__ = "service_environments"
@@ -62,6 +75,12 @@ class ServiceEnvironment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, B
             unique=True,
             postgresql_where=text(LIVE_ROWS_CONDITION),
         ),
+        Index(
+            PUBLIC_HOST_UNIQUE_INDEX,
+            "public_host",
+            unique=True,
+            postgresql_where=text(LIVE_ROWS_CONDITION),
+        ),
     )
 
     service_id: Mapped[uuid.UUID] = mapped_column(
@@ -76,6 +95,25 @@ class ServiceEnvironment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, B
     )
     traffic_applied_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    public_host: Mapped[str] = mapped_column(
+        String(PUBLIC_HOST_MAX_LENGTH), nullable=False, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    teardown_attempt: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    teardown_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    teardown_external_ref: Mapped[str | None] = mapped_column(
+        String(EXTERNAL_REF_MAX_LENGTH), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    teardown_error: Mapped[TeardownErrorCode | None] = mapped_column(
+        String(32), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
     )
 
     service: Mapped[Service] = relationship(back_populates="service_environments")

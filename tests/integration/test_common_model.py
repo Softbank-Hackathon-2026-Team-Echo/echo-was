@@ -18,6 +18,8 @@ from tests.integration.factories import (
     add_succeeded_deployment,
     make_digest,
     make_environment,
+    make_link,
+    make_service,
     seed_shop_api_example,
 )
 
@@ -72,8 +74,11 @@ async def test_environment_list_shows_three_kinds_in_same_columns(
 async def test_live_link_duplicate_rejected_and_allowed_after_soft_delete(
     session_factory: SessionFactory, shop_api: ShopApiExample
 ) -> None:
+    # 주소 유일성이 아니라 (서비스, 환경) 유일성을 보려고 주소는 다르게 둔다.
     duplicate = ServiceEnvironment(
-        service_id=shop_api.service.id, environment_id=shop_api.environments["aws-seoul"].id
+        service_id=shop_api.service.id,
+        environment_id=shop_api.environments["aws-seoul"].id,
+        public_host="shop-api.duplicate.apps.echo.test",
     )
     async with session_factory() as session:
         session.add(duplicate)
@@ -84,12 +89,7 @@ async def test_live_link_duplicate_rejected_and_allowed_after_soft_delete(
         link = await session.get_one(ServiceEnvironment, shop_api.aws_link.id)
         link.current_deployment_id = None
         link.mark_as_deleted(datetime.now(UTC))
-        session.add(
-            ServiceEnvironment(
-                service_id=shop_api.service.id,
-                environment_id=shop_api.environments["aws-seoul"].id,
-            )
-        )
+        session.add(make_link(shop_api.service, shop_api.environments["aws-seoul"]))
 
     async with session_factory() as session:
         count = await session.scalar(
@@ -108,7 +108,7 @@ async def test_name_duplicate_rejected_and_allowed_after_soft_delete(
     session_factory: SessionFactory, model: type[Service | Environment], index_name: str
 ) -> None:
     def make() -> Service | Environment:
-        return Service(name="shop-api") if model is Service else make_environment("aws-seoul")
+        return make_service("shop-api") if model is Service else make_environment("aws-seoul")
 
     async with session_factory() as session, session.begin():
         original = make()

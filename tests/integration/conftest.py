@@ -3,7 +3,8 @@
 - TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 DB 를 쓴다. DB 이름은 `_test` 로 끝나야 한다.
 - 세션 시작 때 DB 가 없으면 만들고, public 스키마를 비운 뒤 `alembic upgrade head` 를 실행한다.
 - DB 에 최대 10초 재시도해도 붙지 못하면 이유를 남기고 이 폴더의 테스트를 모두 건너뛴다.
-- 테스트마다 표 4개를 TRUNCATE 한다(배포 삭제 금지 트리거는 행 DELETE 에만 걸려 TRUNCATE 와 무관).
+- 테스트마다 모든 표를 TRUNCATE 한다(배포·배포 요청 삭제 금지 트리거는 행 DELETE 에만 걸려
+  TRUNCATE 와 무관).
 - 같은 테스트 DB 를 쓰는 pytest 가 동시에 돌면(예: git add·commit 훅이 함께 실행) 서로 표를
   지우므로, 세션 동안 PostgreSQL advisory lock 을 잡아 한 번에 하나만 돌게 한다.
 """
@@ -33,7 +34,15 @@ from sqlalchemy.pool import NullPool
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
-TABLES = ("deployments", "service_environments", "environments", "services")
+TABLES = (
+    "jobs",
+    "deploy_requests",
+    "builds",
+    "deployments",
+    "service_environments",
+    "environments",
+    "services",
+)
 
 
 class _TestDatabaseSettings(BaseSettings):
