@@ -4,7 +4,7 @@
 1. simulate 는 가짜 실행기 모드에서만 받는다.
 2. 서비스·환경을 읽어 거절할 것을 먼저 거절한다(트랜잭션 밖 GitHub 호출 전에).
 3. 브랜치·커밋을 40자 SHA 로 고정한다(트랜잭션 밖).
-4. 환경 행을 FOR UPDATE 로 잠그고 다시 확인한 뒤(환경 삭제와 경쟁 방지), 서비스·연결을 잠그고
+4. 환경 행을 FOR SHARE 로 잠그고 다시 확인한 뒤(환경 삭제와 경쟁 방지), 서비스·연결을 잠그고
    연결이 없으면 만든다. 같은 연결의 대기 요청은 SUPERSEDED 로 밀어내고 새 요청과 할 일을 넣는다.
 """
 
@@ -113,8 +113,11 @@ class DeployRequestService:
 
         now = self._clock.now()
         async with self._session.begin():
+            # FOR SHARE: 환경 삭제(FOR UPDATE)와는 줄을 세우되, 일꾼이 서비스 행을 잡은 채
+            # 이 환경을 FK 로 가리키는 행을 쓸 때 잡는 FOR KEY SHARE 와는 부딪히지 않게 한다
+            # (FOR UPDATE 면 접수 ↔ 성공 처리 사이에 교착이 생긴다).
             environment = await self._environments.get_live_by_id(
-                command.environment_id, for_update=True
+                command.environment_id, for_share=True
             )
             _check_environment_accepts(environment)
             service = await self._services.get_live_by_id(service_id, lock=True)

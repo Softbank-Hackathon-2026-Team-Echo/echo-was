@@ -17,9 +17,12 @@ class EnvironmentRepository:
         self._session.add(environment)
 
     async def find_live_by_id(
-        self, environment_id: uuid.UUID, *, for_update: bool = False
+        self, environment_id: uuid.UUID, *, for_update: bool = False, for_share: bool = False
     ) -> Environment | None:
-        """for_update=True 면 SELECT ... FOR UPDATE 로 행을 잠근다.
+        """for_update=True 면 SELECT ... FOR UPDATE, for_share=True 면 FOR SHARE 로 행을 잠근다.
+
+        FOR SHARE 는 환경 삭제(FOR UPDATE)와는 부딪히지만, 다른 트랜잭션이 이 환경을 FK 로
+        가리키는 행을 넣거나 고칠 때 잡는 FOR KEY SHARE 와는 부딪히지 않는다.
 
         세션에 이미 있는 객체도 DB 의 지금 값으로 덮어쓴다(populate_existing). 커밋 뒤에도 객체를
         만료하지 않는 세션이라, 그렇지 않으면 다른 요청이 바꾼 값을 보지 못한다.
@@ -31,12 +34,16 @@ class EnvironmentRepository:
         )
         if for_update:
             statement = statement.with_for_update()
+        elif for_share:
+            statement = statement.with_for_update(read=True)
         return await self._session.scalar(statement)
 
     async def get_live_by_id(
-        self, environment_id: uuid.UUID, *, for_update: bool = False
+        self, environment_id: uuid.UUID, *, for_update: bool = False, for_share: bool = False
     ) -> Environment:
-        environment = await self.find_live_by_id(environment_id, for_update=for_update)
+        environment = await self.find_live_by_id(
+            environment_id, for_update=for_update, for_share=for_share
+        )
         if environment is None:
             raise EnvironmentNotFoundError(
                 "environment not found", environment_id=str(environment_id)

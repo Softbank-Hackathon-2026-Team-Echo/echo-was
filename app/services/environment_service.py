@@ -166,7 +166,8 @@ class EnvironmentService:
     async def delete_environment(self, environment_id: uuid.UUID) -> None:
         """살아 있는 서비스-환경 연결이 없으면 소프트 삭제한다. 있으면 EnvironmentInUseError.
 
-        연결을 만드는 쪽도 같은 환경 행을 FOR UPDATE 로 잠근 뒤 연결을 만들어야 한다.
+        연결을 만드는 쪽(배포 요청 접수)도 같은 환경 행을 FOR SHARE 로 잠근 뒤 연결을 만든다
+        (이 FOR UPDATE 와 부딪혀 둘 중 하나가 기다린다).
         """
         async with self._session.begin():
             environment = await self._environment_repository.get_live_by_id(

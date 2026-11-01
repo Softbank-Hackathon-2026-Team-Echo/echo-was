@@ -68,6 +68,50 @@ async def test_two_workers_and_concurrent_requests_never_run_two_on_one_connecti
     assert roles == ["SERVING", "STANDBY"]
 
 
+async def test_accept_waiting_for_service_lock_does_not_deadlock_with_success_processing(
+    harness: DeployHarness,
+) -> None:
+    """성공 처리처럼 서비스 행을 잡고 연결 행을 두 번 고치는 트랜잭션(두 번째 UPDATE 는 같은
+    트랜잭션이 만든 행이라 환경 FK 검사 FOR KEY SHARE 를 다시 잡는다)과 접수가 엇갈려도 교착이 없다.
+    """
+    service = await harness.create_service("shop-api")
+    aws = await harness.add_environment("aws-seoul")
+    await harness.deploy(service["id"], aws.id)
+    await harness.run_until_idle()
+
+    async with harness.session_factory() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT id FROM services WHERE id = :id FOR NO KEY UPDATE"),
+            {"id": service["id"]},
+        )
+        await holder.execute(
+            text("UPDATE service_environments SET traffic_weight = 100 WHERE service_id = :id"),
+            {"id": service["id"]},
+        )
+        accept = asyncio.create_task(harness.request_deploy(service["id"], aws.id, branch="next"))
+        for _ in range(100):
+            # pg_stat_activity 는 트랜잭션마다 스냅숏이라 잡고 있는 트랜잭션 밖에서 본다.
+            async with harness.session_factory() as probe:
+                waiting = await probe.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                    )
+                )
+            if waiting:
+                break
+            await asyncio.sleep(0.02)
+        assert waiting, "accept did not reach the service lock"
+        await holder.execute(
+            text("UPDATE service_environments SET traffic_weight = 100 WHERE service_id = :id"),
+            {"id": service["id"]},
+        )
+
+    response = await asyncio.wait_for(accept, timeout=10)
+
+    assert response.status_code == 202, response.text
+
+
 async def test_environment_delete_and_first_deploy_never_leave_link_to_deleted_environment(
     harness: DeployHarness,
 ) -> None:
