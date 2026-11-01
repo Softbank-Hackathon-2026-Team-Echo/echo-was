@@ -1,0 +1,233 @@
+"""서비스 등록·조회·수정·삭제 유스케이스.
+
+소스 저장소 확인(check_access)은 트랜잭션 밖에서 하고, 저장은 짧은 트랜잭션에서 한다.
+삭제는 바로 지우지 않는다. 서비스를 DELETING 으로 바꾸고 대기 요청을 취소한 뒤 내리기 할 일을
+만든다(202). 일꾼이 모든 연결을 내리면 서비스를 소프트 삭제한다.
+"""
+
+import logging
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.clients.source_repository import SourceRepositoryClient
+from app.core.clock import Clock
+from app.core.exceptions import (
+    PublicHostConflictError,
+    ServiceDeletingError,
+    ServiceNameConflictError,
+    ServiceNameImmutableError,
+)
+from app.core.repo_url import normalize_repo_url, parse_repo_url
+from app.enums import (
+    DeployRequestCancelReason,
+    DeployRequestStatus,
+    JobKind,
+    JobStatus,
+    ServiceStatus,
+)
+from app.models import Job, Service
+from app.repositories.deploy_request_repository import DeployRequestRepository
+from app.repositories.job_repository import JobRepository
+from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_repository import ServiceRepository
+from app.services.deploy_support import service_public_host
+from app.services.integrity import violated_constraint_name
+from app.services.service_view import ServiceDetailView, load_service_detail
+
+logger = logging.getLogger(__name__)
+
+NAME_UNIQUE_INDEX = "uq_services_name_live"
+PUBLIC_HOST_UNIQUE_INDEX = "uq_services_public_host_live"
+
+
+@dataclass(frozen=True)
+class CreateServiceCommand:
+    name: str
+    description: str | None
+    repo_url: str
+    health_check_path: str
+    health_check_timeout_seconds: int
+    container_port: int
+
+
+@dataclass(frozen=True)
+class ServiceChanges:
+    """수정 요청에서 들어온 칸. *_set 이 False 면 '들어오지 않음'이다."""
+
+    name: str | None = None
+    description: str | None = None
+    description_set: bool = False
+    repo_url: str | None = None
+    health_check_path: str | None = None
+    health_check_timeout_seconds: int | None = None
+    container_port: int | None = None
+
+
+@dataclass(frozen=True)
+class ServiceSearchResult:
+    items: list[Service]
+    total: int
+
+
+class ServiceService:
+    def __init__(
+        self,
+        session: AsyncSession,
+        source_client: SourceRepositoryClient,
+        clock: Clock,
+        public_base_domain: str,
+    ) -> None:
+        self._session = session
+        self._source_client = source_client
+        self._clock = clock
+        self._public_base_domain = public_base_domain
+        self._services = ServiceRepository(session)
+        self._service_environments = ServiceEnvironmentRepository(session)
+        self._deploy_requests = DeployRequestRepository(session)
+        self._jobs = JobRepository(session)
+
+    async def create_service(self, command: CreateServiceCommand) -> ServiceDetailView:
+        """저장소 접근을 확인하고 서비스를 ACTIVE 로 저장한다. 대표 주소는 이때 한 번 정한다."""
+        repo = parse_repo_url(command.repo_url)
+        access = await self._source_client.check_access(repo)
+        service = Service(
+            name=command.name,
+            description=command.description,
+            repo_url=repo.url,
+            repo_private=access.private,
+            health_check_path=command.health_check_path,
+            health_check_timeout_seconds=command.health_check_timeout_seconds,
+            container_port=command.container_port,
+            public_host=service_public_host(command.name, self._public_base_domain),
+            status=ServiceStatus.ACTIVE,
+            simulated=self._source_client.simulated,
+        )
+        async with self._session.begin():
+            if await self._services.find_live_by_name(command.name) is not None:
+                raise ServiceNameConflictError("service name already in use")
+            self._services.add(service)
+            await self._flush()
+            view = await load_service_detail(self._session, service)
+        _log("service created", "create_service", service)
+        return view
+
+    async def search_services(self, page: int, size: int) -> ServiceSearchResult:
+        async with self._session.begin():
+            services = await self._services.search_live(offset=page * size, limit=size)
+            total = await self._services.count_live()
+        return ServiceSearchResult(items=services, total=total)
+
+    async def get_service(self, service_id: uuid.UUID) -> ServiceDetailView:
+        async with self._session.begin():
+            service = await self._services.get_live_by_id(service_id)
+            return await load_service_detail(self._session, service)
+
+    async def update_service(
+        self, service_id: uuid.UUID, changes: ServiceChanges
+    ) -> ServiceDetailView:
+        """바뀐 값은 다음 배포 요청부터 쓴다. 접수된 요청은 접수 때 사본을 쓴다."""
+        async with self._session.begin():
+            service = await self._services.get_live_by_id(service_id)
+            _check_updatable(service, changes)
+        repo_private: bool | None = None
+        new_repo_url: str | None = None
+        if changes.repo_url is not None:
+            new_repo_url = normalize_repo_url(changes.repo_url)
+            if new_repo_url != service.repo_url:
+                access = await self._source_client.check_access(parse_repo_url(new_repo_url))
+                repo_private = access.private
+        async with self._session.begin():
+            service = await self._services.get_live_by_id(service_id, lock=True)
+            _check_updatable(service, changes)
+            if changes.description_set:
+                service.description = changes.description
+            if new_repo_url is not None and repo_private is not None:
+                service.repo_url = new_repo_url
+                service.repo_private = repo_private
+            if changes.health_check_path is not None:
+                service.health_check_path = changes.health_check_path
+            if changes.health_check_timeout_seconds is not None:
+                service.health_check_timeout_seconds = changes.health_check_timeout_seconds
+            if changes.container_port is not None:
+                service.container_port = changes.container_port
+            await self._session.flush()
+            view = await load_service_detail(self._session, service)
+        _log("service updated", "update_service", service)
+        return view
+
+    async def delete_service(self, service_id: uuid.UUID) -> ServiceDetailView:
+        """DELETING 으로 바꾸고 대기 요청을 취소한 뒤 내리기 할 일을 만든다.
+
+        이미 DELETING 이면 재시도다. 내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려
+        새 멱등 키로 다시 내린다.
+        """
+        now = self._clock.now()
+        async with self._session.begin():
+            service = await self._services.get_live_by_id(service_id, lock=True)
+            connections = await self._service_environments.lock_live_by_service(service.id)
+            if service.status == ServiceStatus.DELETING:
+                for connection in connections:
+                    if connection.teardown_error is not None:
+                        connection.teardown_attempt += 1
+                        connection.teardown_error = None
+                        connection.teardown_requested_at = None
+                        connection.teardown_external_ref = None
+            service.status = ServiceStatus.DELETING
+            service.delete_error = None
+            for queued in await self._deploy_requests.search_queued_by_service(service.id):
+                if await self._deploy_requests.transition(
+                    queued.id,
+                    DeployRequestStatus.QUEUED,
+                    {
+                        "status": DeployRequestStatus.CANCELLED,
+                        "cancel_reason": DeployRequestCancelReason.SERVICE_DELETED,
+                        "finished_at": now,
+                        "updated_at": now,
+                    },
+                ):
+                    await self._jobs.cancel_queued_for_subject(queued.id, now)
+            if await self._jobs.find_open_for_subject(service.id) is None:
+                self._jobs.add(
+                    Job(
+                        kind=JobKind.SERVICE_TEARDOWN,
+                        subject_id=service.id,
+                        status=JobStatus.QUEUED,
+                        run_after=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            await self._session.flush()
+            view = await load_service_detail(self._session, service)
+        _log("service deletion requested", "delete_service", service)
+        return view
+
+    async def _flush(self) -> None:
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            constraint = violated_constraint_name(exc)
+            if constraint == NAME_UNIQUE_INDEX:
+                raise ServiceNameConflictError("service name already in use") from None
+            if constraint == PUBLIC_HOST_UNIQUE_INDEX:
+                raise PublicHostConflictError("public host already in use") from None
+            raise
+
+
+def _check_updatable(service: Service, changes: ServiceChanges) -> None:
+    if service.status == ServiceStatus.DELETING:
+        raise ServiceDeletingError("service is being deleted", service_id=str(service.id))
+    if changes.name is not None and changes.name != service.name:
+        raise ServiceNameImmutableError(
+            "service name cannot be changed", service_id=str(service.id)
+        )
+
+
+def _log(message: str, action: str, service: Service) -> None:
+    logger.info(
+        message,
+        extra={"action": action, "service_id": str(service.id), "status": service.status},
+    )

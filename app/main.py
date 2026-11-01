@@ -13,7 +13,12 @@ from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
-from app.routers import environment_kind_router, environment_router
+from app.routers import (
+    deploy_request_router,
+    environment_kind_router,
+    environment_router,
+    service_router,
+)
 
 configure_logging("echo-api", get_settings().log_level)
 logger = logging.getLogger(__name__)
@@ -29,6 +34,8 @@ app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
 app.include_router(environment_router.router)
 app.include_router(environment_kind_router.router)
+app.include_router(service_router.router)
+app.include_router(deploy_request_router.router)
 
 
 @app.get("/healthz", status_code=status.HTTP_204_NO_CONTENT)

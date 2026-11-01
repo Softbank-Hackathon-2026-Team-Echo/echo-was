@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from httpx import ASGITransport, AsyncClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, make_url, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,6 +31,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+
+from app.clients.source_repository import FakeSourceRepositoryClient
+from app.core.config import get_settings
+from app.core.database import get_session_factory
+from app.dependencies import get_clock, get_source_repository_client
+from app.main import app
+from tests.integration.deploy_harness import DeployHarness, FakeClock, make_fake_executors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONNECT_RETRY_SECONDS = 10.0
@@ -191,3 +199,35 @@ async def engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture
 def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.fixture
+async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[DeployHarness]:
+    """원터치 배포 시험 도구. API 의 세션·설정·시계·소스 클라이언트를 시험 값으로 바꾼다.
+
+    일꾼은 한 단계마다 트랜잭션을 여러 번 연다. 연결을 다시 쓰도록 이 시험 전용 풀 엔진을 쓰고
+    시험이 끝나면 닫는다(표 비우기는 engine 픽스처가 한다).
+    """
+    pooled_engine = create_async_engine(test_database_url, pool_size=10, max_overflow=10)
+    session_factory = async_sessionmaker(pooled_engine, expire_on_commit=False)
+    clock = FakeClock()
+    settings = get_settings().model_copy(update={"fake_executor_step_seconds": 0.0})
+    source_client = FakeSourceRepositoryClient(install_url=settings.github_app_install_url)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        harness = DeployHarness(
+            client=client,
+            session_factory=session_factory,
+            clock=clock,
+            settings=settings,
+            source_client=source_client,
+            executors=make_fake_executors(clock),
+        )
+        app.dependency_overrides[get_session_factory] = lambda: session_factory
+        app.dependency_overrides[get_settings] = lambda: harness.settings
+        app.dependency_overrides[get_clock] = lambda: clock
+        app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
+        try:
+            yield harness
+        finally:
+            app.dependency_overrides.clear()
+            await pooled_engine.dispose()

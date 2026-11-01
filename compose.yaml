@@ -20,5 +20,20 @@ services:
       timeout: 3s
       retries: 30
 
+  # 배포 일꾼. API 와 같은 이미지(Dockerfile)를 쓰고 명령만 바꾼다. 기본 `up` 에는 들어가지 않는다:
+  #   docker compose --profile worker up -d worker
+  # 마이그레이션(alembic upgrade head)은 먼저 따로 실행해 둔다.
+  worker:
+    profiles: ["worker"]
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://echo:echo@db:5432/echo
+      LOG_LEVEL: INFO
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_signal: SIGTERM
+
 volumes:
   echo-db-data:
