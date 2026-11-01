@@ -550,6 +550,8 @@ async def cancel_order(self, order_id: str) -> Order:
 | `.env` | 로컬 전용. `.gitignore` 에 포함하고, 키 목록은 `.env.example` 로 공유 |
 | 노출 금지 | 시크릿을 로그·에러 응답·예외 메시지에 절대 넣지 않는다 |
 
+> **echo-was 예외 — `env` 비밀 저장소.** 환경 접속용 비밀값(`secret_ref = env:ECHO_SECRET_<NAME>`)은 이름이 등록된 환경마다 달라 `BaseSettings` 필드로 선언할 수 없다. 그래서 `app/clients/secret_client.py` **한 파일에서만** `os.environ` 을 직접 읽는다. 이 조회기는 `ECHO_SECRET_` 로 시작하는 이름만 받고(형식 검사), `.env` 파일은 보지 않는다(로컬은 `uv run --env-file .env ...` 로 프로세스 환경변수에 넣는다). 다른 곳에서는 여전히 `os.getenv`·`os.environ` 직접 읽기를 금지한다. 비밀값은 `SecretValue` 로 감싸 repr·로그에 나오지 않게 한다.
+
 ```python
 # core/config.py
 class Settings(BaseSettings):

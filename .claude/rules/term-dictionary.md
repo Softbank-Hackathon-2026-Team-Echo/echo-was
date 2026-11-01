@@ -42,10 +42,16 @@
 | 되돌리기 | Rollback | `deployments.rollback_of_id` | 예전 배포의 이미지·설정으로 **새 배포 행**을 만드는 것. 원본을 가리킨다 | F1·F9 |
 | 트래픽 비율 | Traffic weight | `service_environments.traffic_weight` | 앞단 프록시에 **마지막으로 적용한** 비율(0~100). 실제 분배는 프록시(Envoy)가 한다 | F3·F7 |
 | 비율 적용 시각 | Traffic applied at | `service_environments.traffic_applied_at` | 위 비율을 프록시에 적용한 시각 | F7 |
-| 어댑터 | Adapter | `app/adapters/<kind>.py` | 환경 종류마다 하나. 이번에는 설정 양식만, 동작 코드(배포·상태 조회)는 API 서버 2 | F2, NFR-15 |
-| 설정 양식 | Environment config | `EnvironmentConfig` 하위 클래스 | 환경 종류별 `config` JSON 의 형식(Pydantic). 저장 전에 검사한다 | F2, NFR-15 |
+| 어댑터 | Adapter | `app/adapters/<kind>.py` | 환경 종류마다 파일 하나. 설정 양식 + 동작 클래스를 함께 등록한다 | F2, NFR-15 |
+| 설정 양식 | Environment config | `EnvironmentConfig` 하위 클래스 | 환경 종류별 `config` JSON 의 형식(Pydantic). 저장 전에 검사한다. 키는 DB snake_case, API camelCase | F2, NFR-15 |
+| 어댑터 동작 클래스 | Environment adapter | `EnvironmentAdapter` 하위 클래스 | 종류마다 다른 클러스터 조작을 같은 메서드로 부른다. 지금은 `check_connection`·`read_cluster_info`(async). 실패는 `ConnectionCheckError(reason)` | F2, NFR-15 |
+| 가짜 어댑터 | Simulated adapter | `SimulatedEnvironmentAdapter` | 네트워크 호출 없이 고정 값을 돌려주는 동작 클래스. 결과에 `simulated=True`. 이번 aws·gcp·onprem 은 모두 가짜 | F2 |
+| 클러스터 정보 | Cluster info | `ClusterInfo` (저장 안 함) | `server_version`(쿠버네티스 `gitVersion` 모양), `node_count`, `simulated` | F2·F3 |
+| 접속 상태 | Connection status | `environments.connection_status` | 마지막 접속 확인 결과(§3). 확인 시각 `connection_checked_at`, 실패 이유 `connection_error` | F2·F3 |
 | 설정 | Config | `environments.config` (jsonb) | 환경 종류별 고유 설정(리전·클러스터 이름 등). 비밀값 없음 | F2 |
-| 비밀 참조 | Secret reference | `environments.secret_ref` | 비밀 저장소(클라우드 Secrets Manager·k8s Secret, 로컬은 `.env`)의 보관 위치. 값은 저장하지 않는다 | F2·F16 |
+| 비밀 참조 | Secret reference | `environments.secret_ref` / API `secretRef` | 비밀 저장소의 보관 위치(`env:`·`k8s:`·`aws-sm:`·`gcp-sm:` §3). 값은 저장하지도 API 로 받지도 않는다 | F2·F16 |
+| 비밀값 | Secret value | `SecretValue` (`app/core/secrets.py`) | 메모리에서만 쓰는 비밀값. repr·str·직렬화는 가리고 `get_secret_value()` 로만 꺼낸다 | F16 |
+| 비밀값 조회기 | Secret client | `SecretClient` / `EnvVarSecretClient` (`app/clients/`) | secret_ref 로 비밀값을 읽는다. 지금은 `env` 저장소만 실제 조회 | F2·F16 |
 | 설정 스냅샷 | Config snapshot | `deployments.config_snapshot` (jsonb) | 배포 때 쓴 설정(복제 수·환경변수 등). 되돌리기가 이 값을 복사한다. **비밀값 없이 참조만** | F1 |
 | 이미지 digest | Image digest | `deployments.image_digest` | 배포 기준이 되는 이미지 내용 해시 | F1 |
 | 위치 | Location | `EnvironmentConfig.display_location()` | 환경 카드의 "위치" 칸 값(aws·gcp 는 region, onprem 은 location) | F3 |
@@ -84,8 +90,30 @@
 | `gcp` | `GcpEnvironmentConfig` | `project_id`(예 `echo-hack-123`), `region`(예 `asia-northeast3`), `cluster_name` | `region` |
 | `onprem` | `OnpremEnvironmentConfig` | `location`(예 `team-laptop`), `kube_context` | `location` |
 
-- 새 종류는 `app/adapters/<kind>.py` 파일 하나로 더한다. 표·마이그레이션·레지스트리는 고치지 않는다(NFR-15).
+- 새 종류는 `app/adapters/<kind>.py` 파일 하나(설정 양식 + 동작 클래스)로 더한다. 표·마이그레이션·레지스트리·라우터·서비스는 고치지 않는다(NFR-15).
 - 종류 이름은 클래스 변수일 뿐 `config` JSON 에 넣지 않는다.
+- API 의 `config` 키는 camelCase(`clusterName`, `projectId`, `kubeContext`)다.
+
+### 접속 상태 (`EnvironmentConnectionStatus`) — `environments.connection_status`
+
+| 값 | 뜻 |
+|---|---|
+| `UNCHECKED` | 아직 확인하지 않았거나 config·secret_ref 가 바뀌어 다시 확인해야 함 (기본값). 시각·이유 없음 |
+| `CONNECTED` | 마지막 확인 성공 |
+| `FAILED` | 마지막 확인 실패. `connection_error` 에 이유 코드 |
+
+### 접속 실패 이유 (`ConnectionErrorCode`) — `connection_error`, API `clusterInfoError`
+
+`TIMEOUT` · `SECRET_REF_MISSING` · `SECRET_REF_INVALID` · `SECRET_NOT_FOUND` · `SECRET_STORE_UNSUPPORTED` · `CONFIG_INVALID` · `AUTH_FAILED` · `UNREACHABLE` · `UNKNOWN`. 뜻은 [docs/api/environments.md](../../docs/api/environments.md). DB CHECK 를 걸지 않는다(값을 더해도 마이그레이션 없음).
+
+### 비밀 저장소 (`SecretStore`) — `secret_ref` 의 첫 콜론 앞
+
+| 값 | 위치 형식 | 지금 |
+|---|---|---|
+| `env` | `ECHO_SECRET_[A-Z0-9_]+` (서버 프로세스 환경변수) | 실제 조회 |
+| `k8s` | `<namespace>/<secret>/<key>` | 형식만 |
+| `aws-sm` | 이름 또는 ARN(공백 없음) | 형식만 |
+| `gcp-sm` | `projects/<p>/secrets/<s>[/versions/<v>]` | 형식만 |
 
 ---
 
@@ -95,7 +123,9 @@
 - 되돌리기 행은 원본의 `image_repository`·`image_digest`·`config_snapshot` 을 복사하고 `rollback_of_id` 로 원본을 가리킨다.
 - 서비스별 트래픽 비율의 합계(100%)는 DB 가 검사하지 않는다. 전환 중에는 잠깐 맞지 않을 수 있어서 이전 엔진(API 서버 8)이 맞춘다.
 - 소프트 삭제된 행은 이름·연결 유일성에서 빠진다(같은 이름으로 다시 만들 수 있다).
-- 살아 있는 연결이 있는 서비스·환경, current 배포가 있는 연결을 지울 때의 처리는 삭제 기능을 만드는 태스크(환경은 API 서버 2, 서비스·연결은 API 서버 3)에서 정한다.
+- 살아 있는 연결이 있는 환경은 지울 수 없다(409 `ENVIRONMENT_IN_USE`). 연결을 만드는 쪽은 환경 행을 `FOR UPDATE` 로 잠근 뒤 만든다. 서비스·연결 삭제는 API 서버 3 에서 정한다.
+- 다른 파트·API 는 환경을 `id` 로만 가리킨다. `name` 은 표시용이고 바뀔 수 있다.
+- 비밀값(`SecretValue`)은 저장·로그·응답·예외 메시지에 넣지 않는다.
 
 ---
 
