@@ -1,0 +1,184 @@
+"""DB 통합 테스트 공용 픽스처.
+
+- TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 DB 를 쓴다. DB 이름은 `_test` 로 끝나야 한다.
+- 세션 시작 때 DB 가 없으면 만들고, public 스키마를 비운 뒤 `alembic upgrade head` 를 실행한다.
+- DB 에 최대 10초 재시도해도 붙지 못하면 이유를 남기고 이 폴더의 테스트를 모두 건너뛴다.
+- 테스트마다 표 4개를 TRUNCATE 한다(배포 삭제 금지 트리거는 행 DELETE 에만 걸려 TRUNCATE 와 무관).
+- 같은 테스트 DB 를 쓰는 pytest 가 동시에 돌면(예: git add·commit 훅이 함께 실행) 서로 표를
+  지우므로, 세션 동안 PostgreSQL advisory lock 을 잡아 한 번에 하나만 돌게 한다.
+"""
+
+import asyncio
+import threading
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from pathlib import Path
+from time import monotonic
+from typing import Any
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL, Connection, make_url, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONNECT_RETRY_SECONDS = 10.0
+CONNECT_RETRY_INTERVAL_SECONDS = 0.5
+TABLES = ("deployments", "service_environments", "environments", "services")
+
+
+class _TestDatabaseSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
+
+    test_database_url: str | None = None
+
+
+class DatabaseUnavailableError(Exception):
+    pass
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    integration_dir = Path(__file__).parent
+    for item in items:
+        if integration_dir in item.path.parents:
+            item.add_marker(pytest.mark.integration)
+
+
+def alembic_config(connection: Connection) -> Config:
+    """이미 연 연결로 Alembic 명령을 실행하는 설정. 앱 로깅 설정은 건드리지 않는다."""
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.attributes["configure_logger"] = False
+    config.attributes["connection"] = connection
+    return config
+
+
+def run_alembic(command_fn: Callable[[Config], None]) -> Callable[[Connection], None]:
+    """`await connection.run_sync(run_alembic(...))` 형태로 Alembic 명령을 부른다."""
+
+    def run(connection: Connection) -> None:
+        command_fn(alembic_config(connection))
+
+    return run
+
+
+class _TestDatabaseSession:
+    """테스트 세션 동안 백그라운드 이벤트 루프에서 관리 DB 연결과 advisory lock 을 잡고 있는다.
+
+    pytest-asyncio 는 테스트마다 이벤트 루프를 새로 만들기 때문에, 세션 내내 살아 있어야 하는 연결은
+    별도 스레드의 루프에 둔다.
+    """
+
+    def __init__(self, url: URL) -> None:
+        self._url = url
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._admin_engine = create_async_engine(
+            url.set(database="postgres"), poolclass=NullPool, isolation_level="AUTOCOMMIT"
+        )
+        self._lock_connection: AsyncConnection | None = None
+
+    def _run[T](self, coroutine: Coroutine[Any, Any, T]) -> T:
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
+
+    def start(self) -> None:
+        self._thread.start()
+        self._run(self._start())
+
+    def close(self) -> None:
+        try:
+            self._run(self._close())
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join()
+            self._loop.close()
+
+    async def _start(self) -> None:
+        self._lock_connection = await self._connect_with_retry()
+        await self._lock_connection.execute(
+            text("SELECT pg_advisory_lock(hashtext(:key))"),
+            {"key": f"echo-was-tests:{self._url.database}"},
+        )
+        exists = await self._lock_connection.scalar(
+            text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": self._url.database}
+        )
+        if not exists:
+            await self._lock_connection.execute(text(f'CREATE DATABASE "{self._url.database}"'))
+        await self._reset_schema_to_head()
+
+    async def _connect_with_retry(self) -> AsyncConnection:
+        deadline = monotonic() + CONNECT_RETRY_SECONDS
+        while True:
+            try:
+                return await self._admin_engine.connect()
+            except (OSError, SQLAlchemyError) as exc:
+                if monotonic() >= deadline:
+                    raise DatabaseUnavailableError(type(exc).__name__) from None
+                await asyncio.sleep(CONNECT_RETRY_INTERVAL_SECONDS)
+
+    async def _reset_schema_to_head(self) -> None:
+        engine = create_async_engine(self._url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("DROP SCHEMA public CASCADE"))
+                await connection.execute(text("CREATE SCHEMA public"))
+                await connection.run_sync(
+                    run_alembic(lambda config: command.upgrade(config, "head"))
+                )
+        finally:
+            await engine.dispose()
+
+    async def _close(self) -> None:
+        if self._lock_connection is not None:
+            # 연결을 닫으면 advisory lock 도 풀린다.
+            await self._lock_connection.close()
+        await self._admin_engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def test_database_url() -> Iterator[str]:
+    raw_url = _TestDatabaseSettings().test_database_url
+    if not raw_url:
+        pytest.skip("TEST_DATABASE_URL 이 없어 DB 통합 테스트를 건너뜀 (.env.example 참고)")
+    url = make_url(raw_url)
+    if not (url.database or "").endswith("_test"):
+        pytest.fail("TEST_DATABASE_URL 의 DB 이름은 _test 로 끝나야 한다 (스키마를 지운다)")
+
+    database_session = _TestDatabaseSession(url)
+    try:
+        database_session.start()
+    except DatabaseUnavailableError as exc:
+        database_session.close()
+        pytest.skip(
+            f"DB 통합 테스트를 건너뜀: {url.render_as_string(hide_password=True)} 에 "
+            f"{CONNECT_RETRY_SECONDS:.0f}초 동안 붙지 못함 ({exc}). "
+            "`docker compose up -d --wait db` 로 DB 를 띄운다"
+        )
+    try:
+        yield raw_url
+    finally:
+        database_session.close()
+
+
+@pytest.fixture
+async def engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(test_database_url, poolclass=NullPool)
+    try:
+        yield engine
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text(f"TRUNCATE {', '.join(TABLES)}"))
+        await engine.dispose()
+
+
+@pytest.fixture
+def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(engine, expire_on_commit=False)
