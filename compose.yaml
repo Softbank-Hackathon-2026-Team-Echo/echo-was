@@ -1,0 +1,24 @@
+# 로컬 개발용 PostgreSQL. 계정 echo/echo 는 개발용 더미 값이며 실제 비밀값이 아니다.
+# 통합 테스트 DB(echo_test)는 테스트 픽스처가 없으면 만든다.
+name: echo-was
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: echo
+      POSTGRES_PASSWORD: echo
+      POSTGRES_DB: echo
+    ports:
+      # 기본 포트(5432)와 겹치지 않게 호스트 포트를 바꾼다.
+      - "55432:5432"
+    volumes:
+      - echo-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echo -d echo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  echo-db-data:
