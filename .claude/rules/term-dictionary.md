@@ -40,7 +40,7 @@
 | 배포 | Deployment | `Deployment` / `deployments` | 연결 하나에 이미지 하나를 올린 기록. 지우지 않는 이력이다 | F1 |
 | 현재 배포 | Current deployment | `service_environments.current_deployment_id` | 그 연결에서 지금 돌고 있는 배포. 같은 연결의 배포만 가리킨다 | F1·F3 |
 | 되돌리기 | Rollback | `deployments.rollback_of_id` | 예전 배포의 이미지·설정으로 **새 배포 행**을 만드는 것. 원본을 가리킨다 | F1·F9 |
-| 트래픽 비율 | Traffic weight | `service_environments.traffic_weight` | 앞단 프록시에 **마지막으로 적용한** 비율(0~100). 실제 분배는 프록시(Envoy)가 한다 | F3·F7 |
+| 트래픽 비율 | Traffic weight | `service_environments.traffic_weight` | 앞단 프록시에 **마지막으로 적용한** 비율(0~100). 실제 분배는 프록시(Envoy)가 한다. API 서버 3 에서는 가짜 대표 주소 라우터가 "적용했다"고 답한 값이며, 그 연결의 현재 배포 요청에 `simulated` 로 표시된다 | F3·F7 |
 | 비율 적용 시각 | Traffic applied at | `service_environments.traffic_applied_at` | 위 비율을 프록시에 적용한 시각 | F7 |
 | 어댑터 | Adapter | `app/adapters/<kind>.py` | 환경 종류마다 파일 하나. 설정 양식 + 동작 클래스를 함께 등록한다 | F2, NFR-15 |
 | 설정 양식 | Environment config | `EnvironmentConfig` 하위 클래스 | 환경 종류별 `config` JSON 의 형식(Pydantic). 저장 전에 검사한다. 키는 DB snake_case, API camelCase | F2, NFR-15 |
@@ -56,6 +56,21 @@
 | 이미지 digest | Image digest | `deployments.image_digest` | 배포 기준이 되는 이미지 내용 해시 | F1 |
 | 위치 | Location | `EnvironmentConfig.display_location()` | 환경 카드의 "위치" 칸 값(aws·gcp 는 region, onprem 은 location) | F3 |
 | 소프트 삭제 | Soft delete | `is_deleted`·`deleted_at` | 행을 지우지 않고 표시만 한다. 두 칸은 항상 함께 움직인다 | — |
+| 배포 요청 | Deploy request | `DeployRequest` / `deploy_requests` | 원터치 배포 한 번(서비스 + 환경 1개 + 브랜치·커밋). 접수 순간 커밋 SHA·저장소·설정 사본을 고정한다. 지우지 않는 이력이다. 배포 기록(`deployments`)과 다르다 | F1 |
+| 빌드 | Build | `Build` / `builds` | 서비스·저장소·커밋으로 이미지 하나를 만드는 일. 빌드 1 : 배포 N. 같은 서비스·저장소·커밋은 재사용한다 | F1 |
+| 할 일 | Job | `Job` / `jobs` | 일꾼이 집어 갈 일(`DEPLOY_REQUEST`·`SERVICE_TEARDOWN`). 임대(`lease_token`)로 한 일꾼만 진행한다 | F1 |
+| 일꾼 | Worker | `app/worker/`, `python -m app.worker` | 할 일 표를 폴링해 배포 요청·서비스 내리기를 한 단계씩 진행하는 별도 프로세스 | F1 |
+| 서비스 중 | Serving | `ServiceEnvironmentRole.SERVING` (저장 안 함) | `traffic_weight > 0` 인 연결. 첫 성공 연결이 서비스 중이 된다 | F1·D5 |
+| 예비 | Standby | `ServiceEnvironmentRole.STANDBY` (저장 안 함) | `traffic_weight = 0` 이고 현재 배포가 있는 연결. 재난·장애 때 이전(API 서버 8)이 넘어갈 곳 | F1·D5 |
+| 예비 따라가기 | Standby sync | `deploy_requests.trigger = STANDBY_SYNC` | 서비스 중 연결이 성공하면 예비 연결이 같은 빌드·같은 설정으로 자동 배포되는 요청. `source_request_id` 로 원본을 가리킨다 | F1·D11 |
+| 버전 상태 | Version status | `VersionStatus` (응답 `versionStatus`) | 예비 연결의 현재 이미지가 서비스 중 연결과 같으면 `IN_SYNC`, 다르면 `OUT_OF_SYNC` | F1·P2 |
+| 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}.{public_base_domain}`. 서비스 중 연결로 간다 | F1·D8 |
+| 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | `https://{서비스}.{환경}.{public_base_domain}`. 연결을 만들 때 정해 저장한다(환경 이름이 바뀌어도 그대로). 헬스체크 대상 | F1·D8 |
+| 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기를 실제로 하는 쪽. 이번에는 가짜(`simulated`) | F1 |
+| 멱등 키 | Idempotency key | 빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt` | 외부 작업을 두 번 만들지 않게 우리가 먼저 정해 넘기는 키. 같은 키 재호출은 같은 작업 | F1 |
+| 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다 | F1·D7 |
+| 소스 저장소 클라이언트 | Source repository client | `SourceRepositoryClient` (`app/clients/source_repository.py`) | 저장소 접근 확인·브랜치/커밋 → 40자 SHA·빌드용 읽기 토큰. 가짜와 GitHub App 구현 | F1·D9 |
+| GitHub App 개인키 참조 | GitHub App private key ref | 설정 `github_app_private_key_ref` | 서버에 두는 비밀값(App 개인키)의 보관 위치. 값은 저장·로그·응답에 넣지 않는다 | D9·F16 |
 
 ---
 
@@ -71,7 +86,7 @@
 | `FAILED` | 오류·시간 초과 |
 | `CANCELLED` | 시작 전에 취소 |
 
-허용 전환 (상태 전환 코드는 API 서버 3 에서 쓴다. 지금 DB 는 값만 CHECK 로 막는다):
+허용 전환 (DB 는 값만 CHECK 로 막고, 전환은 코드가 지킨다. 원터치 배포는 빌드 성공 뒤 `IN_PROGRESS` 로 만들고 성공 처리에서 `SUCCEEDED`, 배포 기록이 생긴 뒤 실패하면 `FAILED`):
 
 | 지금 | 다음 |
 |---|---|
@@ -81,6 +96,36 @@
 
 - 끝 상태는 되감지 않는다. **재시도·되돌리기는 새 배포 행**을 만든다.
 - 취소는 `PENDING` 에서만 한다. 올리는 중 취소는 클러스터에 중간 상태를 남기기 때문이다.
+
+### 배포 요청 상태 (`DeployRequestStatus`) — `deploy_requests.status`
+
+| 값 | 뜻 | 다음 |
+|---|---|---|
+| `QUEUED` | 접수됨, 시작 전(일꾼 대기 또는 같은 연결의 앞 요청 대기) | `BUILDING`, `CANCELLED` |
+| `BUILDING` | 이미지 준비 중(재사용이면 바로 통과) | `DEPLOYING`, `FAILED` |
+| `DEPLOYING` | 배포 실행기가 반영 중 | `VERIFYING`, `FAILED` |
+| `VERIFYING` | 환경별 주소 헬스체크 중 | `SUCCEEDED`, `FAILED` |
+| `SUCCEEDED`·`FAILED`·`CANCELLED` | 끝 상태 | 없음 |
+
+- 같은 연결에는 실행 중(`BUILDING`·`DEPLOYING`·`VERIFYING`) 1개 + `QUEUED` 1개까지(부분 unique). 새 요청이 대기 요청을 밀어낸다.
+- 일꾼이 임대를 3번 잃으면 어느 진행 상태에서든 `FAILED`(`WORKER_LOST`).
+- 촉발(`trigger`): `MANUAL`(사람) · `STANDBY_SYNC`(예비 따라가기).
+- 취소 이유(`cancel_reason`, `CANCELLED` 일 때만): `SUPERSEDED`(새 요청이 밀어냄) · `SERVICE_DELETED`.
+- 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR`. 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
+- 되돌리기 결과(`revert_status`): `SUCCEEDED` · `FAILED` · NULL(필요 없었음).
+- 마지막 헬스 결과(`last_health_result`): `OK` · `HTTP_ERROR` · `UNREACHABLE`.
+- 가짜 실패 단계(`simulate.failAt`): `BUILDING` · `DEPLOYING` · `VERIFYING`.
+
+### 빌드·할 일·서비스 상태
+
+| 값 목록 | 표·칸 | 뜻 |
+|---|---|---|
+| `QUEUED` → `RUNNING` → `SUCCEEDED`·`FAILED` | `builds.status` (`BuildStatus`) | `SUCCEEDED` 일 때만 digest 가 있다. 같은 서비스·저장소·커밋의 `FAILED` 아닌 빌드는 하나 |
+| `QUEUED` → `RUNNING` → `DONE`·`FAILED`·`CANCELLED` | `jobs.status` (`JobStatus`) | 미룰 때는 `QUEUED` + `run_after`. `RUNNING` 이면 임대 칸이 있다 |
+| `DEPLOY_REQUEST` · `SERVICE_TEARDOWN` | `jobs.kind` (`JobKind`) | 대상(`subject_id`)은 배포 요청 id · 서비스 id |
+| `ACTIVE` → `DELETING` → (소프트 삭제) | `services.status` (`ServiceStatus`) | 삭제 실패 이유 `delete_error`(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`)는 `DELETING` 일 때만 |
+| `SERVING` · `STANDBY` · `NONE` | 응답 `role` (`ServiceEnvironmentRole`, 저장 안 함) | 비율 > 0 · 비율 0 + 현재 배포 있음 · 현재 배포 없음 |
+| `IN_SYNC` · `OUT_OF_SYNC` | 응답 `versionStatus` (`VersionStatus`) | 예비 연결만. 서비스 중 연결이 없으면 null |
 
 ### 환경 종류 (`environments.kind`)
 
@@ -123,7 +168,11 @@
 - 되돌리기 행은 원본의 `image_repository`·`image_digest`·`config_snapshot` 을 복사하고 `rollback_of_id` 로 원본을 가리킨다.
 - 서비스별 트래픽 비율의 합계(100%)는 DB 가 검사하지 않는다. 전환 중에는 잠깐 맞지 않을 수 있어서 이전 엔진(API 서버 8)이 맞춘다.
 - 소프트 삭제된 행은 이름·연결 유일성에서 빠진다(같은 이름으로 다시 만들 수 있다).
-- 살아 있는 연결이 있는 환경은 지울 수 없다(409 `ENVIRONMENT_IN_USE`). 연결을 만드는 쪽은 환경 행을 `FOR UPDATE` 로 잠근 뒤 만든다. 서비스·연결 삭제는 API 서버 3 에서 정한다.
+- 살아 있는 연결이 있는 환경은 지울 수 없다(409 `ENVIRONMENT_IN_USE`). 연결을 만드는 쪽(배포 요청 접수)은 환경 행을 `FOR UPDATE` 로 잠근 뒤 만든다.
+- 서비스 삭제 = 모든 연결을 내린 뒤 소프트 삭제(`DELETING` 동안 PATCH·배포 요청 409). 내린 연결은 바로 소프트 삭제하고, 배포 기록·배포 요청은 남긴다.
+- 쓰기 경로의 잠금 순서는 하나다: 환경(연결을 만들 때만) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태는 조건부 UPDATE 로만 바꾼다.
+- 외부 호출은 트랜잭션 밖에서, 멱등 키와 함께, "요청함 시각 저장 → 호출 → 작업 번호 저장" 순서로 한다([docs/executors.md](../../docs/executors.md)).
+- 가짜 실행기·가짜 소스 클라이언트 결과에는 `simulated = true` 를 행에 저장하고 응답에 싣는다(설정으로 다시 계산하지 않는다).
 - 다른 파트·API 는 환경을 `id` 로만 가리킨다. `name` 은 표시용이고 바뀔 수 있다.
 - 비밀값(`SecretValue`)은 저장·로그·응답·예외 메시지에 넣지 않는다.
 
@@ -133,7 +182,6 @@
 
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
-| 빌드\* | Build | `builds` | 소스에서 이미지를 만드는 일. 빌드 1 : 배포 N (같은 이미지를 여러 환경에) | F1 | API 서버 3 |
 | 배포 로그\* | Deployment log | (저장 방식 미정) | 배포 작업 로그·빌드 로그·실행 로그 | F1 | API 서버 4 |
 | 역할\* | Role | (미정) | 뷰어·운영자·승인자·에이전트 4역할. 코드 값(`UPPER_SNAKE`)과 표는 담당 태스크에서 정한다 | F4, NFR-07 | API 서버 6 |
 | 감사 로그\* | Audit log | `audit_logs` | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다 | F5, NFR-08 | API 서버 7 |
@@ -158,3 +206,5 @@
 | Config | 환경 종류별 설정(`environments.config`), 배포 설정(`config_snapshot`) | 앱 설정 `Settings`(`app/core/config.py`) |
 | Adapter | 환경 종류 하나의 묶음(설정 양식 + 이후 동작 코드) | 설정 양식은 어댑터의 "검사" 부분만 말한다 |
 | Traffic weight | 마지막으로 프록시에 적용한 값 | 지금 실제로 흐르는 비율(측정값, F7·F17) |
+| Deploy request | 원터치 배포 한 번(`deploy_requests`: 빌드·대기·취소·실패 이유 포함) | 배포 기록(`deployments`: 연결에 이미지를 올린 것, 빌드 성공 뒤에만 생긴다) |
+| Revert | 실패한 새 버전을 거두는 실행기 호출(`revert_status`) | 사용자 되돌리기(`rollback_of_id`, 새 배포 행, API 서버 4) |
