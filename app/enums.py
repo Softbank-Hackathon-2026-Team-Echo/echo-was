@@ -15,3 +15,25 @@ class DeploymentStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class EnvironmentConnectionStatus(StrEnum):
+    """환경 접속 상태. 등록·다시 확인·config/secretRef 수정 때 바뀐다. 단건 조회는 바꾸지 않는다."""
+
+    UNCHECKED = "UNCHECKED"
+    CONNECTED = "CONNECTED"
+    FAILED = "FAILED"
+
+
+class ConnectionErrorCode(StrEnum):
+    """접속 확인·클러스터 정보 읽기 실패 이유. DB CHECK 를 걸지 않고 앱이 이 값만 쓴다."""
+
+    TIMEOUT = "TIMEOUT"
+    SECRET_REF_MISSING = "SECRET_REF_MISSING"
+    SECRET_REF_INVALID = "SECRET_REF_INVALID"
+    SECRET_NOT_FOUND = "SECRET_NOT_FOUND"
+    SECRET_STORE_UNSUPPORTED = "SECRET_STORE_UNSUPPORTED"
+    CONFIG_INVALID = "CONFIG_INVALID"
+    AUTH_FAILED = "AUTH_FAILED"
+    UNREACHABLE = "UNREACHABLE"
+    UNKNOWN = "UNKNOWN"
