@@ -19,10 +19,14 @@ class ApiRequestModel(ApiModel):
 
 
 class ErrorDetail(ApiModel):
-    """필드별 검증 실패 사유. field 는 camelCase 필드 경로다."""
+    """필드별 실패 사유. field 는 camelCase 필드 경로, reason 은 고정 코드다.
+
+    value 는 안내 값(예: installUrl 의 GitHub App 설치 주소)이 있을 때만 싣는다.
+    """
 
     field: str
     reason: str
+    value: str | None = Field(default=None, exclude_if=_is_none)
 
 
 class ApiResponse[T](ApiModel):
@@ -48,3 +52,7 @@ class Page[T](ApiModel):
     total: int
     page: int
     size: int
+
+
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100

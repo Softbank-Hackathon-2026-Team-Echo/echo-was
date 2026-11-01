@@ -19,10 +19,15 @@ from typing import ClassVar
 
 @dataclass(frozen=True)
 class ErrorField:
-    """응답 details 한 칸. field 는 camelCase 경로, reason 은 고정 코드다."""
+    """응답 details 한 칸. field 는 camelCase 경로, reason 은 고정 코드다.
+
+    value 는 클라이언트가 그대로 쓸 안내 값(예: GitHub App 설치 주소)이 있을 때만 담는다.
+    입력 값·비밀값은 넣지 않는다.
+    """
 
     field: str
     reason: str
+    value: str | None = None
 
 
 class AppError(Exception):
@@ -99,3 +104,80 @@ class EnvironmentKindImmutableError(InvalidInputError):
     """환경 종류는 등록 뒤 바꿀 수 없다(배포 기록이 다른 종류로 바뀌는 것을 막는다)."""
 
     code = "ENVIRONMENT_KIND_IMMUTABLE"
+
+
+class ServiceNotFoundError(NotFoundError):
+    code = "SERVICE_NOT_FOUND"
+
+
+class ServiceNameConflictError(ConflictError):
+    code = "SERVICE_NAME_CONFLICT"
+
+
+class ServiceDeletingError(ConflictError):
+    """삭제 중인 서비스는 수정·배포 요청을 받지 않는다."""
+
+    code = "SERVICE_DELETING"
+
+
+class ServiceNameImmutableError(InvalidInputError):
+    """서비스 이름은 바꿀 수 없다(퍼블릭 주소가 이름에서 나온다)."""
+
+    code = "SERVICE_NAME_IMMUTABLE"
+
+
+class PublicHostConflictError(ConflictError):
+    """같은 퍼블릭 주소를 가진 살아 있는 서비스·연결이 이미 있다."""
+
+    code = "PUBLIC_HOST_CONFLICT"
+
+
+class EnvironmentUnhealthyError(ConflictError):
+    """마지막 접속 확인이 실패한 환경에는 배포 요청을 받지 않는다."""
+
+    code = "ENVIRONMENT_UNHEALTHY"
+
+
+class DeployRequestNotFoundError(NotFoundError):
+    code = "DEPLOY_REQUEST_NOT_FOUND"
+
+
+class SimulateNotAllowedError(InvalidInputError):
+    """simulate 는 가짜 실행기 모드에서만 받는다."""
+
+    code = "SIMULATE_NOT_ALLOWED"
+
+
+class RepoNotAccessibleError(NotFoundError):
+    """저장소가 없거나, 비공개인데 GitHub App 이 설치되지 않았다(GitHub 가 둘을 구분해 주지 않는다).
+
+    응답 details 에 App 설치 안내 주소(installUrl)를 담는다.
+    """
+
+    code = "REPO_NOT_ACCESSIBLE"
+
+    def __init__(self, install_url: str | None) -> None:
+        details = (
+            [ErrorField(field="installUrl", reason="INSTALL_GITHUB_APP", value=install_url)]
+            if install_url
+            else None
+        )
+        super().__init__("repository not found or not accessible", details=details)
+
+
+class RefNotFoundError(InvalidInputError):
+    """브랜치·커밋을 저장소에서 찾지 못했다."""
+
+    code = "REF_NOT_FOUND"
+
+    def __init__(self) -> None:
+        super().__init__("branch or commit not found")
+
+
+class SourceProviderUnavailableError(ExternalError):
+    """소스 저장소 제공자(GitHub) 한도 초과·5xx·시간 초과."""
+
+    code = "SOURCE_PROVIDER_UNAVAILABLE"
+
+    def __init__(self) -> None:
+        super().__init__("source provider unavailable")

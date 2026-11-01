@@ -10,11 +10,8 @@ from app.schemas.environment import (
     EnvironmentSummaryResponse,
     UpdateEnvironmentRequest,
 )
-from app.schemas.response import ApiResponse, Page
+from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
 from app.services.environment_service import EnvironmentChanges, EnvironmentService
-
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
 
 # 권한 검사 자리(API 서버 6): authorize_request 가 지금은 아무것도 검사하지 않는다.
 router = APIRouter(
