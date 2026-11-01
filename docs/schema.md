@@ -30,6 +30,9 @@ erDiagram
         varchar32 kind "aws · gcp · onprem ..."
         jsonb config "종류별 설정 (양식이 검사)"
         varchar255 secret_ref "비밀 저장소 위치만"
+        varchar16 connection_status "UNCHECKED · CONNECTED · FAILED"
+        timestamptz connection_checked_at
+        varchar32 connection_error "FAILED 일 때 이유 코드"
     }
     service_environments {
         uuid id PK
@@ -82,7 +85,13 @@ erDiagram
 | `name` | varchar(63) | N | 이름 형식 CHECK, `uq_environments_name_live` | 환경 이름(예 `aws-seoul`) |
 | `kind` | varchar(32) | N | **DB CHECK 없음** — 설정 양식 레지스트리가 검사 | 환경 종류(`aws`·`gcp`·`onprem`) |
 | `config` | jsonb | N | 기본 `{}`, `jsonb_typeof(config) = 'object'` | 종류별 설정. 형식은 종류의 설정 양식이 저장 전에 검사 |
-| `secret_ref` | varchar(255) | Y | | 접속 자격 증명의 **보관 위치**(값 아님) |
+| `secret_ref` | varchar(255) | Y | API 가 형식 검사(아래) | 접속 자격 증명의 **보관 위치**(값 아님). API 등록 때는 필수 |
+| `connection_status` | varchar(16) | N | 기본 `UNCHECKED`, 3개 값 CHECK(`ck_environments_connection_status_valid`) | 마지막 접속 확인 결과. ④-2 상태 흐름 |
+| `connection_checked_at` | timestamptz | Y | `(status = 'UNCHECKED') = (checked_at IS NULL)` (`ck_environments_connection_checked_at_consistency`) | 마지막 확인 시각 |
+| `connection_error` | varchar(32) | Y | `(status = 'FAILED') = (error IS NOT NULL)` (`ck_environments_connection_error_consistency`). **값 CHECK 없음** — 앱이 `ConnectionErrorCode` 값만 쓴다 | 실패 이유 코드(`TIMEOUT`·`SECRET_NOT_FOUND` …) |
+
+- 접속 상태 세 칸은 기존 표에 `add_column` 으로 더해 DB 에서 맨 뒤(소프트 삭제 칸 뒤)에 놓인다. 모델도 `sort_order=APPENDED_COLUMN_SORT_ORDER`(200)로 같은 순서를 쓴다.
+- `secret_ref` 형식(저장소 이름은 첫 콜론에서 나눈다): `env:ECHO_SECRET_<NAME>`(서버 프로세스 환경변수, 지금 실제 조회하는 유일한 저장소) · `k8s:<namespace>/<secret>/<key>` · `aws-sm:<이름 또는 ARN>` · `gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]`. 자세한 규칙은 [docs/api/environments.md](api/environments.md).
 
 ### `service_environments` — 서비스-환경 연결
 
@@ -95,6 +104,8 @@ erDiagram
 | `traffic_weight` | smallint | N | 기본 0, `BETWEEN 0 AND 100` | 마지막으로 앞단 프록시에 적용한 비율(%) |
 | `traffic_applied_at` | timestamptz | Y | | 그 비율을 적용한 시각 |
 | (유일성) | | | `uq_service_environments_service_id_environment_id_live` | 같은 서비스×환경의 살아 있는 연결은 하나 |
+
+- **연결을 만드는 쪽(API 서버 3)은 대상 환경 행을 `SELECT ... FOR UPDATE` 로 잠근 뒤 연결을 만든다.** 환경 삭제도 같은 행을 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 이 순서를 지켜야 "지운 환경에 새 연결"이 생기지 않는다.
 
 ### `deployments` — 배포 (지우지 않는 이력)
 
@@ -118,7 +129,10 @@ erDiagram
 | `gcp` | `project_id`, `region`, `cluster_name` | project_id `^[a-z][a-z0-9-]{4,28}[a-z0-9]$`, region `^[a-z]+-[a-z]+\d{1,2}$` | `region` |
 | `onprem` | `location`, `kube_context` | 빈 값·앞뒤 공백 거부 | `location` |
 
-모든 양식은 모르는 키를 거부(`extra="forbid"`)하고 빈 문자열을 거부한다. 위반은 `ENVIRONMENT_CONFIG_INVALID`(422), 모르는 종류는 `UNKNOWN_ENVIRONMENT_KIND`(422)이며, 오류에는 위반한 **필드 경로만**(`invalid_fields`) 담고 입력 값은 담지 않는다.
+모든 양식은 모르는 키를 거부(`extra="forbid"`)하고 빈 문자열을 거부한다. 위반은 `ENVIRONMENT_CONFIG_INVALID`(422), 모르는 종류는 `UNKNOWN_ENVIRONMENT_KIND`(422)이며, 오류에는 위반한 **필드 경로와 이유 코드만**(로그용 `invalid_fields`, 응답용 `details`) 담고 입력 값은 담지 않는다.
+
+- **키 표기**: DB(`config` 칸)는 snake_case(`cluster_name`), API 는 camelCase(`clusterName`)다. 양식 하나가 두 표기를 알고, API 경계는 camelCase 만, DB 쪽(모델 이벤트·`parsed_config()`)은 snake_case 만 받는다.
+- **동작 클래스**: 종류마다 `EnvironmentAdapter`(`check_connection`·`read_cluster_info`, 모두 async)를 같은 파일에 하나 둔다. 이번 aws·gcp·onprem 은 네트워크 호출이 없는 **가짜(simulated)** 이고 결과에 `simulated=True` 를 단다(aws `v1.31.0`/노드 3, gcp `v1.31.1-gke.1000`/3, onprem `v1.31.4+k3s1`/1).
 
 ---
 
@@ -134,11 +148,13 @@ GCP 로 이전하는 중이다. 같은 digest 를 두 클라우드에 올리고 
 
 **environments** — 세 종류가 같은 칸에 들어간다(F2 데모 증거)
 
-| id | name | kind | config | secret_ref |
-|---|---|---|---|---|
-| `env-aws` | `aws-seoul` | `aws` | `{"region": "ap-northeast-2", "cluster_name": "echo-eks"}` | `echo/environments/aws-seoul` |
-| `env-gcp` | `gcp-seoul` | `gcp` | `{"project_id": "echo-hack-123", "region": "asia-northeast3", "cluster_name": "echo-gke"}` | `echo/environments/gcp-seoul` |
-| `env-onp` | `onprem-k3s` | `onprem` | `{"location": "team-laptop", "kube_context": "k3d-echo"}` | `echo/environments/onprem-k3s` |
+| id | name | kind | config | secret_ref | connection_status |
+|---|---|---|---|---|---|
+| `env-aws` | `aws-seoul` | `aws` | `{"region": "ap-northeast-2", "cluster_name": "echo-eks"}` | `env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG` | `CONNECTED` |
+| `env-gcp` | `gcp-seoul` | `gcp` | `{"project_id": "echo-hack-123", "region": "asia-northeast3", "cluster_name": "echo-gke"}` | `env:ECHO_SECRET_GCP_SEOUL_KUBECONFIG` | `CONNECTED` |
+| `env-onp` | `onprem-k3s` | `onprem` | `{"location": "team-laptop", "kube_context": "k3d-echo"}` | `env:ECHO_SECRET_ONPREM_K3S_KUBECONFIG` | `FAILED` (`connection_error = SECRET_NOT_FOUND`) |
+
+API 응답에서는 같은 행의 `config` 키가 camelCase(`clusterName`, `projectId`, `kubeContext`)로 나간다.
 
 **service_environments** — 한 서비스, 두 환경, 동시에 가동
 
@@ -186,6 +202,23 @@ stateDiagram-v2
 - 재시도와 되돌리기는 상태를 되감지 않고 **새 배포 행**을 만든다. 되돌리기 행은 `rollback_of_id` 로 원본을 가리키고 원본의 `image_repository`·`image_digest`·`config_snapshot` 을 복사한다(F1: 이미지와 설정을 함께 되돌린다).
 - DB 는 상태 **값**만 CHECK 로 막는다. 전환 규칙은 API 서버 3 의 상태 전환 코드가 지킨다.
 
+### ④-2 환경 접속 상태 흐름 (`environments.connection_status`)
+
+```mermaid
+stateDiagram-v2
+    [*] --> UNCHECKED: 등록
+    UNCHECKED --> CONNECTED: 확인 성공
+    UNCHECKED --> FAILED: 실패·시간 초과
+    CONNECTED --> FAILED: 다시 확인 실패
+    FAILED --> CONNECTED: 다시 확인 성공
+    CONNECTED --> UNCHECKED: config·secretRef 수정
+    FAILED --> UNCHECKED: config·secretRef 수정
+```
+
+- 등록·다시 확인·config/secret_ref 수정 직후 요청 안에서 한 번 확인한다(제한 시간 기본 5초). 자동 주기 확인은 없다(API 서버 5).
+- 확인은 DB 트랜잭션·행 잠금 없이 하고, 결과는 행을 다시 `FOR UPDATE` 로 읽어 저장한다. 그 사이 config·secret_ref 가 바뀌었으면 결과를 버린다(옛 설정의 결과가 새 설정에 붙지 않게).
+- 단건 조회는 클러스터 정보를 그 자리에서 읽지만 이 칸들은 바꾸지 않는다. 확인 도중 서버가 죽으면 `UNCHECKED` 로 남고 '다시 확인'으로 풀린다.
+
 ---
 
 ## ⑤ 설계 이유
@@ -194,7 +227,8 @@ stateDiagram-v2
 |---|---|---|
 | 환경 종류는 `kind` 문자열 + `config` jsonb 한 칸, 형식은 설정 양식(Pydantic)이 검사 | 새 환경 = 파일 하나, **마이그레이션 0**(NFR-15). 종류별 표를 두면 환경을 더할 때마다 표·FK·조회가 늘어난다 | 종류별 표(`aws_environments` …), 칸 나열(`aws_region`, `gcp_project_id` …): 둘 다 새 종류마다 스키마 변경 |
 | JSON 의 약점(오타)은 저장 전 검사로 막는다 | Session flush 때 매퍼 이벤트가 양식을 검사하고 정규화한 값만 저장한다. 검사를 건너뛰는 ORM 문장 경로(`insert(Environment)`)는 코드가 거부한다 | DB CHECK 로 종류별 JSON 스키마 검사: 새 종류마다 마이그레이션이 생겨 NFR-15 와 충돌 |
-| 접속 정보는 `secret_ref` 만 저장 | **DB 에 비밀값 0개.** DB 가 새도 클라우드 키는 없다. 값은 Secrets Manager·k8s Secret(로컬은 `.env`)에 둔다 | 암호화 칸: 키 관리가 DB 와 앱에 섞이고, 덤프·로그로 새기 쉽다 |
+| 접속 정보는 `secret_ref` 만 저장 | **DB 에 비밀값 0개.** DB 가 새도 클라우드 키는 없다. 값은 Secrets Manager·k8s Secret(로컬은 프로세스 환경변수 `ECHO_SECRET_*`)에 둔다. API 도 비밀값을 받지 않는다 | 암호화 칸: 키 관리가 DB 와 앱에 섞이고, 덤프·로그로 새기 쉽다 |
+| 접속 상태는 환경 행의 칸 3개(`connection_*`) | 목록이 어댑터를 부르지 않고도 상태·실패 이유를 보여 준다(클러스터 하나가 죽어도 목록이 뜬다). 이유 코드는 CHECK 없이 앱 enum 으로만 막아 코드를 더해도 마이그레이션이 없다 | 별도 확인 이력 표: 지금은 마지막 결과만 필요 |
 | 배포 행은 지우지 않는다 | 되돌리기·감사의 근거. "언제 무엇이 돌았나"를 항상 답할 수 있다. 트리거가 `DELETE` 를 막고 소프트 삭제 칸도 없다 | 소프트 삭제: 이력을 숨길 수 있어 감사 근거로 약하다 |
 | 현재 배포는 복합 FK `(current_deployment_id, id) → deployments(id, service_environment_id)` | "연결 A 의 현재 배포가 연결 B 의 배포" 같은 앱 실수를 **DB 가 거부**한다 | 단일 FK + 앱 검사: 버그 하나로 환경 카드가 다른 클라우드의 버전을 보여 줄 수 있다 |
 | 순환 FK 는 표를 다 만든 뒤 추가(`use_alter`), ORM 관계는 읽기 전용 | 두 표가 서로 가리켜 생성·삭제 순서가 꼬이는 문제와, 복합 FK 에 들어 있는 PK(`id`)를 ORM 이 덮어쓰는 문제를 피한다 | |
@@ -209,26 +243,40 @@ stateDiagram-v2
 
 ## ⑥ 새 환경 추가 방법 — Azure 예
 
-`app/adapters/azure.py` **파일 하나**를 더한다. 표·마이그레이션·레지스트리(`registry.py`)·모델은 고치지 않는다.
+`app/adapters/azure.py` **파일 하나**(설정 양식 + 동작 클래스)를 더한다. 표·마이그레이션·레지스트리(`registry.py`)·모델·라우터·서비스는 고치지 않는다.
 
 ```python
-from app.adapters.base import EnvironmentConfig, NonEmptyStr, register_environment_kind
+from app.adapters.base import (
+    EnvironmentConfig,
+    NonEmptyStr,
+    SimulatedEnvironmentAdapter,
+    register_environment_adapter,
+    register_environment_kind,
+)
 
 
 @register_environment_kind("azure")
 class AzureEnvironmentConfig(EnvironmentConfig):
-    subscription_id: NonEmptyStr
+    subscription_id: NonEmptyStr  # API 에서는 subscriptionId
     location: NonEmptyStr  # 예: koreacentral
     cluster_name: NonEmptyStr
 
     def display_location(self) -> str:
         return self.location
+
+
+@register_environment_adapter("azure")
+class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
+    """가짜. 실제 AKS 접속은 EnvironmentAdapter 를 상속해 check_connection·read_cluster_info 를 쓴다."""
+
+    simulated_server_version = "v1.30.5"
+    simulated_node_count = 2
 ```
 
-- 레지스트리는 처음 조회할 때 `app.adapters` 패키지의 모듈을 모두 불러와 등록한다(`discover()`).
-- 이제 `Environment(name="azure-korea", kind="azure", config={...})` 를 저장할 수 있다. 저장 전 검사·`parsed_config()`·환경 카드 위치가 그대로 동작한다.
-- 증명: `tests/integration/test_environment_config_guard.py::test_new_kind_file_saves_without_model_or_migration_change` 가 임시 폴더에 이 파일 하나만 만들어 Azure 환경을 저장·조회한다. 같은 파일의 다른 테스트는 모델·마이그레이션·레지스트리에 `azure` 라는 글자가 없음을 확인한다.
-- 동작 코드(배포·상태 조회)는 API 서버 2 에서 같은 파일(또는 같은 종류 이름의 어댑터)에 더한다.
+- 레지스트리는 앱을 만들 때(`app.main` 로드) `app.adapters` 패키지의 모듈을 모두 불러와 등록한다(`discover()`). 설정 양식과 동작 클래스가 짝을 이루지 않는 종류가 있으면 여기서 `MissingEnvironmentAdapterError` 로 실패한다.
+- 이제 등록 API·목록 API·종류 목록 API(`configSchema` 포함)에 azure 가 다른 종류와 같은 칸으로 나온다. 저장 전 검사·`parsed_config()`·환경 카드 위치도 그대로 동작한다.
+- 증명: `tests/integration/test_environment_api.py::test_new_kind_file_registers_lists_and_passes_contract` 가 임시 폴더에 이 파일 하나만 만들어 API 로 등록·목록·종류 목록을 부르고 공통 계약 검사(`tests/adapter_contract.py::assert_adapter_contract`)를 통과시킨다. `tests/integration/test_environment_config_guard.py` 는 모델·마이그레이션·레지스트리에 `azure` 라는 글자가 없음을 확인한다.
+- 실제 어댑터도 같은 계약 검사를 스텁 전송으로 통과해야 한다(비밀값이 repr·로그에 없음, 실패 이유는 정해진 코드).
 
 ---
 
@@ -260,4 +308,4 @@ class AzureEnvironmentConfig(EnvironmentConfig):
 | `policies`·`findings` | 공통 정책, 정규화한 보안 결과 | 보안 파트 |
 | 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
 
-삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때)도 삭제 기능을 만드는 태스크에서 정한다: 환경은 API 서버 2, 서비스·연결은 API 서버 3.
+삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스·연결은 API 서버 3 에서 정한다.

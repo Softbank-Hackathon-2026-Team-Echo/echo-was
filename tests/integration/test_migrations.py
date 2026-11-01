@@ -43,6 +43,17 @@ EXPECTED_CONSTRAINTS = {
     ("environments", "ck_environments_config_is_object"): (
         "CHECK ((jsonb_typeof(config) = 'object'::text))"
     ),
+    ("environments", "ck_environments_connection_checked_at_consistency"): (
+        "CHECK ((((connection_status)::text = 'UNCHECKED'::text) = "
+        "(connection_checked_at IS NULL)))"
+    ),
+    ("environments", "ck_environments_connection_error_consistency"): (
+        "CHECK ((((connection_status)::text = 'FAILED'::text) = (connection_error IS NOT NULL)))"
+    ),
+    ("environments", "ck_environments_connection_status_valid"): (
+        "CHECK (((connection_status)::text = ANY ((ARRAY['UNCHECKED'::character varying, "
+        "'CONNECTED'::character varying, 'FAILED'::character varying])::text[])))"
+    ),
     ("environments", "ck_environments_name_format"): (
         "CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'::text))"
     ),
@@ -170,6 +181,49 @@ def _snapshot(connection: Connection, schema: str) -> dict[str, dict[Any, Any]]:
         "indexes": indexes,
         "triggers": triggers,
     }
+
+
+CONNECTION_COLUMNS = {"connection_status", "connection_checked_at", "connection_error"}
+CONNECTION_CHECKS = {
+    "ck_environments_connection_status_valid",
+    "ck_environments_connection_checked_at_consistency",
+    "ck_environments_connection_error_consistency",
+}
+
+
+def _environment_columns_and_checks(connection: Connection) -> tuple[set[str], set[str]]:
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("environments")}
+    checks = {check["name"] or "" for check in inspector.get_check_constraints("environments")}
+    return columns, checks
+
+
+async def test_migration_downgrade_one_removes_connection_columns_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("INSERT INTO environments (name, kind, config) VALUES ('legacy-env', 'aws', '{}')")
+        )
+        await connection.run_sync(run_alembic(lambda config: command.downgrade(config, "-1")))
+        columns_down, checks_down = await connection.run_sync(_environment_columns_and_checks)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        columns_up, checks_up = await connection.run_sync(_environment_columns_and_checks)
+        legacy_status = await connection.scalar(
+            text("SELECT connection_status FROM environments WHERE name = 'legacy-env'")
+        )
+        await connection.run_sync(run_alembic(command.check))
+        # downgrade -1 → upgrade head 는 지운 칸 번호를 다시 쓰지 않아 칸 위치가 달라진다.
+        # 같은 세션의 다른 비교 시험이 실행 순서에 흔들리지 않게 표를 처음부터 다시 만든다.
+        await connection.run_sync(run_alembic(lambda config: command.downgrade(config, "base")))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+
+    assert not columns_down & CONNECTION_COLUMNS
+    assert not checks_down & CONNECTION_CHECKS
+    assert CONNECTION_COLUMNS <= columns_up
+    assert CONNECTION_CHECKS <= checks_up
+    # 기존 행은 UNCHECKED 가 된다.
+    assert legacy_status == "UNCHECKED"
 
 
 async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngine) -> None:

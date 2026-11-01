@@ -7,21 +7,28 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.registry import discover
 from app.core.config import get_settings
 from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.routers import environment_kind_router, environment_router
 
 configure_logging("echo-api", get_settings().log_level)
 logger = logging.getLogger(__name__)
 
 READINESS_TIMEOUT_SECONDS = 2.0
 
+# 환경 종류 파일을 모두 불러온다. 동작 클래스가 빠진 종류가 있으면 첫 요청 전에 여기서 실패한다.
+discover()
+
 # 마이그레이션은 여기서 실행하지 않는다(lifespan·startup 금지). README 의 빠른 시작·배포 절을 본다.
 app = FastAPI(title="Echo Control API")
 app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
+app.include_router(environment_router.router)
+app.include_router(environment_kind_router.router)
 
 
 @app.get("/healthz", status_code=status.HTTP_204_NO_CONTENT)

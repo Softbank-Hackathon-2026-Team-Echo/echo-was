@@ -15,11 +15,17 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@127.0.0.1:
 from app.adapters import base, registry  # noqa: E402
 
 EXTRA_PACKAGE_PREFIX = "extra_adapters_"
-# 새 환경 종류를 "파일 하나"로 더하는 모습 그대로 쓴 양식 파일.
-# 레지스트리·모델·마이그레이션은 건드리지 않는다.
+# 새 환경 종류를 "파일 하나"로 더하는 모습 그대로 쓴 종류 파일(설정 양식 + 가짜 동작 클래스).
+# 레지스트리·모델·마이그레이션·라우터·서비스는 건드리지 않는다.
 AZURE_ADAPTER_SOURCE = textwrap.dedent(
     """
-    from app.adapters.base import EnvironmentConfig, NonEmptyStr, register_environment_kind
+    from app.adapters.base import (
+        EnvironmentConfig,
+        NonEmptyStr,
+        SimulatedEnvironmentAdapter,
+        register_environment_adapter,
+        register_environment_kind,
+    )
 
 
     @register_environment_kind("azure")
@@ -30,6 +36,12 @@ AZURE_ADAPTER_SOURCE = textwrap.dedent(
 
         def display_location(self) -> str:
             return self.location
+
+
+    @register_environment_adapter("azure")
+    class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
+        simulated_server_version = "v1.30.5"
+        simulated_node_count = 2
     """
 )
 
@@ -39,6 +51,7 @@ def isolated_environment_kinds(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     """테스트 안에서 등록한 환경 종류를 테스트가 끝나면 원래대로 되돌린다."""
     registry.discover()
     monkeypatch.setattr(base, "_registered_kinds", dict(base._registered_kinds))
+    monkeypatch.setattr(base, "_registered_adapters", dict(base._registered_adapters))
     monkeypatch.setattr(registry, "_discovered_packages", set(registry._discovered_packages))
     yield
     for name in [name for name in sys.modules if name.startswith(EXTRA_PACKAGE_PREFIX)]:

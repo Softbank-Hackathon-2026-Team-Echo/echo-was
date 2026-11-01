@@ -40,7 +40,13 @@ CREATE TABLE public.environments (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
+    connection_status character varying(16) DEFAULT 'UNCHECKED'::character varying NOT NULL,
+    connection_checked_at timestamp with time zone,
+    connection_error character varying(32),
     CONSTRAINT ck_environments_config_is_object CHECK ((jsonb_typeof(config) = 'object'::text)),
+    CONSTRAINT ck_environments_connection_checked_at_consistency CHECK ((((connection_status)::text = 'UNCHECKED'::text) = (connection_checked_at IS NULL))),
+    CONSTRAINT ck_environments_connection_error_consistency CHECK ((((connection_status)::text = 'FAILED'::text) = (connection_error IS NOT NULL))),
+    CONSTRAINT ck_environments_connection_status_valid CHECK (((connection_status)::text = ANY ((ARRAY['UNCHECKED'::character varying, 'CONNECTED'::character varying, 'FAILED'::character varying])::text[]))),
     CONSTRAINT ck_environments_name_format CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'::text)),
     CONSTRAINT ck_environments_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
 );
