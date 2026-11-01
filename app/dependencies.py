@@ -7,16 +7,22 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.registry import get_environment_adapter
+from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
-from app.core.config import Settings, get_settings
+from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
+from app.core.clock import Clock, SystemClock
+from app.core.config import Settings, SourceClientMode, get_settings
 from app.core.database import get_session_factory
+from app.core.secrets import parse_secret_ref
 from app.repositories.environment_repository import EnvironmentRepository
+from app.services.deploy_request_service import DeployRequestService
 from app.services.environment_connection_service import (
     AdapterResolver,
     EnvironmentConnectionService,
 )
 from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
+from app.services.service_service import ServiceService
 
 
 async def authorize_request() -> None:
@@ -69,3 +75,62 @@ def get_environment_service(
 
 def get_environment_kind_service() -> EnvironmentKindService:
     return EnvironmentKindService()
+
+
+def get_clock() -> Clock:
+    return SystemClock()
+
+
+def build_source_repository_client(settings: Settings, clock: Clock) -> SourceRepositoryClient:
+    """설정에 맞는 소스 저장소 클라이언트. 일꾼 진입점도 이 함수를 쓴다."""
+    if settings.source_client_mode is SourceClientMode.GITHUB:
+        return GithubAppSourceRepositoryClient(
+            api_base_url=settings.github_api_base_url,
+            app_id=settings.github_app_id,
+            private_key_ref=(
+                parse_secret_ref(settings.github_app_private_key_ref)
+                if settings.github_app_private_key_ref
+                else None
+            ),
+            secret_client=EnvVarSecretClient(),
+            install_url=settings.github_app_install_url,
+            timeout_seconds=settings.github_request_timeout_seconds,
+            clock=clock,
+        )
+    return FakeSourceRepositoryClient(install_url=settings.github_app_install_url)
+
+
+def get_source_repository_client(
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> SourceRepositoryClient:
+    return build_source_repository_client(settings, clock)
+
+
+def get_service_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    source_client: Annotated[SourceRepositoryClient, Depends(get_source_repository_client)],
+) -> ServiceService:
+    return ServiceService(
+        session=session,
+        source_client=source_client,
+        clock=clock,
+        public_base_domain=settings.public_base_domain,
+    )
+
+
+def get_deploy_request_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    source_client: Annotated[SourceRepositoryClient, Depends(get_source_repository_client)],
+) -> DeployRequestService:
+    return DeployRequestService(
+        session=session,
+        source_client=source_client,
+        clock=clock,
+        executor_mode=settings.executor_mode,
+        public_base_domain=settings.public_base_domain,
+    )

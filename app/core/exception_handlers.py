@@ -35,7 +35,10 @@ async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
     else:
         logger.info("request rejected", extra=extra)
     details = (
-        [ErrorDetail(field=item.field, reason=item.reason) for item in exc.details]
+        [
+            ErrorDetail(field=item.field, reason=item.reason, value=item.value)
+            for item in exc.details
+        ]
         if exc.details
         else None
     )

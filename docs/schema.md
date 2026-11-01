@@ -19,10 +19,54 @@ erDiagram
     service_environments }o--o| deployments : "현재 배포 (같은 연결의 배포만)"
     deployments |o--o{ deployments : "되돌리기 원본"
 
+    services ||--o{ builds : "커밋마다 이미지"
+    services ||--o{ deploy_requests : "원터치 배포 요청"
+    service_environments ||--o{ deploy_requests : "어느 연결에"
+    builds |o--o{ deploy_requests : "빌드 1 : 요청 N"
+    deploy_requests |o--o| deployments : "빌드 성공 뒤 배포 기록"
+    deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청"
+
     services {
         uuid id PK
         varchar63 name "살아 있는 행 중 유일"
         text description
+        varchar300 repo_url "github.com 저장소"
+        bool repo_private
+        varchar255 health_check_path "기본 /healthz"
+        int health_check_timeout_seconds "기본 300"
+        int container_port "기본 8080"
+        varchar253 public_host "대표 주소, 살아 있는 행 중 유일"
+        varchar16 status "ACTIVE · DELETING"
+        varchar32 delete_error
+        bool simulated
+    }
+    builds {
+        uuid id PK "빌드 실행기 멱등 키"
+        uuid service_id FK
+        varchar300 repo_url
+        char40 commit_sha
+        varchar16 status "QUEUED · RUNNING · SUCCEEDED · FAILED"
+        varchar71 image_digest "SUCCEEDED 일 때만"
+        varchar255 external_ref
+    }
+    deploy_requests {
+        uuid id PK
+        uuid service_environment_id FK
+        varchar16 trigger "MANUAL · STANDBY_SYNC"
+        char40 commit_sha "접수 순간 고정"
+        varchar16 status "QUEUED ... CANCELLED"
+        uuid build_id FK
+        uuid deployment_id FK
+        jsonb config_snapshot "접수 때 설정 사본"
+        bool simulated
+    }
+    jobs {
+        uuid id PK
+        varchar32 kind "DEPLOY_REQUEST · SERVICE_TEARDOWN"
+        uuid subject_id "요청 id 또는 서비스 id"
+        varchar16 status "QUEUED · RUNNING · DONE · FAILED · CANCELLED"
+        uuid lease_token
+        int lease_losses
     }
     environments {
         uuid id PK
@@ -41,6 +85,9 @@ erDiagram
         uuid current_deployment_id FK "복합 FK"
         smallint traffic_weight "0~100, 마지막 적용 값"
         timestamptz traffic_applied_at
+        varchar253 public_host "환경별 주소, 살아 있는 행 중 유일"
+        int teardown_attempt "내리기 멱등 키에 들어감"
+        varchar32 teardown_error
     }
     deployments {
         uuid id PK
@@ -55,7 +102,7 @@ erDiagram
     }
 ```
 
-`services`·`environments`·`service_environments` 는 소프트 삭제 칸(`is_deleted`, `deleted_at`)을, 네 표 모두 `created_at`·`updated_at` 을 가진다(그림에서는 생략).
+`services`·`environments`·`service_environments` 는 소프트 삭제 칸(`is_deleted`, `deleted_at`)을, 모든 표가 `created_at`·`updated_at` 을 가진다(그림에서는 생략, 원터치 배포 표의 칸도 일부만 적었다. 전체는 ②).
 
 ---
 
@@ -74,8 +121,19 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `id` | uuid | N | PK | |
-| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_name_live` | 서비스 이름(예 `shop-api`) |
+| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_name_live` | 서비스 이름(예 `shop-api`). 바꿀 수 없다(주소가 이름에서 나온다) |
 | `description` | text | Y | | 설명 |
+| `repo_url` | varchar(300) | N | | 정규화한 `https://github.com/<owner>/<repo>` |
+| `repo_private` | boolean | N | | 등록·수정 때 GitHub 가 알려 준 비공개 여부 |
+| `health_check_path` | varchar(255) | N | 기본 `/healthz`, `LIKE '/%'` | 헬스체크 경로 |
+| `health_check_timeout_seconds` | integer | N | 기본 300, `BETWEEN 10 AND 1800` | 헬스체크 마감(VERIFYING 시작부터) |
+| `container_port` | integer | N | 기본 8080, `BETWEEN 1 AND 65535` | 앱이 듣는 포트 |
+| `public_host` | varchar(253) | N | `uq_services_public_host_live` | 대표 주소 `{name}.{public_base_domain}`. 만들 때 한 번 정한다 |
+| `status` | varchar(16) | N | 기본 `ACTIVE`, `ACTIVE`·`DELETING` CHECK | 삭제를 받으면 `DELETING`, 다 내리면 소프트 삭제 |
+| `delete_error` | varchar(32) | Y | `delete_error IS NULL OR status = 'DELETING'` | 내리기 실패 이유(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`) |
+| `simulated` | boolean | N | 기본 false | 가짜 소스 저장소 클라이언트로 등록했는지(저장 값) |
+
+- 원터치 배포 칸은 기존 표에 `add_column` 으로 더해 DB 에서 맨 뒤에 놓인다(모델은 `sort_order=APPENDED_COLUMN_SORT_ORDER`). 이 revision 은 `services`·`service_environments` 행이 0개라고 가정하고, 행이 있으면 칸을 더하기 전에 분명한 메시지로 실패한다(NOT NULL·기본값 없는 칸).
 
 ### `environments` — 환경
 
@@ -103,9 +161,73 @@ erDiagram
 | `current_deployment_id` | uuid | Y | 복합 FK `(current_deployment_id, id)` → `deployments(id, service_environment_id)` | 지금 이 연결에서 돌고 있는 배포 |
 | `traffic_weight` | smallint | N | 기본 0, `BETWEEN 0 AND 100` | 마지막으로 앞단 프록시에 적용한 비율(%) |
 | `traffic_applied_at` | timestamptz | Y | | 그 비율을 적용한 시각 |
+| `public_host` | varchar(253) | N | `uq_service_environments_public_host_live` | 환경별 주소 `{서비스}.{환경}.{public_base_domain}`. 만들 때 한 번 정한다(환경 이름이 바뀌어도 그대로) |
+| `teardown_attempt` | integer | N | 기본 0 | 서비스 삭제 재시도 횟수. 내리기 멱등 키 = `{id}:{teardown_attempt}` |
+| `teardown_requested_at` | timestamptz | Y | | 내리기를 요청한 시각(제한 시간 기준) |
+| `teardown_external_ref` | varchar(255) | Y | | 내리기 실행기의 작업 번호 |
+| `teardown_error` | varchar(32) | Y | | 이 연결 내리기 실패 이유 |
 | (유일성) | | | `uq_service_environments_service_id_environment_id_live` | 같은 서비스×환경의 살아 있는 연결은 하나 |
 
-- **연결을 만드는 쪽(API 서버 3)은 대상 환경 행을 `SELECT ... FOR UPDATE` 로 잠근 뒤 연결을 만든다.** 환경 삭제도 같은 행을 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 이 순서를 지켜야 "지운 환경에 새 연결"이 생기지 않는다.
+- **연결을 만드는 쪽(API 서버 3 배포 요청 접수)은 대상 환경 행을 `SELECT ... FOR SHARE` 로 잠근 뒤 연결을 만든다.** 환경 삭제는 같은 행을 `FOR UPDATE` 로 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 둘은 서로 기다려 "지운 환경에 새 연결"이 생기지 않는다. `FOR UPDATE` 가 아니라 `FOR SHARE` 인 이유: 일꾼이 서비스 행을 잡은 채 이 환경을 FK 로 가리키는 행을 쓰면 `FOR KEY SHARE` 를 잡는데, 접수가 `FOR UPDATE` 를 쥐고 서비스 행을 기다리면 교착이 생긴다(`FOR SHARE` 는 `FOR KEY SHARE` 와 부딪히지 않는다). API 서버 2 SPEC 의 "FOR UPDATE" 를 이렇게 바꿨다. 연결은 그 환경의 첫 배포 요청 때 자동으로 만든다(`traffic_weight = 0`).
+- **역할은 저장하지 않고 계산한다**: `traffic_weight > 0` 이면 서비스 중(SERVING), 0 이고 현재 배포가 있으면 예비(STANDBY), 현재 배포가 없으면 NONE. 첫 성공 연결은 가짜 대표 주소 라우터가 "적용했다"고 답한 뒤 `traffic_weight = 100` 이 된다.
+
+### `builds` — 빌드
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | 빌드 실행기의 멱등 키 |
+| `service_id` | uuid | N | FK `services.id` | |
+| `repo_url` | varchar(300) | N | | 접수 때 고정한 저장소 |
+| `commit_sha` | char(40) | N | `^[0-9a-f]{40}$` | |
+| `status` | varchar(16) | N | 기본 `QUEUED`, 4개 값 CHECK | ④-3 |
+| `image_repository`·`image_digest` | varchar(512)·varchar(71) | Y | digest 형식 CHECK, `SUCCEEDED ⇔ 둘 다 있음` | 빌드 결과 |
+| `start_requested_at` | timestamptz | Y | | 시작을 요청한 시각(호출 전에 커밋) |
+| `external_ref` | varchar(255) | Y | | 빌드 실행기의 작업 번호 |
+| `error_code` | varchar(32) | Y | `FAILED ⇔ 값 있음` | `BUILD_FAILED`·`BUILD_TIMEOUT`·`REPO_NOT_ACCESSIBLE`… |
+| `simulated` | boolean | N | | 가짜 빌드 실행기 결과인지 |
+| `started_at`·`finished_at` | timestamptz | Y | 끝 상태 ⇔ `finished_at` 있음 | 제한 시간은 `started_at` 기준 |
+| (재사용) | | | `uq_builds_service_id_repo_url_commit_sha_not_failed` (`WHERE status <> 'FAILED'`) | 같은 서비스·저장소·커밋의 실패하지 않은 빌드는 하나. 실패 뒤에는 새 빌드 |
+
+### `deploy_requests` — 배포 요청 (지우지 않는 이력)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | 접수 번호 |
+| `service_id`·`environment_id`·`service_environment_id` | uuid | N | FK | 어느 서비스를 어느 연결에 |
+| `trigger` | varchar(16) | N | `MANUAL`·`STANDBY_SYNC`, `STANDBY_SYNC ⇔ source_request_id 있음` | 사람이 보냈나, 예비 따라가기인가 |
+| `source_request_id` | uuid | Y | FK 자기 참조 | 따라가기의 원본 요청 |
+| `ref_type`·`ref_value` | varchar(8)·varchar(255) | N | `BRANCH`·`COMMIT` | 사용자가 준 브랜치·커밋 |
+| `repo_url`·`commit_sha` | varchar(300)·char(40) | N | SHA 형식 CHECK | **접수 순간 고정**한 저장소·커밋 |
+| `status` | varchar(16) | N | 7개 값 CHECK | ④-3 |
+| `cancel_reason` | varchar(16) | Y | `SUPERSEDED`·`SERVICE_DELETED`, `CANCELLED ⇔ 값 있음` | |
+| `superseded_by_id` | uuid | Y | FK 자기 참조 | 이 요청을 밀어낸 새 요청 |
+| `error_code` | varchar(32) | Y | `FAILED ⇔ 값 있음`, 값 CHECK 없음 | 실패 이유 코드 |
+| `build_id`·`build_reused` | uuid·boolean | Y | FK `builds.id`, 둘은 함께 NULL | 쓰는 빌드와 재사용 여부 |
+| `deployment_id` | uuid | Y | FK `deployments.id` | 빌드 성공 뒤 만든 배포 기록(배포 실행기 멱등 키) |
+| `deploy_requested_at`·`deploy_external_ref` | timestamptz·varchar(255) | Y | | 배포 실행기 호출 기록 |
+| `revert_status`·`revert_external_ref` | varchar(16)·varchar(255) | Y | `SUCCEEDED`·`FAILED` | 배포 기록이 생긴 뒤 실패했을 때 되돌리기 결과 |
+| `last_health_result` | varchar(16) | Y | `OK`·`HTTP_ERROR`·`UNREACHABLE` | 마지막 헬스체크 결과 종류(마감 때 실패 코드를 정한다) |
+| `config_snapshot` | jsonb | N | object CHECK | 접수 때 설정 사본 `{healthCheckPath, healthCheckTimeoutSeconds, containerPort, mainUrl, environmentUrl}`. 비밀값 없음 |
+| `simulate` | jsonb | Y | object CHECK | `{"failAt": …}` 가짜 모드 실패 지정 |
+| `simulated` | boolean | N | | 가짜 실행기로 처리했는지(저장 값) |
+| `building_at`·`deploying_at`·`verifying_at`·`started_at`·`finished_at` | timestamptz | Y | 끝 상태 ⇔ `finished_at` 있음 | 단계 시각(배포·헬스 제한 시간 기준) |
+| (실행 1 + 대기 1) | | | `uq_deploy_requests_service_environment_id_active`(`BUILDING`·`DEPLOYING`·`VERIFYING`), `uq_deploy_requests_service_environment_id_queued`(`QUEUED`) | 같은 연결에 실행 중 1개 + 대기 1개까지 |
+| (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_deploy_requests_prevent_delete` → 공용 함수 `prevent_append_only_delete()` | 행 DELETE 는 예외(23001) |
+
+- 인덱스: `(service_id, created_at)`(목록), `(service_environment_id, created_at)`(연결별 최근 요청), `build_id`(빌드를 기다리는 요청).
+
+### `jobs` — 할 일 (일꾼 큐)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `kind` | varchar(32) | N | `DEPLOY_REQUEST`·`SERVICE_TEARDOWN` | |
+| `subject_id` | uuid | N | 열린 할 일 부분 unique `uq_jobs_subject_id_open`(`QUEUED`·`RUNNING`) | 배포 요청 id 또는 서비스 id |
+| `status` | varchar(16) | N | 5개 값 CHECK | ④-4 |
+| `run_after` | timestamptz | N | 인덱스 `(status, run_after)` | 이 시각 뒤에 집는다 |
+| `lease_token`·`lease_owner`·`lease_expires_at` | uuid·varchar(128)·timestamptz | Y | `RUNNING ⇔ token·만료 시각 있음` | 임대. 결과는 같은 토큰일 때만 반영 |
+| `lease_losses` | integer | N | 기본 0, `>= 0` | 임대를 잃은 횟수. 3이면 `WORKER_LOST` |
+| `last_error_code` | varchar(32) | Y | | 할 일을 FAILED 로 닫은 이유 |
 
 ### `deployments` — 배포 (지우지 않는 이력)
 
@@ -202,6 +324,43 @@ stateDiagram-v2
 - 재시도와 되돌리기는 상태를 되감지 않고 **새 배포 행**을 만든다. 되돌리기 행은 `rollback_of_id` 로 원본을 가리키고 원본의 `image_repository`·`image_digest`·`config_snapshot` 을 복사한다(F1: 이미지와 설정을 함께 되돌린다).
 - DB 는 상태 **값**만 CHECK 로 막는다. 전환 규칙은 API 서버 3 의 상태 전환 코드가 지킨다.
 
+- 원터치 배포(API 서버 3)에서 배포 기록은 빌드 성공 뒤 `IN_PROGRESS` 로 만들고(`PENDING` 을 거치지 않는다), 헬스체크를 통과해 성공 처리가 끝나면 `SUCCEEDED`, 배포 기록이 생긴 뒤의 실패는 `FAILED` 다.
+
+### ④-3 배포 요청 상태 흐름 (`deploy_requests.status`)과 빌드 상태
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED : 접수 (커밋 SHA 고정)
+    QUEUED --> CANCELLED : 새 요청이 밀어냄(SUPERSEDED) · 서비스 삭제(SERVICE_DELETED)
+    QUEUED --> BUILDING : 같은 연결에 실행 중 요청이 없음
+    BUILDING --> DEPLOYING : 빌드 성공(재사용이면 바로) / 배포 기록 IN_PROGRESS
+    BUILDING --> FAILED : BUILD_FAILED · BUILD_TIMEOUT · REPO_NOT_ACCESSIBLE …
+    DEPLOYING --> VERIFYING : 배포 실행기가 반영
+    DEPLOYING --> FAILED : DEPLOY_FAILED · DEPLOY_TIMEOUT (+ 되돌리기)
+    VERIFYING --> SUCCEEDED : 2xx / 현재 배포 교체 · 역할 판정 · 예비 따라가기
+    VERIFYING --> FAILED : HEALTH_CHECK_FAILED · PUBLIC_URL_UNREACHABLE · HEALTH_CHECK_TIMEOUT (+ 되돌리기)
+    SUCCEEDED --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
+```
+
+- 일꾼이 임대를 3번 잃으면 어느 진행 상태에서든 `FAILED`(`WORKER_LOST`)로 끝난다(배포 기록이 있으면 되돌리기).
+- 빌드(`builds.status`): `QUEUED` → `RUNNING`(실행기 시작) → `SUCCEEDED`·`FAILED`. 끝 상태는 조건부 UPDATE 로 한 번만 적는다. 빌드가 `FAILED` 면 그 빌드를 기다리는 요청은 모두 같은 코드로 끝난다.
+- 서비스(`services.status`): `ACTIVE` → `DELETING`(삭제 접수) → 소프트 삭제(모든 연결을 내림). 내리기 실패면 `DELETING` + `delete_error` 로 남고, 다시 DELETE 하면 남은 연결만 내린다.
+
+### ④-4 할 일 상태 흐름 (`jobs.status`)
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED : 접수·성공 처리·삭제 접수
+    QUEUED --> RUNNING : 일꾼이 집음(SKIP LOCKED, 새 lease_token)
+    RUNNING --> QUEUED : 한 단계 진행, 다시(run_after)
+    RUNNING --> RUNNING : 임대 만료 → 다른 일꾼이 집음(lease_losses + 1)
+    RUNNING --> DONE : 대상이 끝 상태
+    RUNNING --> FAILED : 임대 3번 상실(WORKER_LOST)
+    QUEUED --> CANCELLED : 대상 요청이 밀려남·서비스 삭제
+```
+
 ### ④-2 환경 접속 상태 흐름 (`environments.connection_status`)
 
 ```mermaid
@@ -235,7 +394,12 @@ stateDiagram-v2
 | `traffic_weight` 는 "마지막으로 적용한 값" + `traffic_applied_at` | 실제 분배는 앞단 프록시(Envoy)가 한다. DB 값과 실제 비율이 다를 수 있음을 칸 이름·시각으로 드러낸다(사전 부검 P2). 실제 비율은 측정(F17)으로 본다 | DB 가 실제 비율이라고 가정: 프록시 적용 실패 때 화면이 거짓말을 한다 |
 | 비율 합계 100% 는 DB 가 검사하지 않음 | 전환 중에는 연결 행을 하나씩 바꾸므로 잠깐 합계가 맞지 않는다. 이전 엔진(API 서버 8)이 맞춘다 | 트리거로 합계 검사: 단계적 전환(10→50→100%)을 막는다 |
 | 이미지는 `image_digest` 로만 | 같은 digest 를 여러 환경에 올리면 "같은 버전"이 보장된다. tag 는 바뀔 수 있어 두지 않는다 | |
-| 빌드는 별도 표(API 서버 3) | 빌드 1 : 배포 N. 한 번 만든 이미지를 여러 환경에 올린다 | 배포 행에 빌드 칸: 같은 빌드를 환경마다 반복 기록 |
+| 빌드는 별도 표(API 서버 3) | 빌드 1 : 배포 N. 한 번 만든 이미지를 여러 환경에 올린다. 같은 서비스·저장소·커밋은 다시 빌드하지 않는다(부분 unique) | 배포 행에 빌드 칸: 같은 빌드를 환경마다 반복 기록 |
+| 배포 요청(`deploy_requests`)과 배포 기록(`deployments`)을 나눔 | 요청은 "원터치 한 번"(빌드·대기·취소·실패 이유 포함), 배포 기록은 "연결에 이미지를 올린 것"이다. 빌드 실패·취소 요청은 배포 기록을 만들지 않는다. `deployments` 표와 상태 값은 그대로 둔다 | 배포 표에 요청 칸 추가: 기존 계약(`DeploymentStatus`)이 바뀐다 |
+| 같은 연결은 실행 1 + 대기 1, 새 요청이 대기 요청을 밀어냄 | 최신 요청이 이긴다(Render·Vercel 기본 동작). 부분 unique 2개가 DB 에서도 막는다 | 무제한 큐: 오래된 커밋이 줄줄이 배포된다 |
+| 할 일 표 + 별도 일꾼(`FOR UPDATE SKIP LOCKED` + 임대) | API 재시작·일꾼 장애에도 일이 남고, 임대가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 호출은 우리 행 id 를 멱등 키로 넘겨 두 번 만들지 않는다 | 요청 안에서 처리·인메모리 큐: 재시작하면 일이 사라진다 |
+| 잠금 순서 하나(환경 → 서비스 → 연결(id 순) → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
+| `simulated` 를 행에 저장 | 실제 실행기로 바꾼 뒤에도 과거 가짜 기록을 구분한다(해커톤 목업 공개 규칙) | 응답 때 설정으로 계산: 모드를 바꾸면 과거 기록이 진짜처럼 보인다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
 
@@ -295,11 +459,10 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 
 ## ⑧ 후속 표
 
-이번에는 만들지 않는다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다.
+아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3 에서 만들었다.)
 
 | 표(예정) | 내용 | 담당 태스크 |
 |---|---|---|
-| `builds` | 소스 → 이미지 빌드. 빌드 1 : 배포 N | API 서버 3 (원터치 배포) |
 | (배포·빌드·실행 로그) | 로그 저장·조회 | API 서버 4 (배포 이력·되돌리기·로그) |
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
 | 사용자·역할 | 뷰어·운영자·승인자·에이전트 | API 서버 6 (권한) |
@@ -308,4 +471,4 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 | `policies`·`findings` | 공통 정책, 정규화한 보안 결과 | 보안 파트 |
 | 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
 
-삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스·연결은 API 서버 3 에서 정한다.
+삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스는 API 서버 3 에서 정했다 — `DELETING` 으로 바꾸고 대기 요청을 취소한 뒤, 진행 중 요청이 끝나면 일꾼이 연결마다 내리고 소프트 삭제한다(연결도 내린 즉시 소프트 삭제, 배포 기록·배포 요청은 남는다).

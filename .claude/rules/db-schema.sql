@@ -3,6 +3,15 @@
 -- 마이그레이션 버전 표(alembic_version)는 뺀다.
 
 
+CREATE FUNCTION public.prevent_append_only_delete() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+        BEGIN
+            RAISE EXCEPTION '% rows are append-only and cannot be deleted', TG_TABLE_NAME
+                USING ERRCODE = 'restrict_violation';
+        END;
+        $$;
+
 CREATE FUNCTION public.prevent_deployment_delete() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -11,6 +20,79 @@ CREATE FUNCTION public.prevent_deployment_delete() RETURNS trigger
                 USING ERRCODE = 'restrict_violation';
         END;
         $$;
+
+CREATE TABLE public.builds (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_id uuid NOT NULL,
+    repo_url character varying(300) NOT NULL,
+    commit_sha character(40) NOT NULL,
+    status character varying(16) DEFAULT 'QUEUED'::character varying NOT NULL,
+    image_repository character varying(512),
+    image_digest character varying(71),
+    start_requested_at timestamp with time zone,
+    external_ref character varying(255),
+    error_code character varying(32),
+    simulated boolean NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_builds_commit_sha_format CHECK ((commit_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT ck_builds_error_code_consistency CHECK ((((status)::text = 'FAILED'::text) = (error_code IS NOT NULL))),
+    CONSTRAINT ck_builds_finished_at_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])) = (finished_at IS NOT NULL))),
+    CONSTRAINT ck_builds_image_consistency CHECK ((((status)::text = 'SUCCEEDED'::text) = ((image_digest IS NOT NULL) AND (image_repository IS NOT NULL)))),
+    CONSTRAINT ck_builds_image_digest_format CHECK (((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT ck_builds_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+CREATE TABLE public.deploy_requests (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_id uuid NOT NULL,
+    environment_id uuid NOT NULL,
+    service_environment_id uuid NOT NULL,
+    trigger character varying(16) NOT NULL,
+    source_request_id uuid,
+    ref_type character varying(8) NOT NULL,
+    ref_value character varying(255) NOT NULL,
+    repo_url character varying(300) NOT NULL,
+    commit_sha character(40) NOT NULL,
+    status character varying(16) DEFAULT 'QUEUED'::character varying NOT NULL,
+    cancel_reason character varying(16),
+    superseded_by_id uuid,
+    error_code character varying(32),
+    build_id uuid,
+    build_reused boolean,
+    deployment_id uuid,
+    deploy_requested_at timestamp with time zone,
+    deploy_external_ref character varying(255),
+    revert_status character varying(16),
+    revert_external_ref character varying(255),
+    last_health_result character varying(16),
+    config_snapshot jsonb NOT NULL,
+    simulate jsonb,
+    simulated boolean NOT NULL,
+    building_at timestamp with time zone,
+    deploying_at timestamp with time zone,
+    verifying_at timestamp with time zone,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_deploy_requests_build_reused_consistency CHECK (((build_id IS NULL) = (build_reused IS NULL))),
+    CONSTRAINT ck_deploy_requests_cancel_reason_consistency CHECK ((((status)::text = 'CANCELLED'::text) = (cancel_reason IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_cancel_reason_valid CHECK (((cancel_reason)::text = ANY ((ARRAY['SUPERSEDED'::character varying, 'SERVICE_DELETED'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_commit_sha_format CHECK ((commit_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT ck_deploy_requests_config_snapshot_is_object CHECK ((jsonb_typeof(config_snapshot) = 'object'::text)),
+    CONSTRAINT ck_deploy_requests_error_code_consistency CHECK ((((status)::text = 'FAILED'::text) = (error_code IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_finished_at_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])) = (finished_at IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_last_health_result_valid CHECK (((last_health_result)::text = ANY ((ARRAY['OK'::character varying, 'HTTP_ERROR'::character varying, 'UNREACHABLE'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_ref_type_valid CHECK (((ref_type)::text = ANY ((ARRAY['BRANCH'::character varying, 'COMMIT'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_revert_status_valid CHECK (((revert_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_simulate_is_object CHECK ((jsonb_typeof(simulate) = 'object'::text)),
+    CONSTRAINT ck_deploy_requests_source_request_consistency CHECK ((((trigger)::text = 'STANDBY_SYNC'::text) = (source_request_id IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'BUILDING'::character varying, 'DEPLOYING'::character varying, 'VERIFYING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_trigger_valid CHECK (((trigger)::text = ANY ((ARRAY['MANUAL'::character varying, 'STANDBY_SYNC'::character varying])::text[])))
+);
 
 CREATE TABLE public.deployments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -51,6 +133,25 @@ CREATE TABLE public.environments (
     CONSTRAINT ck_environments_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
 );
 
+CREATE TABLE public.jobs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind character varying(32) NOT NULL,
+    subject_id uuid NOT NULL,
+    status character varying(16) DEFAULT 'QUEUED'::character varying NOT NULL,
+    run_after timestamp with time zone NOT NULL,
+    lease_token uuid,
+    lease_owner character varying(128),
+    lease_expires_at timestamp with time zone,
+    lease_losses integer DEFAULT 0 NOT NULL,
+    last_error_code character varying(32),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_jobs_kind_valid CHECK (((kind)::text = ANY ((ARRAY['DEPLOY_REQUEST'::character varying, 'SERVICE_TEARDOWN'::character varying])::text[]))),
+    CONSTRAINT ck_jobs_lease_consistency CHECK ((((status)::text = 'RUNNING'::text) = ((lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)))),
+    CONSTRAINT ck_jobs_lease_losses_non_negative CHECK ((lease_losses >= 0)),
+    CONSTRAINT ck_jobs_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying, 'DONE'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
+);
+
 CREATE TABLE public.service_environments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_id uuid NOT NULL,
@@ -62,6 +163,11 @@ CREATE TABLE public.service_environments (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
+    public_host character varying(253) NOT NULL,
+    teardown_attempt integer DEFAULT 0 NOT NULL,
+    teardown_requested_at timestamp with time zone,
+    teardown_external_ref character varying(255),
+    teardown_error character varying(32),
     CONSTRAINT ck_service_environments_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL))),
     CONSTRAINT ck_service_environments_traffic_weight_range CHECK (((traffic_weight >= 0) AND (traffic_weight <= 100)))
 );
@@ -74,15 +180,38 @@ CREATE TABLE public.services (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
+    repo_url character varying(300) NOT NULL,
+    repo_private boolean NOT NULL,
+    health_check_path character varying(255) DEFAULT '/healthz'::character varying NOT NULL,
+    health_check_timeout_seconds integer DEFAULT 300 NOT NULL,
+    container_port integer DEFAULT 8080 NOT NULL,
+    public_host character varying(253) NOT NULL,
+    status character varying(16) DEFAULT 'ACTIVE'::character varying NOT NULL,
+    delete_error character varying(32),
+    simulated boolean DEFAULT false NOT NULL,
+    CONSTRAINT ck_services_container_port_range CHECK (((container_port >= 1) AND (container_port <= 65535))),
+    CONSTRAINT ck_services_delete_error_only_when_deleting CHECK (((delete_error IS NULL) OR ((status)::text = 'DELETING'::text))),
+    CONSTRAINT ck_services_health_check_path_format CHECK (((health_check_path)::text ~~ '/%'::text)),
+    CONSTRAINT ck_services_health_check_timeout_range CHECK (((health_check_timeout_seconds >= 10) AND (health_check_timeout_seconds <= 1800))),
     CONSTRAINT ck_services_name_format CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'::text)),
-    CONSTRAINT ck_services_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
+    CONSTRAINT ck_services_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL))),
+    CONSTRAINT ck_services_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DELETING'::character varying])::text[])))
 );
+
+ALTER TABLE ONLY public.builds
+    ADD CONSTRAINT pk_builds PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT pk_deploy_requests PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT pk_deployments PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT pk_environments PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.jobs
+    ADD CONSTRAINT pk_jobs PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT pk_service_environments PRIMARY KEY (id);
@@ -93,15 +222,61 @@ ALTER TABLE ONLY public.services
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT uq_deployments_id_service_environment_id UNIQUE (id, service_environment_id);
 
+CREATE INDEX ix_deploy_requests_build_id ON public.deploy_requests USING btree (build_id);
+
+CREATE INDEX ix_deploy_requests_service_environment_id_created_at ON public.deploy_requests USING btree (service_environment_id, created_at);
+
+CREATE INDEX ix_deploy_requests_service_id_created_at ON public.deploy_requests USING btree (service_id, created_at);
+
 CREATE INDEX ix_deployments_service_environment_id_created_at ON public.deployments USING btree (service_environment_id, created_at);
 
+CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
+
+CREATE UNIQUE INDEX uq_builds_service_id_repo_url_commit_sha_not_failed ON public.builds USING btree (service_id, repo_url, commit_sha) WHERE ((status)::text <> 'FAILED'::text);
+
+CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_active ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = ANY ((ARRAY['BUILDING'::character varying, 'DEPLOYING'::character varying, 'VERIFYING'::character varying])::text[]));
+
+CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_queued ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = 'QUEUED'::text);
+
 CREATE UNIQUE INDEX uq_environments_name_live ON public.environments USING btree (name) WHERE (is_deleted = false);
+
+CREATE UNIQUE INDEX uq_jobs_subject_id_open ON public.jobs USING btree (subject_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying])::text[]));
+
+CREATE UNIQUE INDEX uq_service_environments_public_host_live ON public.service_environments USING btree (public_host) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_service_environments_service_id_environment_id_live ON public.service_environments USING btree (service_id, environment_id) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_services_name_live ON public.services USING btree (name) WHERE (is_deleted = false);
 
+CREATE UNIQUE INDEX uq_services_public_host_live ON public.services USING btree (public_host) WHERE (is_deleted = false);
+
+CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON public.deploy_requests FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
+
 CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployments FOR EACH ROW EXECUTE FUNCTION public.prevent_deployment_delete();
+
+ALTER TABLE ONLY public.builds
+    ADD CONSTRAINT fk_builds_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_build_id_builds FOREIGN KEY (build_id) REFERENCES public.builds(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_deployment_id_deployments FOREIGN KEY (deployment_id) REFERENCES public.deployments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_environment_id_environments FOREIGN KEY (environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_service_environment_id_service_environments FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_source_request_id_deploy_requests FOREIGN KEY (source_request_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_superseded_by_id_deploy_requests FOREIGN KEY (superseded_by_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT fk_deployments_rollback_of_id_deployments FOREIGN KEY (rollback_of_id) REFERENCES public.deployments(id) ON DELETE RESTRICT;

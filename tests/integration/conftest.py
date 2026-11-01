@@ -3,7 +3,8 @@
 - TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 DB 를 쓴다. DB 이름은 `_test` 로 끝나야 한다.
 - 세션 시작 때 DB 가 없으면 만들고, public 스키마를 비운 뒤 `alembic upgrade head` 를 실행한다.
 - DB 에 최대 10초 재시도해도 붙지 못하면 이유를 남기고 이 폴더의 테스트를 모두 건너뛴다.
-- 테스트마다 표 4개를 TRUNCATE 한다(배포 삭제 금지 트리거는 행 DELETE 에만 걸려 TRUNCATE 와 무관).
+- 테스트마다 모든 표를 TRUNCATE 한다(배포·배포 요청 삭제 금지 트리거는 행 DELETE 에만 걸려
+  TRUNCATE 와 무관).
 - 같은 테스트 DB 를 쓰는 pytest 가 동시에 돌면(예: git add·commit 훅이 함께 실행) 서로 표를
   지우므로, 세션 동안 PostgreSQL advisory lock 을 잡아 한 번에 하나만 돌게 한다.
 """
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from httpx import ASGITransport, AsyncClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, make_url, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,10 +32,25 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.clients.source_repository import FakeSourceRepositoryClient
+from app.core.config import get_settings
+from app.core.database import get_session_factory
+from app.dependencies import get_clock, get_source_repository_client
+from app.main import app
+from tests.integration.deploy_harness import DeployHarness, FakeClock, make_fake_executors
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
-TABLES = ("deployments", "service_environments", "environments", "services")
+TABLES = (
+    "jobs",
+    "deploy_requests",
+    "builds",
+    "deployments",
+    "service_environments",
+    "environments",
+    "services",
+)
 
 
 class _TestDatabaseSettings(BaseSettings):
@@ -182,3 +199,35 @@ async def engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture
 def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.fixture
+async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[DeployHarness]:
+    """원터치 배포 시험 도구. API 의 세션·설정·시계·소스 클라이언트를 시험 값으로 바꾼다.
+
+    일꾼은 한 단계마다 트랜잭션을 여러 번 연다. 연결을 다시 쓰도록 이 시험 전용 풀 엔진을 쓰고
+    시험이 끝나면 닫는다(표 비우기는 engine 픽스처가 한다).
+    """
+    pooled_engine = create_async_engine(test_database_url, pool_size=10, max_overflow=10)
+    session_factory = async_sessionmaker(pooled_engine, expire_on_commit=False)
+    clock = FakeClock()
+    settings = get_settings().model_copy(update={"fake_executor_step_seconds": 0.0})
+    source_client = FakeSourceRepositoryClient(install_url=settings.github_app_install_url)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        harness = DeployHarness(
+            client=client,
+            session_factory=session_factory,
+            clock=clock,
+            settings=settings,
+            source_client=source_client,
+            executors=make_fake_executors(clock),
+        )
+        app.dependency_overrides[get_session_factory] = lambda: session_factory
+        app.dependency_overrides[get_settings] = lambda: harness.settings
+        app.dependency_overrides[get_clock] = lambda: clock
+        app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
+        try:
+            yield harness
+        finally:
+            app.dependency_overrides.clear()
+            await pooled_engine.dispose()

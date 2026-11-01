@@ -6,6 +6,15 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-01T18:02Z · app/models/deploy_request.py (Edit) · 신규/동일
+- 2026-11-01T17:45Z · app/models/service.py (Edit) · repo_url, repo_private, health_check_path, health_check_timeout_seconds, container_port, public_host, status, delete_error, simulated 컬럼 추가
+- 2026-11-01T17:45Z · app/models/deploy_request.py (Edit) · 신규/동일
+- 2026-11-01T17:43Z · app/models/service_environment.py (Edit) · public_host, teardown_attempt, teardown_requested_at, teardown_external_ref, teardown_error 컬럼 추가
+- 2026-11-01T17:43Z · app/models/__init__.py (Write) · +13 −1
+- 2026-11-01T17:43Z · app/models/job.py (Write) · 신규/동일
+- 2026-11-01T17:43Z · app/models/deploy_request.py (Write) · 신규/동일
+- 2026-11-01T17:43Z · app/models/build.py (Write) · 신규/동일
+- 2026-11-01T17:42Z · app/models/service.py (Write) · repo_url, repo_private, health_check_path, health_check_timeout_seconds, container_port, public_host, status, delete_error, simulated 컬럼 추가
 - 2026-11-01T14:48Z · app/models/environment.py (Edit) · connection_status, connection_checked_at, connection_error 컬럼 추가; secret_ref 컬럼 변경
 - 2026-11-01T14:48Z · app/models/environment.py (Edit) · +20 −1
 - 2026-11-01T14:48Z · app/models/environment.py (Edit) · +4 −1

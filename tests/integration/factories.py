@@ -35,6 +35,33 @@ class ShopApiExample:
     gcp_deployment: Deployment
 
 
+PUBLIC_BASE_DOMAIN = "apps.echo.test"
+
+
+def make_service(name: str, description: str | None = None) -> Service:
+    """서비스 행. 원터치 배포 칸(저장소·대표 주소)을 채운다."""
+    return Service(
+        name=name,
+        description=description,
+        repo_url=f"https://github.com/team-echo/{name}",
+        repo_private=False,
+        public_host=f"{name}.{PUBLIC_BASE_DOMAIN}",
+        simulated=True,
+    )
+
+
+def make_link(
+    service: Service, environment: Environment, traffic_weight: int = 0
+) -> ServiceEnvironment:
+    """서비스-환경 연결 행. 환경별 주소를 채운다."""
+    return ServiceEnvironment(
+        service_id=service.id,
+        environment_id=environment.id,
+        traffic_weight=traffic_weight,
+        public_host=f"{service.name}.{environment.name}.{PUBLIC_BASE_DOMAIN}",
+    )
+
+
 def secret_ref_for(name: str) -> str:
     """env 저장소 형식의 비밀 참조. 예: aws-seoul → env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG"""
     return f"env:ECHO_SECRET_{name.upper().replace('-', '_')}_KUBECONFIG"
@@ -65,24 +92,16 @@ async def add_succeeded_deployment(
 
 async def seed_shop_api_example(session: AsyncSession) -> ShopApiExample:
     """shop-api 가 같은 이미지를 AWS 90%·GCP 10%로 돌리는 순간. 온프레 환경은 등록만 돼 있다."""
-    service = Service(name="shop-api", description="데모 쇼핑몰 API")
+    service = make_service("shop-api", description="데모 쇼핑몰 API")
     environments = {name: make_environment(name) for name in ENVIRONMENT_CONFIGS}
     session.add_all([service, *environments.values()])
     await session.flush()
 
     applied_at = datetime.now(UTC)
-    aws_link = ServiceEnvironment(
-        service_id=service.id,
-        environment_id=environments["aws-seoul"].id,
-        traffic_weight=90,
-        traffic_applied_at=applied_at,
-    )
-    gcp_link = ServiceEnvironment(
-        service_id=service.id,
-        environment_id=environments["gcp-seoul"].id,
-        traffic_weight=10,
-        traffic_applied_at=applied_at,
-    )
+    aws_link = make_link(service, environments["aws-seoul"], traffic_weight=90)
+    aws_link.traffic_applied_at = applied_at
+    gcp_link = make_link(service, environments["gcp-seoul"], traffic_weight=10)
+    gcp_link.traffic_applied_at = applied_at
     session.add_all([aws_link, gcp_link])
     await session.flush()
 
