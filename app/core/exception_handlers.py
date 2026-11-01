@@ -22,7 +22,7 @@ def error_response(
 ) -> JSONResponse:
     body = ApiResponse[None](success=False, code=code, message=message, details=details)
     return JSONResponse(
-        body.model_dump(mode="json", by_alias=True, exclude_none=True),
+        body.model_dump(mode="json", by_alias=True, exclude={"data"}),
         status_code=status_code,
         headers=headers,
     )
@@ -34,7 +34,12 @@ async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
         logger.error("request failed", extra=extra, exc_info=exc)
     else:
         logger.info("request rejected", extra=extra)
-    return error_response(exc.status_code, exc.code, exc.message)
+    details = (
+        [ErrorDetail(field=item.field, reason=item.reason) for item in exc.details]
+        if exc.details
+        else None
+    )
+    return error_response(exc.status_code, exc.code, exc.message, details)
 
 
 async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

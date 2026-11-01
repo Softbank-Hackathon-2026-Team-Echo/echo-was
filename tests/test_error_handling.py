@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
 from app.core.exception_handlers import register_exception_handlers
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, ErrorField, InvalidInputError, NotFoundError
 from app.core.logging import ContextFilter, JsonFormatter
 from app.core.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.schemas.response import ApiModel
@@ -33,7 +33,25 @@ def _create_app() -> FastAPI:
     async def boom() -> None:
         raise RuntimeError("boom")
 
+    @app.get("/invalid")
+    async def invalid() -> None:
+        raise InvalidInputError(
+            "invalid input", details=[ErrorField("config.region", "INVALID_FORMAT")], kind="aws"
+        )
+
     return app
+
+
+async def test_app_error_with_details_returns_details_in_envelope() -> None:
+    response = await _request("GET", "/invalid")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "success": False,
+        "code": "INVALID_INPUT",
+        "message": "invalid input",
+        "details": [{"field": "config.region", "reason": "INVALID_FORMAT"}],
+    }
 
 
 async def _request(
