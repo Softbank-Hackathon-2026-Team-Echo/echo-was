@@ -2,7 +2,13 @@ from typing import Annotated
 
 from pydantic import StringConstraints
 
-from app.adapters.base import EnvironmentConfig, NonEmptyStr, register_environment_kind
+from app.adapters.base import (
+    EnvironmentConfig,
+    NonEmptyStr,
+    SimulatedEnvironmentAdapter,
+    register_environment_adapter,
+    register_environment_kind,
+)
 
 # GCP 프로젝트 ID 규칙: 6~30자, 소문자로 시작, 소문자·숫자·하이픈, 하이픈으로 끝나지 않음.
 GcpProjectId = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")]
@@ -20,3 +26,14 @@ class GcpEnvironmentConfig(EnvironmentConfig):
 
     def display_location(self) -> str:
         return self.region
+
+
+@register_environment_adapter("gcp")
+class GcpEnvironmentAdapter(SimulatedEnvironmentAdapter):
+    """GCP(GKE) 동작 클래스 — **가짜(simulated)**. 네트워크 호출 없이 고정 값을 돌려준다.
+
+    실제 GKE 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 이 클래스를 바꾼다.
+    """
+
+    simulated_server_version = "v1.31.1-gke.1000"
+    simulated_node_count = 3
