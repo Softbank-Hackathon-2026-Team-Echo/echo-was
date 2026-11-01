@@ -3,20 +3,26 @@ import logging
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.registry import discover
+from app.auth.audit import register_audit_handlers
 from app.core.config import get_settings
 from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.routers import (
+    agent_token_router,
+    auth_router,
     deploy_request_router,
     environment_kind_router,
     environment_router,
+    invitation_router,
+    organization_router,
     service_router,
 )
 
@@ -30,8 +36,23 @@ discover()
 
 # 마이그레이션은 여기서 실행하지 않는다(lifespan·startup 금지). README 의 빠른 시작·배포 절을 본다.
 app = FastAPI(title="Echo Control API")
+# 프론트(다른 출처)가 쿠키를 실어 부를 수 있게 허용 목록 + credentials. 쓰기 요청의 Origin 은
+# 검사기가 한 번 더 확인한다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().frontend_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
+)
 app.add_middleware(RequestContextMiddleware)
 register_exception_handlers(app)
+register_audit_handlers(app)
+app.include_router(auth_router.router)
+app.include_router(organization_router.router)
+app.include_router(invitation_router.router)
+app.include_router(agent_token_router.router)
 app.include_router(environment_router.router)
 app.include_router(environment_kind_router.router)
 app.include_router(service_router.router)

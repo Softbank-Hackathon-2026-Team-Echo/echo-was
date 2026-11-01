@@ -1,5 +1,8 @@
 """배포 요청 접수·조회 유스케이스. 접수만 동기로 하고 실행은 일꾼이 한다.
 
+서비스·환경·배포 요청은 모두 경로의 조직 안에서만 찾는다. 환경이 서비스와 다른 조직이면 그 환경은
+없는 것과 같다(404 ENVIRONMENT_NOT_FOUND).
+
 접수 순서(잠금 순서: 환경 → 서비스 → 연결 → 요청 → 할 일):
 1. simulate 는 가짜 실행기 모드에서만 받는다.
 2. 서비스·환경을 읽어 거절할 것을 먼저 거절한다(트랜잭션 밖 GitHub 호출 전에).
@@ -97,15 +100,17 @@ class DeployRequestService:
         self._jobs = JobRepository(session)
 
     async def create_deploy_request(
-        self, service_id: uuid.UUID, command: CreateDeployCommand
+        self, organization_id: uuid.UUID, service_id: uuid.UUID, command: CreateDeployCommand
     ) -> DeployRequestView:
         if command.simulate_fail_at is not None and self._executor_mode is not ExecutorMode.FAKE:
             raise SimulateNotAllowedError("simulate is only accepted with fake executors")
 
         async with self._session.begin():
-            service = await self._services.get_live_by_id(service_id)
+            service = await self._services.get_live_by_id(organization_id, service_id)
             _check_service_accepts(service)
-            environment = await self._environments.get_live_by_id(command.environment_id)
+            environment = await self._environments.get_live_by_id(
+                organization_id, command.environment_id
+            )
             _check_environment_accepts(environment)
             repo = parse_repo_url(service.repo_url)
 
@@ -117,10 +122,10 @@ class DeployRequestService:
             # 이 환경을 FK 로 가리키는 행을 쓸 때 잡는 FOR KEY SHARE 와는 부딪히지 않게 한다
             # (FOR UPDATE 면 접수 ↔ 성공 처리 사이에 교착이 생긴다).
             environment = await self._environments.get_live_by_id(
-                command.environment_id, for_share=True
+                organization_id, command.environment_id, for_share=True
             )
             _check_environment_accepts(environment)
-            service = await self._services.get_live_by_id(service_id, lock=True)
+            service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             _check_service_accepts(service)
             connections = await self._service_environments.lock_live_by_service(service.id)
             connection = next(
@@ -167,23 +172,30 @@ class DeployRequestService:
 
     async def search_deploy_requests(
         self,
+        organization_id: uuid.UUID,
         service_id: uuid.UUID,
         environment_id: uuid.UUID | None,
         page: int,
         size: int,
     ) -> DeployRequestSearchResult:
         async with self._session.begin():
-            await self._services.get_live_by_id(service_id)
+            await self._services.get_live_by_id(organization_id, service_id)
             requests = await self._deploy_requests.search_by_service(
-                service_id, environment_id, offset=page * size, limit=size
+                organization_id, service_id, environment_id, offset=page * size, limit=size
             )
-            total = await self._deploy_requests.count_by_service(service_id, environment_id)
+            total = await self._deploy_requests.count_by_service(
+                organization_id, service_id, environment_id
+            )
             views = await self._views(requests)
         return DeployRequestSearchResult(items=views, total=total)
 
-    async def get_deploy_request(self, deploy_request_id: uuid.UUID) -> DeployRequestView:
+    async def get_deploy_request(
+        self, organization_id: uuid.UUID, deploy_request_id: uuid.UUID
+    ) -> DeployRequestView:
         async with self._session.begin():
-            request = await self._deploy_requests.find_by_id(deploy_request_id)
+            request = await self._deploy_requests.find_in_organization(
+                organization_id, deploy_request_id
+            )
             if request is None:
                 raise DeployRequestNotFoundError(
                     "deploy request not found", deploy_request_id=str(deploy_request_id)

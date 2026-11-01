@@ -13,8 +13,6 @@ from app.executors.base import HealthHttpError, HealthUnreachable
 from app.executors.fake import FakeBuildExecutor, FakeDeployExecutor
 from app.models import Build, Deployment, DeployRequest, Environment, ServiceEnvironment
 from tests.integration.deploy_harness import (
-    DEPLOY_REQUESTS,
-    SERVICES,
     DeployHarness,
     ScriptedHealthChecker,
     connection_of,
@@ -310,7 +308,7 @@ async def test_health_check_deadline_uses_last_result(
     service, aws, _ = await _setup(harness)
     harness.replace_executors(health=ScriptedHealthChecker(script, default=script[-1]))
     response = await harness.client.patch(
-        f"{SERVICES}/{service['id']}", json={"healthCheckTimeoutSeconds": 10}
+        f"{harness.services}/{service['id']}", json={"healthCheckTimeoutSeconds": 10}
     )
     assert response.status_code == 200
 
@@ -542,7 +540,7 @@ async def test_search_deploy_requests_filters_by_environment_newest_first(
 
 
 async def test_get_deploy_request_unknown_returns_404(harness: DeployHarness) -> None:
-    response = await harness.client.get(f"{DEPLOY_REQUESTS}/{uuid.uuid4()}")
+    response = await harness.client.get(f"{harness.deploy_requests}/{uuid.uuid4()}")
 
     assert (response.status_code, response.json()["code"]) == (404, "DEPLOY_REQUEST_NOT_FOUND")
 

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.enums import DeployRequestStatus
 from app.executors.fake import FakeBuildExecutor, FakeTeardownExecutor
 from app.models import Deployment, DeployRequest, Environment, Service, ServiceEnvironment
-from tests.integration.deploy_harness import SERVICES, DeployHarness, connection_of
+from tests.integration.deploy_harness import DeployHarness, connection_of
 
 
 async def _two_environment_service(
@@ -24,7 +24,7 @@ async def _two_environment_service(
 
 
 async def _delete(harness: DeployHarness, service_id: str) -> dict[str, Any]:
-    response = await harness.client.delete(f"{SERVICES}/{service_id}")
+    response = await harness.client.delete(f"{harness.services}/{service_id}")
     assert response.status_code == 202, response.text
     data: dict[str, Any] = response.json()["data"]
     return data
@@ -51,15 +51,16 @@ async def test_delete_service_cancels_queued_waits_active_then_removes_everythin
 
     deleting = await _delete(harness, service["id"])
     rejected_patch = await harness.client.patch(
-        f"{SERVICES}/{service['id']}", json={"description": "x"}
+        f"{harness.services}/{service['id']}", json={"description": "x"}
     )
     rejected_deploy = await harness.request_deploy(service["id"], aws.id)
     queued_after = await harness.get_request(queued["id"])
     await harness.run_until_idle()
     active_after = await harness.get_request(active["id"])
-    gone = await harness.client.get(f"{SERVICES}/{service['id']}")
+    gone = await harness.client.get(f"{harness.services}/{service['id']}")
     recreated = await harness.client.post(
-        SERVICES, json={"name": "shop-api", "repoUrl": "https://github.com/team-echo/shop-api"}
+        harness.services,
+        json={"name": "shop-api", "repoUrl": "https://github.com/team-echo/shop-api"},
     )
 
     assert (deleting["status"], deleting["deleteError"]) == ("DELETING", None)
@@ -121,7 +122,7 @@ async def test_teardown_failure_keeps_deleting_and_retry_removes_only_remaining(
     teardown.recover_service_environment(onprem_link)
     retried = await _delete(harness, service["id"])
     await harness.run_until_idle()
-    gone = await harness.client.get(f"{SERVICES}/{service['id']}")
+    gone = await harness.client.get(f"{harness.services}/{service['id']}")
 
     assert (stuck["status"], stuck["deleteError"]) == ("DELETING", "TEARDOWN_FAILED")
     assert [item["environment"]["name"] for item in stuck["environments"]] == ["onprem-k3s"]
@@ -185,7 +186,7 @@ async def test_teardown_job_losing_lease_three_times_records_worker_lost(
 
 
 async def test_delete_unknown_service_returns_404(harness: DeployHarness) -> None:
-    response = await harness.client.delete(f"{SERVICES}/{uuid.uuid4()}")
+    response = await harness.client.delete(f"{harness.services}/{uuid.uuid4()}")
 
     assert (response.status_code, response.json()["code"]) == (404, "SERVICE_NOT_FOUND")
 
@@ -194,7 +195,7 @@ async def test_deleting_service_is_listed_and_readable(harness: DeployHarness) -
     service, _, _ = await _two_environment_service(harness)
     await _delete(harness, service["id"])
 
-    listed = await harness.client.get(SERVICES)
+    listed = await harness.client.get(harness.services)
     detail = await harness.get_service(service["id"])
 
     assert [item["status"] for item in listed.json()["data"]["items"]] == ["DELETING"]

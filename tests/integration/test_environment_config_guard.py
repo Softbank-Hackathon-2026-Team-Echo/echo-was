@@ -13,7 +13,7 @@ from app.adapters.aws import AwsEnvironmentConfig
 from app.adapters.base import InvalidEnvironmentConfigError, UnknownEnvironmentKindError
 from app.adapters.registry import discover
 from app.core.exceptions import InvalidInputError
-from app.models import Environment
+from app.models import Environment, Organization
 from tests.integration.factories import make_environment
 
 SessionFactory = async_sessionmaker[AsyncSession]
@@ -38,12 +38,17 @@ async def _count_environments(session_factory: SessionFactory) -> int:
 
 
 async def test_flush_aws_without_region_raises_before_insert(
-    session_factory: SessionFactory, executed_statements: list[str]
+    session_factory: SessionFactory, organization: Organization, executed_statements: list[str]
 ) -> None:
     secret_value = "should-not-leak"
     async with session_factory() as session:
         session.add(
-            Environment(name="aws-seoul", kind="aws", config={"cluster_name": secret_value})
+            Environment(
+                organization_id=organization.id,
+                name="aws-seoul",
+                kind="aws",
+                config={"cluster_name": secret_value},
+            )
         )
         with pytest.raises(InvalidEnvironmentConfigError) as exc_info:
             await session.flush()
@@ -69,12 +74,15 @@ async def test_flush_aws_without_region_raises_before_insert(
 )
 async def test_flush_unknown_kind_or_extra_key_rejected(
     session_factory: SessionFactory,
+    organization: Organization,
     kind: str,
     config: dict[str, object],
     error_type: type[InvalidInputError],
 ) -> None:
     async with session_factory() as session:
-        session.add(Environment(name="env-a", kind=kind, config=config))
+        session.add(
+            Environment(organization_id=organization.id, name="env-a", kind=kind, config=config)
+        )
         with pytest.raises(error_type):
             await session.flush()
 
@@ -82,10 +90,10 @@ async def test_flush_unknown_kind_or_extra_key_rejected(
 
 
 async def test_update_config_or_kind_is_validated_on_flush(
-    session_factory: SessionFactory,
+    session_factory: SessionFactory, organization: Organization
 ) -> None:
     async with session_factory() as session, session.begin():
-        environment = make_environment("aws-seoul")
+        environment = make_environment("aws-seoul", organization)
         session.add(environment)
 
     async with session_factory() as session:
@@ -118,9 +126,11 @@ async def test_orm_insert_and_update_statements_rejected(
     assert await _count_environments(session_factory) == 0
 
 
-async def test_in_place_config_mutation_is_not_saved(session_factory: SessionFactory) -> None:
+async def test_in_place_config_mutation_is_not_saved(
+    session_factory: SessionFactory, organization: Organization
+) -> None:
     async with session_factory() as session, session.begin():
-        environment = make_environment("aws-seoul")
+        environment = make_environment("aws-seoul", organization)
         session.add(environment)
 
     async with session_factory() as session, session.begin():
@@ -132,9 +142,11 @@ async def test_in_place_config_mutation_is_not_saved(session_factory: SessionFac
     assert reloaded.config["cluster_name"] == "echo-eks"
 
 
-async def test_reassigned_config_is_saved_and_parsed(session_factory: SessionFactory) -> None:
+async def test_reassigned_config_is_saved_and_parsed(
+    session_factory: SessionFactory, organization: Organization
+) -> None:
     async with session_factory() as session, session.begin():
-        environment = make_environment("aws-seoul")
+        environment = make_environment("aws-seoul", organization)
         session.add(environment)
 
     async with session_factory() as session, session.begin():
@@ -150,7 +162,7 @@ async def test_reassigned_config_is_saved_and_parsed(session_factory: SessionFac
 
 
 async def test_new_kind_file_saves_without_model_or_migration_change(
-    session_factory: SessionFactory, azure_adapter_package: str
+    session_factory: SessionFactory, organization: Organization, azure_adapter_package: str
 ) -> None:
     discover(azure_adapter_package)
     config: dict[str, object] = {
@@ -160,7 +172,9 @@ async def test_new_kind_file_saves_without_model_or_migration_change(
     }
 
     async with session_factory() as session, session.begin():
-        environment = Environment(name="azure-korea", kind="azure", config=dict(config))
+        environment = Environment(
+            organization_id=organization.id, name="azure-korea", kind="azure", config=dict(config)
+        )
         session.add(environment)
 
     async with session_factory() as session:

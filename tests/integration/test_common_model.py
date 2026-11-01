@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from app.models import Deployment, Environment, Service, ServiceEnvironment
+from app.models import Deployment, Environment, Organization, Service, ServiceEnvironment
 from tests.integration.factories import (
     SHOP_API_DIGEST,
     ShopApiExample,
@@ -102,13 +102,18 @@ async def test_live_link_duplicate_rejected_and_allowed_after_soft_delete(
 
 @pytest.mark.parametrize(
     ("model", "index_name"),
-    [(Service, "uq_services_name_live"), (Environment, "uq_environments_name_live")],
+    [(Service, "uq_services_name_live"), (Environment, "uq_environments_org_name_live")],
 )
 async def test_name_duplicate_rejected_and_allowed_after_soft_delete(
-    session_factory: SessionFactory, model: type[Service | Environment], index_name: str
+    session_factory: SessionFactory,
+    organization: Organization,
+    model: type[Service | Environment],
+    index_name: str,
 ) -> None:
     def make() -> Service | Environment:
-        return make_service("shop-api") if model is Service else make_environment("aws-seoul")
+        if model is Service:
+            return make_service("shop-api", organization)
+        return make_environment("aws-seoul", organization)
 
     async with session_factory() as session, session.begin():
         original = make()

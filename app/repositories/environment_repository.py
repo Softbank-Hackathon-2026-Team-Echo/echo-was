@@ -8,7 +8,11 @@ from app.models import Environment, ServiceEnvironment
 
 
 class EnvironmentRepository:
-    """환경 표 조회·저장. 소프트 삭제된 행은 보지 않는다. 트랜잭션은 서비스가 연다."""
+    """환경 표 조회·저장. 소프트 삭제된 행은 보지 않는다. 트랜잭션은 서비스가 연다.
+
+    API 가 쓰는 조회는 모두 조직(organization_id)을 필수로 받는다.
+    다른 조직의 환경은 없는 것과 같다.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -17,7 +21,12 @@ class EnvironmentRepository:
         self._session.add(environment)
 
     async def find_live_by_id(
-        self, environment_id: uuid.UUID, *, for_update: bool = False, for_share: bool = False
+        self,
+        organization_id: uuid.UUID,
+        environment_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+        for_share: bool = False,
     ) -> Environment | None:
         """for_update=True 면 SELECT ... FOR UPDATE, for_share=True 면 FOR SHARE 로 행을 잠근다.
 
@@ -29,7 +38,11 @@ class EnvironmentRepository:
         """
         statement = (
             select(Environment)
-            .where(Environment.id == environment_id, _is_live())
+            .where(
+                Environment.id == environment_id,
+                Environment.organization_id == organization_id,
+                _is_live(),
+            )
             .execution_options(populate_existing=True)
         )
         if for_update:
@@ -39,10 +52,15 @@ class EnvironmentRepository:
         return await self._session.scalar(statement)
 
     async def get_live_by_id(
-        self, environment_id: uuid.UUID, *, for_update: bool = False, for_share: bool = False
+        self,
+        organization_id: uuid.UUID,
+        environment_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+        for_share: bool = False,
     ) -> Environment:
         environment = await self.find_live_by_id(
-            environment_id, for_update=for_update, for_share=for_share
+            organization_id, environment_id, for_update=for_update, for_share=for_share
         )
         if environment is None:
             raise EnvironmentNotFoundError(
@@ -50,23 +68,28 @@ class EnvironmentRepository:
             )
         return environment
 
-    async def find_live_by_name(self, name: str) -> Environment | None:
+    async def find_live_by_name(self, organization_id: uuid.UUID, name: str) -> Environment | None:
+        """이름은 조직 안에서만 유일하다."""
         return await self._session.scalar(
-            select(Environment).where(Environment.name == name, _is_live())
+            select(Environment).where(
+                Environment.organization_id == organization_id, Environment.name == name, _is_live()
+            )
         )
 
-    async def search_live(self, kind: str | None, offset: int, limit: int) -> list[Environment]:
+    async def search_live(
+        self, organization_id: uuid.UUID, kind: str | None, offset: int, limit: int
+    ) -> list[Environment]:
         statement = (
-            _filter_by_kind(select(Environment).where(_is_live()), kind)
+            _filter_by_kind(_in_organization(select(Environment), organization_id), kind)
             .order_by(Environment.created_at, Environment.id)
             .offset(offset)
             .limit(limit)
         )
         return list((await self._session.scalars(statement)).all())
 
-    async def count_live(self, kind: str | None) -> int:
+    async def count_live(self, organization_id: uuid.UUID, kind: str | None) -> int:
         statement = _filter_by_kind(
-            select(func.count()).select_from(Environment).where(_is_live()), kind
+            _in_organization(select(func.count()).select_from(Environment), organization_id), kind
         )
         return await self._session.scalar(statement) or 0
 
@@ -82,6 +105,10 @@ class EnvironmentRepository:
 
 def _is_live() -> ColumnElement[bool]:
     return Environment.is_deleted.is_(False)
+
+
+def _in_organization[*Ts](statement: Select[*Ts], organization_id: uuid.UUID) -> Select[*Ts]:
+    return statement.where(Environment.organization_id == organization_id, _is_live())
 
 
 def _filter_by_kind[*Ts](statement: Select[*Ts], kind: str | None) -> Select[*Ts]:

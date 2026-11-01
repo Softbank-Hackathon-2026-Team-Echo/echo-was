@@ -3,7 +3,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.dependencies import authorize_request, get_deploy_request_service, get_service_service
+from app.auth.guards import AdminAccess, DeveloperAccess, ViewerAccess
+from app.dependencies import get_deploy_request_service, get_service_service
 from app.schemas.deploy_request import (
     CreateDeployRequest,
     DeployRequestDetailResponse,
@@ -19,10 +20,8 @@ from app.schemas.service import (
 from app.services.deploy_request_service import CreateDeployCommand, DeployRequestService
 from app.services.service_service import CreateServiceCommand, ServiceChanges, ServiceService
 
-# 권한 검사 자리(API 서버 6): authorize_request 가 지금은 아무것도 검사하지 않는다.
-router = APIRouter(
-    prefix="/api/v1/services", tags=["service"], dependencies=[Depends(authorize_request)]
-)
+# 조회는 뷰어(에이전트 가능), 등록·수정·배포 요청은 개발자, 삭제는 어드민.
+router = APIRouter(prefix="/api/v1/orgs/{org_id}/services", tags=["service"])
 
 Services = Annotated[ServiceService, Depends(get_service_service)]
 DeployRequests = Annotated[DeployRequestService, Depends(get_deploy_request_service)]
@@ -32,10 +31,11 @@ DeployRequests = Annotated[DeployRequestService, Depends(get_deploy_request_serv
     "", status_code=status.HTTP_201_CREATED, response_model=ApiResponse[ServiceDetailResponse]
 )
 async def create_service(
-    request: CreateServiceRequest, services: Services
+    access: DeveloperAccess, request: CreateServiceRequest, services: Services
 ) -> ApiResponse[ServiceDetailResponse]:
     view = await services.create_service(
         CreateServiceCommand(
+            organization_id=access.organization_id,
             name=request.name,
             description=request.description,
             repo_url=request.repo_url,
@@ -49,11 +49,12 @@ async def create_service(
 
 @router.get("", response_model=ApiResponse[Page[ServiceSummaryResponse]])
 async def search_services(
+    access: ViewerAccess,
     services: Services,
     page: Annotated[int, Query(ge=0)] = 0,
     size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> ApiResponse[Page[ServiceSummaryResponse]]:
-    result = await services.search_services(page=page, size=size)
+    result = await services.search_services(access.organization_id, page=page, size=size)
     return ApiResponse(
         data=Page(
             items=[ServiceSummaryResponse.from_model(service) for service in result.items],
@@ -66,17 +67,21 @@ async def search_services(
 
 @router.get("/{service_id}", response_model=ApiResponse[ServiceDetailResponse])
 async def get_service(
-    service_id: uuid.UUID, services: Services
+    access: ViewerAccess, service_id: uuid.UUID, services: Services
 ) -> ApiResponse[ServiceDetailResponse]:
-    view = await services.get_service(service_id)
+    view = await services.get_service(access.organization_id, service_id)
     return ApiResponse(data=ServiceDetailResponse.from_view(view))
 
 
 @router.patch("/{service_id}", response_model=ApiResponse[ServiceDetailResponse])
 async def update_service(
-    service_id: uuid.UUID, request: UpdateServiceRequest, services: Services
+    access: DeveloperAccess,
+    service_id: uuid.UUID,
+    request: UpdateServiceRequest,
+    services: Services,
 ) -> ApiResponse[ServiceDetailResponse]:
     view = await services.update_service(
+        access.organization_id,
         service_id,
         ServiceChanges(
             name=request.name,
@@ -97,9 +102,9 @@ async def update_service(
     response_model=ApiResponse[ServiceDetailResponse],
 )
 async def delete_service(
-    service_id: uuid.UUID, services: Services
+    access: AdminAccess, service_id: uuid.UUID, services: Services
 ) -> ApiResponse[ServiceDetailResponse]:
-    view = await services.delete_service(service_id)
+    view = await services.delete_service(access.organization_id, service_id)
     return ApiResponse(data=ServiceDetailResponse.from_view(view))
 
 
@@ -109,10 +114,14 @@ async def delete_service(
     response_model=ApiResponse[DeployRequestDetailResponse],
 )
 async def create_deploy_request(
-    service_id: uuid.UUID, request: CreateDeployRequest, deploy_requests: DeployRequests
+    access: DeveloperAccess,
+    service_id: uuid.UUID,
+    request: CreateDeployRequest,
+    deploy_requests: DeployRequests,
 ) -> ApiResponse[DeployRequestDetailResponse]:
     ref_type, ref_value = request.ref
     view = await deploy_requests.create_deploy_request(
+        access.organization_id,
         service_id,
         CreateDeployCommand(
             environment_id=request.environment_id,
@@ -129,13 +138,16 @@ async def create_deploy_request(
     response_model=ApiResponse[Page[DeployRequestSummaryResponse]],
 )
 async def search_deploy_requests(
+    access: ViewerAccess,
     service_id: uuid.UUID,
     deploy_requests: DeployRequests,
     page: Annotated[int, Query(ge=0)] = 0,
     size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     environment_id: Annotated[uuid.UUID | None, Query(alias="environmentId")] = None,
 ) -> ApiResponse[Page[DeployRequestSummaryResponse]]:
-    result = await deploy_requests.search_deploy_requests(service_id, environment_id, page, size)
+    result = await deploy_requests.search_deploy_requests(
+        access.organization_id, service_id, environment_id, page, size
+    )
     return ApiResponse(
         data=Page(
             items=[DeployRequestSummaryResponse.from_view(view) for view in result.items],

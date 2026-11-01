@@ -1,5 +1,8 @@
 """환경 등록·조회·수정·삭제·다시 확인 유스케이스.
 
+모든 유스케이스는 조직 하나 안에서만 본다(다른 조직의 환경은 없는 것과 같다). 이름은 조직 안에서
+유일하고, env 비밀 참조는 조직 열쇠 이름(`ECHO_SECRET_<조직 키>__`)으로 시작해야 한다.
+
 트랜잭션은 이 서비스가 `async with session.begin()` 블록 단위로 연다. 접속 확인은 DB 트랜잭션·행
 잠금 없이 실행하고(네트워크 대기 중 잠금 방지), 결과는 새 트랜잭션에서 행을 다시 잠가 저장한다.
 그 사이에 config·secret_ref 가 바뀌었으면 결과를 버린다(바꾼 쪽이 자기 확인을 따로 돈다).
@@ -27,10 +30,15 @@ from app.core.exceptions import (
     EnvironmentKindImmutableError,
     EnvironmentNameConflictError,
     EnvironmentNotFoundError,
+    SecretRefNotInOrganizationError,
 )
-from app.core.secrets import InvalidSecretRefError, parse_secret_ref
+from app.core.secrets import (
+    InvalidSecretRefError,
+    is_secret_ref_in_organization,
+    parse_secret_ref,
+)
 from app.enums import ConnectionErrorCode
-from app.models import Environment
+from app.models import Environment, Organization
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.environment_connection_service import (
     ConnectionTarget,
@@ -39,7 +47,7 @@ from app.services.environment_connection_service import (
 
 logger = logging.getLogger(__name__)
 
-NAME_UNIQUE_INDEX = "uq_environments_name_live"
+NAME_UNIQUE_INDEX = "uq_environments_org_name_live"
 
 
 @dataclass(frozen=True)
@@ -84,56 +92,69 @@ class EnvironmentService:
         self._connection_service = connection_service
 
     async def create_environment(
-        self, name: str, kind: str, config: Mapping[str, object], secret_ref: str
+        self,
+        organization: Organization,
+        name: str,
+        kind: str,
+        config: Mapping[str, object],
+        secret_ref: str,
     ) -> EnvironmentDetailView:
         """환경을 UNCHECKED 로 저장·커밋한 뒤 접속을 확인하고 결과를 저장한다.
 
         config 는 API 표기(camelCase)다. 접속 확인이 실패해도 등록은 된다.
         """
         parsed_config = validate_environment_config(kind, config, by_alias=True)
+        _check_secret_ref_in_organization(secret_ref, organization)
         environment = Environment(
+            organization_id=organization.id,
             name=name,
             kind=kind,
             config=parsed_config.model_dump(mode="json"),
             secret_ref=secret_ref,
         )
         async with self._session.begin():
-            await self._check_name_available(name)
+            await self._check_name_available(organization.id, name)
             self._environment_repository.add(environment)
             await self._flush()
         self._log("environment created", "create_environment", environment)
         return await self._check_and_record(environment)
 
     async def search_environments(
-        self, kind: str | None, page: int, size: int
+        self, organization_id: uuid.UUID, kind: str | None, page: int, size: int
     ) -> EnvironmentSearchResult:
         """저장된 값만 읽는다. 어댑터·비밀값 조회기는 부르지 않는다."""
         async with self._session.begin():
             environments = await self._environment_repository.search_live(
-                kind, offset=page * size, limit=size
+                organization_id, kind, offset=page * size, limit=size
             )
-            total = await self._environment_repository.count_live(kind)
+            total = await self._environment_repository.count_live(organization_id, kind)
         return EnvironmentSearchResult(
             items=[self._view(environment) for environment in environments], total=total
         )
 
-    async def get_environment(self, environment_id: uuid.UUID) -> EnvironmentDetailView:
+    async def get_environment(
+        self, organization_id: uuid.UUID, environment_id: uuid.UUID
+    ) -> EnvironmentDetailView:
         """저장된 값 + 그 자리에서 읽은 클러스터 정보. 저장된 접속 상태는 바꾸지 않는다."""
         async with self._session.begin():
-            environment = await self._environment_repository.get_live_by_id(environment_id)
+            environment = await self._environment_repository.get_live_by_id(
+                organization_id, environment_id
+            )
         return await self._detail_with_cluster_info(environment)
 
     async def update_environment(
-        self, environment_id: uuid.UUID, changes: EnvironmentChanges
+        self, organization: Organization, environment_id: uuid.UUID, changes: EnvironmentChanges
     ) -> EnvironmentDetailView:
         """name·config(전체 교체)·secret_ref 를 바꾼다. kind 는 바꿀 수 없다.
 
         config·secret_ref 가 실제로 바뀌면 같은 커밋에서 접속 상태를 UNCHECKED 로 되돌리고,
         커밋 뒤 다시 확인한다. name 만 바뀌면 다시 확인하지 않는다.
         """
+        if changes.secret_ref is not None:
+            _check_secret_ref_in_organization(changes.secret_ref, organization)
         async with self._session.begin():
             environment = await self._environment_repository.get_live_by_id(
-                environment_id, for_update=True
+                organization.id, environment_id, for_update=True
             )
             if changes.kind is not None and changes.kind != environment.kind:
                 raise EnvironmentKindImmutableError(
@@ -151,7 +172,7 @@ class EnvironmentService:
                 environment.secret_ref = changes.secret_ref
                 needs_check = True
             if changes.name is not None and changes.name != environment.name:
-                await self._check_name_available(changes.name)
+                await self._check_name_available(organization.id, changes.name)
                 environment.name = changes.name
             if needs_check:
                 environment.mark_connection_unchecked()
@@ -163,7 +184,9 @@ class EnvironmentService:
             return await self._check_and_record(environment)
         return await self._detail_with_cluster_info(environment)
 
-    async def delete_environment(self, environment_id: uuid.UUID) -> None:
+    async def delete_environment(
+        self, organization_id: uuid.UUID, environment_id: uuid.UUID
+    ) -> None:
         """살아 있는 서비스-환경 연결이 없으면 소프트 삭제한다. 있으면 EnvironmentInUseError.
 
         연결을 만드는 쪽(배포 요청 접수)도 같은 환경 행을 FOR SHARE 로 잠근 뒤 연결을 만든다
@@ -171,7 +194,7 @@ class EnvironmentService:
         """
         async with self._session.begin():
             environment = await self._environment_repository.get_live_by_id(
-                environment_id, for_update=True
+                organization_id, environment_id, for_update=True
             )
             if await self._environment_repository.has_live_service_environments(environment_id):
                 raise EnvironmentInUseError(
@@ -182,11 +205,13 @@ class EnvironmentService:
         self._log("environment deleted", "delete_environment", environment)
 
     async def check_environment_connection(
-        self, environment_id: uuid.UUID
+        self, organization_id: uuid.UUID, environment_id: uuid.UUID
     ) -> EnvironmentDetailView:
         """커밋된 행으로 접속을 다시 확인하고 결과를 저장한다."""
         async with self._session.begin():
-            environment = await self._environment_repository.get_live_by_id(environment_id)
+            environment = await self._environment_repository.get_live_by_id(
+                organization_id, environment_id
+            )
         return await self._check_and_record(environment)
 
     async def _check_and_record(self, environment: Environment) -> EnvironmentDetailView:
@@ -195,7 +220,7 @@ class EnvironmentService:
 
         async with self._session.begin():
             stored = await self._environment_repository.find_live_by_id(
-                target.environment_id, for_update=True
+                environment.organization_id, target.environment_id, for_update=True
             )
             if stored is None:
                 raise EnvironmentNotFoundError(
@@ -231,8 +256,8 @@ class EnvironmentService:
             cluster_info_error=result.error,
         )
 
-    async def _check_name_available(self, name: str) -> None:
-        if await self._environment_repository.find_live_by_name(name) is not None:
+    async def _check_name_available(self, organization_id: uuid.UUID, name: str) -> None:
+        if await self._environment_repository.find_live_by_name(organization_id, name) is not None:
             raise EnvironmentNameConflictError("environment name already in use")
 
     async def _flush(self) -> None:
@@ -289,6 +314,16 @@ class EnvironmentService:
                 "connection_error": environment.connection_error,
             },
         )
+
+
+def _check_secret_ref_in_organization(secret_ref: str, organization: Organization) -> None:
+    """형식은 요청 스키마가 이미 검사했다. 여기서는 조직 열쇠 이름으로 묶였는지만 본다."""
+    try:
+        ref = parse_secret_ref(secret_ref)
+    except InvalidSecretRefError:
+        return
+    if not is_secret_ref_in_organization(ref, organization.slug):
+        raise SecretRefNotInOrganizationError
 
 
 def _connection_target(environment: Environment) -> ConnectionTarget:

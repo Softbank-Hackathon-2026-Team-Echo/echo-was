@@ -21,6 +21,36 @@ CREATE FUNCTION public.prevent_deployment_delete() RETURNS trigger
         END;
         $$;
 
+CREATE TABLE public.agent_tokens (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    name character varying(100) NOT NULL,
+    token_hash character(64) NOT NULL,
+    last4 character(4) NOT NULL,
+    created_by_user_id uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    last_used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.audit_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid,
+    actor_type character varying(16) NOT NULL,
+    actor_user_id uuid,
+    actor_agent_token_id uuid,
+    action character varying(300) NOT NULL,
+    path text NOT NULL,
+    reason character varying(64) NOT NULL,
+    result character varying(16) DEFAULT 'DENIED'::character varying NOT NULL,
+    request_id character varying(128),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_audit_logs_actor_consistency CHECK (((((actor_type)::text = 'USER'::text) AND (actor_user_id IS NOT NULL) AND (actor_agent_token_id IS NULL)) OR (((actor_type)::text = 'AGENT'::text) AND (actor_agent_token_id IS NOT NULL) AND (actor_user_id IS NULL)))),
+    CONSTRAINT ck_audit_logs_actor_type_valid CHECK (((actor_type)::text = ANY ((ARRAY['USER'::character varying, 'AGENT'::character varying])::text[]))),
+    CONSTRAINT ck_audit_logs_result_valid CHECK (((result)::text = 'DENIED'::text))
+);
+
 CREATE TABLE public.builds (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_id uuid NOT NULL,
@@ -125,12 +155,30 @@ CREATE TABLE public.environments (
     connection_status character varying(16) DEFAULT 'UNCHECKED'::character varying NOT NULL,
     connection_checked_at timestamp with time zone,
     connection_error character varying(32),
+    organization_id uuid NOT NULL,
     CONSTRAINT ck_environments_config_is_object CHECK ((jsonb_typeof(config) = 'object'::text)),
     CONSTRAINT ck_environments_connection_checked_at_consistency CHECK ((((connection_status)::text = 'UNCHECKED'::text) = (connection_checked_at IS NULL))),
     CONSTRAINT ck_environments_connection_error_consistency CHECK ((((connection_status)::text = 'FAILED'::text) = (connection_error IS NOT NULL))),
     CONSTRAINT ck_environments_connection_status_valid CHECK (((connection_status)::text = ANY ((ARRAY['UNCHECKED'::character varying, 'CONNECTED'::character varying, 'FAILED'::character varying])::text[]))),
     CONSTRAINT ck_environments_name_format CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'::text)),
     CONSTRAINT ck_environments_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
+);
+
+CREATE TABLE public.invitations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    github_id bigint NOT NULL,
+    github_login character varying(39) NOT NULL,
+    role character varying(16) NOT NULL,
+    status character varying(16) NOT NULL,
+    invited_by_user_id uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    accepted_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_invitations_accepted_at_consistency CHECK ((((status)::text = 'ACCEPTED'::text) = (accepted_at IS NOT NULL))),
+    CONSTRAINT ck_invitations_role_valid CHECK (((role)::text = ANY ((ARRAY['ADMIN'::character varying, 'DEVELOPER'::character varying, 'VIEWER'::character varying])::text[]))),
+    CONSTRAINT ck_invitations_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'ACCEPTED'::character varying, 'EXPIRED'::character varying, 'REVOKED'::character varying])::text[])))
 );
 
 CREATE TABLE public.jobs (
@@ -150,6 +198,28 @@ CREATE TABLE public.jobs (
     CONSTRAINT ck_jobs_lease_consistency CHECK ((((status)::text = 'RUNNING'::text) = ((lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)))),
     CONSTRAINT ck_jobs_lease_losses_non_negative CHECK ((lease_losses >= 0)),
     CONSTRAINT ck_jobs_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying, 'DONE'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
+);
+
+CREATE TABLE public.organization_members (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    role character varying(16) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_organization_members_role_valid CHECK (((role)::text = ANY ((ARRAY['ADMIN'::character varying, 'DEVELOPER'::character varying, 'VIEWER'::character varying])::text[])))
+);
+
+CREATE TABLE public.organizations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug character varying(39) NOT NULL,
+    name character varying(100) NOT NULL,
+    personal boolean DEFAULT false NOT NULL,
+    created_by_user_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_organizations_name_not_empty CHECK ((char_length((name)::text) >= 1)),
+    CONSTRAINT ck_organizations_slug_format CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))
 );
 
 CREATE TABLE public.service_environments (
@@ -189,6 +259,7 @@ CREATE TABLE public.services (
     status character varying(16) DEFAULT 'ACTIVE'::character varying NOT NULL,
     delete_error character varying(32),
     simulated boolean DEFAULT false NOT NULL,
+    organization_id uuid NOT NULL,
     CONSTRAINT ck_services_container_port_range CHECK (((container_port >= 1) AND (container_port <= 65535))),
     CONSTRAINT ck_services_delete_error_only_when_deleting CHECK (((delete_error IS NULL) OR ((status)::text = 'DELETING'::text))),
     CONSTRAINT ck_services_health_check_path_format CHECK (((health_check_path)::text ~~ '/%'::text)),
@@ -197,6 +268,31 @@ CREATE TABLE public.services (
     CONSTRAINT ck_services_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL))),
     CONSTRAINT ck_services_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DELETING'::character varying])::text[])))
 );
+
+CREATE TABLE public.sessions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    token_hash character(64) NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    github_id bigint NOT NULL,
+    github_login character varying(39) NOT NULL,
+    name character varying(255),
+    avatar_url character varying(500),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.agent_tokens
+    ADD CONSTRAINT pk_agent_tokens PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT pk_audit_logs PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.builds
     ADD CONSTRAINT pk_builds PRIMARY KEY (id);
@@ -210,8 +306,17 @@ ALTER TABLE ONLY public.deployments
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT pk_environments PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT pk_invitations PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT pk_jobs PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT pk_organization_members PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT pk_organizations PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT pk_service_environments PRIMARY KEY (id);
@@ -219,8 +324,33 @@ ALTER TABLE ONLY public.service_environments
 ALTER TABLE ONLY public.services
     ADD CONSTRAINT pk_services PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT pk_sessions PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT pk_users PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.agent_tokens
+    ADD CONSTRAINT uq_agent_tokens_token_hash UNIQUE (token_hash);
+
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT uq_deployments_id_service_environment_id UNIQUE (id, service_environment_id);
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT uq_organization_members_organization_id_user_id UNIQUE (organization_id, user_id);
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT uq_organizations_slug UNIQUE (slug);
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT uq_sessions_token_hash UNIQUE (token_hash);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT uq_users_github_id UNIQUE (github_id);
+
+CREATE INDEX ix_agent_tokens_organization_id_created_at ON public.agent_tokens USING btree (organization_id, created_at);
+
+CREATE INDEX ix_audit_logs_organization_id_created_at ON public.audit_logs USING btree (organization_id, created_at);
 
 CREATE INDEX ix_deploy_requests_build_id ON public.deploy_requests USING btree (build_id);
 
@@ -230,7 +360,13 @@ CREATE INDEX ix_deploy_requests_service_id_created_at ON public.deploy_requests 
 
 CREATE INDEX ix_deployments_service_environment_id_created_at ON public.deployments USING btree (service_environment_id, created_at);
 
+CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_id);
+
 CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
+
+CREATE INDEX ix_organization_members_user_id ON public.organization_members USING btree (user_id);
+
+CREATE INDEX ix_services_organization_id ON public.services USING btree (organization_id);
 
 CREATE UNIQUE INDEX uq_builds_service_id_repo_url_commit_sha_not_failed ON public.builds USING btree (service_id, repo_url, commit_sha) WHERE ((status)::text <> 'FAILED'::text);
 
@@ -238,7 +374,9 @@ CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_active ON public.d
 
 CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_queued ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = 'QUEUED'::text);
 
-CREATE UNIQUE INDEX uq_environments_name_live ON public.environments USING btree (name) WHERE (is_deleted = false);
+CREATE UNIQUE INDEX uq_environments_org_name_live ON public.environments USING btree (organization_id, name) WHERE (is_deleted = false);
+
+CREATE UNIQUE INDEX uq_invitations_organization_id_github_id_pending ON public.invitations USING btree (organization_id, github_id) WHERE ((status)::text = 'PENDING'::text);
 
 CREATE UNIQUE INDEX uq_jobs_subject_id_open ON public.jobs USING btree (subject_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying])::text[]));
 
@@ -250,9 +388,26 @@ CREATE UNIQUE INDEX uq_services_name_live ON public.services USING btree (name) 
 
 CREATE UNIQUE INDEX uq_services_public_host_live ON public.services USING btree (public_host) WHERE (is_deleted = false);
 
+CREATE TRIGGER trg_audit_logs_prevent_delete BEFORE DELETE ON public.audit_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
+
 CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON public.deploy_requests FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployments FOR EACH ROW EXECUTE FUNCTION public.prevent_deployment_delete();
+
+ALTER TABLE ONLY public.agent_tokens
+    ADD CONSTRAINT fk_agent_tokens_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_tokens
+    ADD CONSTRAINT fk_agent_tokens_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT fk_audit_logs_actor_agent_token_id_agent_tokens FOREIGN KEY (actor_agent_token_id) REFERENCES public.agent_tokens(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT fk_audit_logs_actor_user_id_users FOREIGN KEY (actor_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT fk_audit_logs_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.builds
     ADD CONSTRAINT fk_builds_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
@@ -284,6 +439,24 @@ ALTER TABLE ONLY public.deployments
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT fk_deployments_service_environment_id_service_environments FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY public.environments
+    ADD CONSTRAINT fk_environments_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT fk_invitations_invited_by_user_id_users FOREIGN KEY (invited_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT fk_invitations_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT fk_organization_members_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT fk_organization_members_user_id_users FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT fk_organizations_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT fk_service_environments_current_deployment_id_id_deployments FOREIGN KEY (current_deployment_id, id) REFERENCES public.deployments(id, service_environment_id) ON DELETE RESTRICT;
 
@@ -292,4 +465,10 @@ ALTER TABLE ONLY public.service_environments
 
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT fk_service_environments_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.services
+    ADD CONSTRAINT fk_services_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT fk_sessions_user_id_users FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
 

@@ -120,7 +120,7 @@ async def test_environment_delete_and_first_deploy_never_leave_link_to_deleted_e
     for index in range(8):
         environment = await harness.add_environment(f"env-{index}")
         delete_response, deploy_response = await asyncio.gather(
-            harness.client.delete(f"/api/v1/environments/{environment.id}"),
+            harness.client.delete(f"{harness.environments}/{environment.id}"),
             harness.request_deploy(service["id"], environment.id),
         )
         outcomes.append((delete_response.status_code, deploy_response.status_code))

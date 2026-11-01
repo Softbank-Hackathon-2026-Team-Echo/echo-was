@@ -12,7 +12,7 @@ HTTP 변환은 exception_handlers 한곳에서 한다.
 도메인 예외는 클라이언트 분기나 재시도 정책이 다를 때만 카테고리를 상속해 만든다.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -34,6 +34,8 @@ class AppError(Exception):
     code: ClassVar[str] = "INTERNAL_ERROR"
     status_code: ClassVar[int] = 500
     retryable: ClassVar[bool] = False
+    # 응답에 실을 헤더(예: 401 의 쿠키 삭제 Set-Cookie). 하위 클래스가 필요할 때만 채운다.
+    headers: Mapping[str, str] | None = None
 
     def __init__(
         self,
@@ -181,3 +183,164 @@ class SourceProviderUnavailableError(ExternalError):
 
     def __init__(self) -> None:
         super().__init__("source provider unavailable")
+
+
+# --- 인증·조직·역할 (API 서버 6) ---
+
+
+class UnauthenticatedError(UnauthorizedError):
+    """로그인하지 않았거나 세션·토큰이 만료·폐기됐다. 쿠키가 있었으면 지우는 헤더를 싣는다."""
+
+    code = "UNAUTHENTICATED"
+
+    def __init__(self, headers: Mapping[str, str] | None = None) -> None:
+        super().__init__("authentication required")
+        self.headers = headers
+
+
+class AuditedForbiddenError(ForbiddenError):
+    """거부 기록(audit_logs)을 남기는 403. 예외 처리기가 기록을 따로 커밋한 뒤 응답한다."""
+
+
+class RoleForbiddenError(AuditedForbiddenError):
+    code = "ROLE_FORBIDDEN"
+
+    def __init__(self) -> None:
+        super().__init__("role does not allow this action")
+
+
+class AgentReadOnlyError(AuditedForbiddenError):
+    """에이전트 토큰은 자기 조직을 읽기만 한다. 사람만 쓰는 경로도 이 오류다."""
+
+    code = "AGENT_READ_ONLY"
+
+    def __init__(self) -> None:
+        super().__init__("agent tokens are read-only")
+
+
+class OriginNotAllowedError(AuditedForbiddenError):
+    """쿠키로 인증한 변경 요청의 Origin 이 허용 목록에 없다."""
+
+    code = "ORIGIN_NOT_ALLOWED"
+
+    def __init__(self) -> None:
+        super().__init__("origin not allowed")
+
+
+class CannotChangeOwnRoleError(AuditedForbiddenError):
+    code = "CANNOT_CHANGE_OWN_ROLE"
+
+    def __init__(self) -> None:
+        super().__init__("cannot change own role")
+
+
+class OrganizationNotFoundError(NotFoundError):
+    """조직이 없거나 요청한 쪽이 멤버가 아니다(둘을 구분하지 않는다)."""
+
+    code = "ORGANIZATION_NOT_FOUND"
+
+    def __init__(self) -> None:
+        super().__init__("organization not found")
+
+
+class MemberNotFoundError(NotFoundError):
+    code = "MEMBER_NOT_FOUND"
+
+
+class InvitationNotFoundError(NotFoundError):
+    code = "INVITATION_NOT_FOUND"
+
+
+class AgentTokenNotFoundError(NotFoundError):
+    code = "AGENT_TOKEN_NOT_FOUND"
+
+
+class OrganizationSlugConflictError(ConflictError):
+    code = "ORGANIZATION_SLUG_CONFLICT"
+
+    def __init__(self) -> None:
+        super().__init__("organization slug already in use")
+
+
+class OrganizationSlugReservedError(ConflictError):
+    code = "ORGANIZATION_SLUG_RESERVED"
+
+    def __init__(self) -> None:
+        super().__init__("organization slug is reserved")
+
+
+class AlreadyMemberError(ConflictError):
+    code = "ALREADY_MEMBER"
+
+
+class LastAdminError(ConflictError):
+    """변경 뒤 조직에 어드민이 0명이 된다."""
+
+    code = "LAST_ADMIN"
+
+    def __init__(self) -> None:
+        super().__init__("organization must keep at least one admin")
+
+
+class InvitationNotPendingError(ConflictError):
+    code = "INVITATION_NOT_PENDING"
+
+
+class GithubUserNotFoundError(InvalidInputError):
+    code = "GITHUB_USER_NOT_FOUND"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "github user not found",
+            details=[ErrorField(field="githubLogin", reason="GITHUB_USER_NOT_FOUND")],
+        )
+
+
+class SecretRefNotInOrganizationError(InvalidInputError):
+    """env 비밀 참조가 이 조직의 열쇠 이름(ECHO_SECRET_<조직 키>__)으로 시작하지 않는다."""
+
+    code = "SECRET_REF_NOT_IN_ORGANIZATION"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "secret reference does not belong to this organization",
+            details=[ErrorField(field="secretRef", reason="SECRET_REF_NOT_IN_ORGANIZATION")],
+        )
+
+
+class RequestFieldInvalidError(InvalidInputError):
+    """스키마 밖(설정 값 등)에서 정한 범위를 넘은 요청 칸. 스키마 검증과 같은 코드로 응답한다."""
+
+    code = "VALIDATION_ERROR"
+
+    def __init__(self, field: str, reason: str) -> None:
+        super().__init__("request validation failed", details=[ErrorField(field, reason)])
+
+
+class GithubUnavailableError(ExternalError):
+    """GitHub 사용자 API 장애·시간 초과·한도 초과(403·429)."""
+
+    code = "GITHUB_UNAVAILABLE"
+
+    def __init__(self) -> None:
+        super().__init__("github unavailable")
+
+
+class GithubCodeRejectedError(ExternalError):
+    """GitHub 가 로그인 코드를 받지 않았다(만료·재사용). 로그인 콜백은 OAUTH_DENIED 로 보낸다."""
+
+    code = "GITHUB_CODE_REJECTED"
+    retryable = False
+
+    def __init__(self) -> None:
+        super().__init__("github rejected the login code")
+
+
+class LoginNotConfiguredError(AppError):
+    """GitHub 로그인 설정(client id·secret 참조·콜백 주소·프론트 주소)이 비어 있다."""
+
+    code = "LOGIN_NOT_CONFIGURED"
+    status_code = 503
+
+    def __init__(self) -> None:
+        super().__init__("github login is not configured")

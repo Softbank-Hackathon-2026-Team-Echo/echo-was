@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.enums import ServiceStatus, TeardownErrorCode
@@ -70,6 +71,7 @@ class Service(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             unique=True,
             postgresql_where=text(LIVE_ROWS_CONDITION),
         ),
+        Index("ix_services_organization_id", "organization_id"),
     )
 
     name: Mapped[str] = mapped_column(String(RESOURCE_NAME_MAX_LENGTH), nullable=False)
@@ -120,6 +122,12 @@ class Service(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         default=False,
         server_default=text("false"),
         sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    # 서비스가 속한 조직. 이름은 대표 주소 때문에 조직과 무관하게 전체에서 유일하다.
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        sort_order=APPENDED_COLUMN_SORT_ORDER + 1,
     )
 
     service_environments: Mapped[list[ServiceEnvironment]] = relationship(back_populates="service")

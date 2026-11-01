@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, Index, String, event, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, event, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import (
@@ -70,7 +71,8 @@ class Environment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             name="connection_error_consistency",
         ),
         Index(
-            "uq_environments_name_live",
+            "uq_environments_org_name_live",
+            "organization_id",
             "name",
             unique=True,
             postgresql_where=text(LIVE_ROWS_CONDITION),
@@ -95,6 +97,12 @@ class Environment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     )
     connection_error: Mapped[ConnectionErrorCode | None] = mapped_column(
         String(32), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    # 환경이 속한 조직. 이름은 조직 안에서만 유일하다.
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        sort_order=APPENDED_COLUMN_SORT_ORDER + 1,
     )
 
     service_environments: Mapped[list[ServiceEnvironment]] = relationship(

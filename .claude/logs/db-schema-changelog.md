@@ -6,6 +6,20 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/service.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/service.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/service.py (Edit) · organization_id 컬럼 추가
+- 2026-11-01T19:53Z · app/models/__init__.py (Edit) · +13 −0
+- 2026-11-01T19:53Z · app/models/audit_log.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/agent_token.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/user_session.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/invitation.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/organization.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/user.py (Write) · 신규/동일
+- 2026-11-01T19:53Z · app/models/base.py (Edit) · created_at 컬럼 추가
 - 2026-11-01T18:02Z · app/models/deploy_request.py (Edit) · 신규/동일
 - 2026-11-01T17:45Z · app/models/service.py (Edit) · repo_url, repo_private, health_check_path, health_check_timeout_seconds, container_port, public_host, status, delete_error, simulated 컬럼 추가
 - 2026-11-01T17:45Z · app/models/deploy_request.py (Edit) · 신규/동일

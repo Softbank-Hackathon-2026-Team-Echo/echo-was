@@ -70,6 +70,19 @@ class TimestampMixin:
     __mapper_args__ = {"eager_defaults": True}
 
 
+class CreatedAtMixin:
+    """created_at 만 있는 표(세션·에이전트 토큰·거부 기록). 고칠 칸이 정해져 있다."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        sort_order=_TRAILING_COLUMN,
+    )
+
+    __mapper_args__ = {"eager_defaults": True}
+
+
 class SoftDeleteMixin:
     """소프트 삭제. 쓰는 표는 __table_args__ 에 soft_delete_consistency_check() 를 넣는다.
 

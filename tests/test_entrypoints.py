@@ -49,20 +49,44 @@ def test_app_registers_environment_routes() -> None:
     paths = set(app.openapi()["paths"])
 
     assert {
-        "/api/v1/environments",
-        "/api/v1/environments/{environment_id}",
-        "/api/v1/environments/{environment_id}/connection-check",
+        "/api/v1/orgs/{org_id}/environments",
+        "/api/v1/orgs/{org_id}/environments/{environment_id}",
+        "/api/v1/orgs/{org_id}/environments/{environment_id}/connection-check",
         "/api/v1/environment-kinds",
     } <= paths
+    # API 2·3 경로는 조직 아래로 옮겼다(옛 경로는 없다).
+    assert not {path for path in paths if path.startswith("/api/v1/environments")}
 
 
 def test_app_registers_service_and_deploy_request_routes() -> None:
     paths = app.openapi()["paths"]
 
-    assert set(paths["/api/v1/services"]) == {"get", "post"}
-    assert set(paths["/api/v1/services/{service_id}"]) == {"get", "patch", "delete"}
-    assert set(paths["/api/v1/services/{service_id}/deploy-requests"]) == {"get", "post"}
-    assert set(paths["/api/v1/deploy-requests/{deploy_request_id}"]) == {"get"}
+    assert set(paths["/api/v1/orgs/{org_id}/services"]) == {"get", "post"}
+    assert set(paths["/api/v1/orgs/{org_id}/services/{service_id}"]) == {"get", "patch", "delete"}
+    assert set(paths["/api/v1/orgs/{org_id}/services/{service_id}/deploy-requests"]) == {
+        "get",
+        "post",
+    }
+    assert set(paths["/api/v1/orgs/{org_id}/deploy-requests/{deploy_request_id}"]) == {"get"}
+    assert "/api/v1/services" not in paths
+    assert "/api/v1/deploy-requests/{deploy_request_id}" not in paths
+
+
+def test_app_registers_auth_and_organization_routes() -> None:
+    paths = app.openapi()["paths"]
+
+    assert set(paths["/api/v1/auth/github/login"]) == {"get"}
+    assert set(paths["/api/v1/auth/github/callback"]) == {"get"}
+    assert set(paths["/api/v1/auth/logout"]) == {"post"}
+    assert set(paths["/api/v1/me"]) == {"get"}
+    assert set(paths["/api/v1/orgs"]) == {"get", "post"}
+    assert set(paths["/api/v1/orgs/{org_id}"]) == {"get"}
+    assert set(paths["/api/v1/orgs/{org_id}/members"]) == {"get"}
+    assert set(paths["/api/v1/orgs/{org_id}/members/{user_id}"]) == {"patch", "delete"}
+    assert set(paths["/api/v1/orgs/{org_id}/invitations"]) == {"get", "post"}
+    assert set(paths["/api/v1/orgs/{org_id}/invitations/{invitation_id}"]) == {"delete"}
+    assert set(paths["/api/v1/orgs/{org_id}/agent-tokens"]) == {"get", "post"}
+    assert set(paths["/api/v1/orgs/{org_id}/agent-tokens/{token_id}"]) == {"delete"}
 
 
 async def test_worker_run_returns_when_stop_is_already_set() -> None:
