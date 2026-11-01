@@ -91,7 +91,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - `traffic_weight` 는 "마지막으로 프록시에 적용한 값"이다. 합계 100% 는 DB 가 아니라 이전 엔진이 맞춘다. 역할(서비스 중·예비)은 저장하지 않고 이 값과 현재 배포로 계산한다.
 
 ### 원터치 배포 (자주 어기는 것)
-- **잠금 순서는 하나**: 환경(연결을 만들 때만) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태만 바꾸는 잠금은 `FOR NO KEY UPDATE`(`with_for_update(key_share=True)`).
+- **잠금 순서는 하나**: 환경(접수만, `FOR SHARE`) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태만 바꾸는 잠금은 `FOR NO KEY UPDATE`(`with_for_update(key_share=True)`). 접수에서 환경을 `FOR UPDATE` 로 잡으면 일꾼의 FK 검사(`FOR KEY SHARE`)와 교착이 생긴다(`test_accept_waiting_for_service_lock_does_not_deadlock_with_success_processing`).
 - **상태는 조건부 UPDATE 로만**(`DeployRequestRepository.transition` 등, 0행이면 결과를 버리고 다시 읽는다). 일꾼의 쓰기 트랜잭션은 맨 끝에 `JobLease.hold()` 로 임대를 확인한다.
 - **외부 호출은 트랜잭션 밖 + 멱등 키**(빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt`) + "요청함 시각 저장·커밋 → 호출 → external_ref 저장" 순서([docs/executors.md](docs/executors.md)).
 - 일꾼·배포 코드의 시각은 주입한 `Clock` 으로 정한다(DB `now()` 에 기대지 않는다).
