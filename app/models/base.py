@@ -22,6 +22,9 @@ RESOURCE_NAME_MAX_LENGTH = 63
 # 공통 칸의 표 안 위치: id 를 맨 앞에, 시각·삭제 칸을 맨 뒤에 둔다.
 _FIRST_COLUMN = -100
 _TRAILING_COLUMN = 100
+# 이미 있는 표에 op.add_column 으로 더한 칸은 DB 에서 맨 뒤(믹스인 칸 뒤)에 붙는다.
+# 모델 메타데이터의 칸 순서도 같게 하려고 믹스인 칸보다 큰 값을 준다.
+APPENDED_COLUMN_SORT_ORDER = 200
 
 
 class Base(AsyncAttrs, DeclarativeBase):

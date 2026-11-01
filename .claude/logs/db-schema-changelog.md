@@ -6,6 +6,11 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-01T14:48Z · app/models/environment.py (Edit) · connection_status, connection_checked_at, connection_error 컬럼 추가; secret_ref 컬럼 변경
+- 2026-11-01T14:48Z · app/models/environment.py (Edit) · +20 −1
+- 2026-11-01T14:48Z · app/models/environment.py (Edit) · +4 −1
+- 2026-11-01T14:48Z · app/models/environment.py (Edit) · +2 −1
+- 2026-11-01T14:48Z · app/models/base.py (Edit) · +3 −0
 - 2026-11-01T08:38Z · app/models/base.py (Edit) · 신규/동일
 - 2026-11-01T08:38Z · app/models/base.py (Edit) · 신규/동일
 - 2026-11-01T08:38Z · app/models/base.py (Edit) · 신규/동일

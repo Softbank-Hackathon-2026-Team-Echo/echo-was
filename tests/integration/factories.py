@@ -35,11 +35,14 @@ class ShopApiExample:
     gcp_deployment: Deployment
 
 
+def secret_ref_for(name: str) -> str:
+    """env 저장소 형식의 비밀 참조. 예: aws-seoul → env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG"""
+    return f"env:ECHO_SECRET_{name.upper().replace('-', '_')}_KUBECONFIG"
+
+
 def make_environment(name: str) -> Environment:
     kind, config = ENVIRONMENT_CONFIGS[name]
-    return Environment(
-        name=name, kind=kind, config=dict(config), secret_ref=f"echo/environments/{name}"
-    )
+    return Environment(name=name, kind=kind, config=dict(config), secret_ref=secret_ref_for(name))
 
 
 async def add_succeeded_deployment(
