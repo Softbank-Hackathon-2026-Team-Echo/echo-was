@@ -19,6 +19,7 @@ from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
 from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
+from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.environment_connection_service import (
     AdapterResolver,
     EnvironmentConnectionService,
@@ -105,17 +106,24 @@ def get_source_repository_client(
     return build_source_repository_client(settings, clock)
 
 
+def get_host_suffix_generator() -> HostSuffixGenerator:
+    """대표·환경별 주소에 붙일 무작위 suffix 생성기. 시험은 고정 값 생성기로 바꾼다."""
+    return generate_host_suffix
+
+
 def get_service_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
     source_client: Annotated[SourceRepositoryClient, Depends(get_source_repository_client)],
+    host_suffix_generator: Annotated[HostSuffixGenerator, Depends(get_host_suffix_generator)],
 ) -> ServiceService:
     return ServiceService(
         session=session,
         source_client=source_client,
         clock=clock,
         public_base_domain=settings.public_base_domain,
+        host_suffix_generator=host_suffix_generator,
     )
 
 

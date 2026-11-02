@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.secrets import organization_env_secret_prefix
 from app.enums import DeploymentStatus
 from app.models import Deployment, Environment, Organization, Service, ServiceEnvironment, User
+from app.services.deploy_support import (
+    connection_public_host,
+    generate_host_suffix,
+    service_public_host,
+)
 
 DEFAULT_ORG_SLUG = "team-echo"
 _github_ids = itertools.count(9_000_001)
@@ -70,14 +75,16 @@ PUBLIC_BASE_DOMAIN = "apps.echo.test"
 
 
 def make_service(name: str, organization: Organization, description: str | None = None) -> Service:
-    """서비스 행. 원터치 배포 칸(저장소·대표 주소)을 채운다."""
+    """서비스 행. 원터치 배포 칸(저장소·suffix·대표 주소)을 API 와 같은 규칙으로 채운다."""
+    host_suffix = generate_host_suffix()
     return Service(
         organization_id=organization.id,
         name=name,
         description=description,
         repo_url=f"https://github.com/team-echo/{name}",
         repo_private=False,
-        public_host=f"{name}.{PUBLIC_BASE_DOMAIN}",
+        host_suffix=host_suffix,
+        public_host=service_public_host(name, host_suffix, PUBLIC_BASE_DOMAIN),
         simulated=True,
     )
 
@@ -85,12 +92,14 @@ def make_service(name: str, organization: Organization, description: str | None 
 def make_link(
     service: Service, environment: Environment, traffic_weight: int = 0
 ) -> ServiceEnvironment:
-    """서비스-환경 연결 행. 환경별 주소를 채운다."""
+    """서비스-환경 연결 행. 환경별 주소를 서비스의 suffix 로 채운다."""
     return ServiceEnvironment(
         service_id=service.id,
         environment_id=environment.id,
         traffic_weight=traffic_weight,
-        public_host=f"{service.name}.{environment.name}.{PUBLIC_BASE_DOMAIN}",
+        public_host=connection_public_host(
+            service.name, environment.name, service.host_suffix, PUBLIC_BASE_DOMAIN
+        ),
     )
 
 

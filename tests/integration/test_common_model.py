@@ -102,7 +102,7 @@ async def test_live_link_duplicate_rejected_and_allowed_after_soft_delete(
 
 @pytest.mark.parametrize(
     ("model", "index_name"),
-    [(Service, "uq_services_name_live"), (Environment, "uq_environments_org_name_live")],
+    [(Service, "uq_services_org_name_live"), (Environment, "uq_environments_org_name_live")],
 )
 async def test_name_duplicate_rejected_and_allowed_after_soft_delete(
     session_factory: SessionFactory,

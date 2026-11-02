@@ -49,8 +49,8 @@ class ServiceEnvironment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, B
     - current_deployment_id: 지금 이 연결에서 돌고 있는 배포. 같은 연결의 배포만 가리킨다(복합 FK).
     - traffic_weight: 마지막으로 앞단 프록시에 적용한 트래픽 비율(0~100). 실제 분배는 프록시가 한다.
       0 보다 크면 서비스 중, 0 이고 현재 배포가 있으면 예비다(역할은 저장하지 않고 계산한다).
-    - public_host: 환경별 주소 `{서비스}.{환경}.{도메인}`. 만들 때 한 번 정해 저장한다
-      (환경 이름이 바뀌어도 그대로다).
+    - public_host: 환경별 주소 `{서비스}-{환경}-{서비스의 host_suffix}.{도메인}`. 만들 때 한 번 정해
+      저장한다(환경 이름이 바뀌어도 그대로다).
     - teardown_*: 서비스 삭제 때 이 연결을 내린 기록. 다시 삭제하면 teardown_attempt 가 1 늘고
       멱등 키(연결 id + attempt)가 바뀐다.
     """

@@ -25,6 +25,7 @@ from app.executors.fake import (
     FakeTeardownExecutor,
 )
 from app.models import DeployRequest, Environment, Job, Organization
+from app.services.deploy_support import generate_host_suffix
 from app.worker.runner import Worker
 from tests.github_user_fake import FakeGithubUserClient
 from tests.integration.auth_support import Member, org_path
@@ -63,6 +64,21 @@ class ScriptedHealthChecker:
     async def probe(self, url: str, path: str, timeout_seconds: float) -> HealthProbeResult:
         self.calls.append(f"{url}{path}")
         return self._script.pop(0) if self._script else self._default
+
+
+class ScriptedHostSuffixGenerator:
+    """대본대로 주소 suffix 를 돌려주는 생성기. 대본이 끝나면 실제 무작위 생성기를 쓴다."""
+
+    def __init__(self) -> None:
+        self._script: list[str] = []
+        self.calls = 0
+
+    def queue(self, *suffixes: str) -> None:
+        self._script.extend(suffixes)
+
+    def __call__(self) -> str:
+        self.calls += 1
+        return self._script.pop(0) if self._script else generate_host_suffix()
 
 
 @dataclass
@@ -107,6 +123,7 @@ class DeployHarness:
     admin: Member
     github_users: FakeGithubUserClient
     responses: list[str] = field(default_factory=list)
+    host_suffixes: ScriptedHostSuffixGenerator = field(default_factory=ScriptedHostSuffixGenerator)
 
     @property
     def services(self) -> str:

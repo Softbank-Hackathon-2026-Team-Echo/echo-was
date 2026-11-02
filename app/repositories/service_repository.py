@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ServiceNotFoundError
@@ -11,7 +11,7 @@ class ServiceRepository:
     """서비스 표 조회·저장. 트랜잭션은 서비스 계층이 연다.
 
     API 가 쓰는 조회(*_live_*)는 조직을 필수로 받는다. 일꾼이 쓰는 find_by_id 는 조직 조건이 없다.
-    이름 조회(find_live_by_name)는 대표 주소 때문에 전체에서 찾는다.
+    이름 조회(find_live_by_name)는 조직 안에서, 주소 조회(is_public_host_in_use)는 전체에서 찾는다.
 
     lock=True 는 `FOR NO KEY UPDATE`(상태만 바꾸는 잠금)다. 다른 트랜잭션이 이 행을 FK 로 가리키는
     행을 넣을 때 잡는 `FOR KEY SHARE` 와 부딪히지 않는다. 읽은 값은 세션에 있던 객체도 DB 값으로
@@ -55,8 +55,19 @@ class ServiceRepository:
             raise ServiceNotFoundError("service not found", service_id=str(service_id))
         return service
 
-    async def find_live_by_name(self, name: str) -> Service | None:
-        return await self._session.scalar(select(Service).where(Service.name == name, _is_live()))
+    async def find_live_by_name(self, organization_id: uuid.UUID, name: str) -> Service | None:
+        return await self._session.scalar(
+            select(Service).where(
+                Service.organization_id == organization_id, Service.name == name, _is_live()
+            )
+        )
+
+    async def is_public_host_in_use(self, public_host: str) -> bool:
+        return bool(
+            await self._session.scalar(
+                select(exists().where(Service.public_host == public_host, _is_live()))
+            )
+        )
 
     async def search_live(
         self, organization_id: uuid.UUID, offset: int, limit: int

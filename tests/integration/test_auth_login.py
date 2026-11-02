@@ -145,6 +145,39 @@ async def test_callback_secure_cookie_follows_setting(harness: DeployHarness) ->
     assert _set_cookies(response)[SESSION_COOKIE][SESSION_COOKIE]["secure"] is True
 
 
+async def test_callback_host_prefixed_cookie_name_has_no_domain_and_me_succeeds(
+    harness: DeployHarness,
+) -> None:
+    """데모 배포 값(SPEC api-3-1 AD-5): 고객 앱이 같은 등록 도메인 아래에 있어도 `__Host-` 쿠키는
+    Secure·Path=/·Domain 없음이어야만 저장되므로 고객 앱이 Domain 쿠키로 덮어쓰지 못한다."""
+    host_cookie = "__Host-echo_session"
+    harness.github_users.add_user("code-alice", ALICE)
+    harness.use_settings(session_cookie_name=host_cookie, session_cookie_secure=True)
+
+    async with make_client() as client:
+        state_response = await client.get(LOGIN)
+        state = parse_qs(urlsplit(state_response.headers["location"]).query)["state"][0]
+        state_value = state_response.cookies[STATE_COOKIE]
+        # Secure 쿠키는 http://test 로 돌려보내지 않으므로 시험이 직접 싣는다.
+        response = await client.get(
+            CALLBACK,
+            params={"code": "code-alice", "state": state},
+            headers={"Cookie": f"{STATE_COOKIE}={state_value}"},
+        )
+        session_value = response.cookies[host_cookie]
+        me = await client.get("/api/v1/me", headers={"Cookie": f"{host_cookie}={session_value}"})
+
+    session_cookie = _set_cookies(response)[host_cookie][host_cookie]
+    assert response.status_code == 302, response.text
+    assert SESSION_COOKIE not in _set_cookies(response)
+    assert session_cookie["secure"] is True
+    assert session_cookie["path"] == "/"
+    assert session_cookie["domain"] == ""
+    assert "domain=" not in response.headers["set-cookie"].lower()
+    assert me.status_code == 200, me.text
+    assert me.json()["data"]["user"]["githubLogin"] == "Alice-Dev"
+
+
 async def test_second_login_updates_profile_without_new_personal_org(
     harness: DeployHarness,
 ) -> None:

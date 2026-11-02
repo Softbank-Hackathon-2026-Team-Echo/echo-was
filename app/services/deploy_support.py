@@ -3,7 +3,10 @@
 퍼블릭 주소, 설정 사본, 대기 요청 밀어내기, 실행기에 넘길 대상 값.
 """
 
+import secrets
+import string
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +20,7 @@ from app.enums import (
 )
 from app.executors.base import DeploymentSpec, DeployTarget
 from app.models import Deployment, DeployRequest, Environment, Job, Service, ServiceEnvironment
+from app.models.service import HOST_SUFFIX_LENGTH
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
 
@@ -29,14 +33,39 @@ SNAPSHOT_ENVIRONMENT_URL = "environmentUrl"
 SIMULATE_FAIL_AT = "failAt"
 
 
-def service_public_host(service_name: str, public_base_domain: str) -> str:
-    return f"{service_name}.{public_base_domain}"
+HOST_SUFFIX_ALPHABET = string.ascii_lowercase + string.digits
+# DNS 레이블 한 칸의 최대 길이. 넘으면 suffix 앞부분을 잘라 `-{suffix}` 자리를 남긴다.
+PUBLIC_HOST_LABEL_MAX_LENGTH = 63
+PUBLIC_HOST_LABEL_PREFIX_MAX_LENGTH = PUBLIC_HOST_LABEL_MAX_LENGTH - HOST_SUFFIX_LENGTH - 1
+
+HostSuffixGenerator = Callable[[], str]
+
+
+def generate_host_suffix() -> str:
+    """소문자·숫자 8자 무작위 값. 지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게 한다."""
+    return "".join(secrets.choice(HOST_SUFFIX_ALPHABET) for _ in range(HOST_SUFFIX_LENGTH))
+
+
+def public_host_label(prefix: str, host_suffix: str) -> str:
+    """`{prefix}-{suffix}`. 63자를 넘으면 prefix 를 54자로 자르고 끝의 `-` 를 뗀다."""
+    label = f"{prefix}-{host_suffix}"
+    if len(label) <= PUBLIC_HOST_LABEL_MAX_LENGTH:
+        return label
+    truncated = prefix[:PUBLIC_HOST_LABEL_PREFIX_MAX_LENGTH].rstrip("-")
+    return f"{truncated}-{host_suffix}"
+
+
+def service_public_host(service_name: str, host_suffix: str, public_base_domain: str) -> str:
+    """대표 주소 `{서비스}-{suffix}.{도메인}`. 도메인 바로 아래 한 단계라 `*.도메인` 이 덮는다."""
+    return f"{public_host_label(service_name, host_suffix)}.{public_base_domain}"
 
 
 def connection_public_host(
-    service_name: str, environment_name: str, public_base_domain: str
+    service_name: str, environment_name: str, host_suffix: str, public_base_domain: str
 ) -> str:
-    return f"{service_name}.{environment_name}.{public_base_domain}"
+    """환경별 주소 `{서비스}-{환경}-{suffix}.{도메인}`. 서비스의 suffix 를 그대로 쓴다."""
+    label = public_host_label(f"{service_name}-{environment_name}", host_suffix)
+    return f"{label}.{public_base_domain}"
 
 
 def public_url(public_host: str) -> str:

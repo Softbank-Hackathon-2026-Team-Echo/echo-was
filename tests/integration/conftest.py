@@ -34,7 +34,12 @@ from sqlalchemy.pool import NullPool
 from app.clients.source_repository import FakeSourceRepositoryClient
 from app.core.config import get_settings
 from app.core.database import get_session_factory
-from app.dependencies import get_clock, get_github_user_client, get_source_repository_client
+from app.dependencies import (
+    get_clock,
+    get_github_user_client,
+    get_host_suffix_generator,
+    get_source_repository_client,
+)
 from app.enums import OrganizationRole
 from app.main import app
 from app.models import Organization
@@ -260,6 +265,7 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
         app.dependency_overrides[get_clock] = lambda: clock
         app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
         app.dependency_overrides[get_github_user_client] = lambda: harness.github_users
+        app.dependency_overrides[get_host_suffix_generator] = lambda: harness.host_suffixes
         try:
             yield harness
         finally:
