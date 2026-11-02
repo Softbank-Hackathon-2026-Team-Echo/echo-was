@@ -146,7 +146,7 @@ curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/d
 
 가짜 모드 규칙(기본값): 저장소 owner 가 `private-` 면 비공개, `denied-`·`missing-` 면 404, `flaky-` 면 502. 브랜치가 `missing-` 로 시작하면 422 `REF_NOT_FOUND`. `"simulate": {"failAt": "BUILDING"|"DEPLOYING"|"VERIFYING"}` 로 그 단계를 일부러 실패시킬 수 있다(가짜 모드에서만).
 
-실제 GitHub App(비공개 저장소) 설정 자리 — **App 생성·조직 설치는 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 App 개인키 하나이고, 설정에는 비밀 저장소 위치만 둔다.
+실제 GitHub App 은 `Echoport Deploy`(https://github.com/apps/echoport-deploy, 조직 소유, App ID `5574944`, Client ID `Iv23lipNlpKaIxNuvR17`, 11/2 생성)이고, 조직에는 echo-was 저장소에만 설치돼 있다. **App 설정·설치 범위 변경은 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 App 개인키 하나이고, 설정에는 비밀 저장소 위치만 둔다.
 
 ```bash
 SOURCE_CLIENT_MODE=github
@@ -175,7 +175,7 @@ GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 
 ### GitHub 로그인 설정
 
-로그인 앱은 API 서버 3 의 GitHub App 을 그대로 쓴다(사용자 인증). **App 생성·설정 변경은 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 client secret 하나이고 설정에는 비밀 참조만 둔다.
+로그인 앱은 API 서버 3 의 GitHub App(`Echoport Deploy`)을 그대로 쓴다(사용자 인증). Callback URL 에는 `https://api.echoport.uk/api/v1/auth/github/callback` 과 `http://localhost:8000/api/v1/auth/github/callback` 이 들어 있다. **App 설정 변경은 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 client secret 하나이고 설정에는 비밀 참조만 둔다.
 
 ```bash
 GITHUB_APP_CLIENT_ID=<App 의 Client ID>
