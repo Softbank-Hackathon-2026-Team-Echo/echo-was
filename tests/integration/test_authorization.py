@@ -34,6 +34,7 @@ from tests.integration.factories import secret_ref_for
 
 PUBLIC_PATHS = {
     ("GET", "/healthz"),
+    ("GET", "/livez"),
     ("GET", "/readyz"),
     ("GET", "/api/v1/auth/github/login"),
     ("GET", "/api/v1/auth/github/callback"),

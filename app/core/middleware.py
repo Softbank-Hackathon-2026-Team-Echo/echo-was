@@ -17,7 +17,7 @@ REQUEST_ID_HEADER = "X-Request-ID"
 # 로그 주입을 막으려고 글자를 제한한다.
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # K8s probe 가 수 초마다 호출하므로 접근 로그에서 뺀다.
-_UNLOGGED_PATHS = frozenset({"/healthz", "/readyz"})
+_UNLOGGED_PATHS = frozenset({"/healthz", "/livez", "/readyz"})
 
 
 def resolve_request_id(scope: Scope) -> str:

@@ -15,7 +15,7 @@
 | `POST /api/v1/auth/logout` | 204 | 세션 폐기 + 쿠키 삭제. 세션이 없어도 204 |
 | `GET /api/v1/me` | 200 | 사람만. `{user, organizations[{id, slug, name, personal, role, createdAt}]}`. 부를 때 대기 초대를 적용한다 |
 
-`/healthz`·`/readyz`·위 세 auth 경로·`/docs`·`/openapi.json` 밖의 모든 경로는 로그인이 필요하다(없으면 401 `UNAUTHENTICATED`).
+`/healthz`·`/livez`·`/readyz`·위 세 auth 경로·`/docs`·`/openapi.json` 밖의 모든 경로는 로그인이 필요하다(없으면 401 `UNAUTHENTICATED`).
 
 ## 로그인 흐름
 

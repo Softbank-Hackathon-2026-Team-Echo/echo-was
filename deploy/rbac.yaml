@@ -1,0 +1,32 @@
+# 배포 워크플로(서비스 계정 echo-was-deploy)의 클러스터 권한. 워크플로가 적용하지 않는다 — 클러스터 관리자가 손으로 적용한다.
+# 범위는 네임스페이스 echo-was 하나다(ClusterRole admin 을 이 네임스페이스에만 묶는다).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: echo-was-deploy-gke-crds, namespace: echo-was}
+rules:
+  - apiGroups: [cloud.google.com]
+    resources: [backendconfigs]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [networking.gke.io]
+    resources: [frontendconfigs]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [secrets-store.csi.x-k8s.io]
+    resources: [secretproviderclasses]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [secret-sync.gke.io]
+    resources: [secretsyncs]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: echo-was-deploy-admin, namespace: echo-was}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects:
+  - {kind: User, name: echo-was-deploy@team-echo-final.iam.gserviceaccount.com}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: echo-was-deploy-gke-crds, namespace: echo-was}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: echo-was-deploy-gke-crds}
+subjects:
+  - {kind: User, name: echo-was-deploy@team-echo-final.iam.gserviceaccount.com}
