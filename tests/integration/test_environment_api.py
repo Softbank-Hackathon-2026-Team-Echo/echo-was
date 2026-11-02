@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient, Response
+from httpx import AsyncClient, Response
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,22 +21,39 @@ from app.adapters.base import (
     SimulatedEnvironmentAdapter,
 )
 from app.adapters.registry import discover
+from app.core.clock import SystemClock
 from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.core.logging import JsonFormatter
-from app.core.secrets import SecretValue
+from app.core.secrets import SecretValue, organization_env_secret_prefix
 from app.dependencies import get_adapter_resolver
-from app.enums import ConnectionErrorCode
+from app.enums import ConnectionErrorCode, OrganizationRole
 from app.main import app
 from app.models import Environment
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.environment_connection_service import AdapterResolver
 from tests.adapter_contract import assert_adapter_contract
-from tests.integration.factories import ShopApiExample, seed_shop_api_example
+from tests.integration.auth_support import (
+    Member,
+    auth_settings,
+    create_member,
+    create_organization,
+    make_client,
+    org_path,
+)
+from tests.integration.factories import (
+    DEFAULT_ORG_SLUG,
+    ShopApiExample,
+    secret_env_name,
+    seed_shop_api_example,
+)
 
 SessionFactory = async_sessionmaker[AsyncSession]
 
-BASE = "/api/v1/environments"
+# client 픽스처의 base_url 이 조직 경로(/api/v1/orgs/{org_id})라 환경 경로는 그 아래 상대 경로다.
+BASE = "/environments"
+ENVIRONMENT_KINDS = "http://test/api/v1/environment-kinds"
+ORG_SECRET_PREFIX = organization_env_secret_prefix(DEFAULT_ORG_SLUG)
 SUMMARY_KEYS = {
     "id",
     "name",
@@ -56,9 +73,9 @@ AWS_CONFIG = {"region": "ap-northeast-2", "clusterName": "echo-eks"}
 GCP_CONFIG = {"projectId": "echo-hack-123", "region": "asia-northeast3", "clusterName": "echo-gke"}
 ONPREM_CONFIG = {"location": "team-laptop", "kubeContext": "k3d-echo"}
 
-AWS_SECRET_ENV = "ECHO_SECRET_AWS_SEOUL_KUBECONFIG"
-GCP_SECRET_ENV = "ECHO_SECRET_GCP_SEOUL_KUBECONFIG"
-ONPREM_SECRET_ENV = "ECHO_SECRET_ONPREM_K3S_KUBECONFIG"
+AWS_SECRET_ENV = secret_env_name("aws-seoul")
+GCP_SECRET_ENV = secret_env_name("gcp-seoul")
+ONPREM_SECRET_ENV = secret_env_name("onprem-k3s")
 
 
 def _payload(
@@ -89,10 +106,24 @@ def secrets_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 
 @pytest.fixture
-async def client(session_factory: SessionFactory) -> AsyncIterator[AsyncClient]:
+async def team(session_factory: SessionFactory) -> Member:
+    """team-echo 조직과 그 ADMIN 멤버(세션 쿠키)."""
+    organization = await create_organization(session_factory, DEFAULT_ORG_SLUG)
+    return await create_member(
+        session_factory, organization, OrganizationRole.ADMIN, SystemClock().now()
+    )
+
+
+@pytest.fixture
+async def client(session_factory: SessionFactory, team: Member) -> AsyncIterator[AsyncClient]:
+    """team-echo 어드민의 세션 쿠키·허용 Origin 을 싣고 base_url 이 그 조직 경로인 클라이언트."""
     app.dependency_overrides[get_session_factory] = lambda: session_factory
+    settings = auth_settings(get_settings())
+    app.dependency_overrides[get_settings] = lambda: settings
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        async with make_client(
+            session_token=team.session_token, base_path=org_path(team.organization.id)
+        ) as c:
             yield c
     finally:
         app.dependency_overrides.clear()
@@ -104,7 +135,7 @@ def _use_adapter(adapter: SimulatedEnvironmentAdapter) -> None:
 
 
 def _use_timeout(seconds: float) -> None:
-    settings = get_settings().model_copy(update={"environment_check_timeout_seconds": seconds})
+    settings = auth_settings(get_settings(), environment_check_timeout_seconds=seconds)
     app.dependency_overrides[get_settings] = lambda: settings
 
 
@@ -176,8 +207,10 @@ async def test_new_kind_file_registers_lists_and_passes_contract(
     client: AsyncClient, azure_adapter_package: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     discover(azure_adapter_package)
-    monkeypatch.setenv("ECHO_SECRET_AZURE_KOREA", "fake-azure-kubeconfig")
-    await _create(client, name="aws-seoul", kind="aws", secret_ref="env:ECHO_SECRET_MISSING_AWS")
+    monkeypatch.setenv(f"{ORG_SECRET_PREFIX}AZURE_KOREA", "fake-azure-kubeconfig")
+    await _create(
+        client, name="aws-seoul", kind="aws", secret_ref=f"env:{ORG_SECRET_PREFIX}MISSING_AWS"
+    )
 
     created = await client.post(
         BASE,
@@ -185,11 +218,11 @@ async def test_new_kind_file_registers_lists_and_passes_contract(
             name="azure-korea",
             kind="azure",
             config={"subscriptionId": "sub-1", "location": "koreacentral", "clusterName": "aks"},
-            secret_ref="env:ECHO_SECRET_AZURE_KOREA",
+            secret_ref=f"env:{ORG_SECRET_PREFIX}AZURE_KOREA",
         ),
     )
     listed = await client.get(BASE)
-    kinds = await client.get("/api/v1/environment-kinds")
+    kinds = await client.get(ENVIRONMENT_KINDS)
 
     assert created.status_code == 201
     assert created.json()["data"]["connectionStatus"] == "CONNECTED"
@@ -210,7 +243,7 @@ async def test_new_kind_file_registers_lists_and_passes_contract(
 async def test_search_environment_kinds_returns_camel_case_config_schema(
     client: AsyncClient,
 ) -> None:
-    response = await client.get("/api/v1/environment-kinds")
+    response = await client.get(ENVIRONMENT_KINDS)
 
     assert response.status_code == 200
     kinds = response.json()["data"]
@@ -319,7 +352,7 @@ async def test_create_environment_connects_with_simulated_cluster_info(
 @pytest.mark.parametrize(
     ("secret_ref", "reason"),
     [
-        ("env:ECHO_SECRET_NOT_PROVIDED", "SECRET_NOT_FOUND"),
+        (f"env:{ORG_SECRET_PREFIX}NOT_PROVIDED", "SECRET_NOT_FOUND"),
         ("k8s:echo-system/aws-seoul/kubeconfig", "SECRET_STORE_UNSUPPORTED"),
         ("aws-sm:echo/aws-seoul", "SECRET_STORE_UNSUPPORTED"),
         ("gcp-sm:projects/echo-hack-123/secrets/gke", "SECRET_STORE_UNSUPPORTED"),
@@ -371,7 +404,9 @@ async def test_create_environment_concurrent_duplicate_integrity_error_conflicts
 ) -> None:
     await _create(client)
 
-    async def find_nothing(self: EnvironmentRepository, name: str) -> None:
+    async def find_nothing(
+        self: EnvironmentRepository, organization_id: uuid.UUID, name: str
+    ) -> None:
         return None
 
     # 사전 조회를 통과한 동시 등록을 흉내 낸다: DB 부분 unique index 가 막는다.
@@ -513,7 +548,7 @@ async def test_update_environment_secret_ref_to_missing_secret_becomes_failed(
     created = await _create(client)
 
     response = await client.patch(
-        f"{BASE}/{created['id']}", json={"secretRef": "env:ECHO_SECRET_GONE"}
+        f"{BASE}/{created['id']}", json={"secretRef": f"env:{ORG_SECRET_PREFIX}GONE"}
     )
 
     assert response.status_code == 200
@@ -565,9 +600,9 @@ async def test_update_environment_name_conflicts_with_other_live_environment(
 
 
 @pytest.fixture
-async def shop_api(session_factory: SessionFactory) -> ShopApiExample:
+async def shop_api(session_factory: SessionFactory, team: Member) -> ShopApiExample:
     async with session_factory() as session, session.begin():
-        return await seed_shop_api_example(session)
+        return await seed_shop_api_example(session, team.organization)
 
 
 async def test_delete_environment_in_use_conflicts_and_row_unchanged(
@@ -758,7 +793,7 @@ async def test_secret_value_never_appears_in_logs_or_responses(
         # SECRET_NOT_FOUND
         responses.append(
             await client.post(
-                BASE, json=_payload(name="env-missing", secret_ref="env:ECHO_SECRET_ABSENT")
+                BASE, json=_payload(name="env-missing", secret_ref=f"env:{ORG_SECRET_PREFIX}ABSENT")
             )
         )
         # 어댑터 ConnectionCheckError
@@ -868,16 +903,26 @@ async def test_check_connection_environment_deleted_during_check_returns_not_fou
 
 
 async def _insert_raw_environment(
-    session_factory: SessionFactory, name: str, config: dict[str, object], secret_ref: str
+    session_factory: SessionFactory,
+    organization_id: uuid.UUID,
+    name: str,
+    config: dict[str, object],
+    secret_ref: str,
 ) -> str:
     # 지금 양식으로 읽히지 않는 저장 행(종류 파일 변경 등)을 만들려고 시험에서만 SQL 로 직접 넣는다.
     async with session_factory() as session, session.begin():
         environment_id = await session.scalar(
             text(
-                "INSERT INTO environments (name, kind, config, secret_ref) "
-                "VALUES (:name, 'aws', CAST(:config AS jsonb), :secret_ref) RETURNING id"
+                "INSERT INTO environments (organization_id, name, kind, config, secret_ref) "
+                "VALUES (:organization_id, :name, 'aws', CAST(:config AS jsonb), :secret_ref) "
+                "RETURNING id"
             ),
-            {"name": name, "config": json.dumps(config), "secret_ref": secret_ref},
+            {
+                "organization_id": organization_id,
+                "name": name,
+                "config": json.dumps(config),
+                "secret_ref": secret_ref,
+            },
         )
     return str(environment_id)
 
@@ -887,10 +932,15 @@ async def test_unreadable_stored_config_does_not_break_list_and_check_fails(
     session_factory: SessionFactory,
     secrets_env: dict[str, str],
     caplog: pytest.LogCaptureFixture,
+    team: Member,
 ) -> None:
     await _create(client)
     broken_id = await _insert_raw_environment(
-        session_factory, "broken-aws", {"region": "seoul"}, f"env:{AWS_SECRET_ENV}"
+        session_factory,
+        team.organization.id,
+        "broken-aws",
+        {"region": "seoul"},
+        f"env:{AWS_SECRET_ENV}",
     )
 
     with caplog.at_level(logging.WARNING):
@@ -915,10 +965,11 @@ async def test_unreadable_stored_config_does_not_break_list_and_check_fails(
 
 
 async def test_invalid_stored_secret_ref_is_shown_as_is_and_check_fails(
-    client: AsyncClient, session_factory: SessionFactory
+    client: AsyncClient, session_factory: SessionFactory, team: Member
 ) -> None:
     broken_id = await _insert_raw_environment(
         session_factory,
+        team.organization.id,
         "legacy-aws",
         {"region": "ap-northeast-2", "cluster_name": "eks"},
         "echo/environments/legacy-aws",
@@ -935,11 +986,14 @@ async def test_invalid_stored_secret_ref_is_shown_as_is_and_check_fails(
 
 
 async def test_environment_without_secret_ref_check_fails_with_missing(
-    client: AsyncClient, session_factory: SessionFactory
+    client: AsyncClient, session_factory: SessionFactory, team: Member
 ) -> None:
     async with session_factory() as session, session.begin():
         environment = Environment(
-            name="no-ref", kind="aws", config={"region": "ap-northeast-2", "cluster_name": "e"}
+            organization_id=team.organization.id,
+            name="no-ref",
+            kind="aws",
+            config={"region": "ap-northeast-2", "cluster_name": "e"},
         )
         session.add(environment)
 
@@ -975,10 +1029,14 @@ async def test_environment_without_secret_ref_check_fails_with_missing(
     ],
 )
 async def test_database_rejects_inconsistent_connection_columns(
-    session_factory: SessionFactory, assignment: str, constraint: str
+    session_factory: SessionFactory, assignment: str, constraint: str, team: Member
 ) -> None:
     environment_id = await _insert_raw_environment(
-        session_factory, "env-a", {"region": "ap-northeast-2", "cluster_name": "e"}, "env:X"
+        session_factory,
+        team.organization.id,
+        "env-a",
+        {"region": "ap-northeast-2", "cluster_name": "e"},
+        "env:X",
     )
     async with session_factory() as session:
         with pytest.raises(IntegrityError, match=constraint):

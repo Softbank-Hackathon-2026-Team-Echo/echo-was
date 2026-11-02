@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -28,6 +28,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·오류 코드·secretRef 형식·null 규칙)을 바꾸거나 쓸 때 |
 | [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포 API 계약(역할·버전 상태·겹침 규칙·실패 코드·`simulated`)을 바꾸거나 쓸 때 |
 | [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서 계약 |
+| [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
 
@@ -36,11 +37,16 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # environment·environment_kind·service·deploy_request 라우터 (/api/v1, 권한 검사 자리 authorize_request)
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·deploy_request 라우터
+│                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
+├─ auth/              # guards(require_login·require_human·require_org_role) · audit(403 거부 기록 처리기) · tokens · cookies · actors
 ├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수)
+│                     #   AuthService(로그인·세션·/me) · OrganizationService · InvitationService · AgentTokenService
 │                     #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · deploy_support · service_view · job_lease
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·Build·Deployment·Job Repository (조건부 UPDATE)
+│                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
+│                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
 ├─ executors/         # 실행기 인터페이스(base) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
@@ -48,16 +54,20 @@ app/
 │   ├─ registry.py    #   discover()(양식·동작 짝 검사), validate_environment_config(by_alias), get_environment_adapter()
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나
 ├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, jobs
-├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청 스키마)
+│                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
+├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
+├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url
-├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·시계·비밀값 조회기)
-└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태와 코드 (용어 사전 §3)
+├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기)
+└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류 (용어 사전 §3)
 alembic/              # 마이그레이션
 scripts/              # dump_schema.sh
-tests/                # 단위 테스트 · adapter_contract.py·executor_contract.py(공통 계약) · github_fake.py(MockTransport) · integration/ (실제 PostgreSQL, deploy_harness.py)
+tests/                # 단위 테스트 · adapter_contract.py·executor_contract.py(공통 계약) · github_fake.py·github_user_fake.py(가짜 GitHub)
+                      #   integration/ (실제 PostgreSQL, deploy_harness.py, auth_support.py: 멤버·세션·토큰 행 + 쿠키 클라이언트)
 ```
 
 - 레이어는 `routers/`(API) → `services/`(유스케이스, `session.begin()` 블록으로 트랜잭션) → `repositories/`(DB) 순서다. 외부 시스템 호출은 `clients/` 와 `adapters/` 의 동작 코드가 맡는다.
+- **권한 검사는 라우트마다 의존성 하나**: 조직 경로는 `ViewerAccess`·`DeveloperAccess`·`AdminAccess`·`Human*Access`(= `require_org_role(min_role, human_only)`), 조직 밖은 `Human`(`require_human`)·`LoggedIn`(`require_login`). 공개 경로는 `/healthz`·`/readyz`·로그인 시작·콜백·로그아웃뿐이다. 검사기는 요청 공용 세션을 쓰지 않고 팩토리로 짧은 세션을 따로 연다. 새 라우트에 검사기가 빠지면 `test_every_route_has_guards` 와 역할 표 시험(`test_role_table_covers_every_api_route`)이 실패한다.
 - 세션은 `get_session_factory()`(`expire_on_commit=False`)로 만들고 요청 의존성은 트랜잭션을 열지 않은 세션을 넘긴다. 시험은 `app.dependency_overrides` 로 세션 팩토리·설정·어댑터 조회를 바꾼다.
 - **import 방향**: `app.models` → `app.adapters` 만 허용한다. `app.adapters` 는 `app.models` 를 import 하지 않는다(테스트가 확인).
 - Worker 진입점은 `python -m app.worker`(같은 이미지, compose `worker` 프로필). 로그 `component` 는 `echo-worker`. 일꾼은 `Worker.run_once()` 와 주입한 시계(`Clock`)로 시험한다(실제 sleep 없음).
@@ -90,8 +100,16 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 현재 배포는 `current_deployment_id` 값을 넣어 바꾼다(`current_deployment` 관계는 읽기 전용). 같은 연결의 배포만 가리킬 수 있다(복합 FK).
 - `traffic_weight` 는 "마지막으로 프록시에 적용한 값"이다. 합계 100% 는 DB 가 아니라 이전 엔진이 맞춘다. 역할(서비스 중·예비)은 저장하지 않고 이 값과 현재 배포로 계산한다.
 
+### 조직·권한 (자주 어기는 것)
+- **서비스·환경은 조직에 속한다**(`organization_id`). API 가 쓰는 저장소 조회(`get_live_by_id`·`search_live`·`count_live`·`find_live_by_id`)는 `organization_id` 를 필수로 받고, 다른 조직 것은 각 리소스의 404 다. 배포 요청은 조직 칸이 없어 `services` 와 JOIN 해 거른다. 일꾼이 쓰는 조회(`find_by_id`)는 조직 조건 없이 둔다.
+- 서비스 이름은 Echo 전체 유일(대표 주소), 환경 이름은 조직 안 유일(`uq_environments_org_name_live`).
+- `env:` 비밀 참조는 `ECHO_SECRET_<조직 키>__` 로 시작해야 한다(422 `SECRET_REF_NOT_IN_ORGANIZATION`). 조직 slug 는 바꾸지 않는다.
+- 403 은 `AuditedForbiddenError` 하위(ROLE_FORBIDDEN·AGENT_READ_ONLY·CANNOT_CHANGE_OWN_ROLE·ORIGIN_NOT_ALLOWED)로 raise 한다. 예외 처리기가 `request.state` 의 팩토리로 `audit_logs` 를 따로 커밋한다. 401·404 는 기록하지 않는다.
+- 멤버 변경은 조직 행 `FOR NO KEY UPDATE` 뒤 잠금 안에서 행위자 역할을 다시 읽는다(자기 역할 변경 금지·어드민 1명 이상). 첫 로그인·초대 적용·개인 조직 slug 는 `ON CONFLICT DO NOTHING`.
+- 세션 쿠키 값·에이전트 토큰 원문(발급 응답 제외)·GitHub 사용자 토큰·client secret 은 저장·로그·응답에 넣지 않는다(DB 에는 SHA-256 만). 개발용·비상용 로그인과 설정으로 켜는 가짜 GitHub 는 만들지 않는다(가짜는 시험의 의존성 교체로만).
+
 ### 원터치 배포 (자주 어기는 것)
-- **잠금 순서는 하나**: 환경(접수만, `FOR SHARE`) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태만 바꾸는 잠금은 `FOR NO KEY UPDATE`(`with_for_update(key_share=True)`). 접수에서 환경을 `FOR UPDATE` 로 잡으면 일꾼의 FK 검사(`FOR KEY SHARE`)와 교착이 생긴다(`test_accept_waiting_for_service_lock_does_not_deadlock_with_success_processing`).
+- **잠금 순서는 하나**: 조직(멤버 변경·초대만, `FOR NO KEY UPDATE`) → 환경(접수만, `FOR SHARE`) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태만 바꾸는 잠금은 `FOR NO KEY UPDATE`(`with_for_update(key_share=True)`). 접수에서 환경을 `FOR UPDATE` 로 잡으면 일꾼의 FK 검사(`FOR KEY SHARE`)와 교착이 생긴다(`test_accept_waiting_for_service_lock_does_not_deadlock_with_success_processing`).
 - **상태는 조건부 UPDATE 로만**(`DeployRequestRepository.transition` 등, 0행이면 결과를 버리고 다시 읽는다). 일꾼의 쓰기 트랜잭션은 맨 끝에 `JobLease.hold()` 로 임대를 확인한다.
 - **외부 호출은 트랜잭션 밖 + 멱등 키**(빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt`) + "요청함 시각 저장·커밋 → 호출 → external_ref 저장" 순서([docs/executors.md](docs/executors.md)).
 - 일꾼·배포 코드의 시각은 주입한 `Clock` 으로 정한다(DB `now()` 에 기대지 않는다).

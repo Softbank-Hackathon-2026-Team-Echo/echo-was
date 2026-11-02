@@ -45,6 +45,7 @@ PUBLIC_HOST_UNIQUE_INDEX = "uq_services_public_host_live"
 
 @dataclass(frozen=True)
 class CreateServiceCommand:
+    organization_id: uuid.UUID
     name: str
     description: str | None
     repo_url: str
@@ -104,8 +105,10 @@ class ServiceService:
             public_host=service_public_host(command.name, self._public_base_domain),
             status=ServiceStatus.ACTIVE,
             simulated=self._source_client.simulated,
+            organization_id=command.organization_id,
         )
         async with self._session.begin():
+            # 이름은 대표 주소({서비스}.{도메인}) 때문에 조직과 무관하게 전체에서 유일하다.
             if await self._services.find_live_by_name(command.name) is not None:
                 raise ServiceNameConflictError("service name already in use")
             self._services.add(service)
@@ -114,23 +117,29 @@ class ServiceService:
         _log("service created", "create_service", service)
         return view
 
-    async def search_services(self, page: int, size: int) -> ServiceSearchResult:
+    async def search_services(
+        self, organization_id: uuid.UUID, page: int, size: int
+    ) -> ServiceSearchResult:
         async with self._session.begin():
-            services = await self._services.search_live(offset=page * size, limit=size)
-            total = await self._services.count_live()
+            services = await self._services.search_live(
+                organization_id, offset=page * size, limit=size
+            )
+            total = await self._services.count_live(organization_id)
         return ServiceSearchResult(items=services, total=total)
 
-    async def get_service(self, service_id: uuid.UUID) -> ServiceDetailView:
+    async def get_service(
+        self, organization_id: uuid.UUID, service_id: uuid.UUID
+    ) -> ServiceDetailView:
         async with self._session.begin():
-            service = await self._services.get_live_by_id(service_id)
+            service = await self._services.get_live_by_id(organization_id, service_id)
             return await load_service_detail(self._session, service)
 
     async def update_service(
-        self, service_id: uuid.UUID, changes: ServiceChanges
+        self, organization_id: uuid.UUID, service_id: uuid.UUID, changes: ServiceChanges
     ) -> ServiceDetailView:
         """바뀐 값은 다음 배포 요청부터 쓴다. 접수된 요청은 접수 때 사본을 쓴다."""
         async with self._session.begin():
-            service = await self._services.get_live_by_id(service_id)
+            service = await self._services.get_live_by_id(organization_id, service_id)
             _check_updatable(service, changes)
         repo_private: bool | None = None
         new_repo_url: str | None = None
@@ -140,7 +149,7 @@ class ServiceService:
                 access = await self._source_client.check_access(parse_repo_url(new_repo_url))
                 repo_private = access.private
         async with self._session.begin():
-            service = await self._services.get_live_by_id(service_id, lock=True)
+            service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             _check_updatable(service, changes)
             if changes.description_set:
                 service.description = changes.description
@@ -158,7 +167,9 @@ class ServiceService:
         _log("service updated", "update_service", service)
         return view
 
-    async def delete_service(self, service_id: uuid.UUID) -> ServiceDetailView:
+    async def delete_service(
+        self, organization_id: uuid.UUID, service_id: uuid.UUID
+    ) -> ServiceDetailView:
         """DELETING 으로 바꾸고 대기 요청을 취소한 뒤 내리기 할 일을 만든다.
 
         이미 DELETING 이면 재시도다. 내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려
@@ -166,7 +177,7 @@ class ServiceService:
         """
         now = self._clock.now()
         async with self._session.begin():
-            service = await self._services.get_live_by_id(service_id, lock=True)
+            service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             connections = await self._service_environments.lock_live_by_service(service.id)
             if service.status == ServiceStatus.DELETING:
                 for connection in connections:

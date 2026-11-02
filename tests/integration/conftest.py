@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from httpx import ASGITransport, AsyncClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, make_url, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -35,9 +34,19 @@ from sqlalchemy.pool import NullPool
 from app.clients.source_repository import FakeSourceRepositoryClient
 from app.core.config import get_settings
 from app.core.database import get_session_factory
-from app.dependencies import get_clock, get_source_repository_client
+from app.dependencies import get_clock, get_github_user_client, get_source_repository_client
+from app.enums import OrganizationRole
 from app.main import app
+from app.models import Organization
+from tests.github_user_fake import FakeGithubUserClient
+from tests.integration.auth_support import (
+    auth_settings,
+    create_member,
+    create_organization,
+    make_client,
+)
 from tests.integration.deploy_harness import DeployHarness, FakeClock, make_fake_executors
+from tests.integration.factories import DEFAULT_ORG_SLUG, add_organization
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONNECT_RETRY_SECONDS = 10.0
@@ -50,6 +59,14 @@ TABLES = (
     "service_environments",
     "environments",
     "services",
+    # --- API 서버 6: 로그인·조직 ---
+    "audit_logs",
+    "agent_tokens",
+    "sessions",
+    "invitations",
+    "organization_members",
+    "organizations",
+    "users",
 )
 
 
@@ -202,8 +219,18 @@ def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 
 @pytest.fixture
+async def organization(session_factory: async_sessionmaker[AsyncSession]) -> Organization:
+    """DB 에 직접 넣는 시험용 team-echo 조직(만든 사람 행 포함, 멤버 행 없음)."""
+    async with session_factory() as session, session.begin():
+        return await add_organization(session)
+
+
+@pytest.fixture
 async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[DeployHarness]:
     """원터치 배포 시험 도구. API 의 세션·설정·시계·소스 클라이언트를 시험 값으로 바꾼다.
+
+    team-echo 조직과 그 ADMIN 멤버를 만들고, harness.client 는 그 멤버의 세션 쿠키와 허용
+    Origin 을 싣는다. 경로는 harness.services 등 조직 경로를 쓴다.
 
     일꾼은 한 단계마다 트랜잭션을 여러 번 연다. 연결을 다시 쓰도록 이 시험 전용 풀 엔진을 쓰고
     시험이 끝나면 닫는다(표 비우기는 engine 픽스처가 한다).
@@ -211,9 +238,12 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
     pooled_engine = create_async_engine(test_database_url, pool_size=10, max_overflow=10)
     session_factory = async_sessionmaker(pooled_engine, expire_on_commit=False)
     clock = FakeClock()
-    settings = get_settings().model_copy(update={"fake_executor_step_seconds": 0.0})
+    settings = auth_settings(get_settings(), fake_executor_step_seconds=0.0)
     source_client = FakeSourceRepositoryClient(install_url=settings.github_app_install_url)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    team = await create_organization(session_factory, DEFAULT_ORG_SLUG)
+    admin = await create_member(session_factory, team, OrganizationRole.ADMIN, clock.now())
+    github_users = FakeGithubUserClient()
+    async with make_client(session_token=admin.session_token) as client:
         harness = DeployHarness(
             client=client,
             session_factory=session_factory,
@@ -221,11 +251,15 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
             settings=settings,
             source_client=source_client,
             executors=make_fake_executors(clock),
+            organization=team,
+            admin=admin,
+            github_users=github_users,
         )
         app.dependency_overrides[get_session_factory] = lambda: session_factory
         app.dependency_overrides[get_settings] = lambda: harness.settings
         app.dependency_overrides[get_clock] = lambda: clock
         app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
+        app.dependency_overrides[get_github_user_client] = lambda: harness.github_users
         try:
             yield harness
         finally:

@@ -42,7 +42,7 @@ async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
         if exc.details
         else None
     )
-    return error_response(exc.status_code, exc.code, exc.message, details)
+    return error_response(exc.status_code, exc.code, exc.message, details, headers=exc.headers)
 
 
 async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

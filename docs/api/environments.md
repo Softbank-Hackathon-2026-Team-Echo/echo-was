@@ -3,7 +3,7 @@
 AWS·GCP·온프레 클러스터를 **환경**으로 등록·조회·수정·삭제하고 접속을 확인한다. 근거: SPEC [specs/api-2-environment-api-adapters.md](../../specs/api-2-environment-api-adapters.md), 원장 F2·NFR-15.
 
 - 실행 중인 서버의 OpenAPI: `GET /docs`(Swagger UI) · `GET /openapi.json`. 이 문서와 같은 계약이다.
-- **인증 없음.** 권한 검사 자리만 있다(API 서버 6 에서 GitHub 로그인 + 역할 4종). 서버를 인터넷에 열지 않는다.
+- **로그인·조직 범위(API 서버 6).** 모든 경로는 `/api/v1/orgs/{orgId}` 아래이고(종류 목록만 조직 밖), 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 등록·수정·다시 확인은 개발자, 삭제는 어드민이다. 검사 순서·오류는 [auth.md](auth.md).
 - **어댑터는 가짜(simulated)다.** aws·gcp·onprem 동작 클래스는 네트워크 호출 없이 고정 값을 돌려준다. 응답의 `clusterInfo.simulated = true` 가 그 표시다. 실제 클러스터 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 바꾼다. 요청·응답 모양은 실제와 같게 고정했다.
 
 ## 공통 규칙
@@ -14,31 +14,31 @@ AWS·GCP·온프레 클러스터를 **환경**으로 등록·조회·수정·삭
   - 봉투의 `code`·`message`·`details` 는 값이 없으면 뺀다.
 - JSON 이름은 camelCase 다. `config` 안의 키도 camelCase 다(DB 에는 snake_case 로 저장한다).
 - 시각은 ISO 8601 UTC(`2026-11-01T15:00:16.668145Z`).
-- **다른 파트·API 는 환경을 `id`(uuid)로만 가리킨다.** `name` 은 표시용이며 수정할 수 있다.
+- **다른 파트·API 는 환경을 `id`(uuid)로만 가리킨다.** `name` 은 표시용이며 수정할 수 있다. 이름은 **조직 안에서** 유일하다.
 - 모든 응답에 `X-Request-ID` 헤더가 붙는다.
 
 ## 엔드포인트
 
-| 메서드 · 경로 | 요청 | 성공 |
-|---|---|---|
-| `POST /api/v1/environments` | `CreateEnvironmentRequest` | 201 `ApiResponse[EnvironmentDetailResponse]` |
-| `GET /api/v1/environments?page&size&kind` | — | 200 `ApiResponse[Page[EnvironmentSummaryResponse]]` |
-| `GET /api/v1/environments/{id}` | — | 200 `ApiResponse[EnvironmentDetailResponse]` |
-| `PATCH /api/v1/environments/{id}` | `UpdateEnvironmentRequest` | 200 `ApiResponse[EnvironmentDetailResponse]` |
-| `DELETE /api/v1/environments/{id}` | — | 204 (본문 없음) |
-| `POST /api/v1/environments/{id}/connection-check` | — | 200 `ApiResponse[EnvironmentDetailResponse]` |
-| `GET /api/v1/environment-kinds` | — | 200 `ApiResponse[list[EnvironmentKindResponse]]` |
+| 메서드 · 경로 | 요청 | 성공 | 최소 역할 |
+|---|---|---|---|
+| `POST /api/v1/orgs/{orgId}/environments` | `CreateEnvironmentRequest` | 201 `ApiResponse[EnvironmentDetailResponse]` | 개발자 |
+| `GET /api/v1/orgs/{orgId}/environments?page&size&kind` | — | 200 `ApiResponse[Page[EnvironmentSummaryResponse]]` | 뷰어·에이전트 |
+| `GET /api/v1/orgs/{orgId}/environments/{id}` | — | 200 `ApiResponse[EnvironmentDetailResponse]` | 뷰어·에이전트 |
+| `PATCH /api/v1/orgs/{orgId}/environments/{id}` | `UpdateEnvironmentRequest` | 200 `ApiResponse[EnvironmentDetailResponse]` | 개발자 |
+| `DELETE /api/v1/orgs/{orgId}/environments/{id}` | — | 204 (본문 없음) | 어드민 |
+| `POST /api/v1/orgs/{orgId}/environments/{id}/connection-check` | — | 200 `ApiResponse[EnvironmentDetailResponse]` | 개발자 |
+| `GET /api/v1/environment-kinds` | — | 200 `ApiResponse[list[EnvironmentKindResponse]]` | 로그인한 누구나(조직 밖) |
 
 SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateEnvironmentRequest`, `EnvironmentUpdate` = `UpdateEnvironmentRequest`, `EnvironmentSummary` = `EnvironmentSummaryResponse`, `EnvironmentDetail` = `EnvironmentDetailResponse`, `EnvironmentKind` = `EnvironmentKindResponse`(`app/schemas/environment.py`).
 
-### 등록 `POST /api/v1/environments`
+### 등록 `POST /api/v1/orgs/{orgId}/environments`
 
 ```json
 {
   "name": "aws-seoul",
   "kind": "aws",
   "config": {"region": "ap-northeast-2", "clusterName": "echo-eks"},
-  "secretRef": "env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG"
+  "secretRef": "env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG"
 }
 ```
 
@@ -63,26 +63,27 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 
 | 형식 | 예 | 지금 조회 |
 |---|---|---|
-| `env:<NAME>` (`NAME` 은 `ECHO_SECRET_` 로 시작, 대문자·숫자·`_`) | `env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG` | 서버 프로세스 환경변수를 읽는다 |
+| `env:<NAME>` (`NAME` 은 `ECHO_SECRET_<조직 키>__` 로 시작, 대문자·숫자·`_`) | `env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG` | 서버 프로세스 환경변수를 읽는다 |
 | `k8s:<namespace>/<secret>/<key>` | `k8s:echo-system/aws-seoul/kubeconfig` | 형식만. 확인은 `SECRET_STORE_UNSUPPORTED` |
 | `aws-sm:<이름 또는 ARN>` | `aws-sm:echo/aws-seoul` | 형식만. 확인은 `SECRET_STORE_UNSUPPORTED` |
 | `gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]` | `gcp-sm:projects/echo-hack-123/secrets/gke` | 형식만. 확인은 `SECRET_STORE_UNSUPPORTED` |
 
 - 형식이 틀리면 422 `VALIDATION_ERROR`, `details = [{"field": "secretRef", "reason": "INVALID_SECRET_REF"}]`.
-- `env:` 이름을 `ECHO_SECRET_` 로 제한하는 이유: 인증 없는 API 로 서버 자체 설정(`DATABASE_URL` 등)을 열쇠로 지정하지 못하게 하기 위해서다.
+- `env:` 이름을 `ECHO_SECRET_` 로 제한하는 이유: API 로 서버 자체 설정(`DATABASE_URL` 등)을 열쇠로 지정하지 못하게 하기 위해서다.
+- **조직 열쇠 이름(API 서버 6)**: 환경 API 에서 `env:` 이름은 한 겹 더 좁혀 `ECHO_SECRET_<조직 키>__` 로 시작해야 한다. 조직 키는 slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`, 밑줄 두 개로 끝). 아니면 422 `SECRET_REF_NOT_IN_ORGANIZATION`(`details = [{"field": "secretRef", "reason": "SECRET_REF_NOT_IN_ORGANIZATION"}]`). 다른 조직의 열쇠를 가리키지 못하게 하기 위해서다. `k8s:`·`aws-sm:`·`gcp-sm:` 은 형식만 검사하고 조직으로 묶지 않는다.
 - 비밀값은 메모리에서만 쓰고 저장·로그·응답·예외 메시지에 넣지 않는다.
 
-### 목록 `GET /api/v1/environments`
+### 목록 `GET /api/v1/orgs/{orgId}/environments`
 
 - 쿼리: `page`(0부터, 기본 0), `size`(1~100, 기본 20, 범위 밖은 422), `kind`(정확히 일치, 선택).
 - 소프트 삭제된 환경은 빠진다. `createdAt` 오름차순, 같으면 `id`.
 - **저장된 값만 쓴다.** 어댑터·비밀 저장소를 부르지 않으므로 클러스터 하나가 죽어도 목록은 뜬다.
 
-### 단건 `GET /api/v1/environments/{id}`
+### 단건 `GET /api/v1/orgs/{orgId}/environments/{id}`
 
 저장된 값 + 그 자리에서 읽은 `clusterInfo`(제한 시간 동일). **저장된 접속 상태는 바꾸지 않는다.** 읽지 못하면 `clusterInfo = null`, 이유는 `clusterInfoError`, 상태 코드는 200.
 
-### 수정 `PATCH /api/v1/environments/{id}`
+### 수정 `PATCH /api/v1/orgs/{orgId}/environments/{id}`
 
 - 바꿀 수 있는 칸: `name`, `config`(**전체 교체**, 부분 병합 없음), `secretRef`. 들어온 칸만 바꾼다.
 - `kind` 가 지금과 다르면 422 `ENVIRONMENT_KIND_IMMUTABLE`, 같으면 무시한다.
@@ -91,12 +92,12 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 - 빈 본문 `{}` 은 200 + 현재 값.
 - 사용 중인 환경도 수정할 수 있다.
 
-### 삭제 `DELETE /api/v1/environments/{id}`
+### 삭제 `DELETE /api/v1/orgs/{orgId}/environments/{id}`
 
 - 살아 있는 서비스-환경 연결이 있으면 409 `ENVIRONMENT_IN_USE`.
 - 없으면 소프트 삭제 → 204. 이후 단건·수정·삭제·다시 확인은 404 이고, 같은 이름으로 다시 등록할 수 있다.
 
-### 다시 확인 `POST /api/v1/environments/{id}/connection-check`
+### 다시 확인 `POST /api/v1/orgs/{orgId}/environments/{id}/connection-check`
 
 커밋된 값으로 접속을 확인하고 `connectionStatus`·`connectionCheckedAt`·`connectionError` 를 저장한다. 같은 상태여도 시각은 새로 적는다. 자동 주기 확인은 없다(API 서버 5 에서 정한다).
 
@@ -146,7 +147,7 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
     "kind": "aws",
     "location": "ap-northeast-2",
     "config": {"region": "ap-northeast-2", "clusterName": "echo-eks"},
-    "secretRef": "env:ECHO_SECRET_AWS_SEOUL_KUBECONFIG",
+    "secretRef": "env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG",
     "connectionStatus": "CONNECTED",
     "connectionCheckedAt": "2026-11-01T15:00:16.668145Z",
     "connectionError": null,
@@ -197,9 +198,11 @@ stateDiagram-v2
 | 모르는 종류 | 422 | `UNKNOWN_ENVIRONMENT_KIND` |
 | 설정 양식 위반 | 422 | `ENVIRONMENT_CONFIG_INVALID` + `details` |
 | 종류 변경 | 422 | `ENVIRONMENT_KIND_IMMUTABLE` |
-| 살아 있는 환경과 이름 중복(등록·수정) | 409 | `ENVIRONMENT_NAME_CONFLICT` |
+| `env:` 비밀 참조가 이 조직의 열쇠 이름이 아님 | 422 | `SECRET_REF_NOT_IN_ORGANIZATION` + `details` |
+| 같은 조직의 살아 있는 환경과 이름 중복(등록·수정) | 409 | `ENVIRONMENT_NAME_CONFLICT` |
 | 사용 중인 환경 삭제 | 409 | `ENVIRONMENT_IN_USE` |
-| 없거나 삭제된 환경(확인 도중 삭제 포함) | 404 | `ENVIRONMENT_NOT_FOUND` |
+| 없거나 삭제된 환경(확인 도중 삭제 포함), 다른 조직의 환경 | 404 | `ENVIRONMENT_NOT_FOUND` |
+| 로그인 안 함 · 조직 멤버 아님 · 역할 모자람 | 401 · 404 · 403 | `UNAUTHENTICATED` · `ORGANIZATION_NOT_FOUND` · `ROLE_FORBIDDEN` 등([auth.md](auth.md)) |
 
 `ENVIRONMENT_CONFIG_INVALID` 의 `details`: `field` = `config.` + camelCase 경로(루트 위반은 `config`), `reason` = `MISSING`(빠짐) · `UNKNOWN_FIELD`(모르는 칸, 들어온 키 그대로) · `INVALID_FORMAT`(그 외). 입력 값·정규식은 넣지 않는다.
 

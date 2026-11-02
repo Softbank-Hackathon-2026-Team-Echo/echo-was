@@ -1,10 +1,10 @@
 import re
 from enum import StrEnum
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
 
@@ -15,6 +15,18 @@ PUBLIC_BASE_DOMAIN_MAX_LENGTH = 125
 _DOMAIN_PATTERN = re.compile(
     r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$"
 )
+
+
+# 세션·초대는 7일, 로그인 상태 쿠키는 10분.
+SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_RESERVED_ORG_SLUGS = ("team-echo",)
+
+
+def _split_comma_list(value: object) -> object:
+    """환경변수의 쉼표 구분 문자열을 목록으로 바꾼다. 빈 칸은 버린다."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value
 
 
 class ExecutorMode(StrEnum):
@@ -59,6 +71,33 @@ class Settings(BaseSettings):
     github_api_base_url: str = "https://api.github.com"
     github_request_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # GitHub 로그인(API 서버 6). 위 GitHub App 의 사용자 인증을 쓴다. 넷 중 하나라도 비면
+    # 로그인·콜백만 503 LOGIN_NOT_CONFIGURED 이고 나머지 API·일꾼·alembic 은 그대로 뜬다.
+    github_app_client_id: str | None = None
+    # client secret 은 값이 아니라 비밀 저장소 위치다(env:ECHO_SECRET_... 등).
+    github_app_client_secret_ref: str | None = None
+    github_oauth_base_url: str = "https://github.com"
+    # 이 API 호스트의 콜백 공개 주소(…/api/v1/auth/github/callback).
+    # GitHub App 콜백 목록의 값과 글자까지 같아야 한다.
+    github_oauth_redirect_uri: str | None = None
+    # 로그인 뒤 돌아갈 프론트 주소. 끝의 / 는 뗀다.
+    frontend_base_url: str | None = None
+    # 쿠키로 인증한 변경 요청이 허용되는 Origin(정확히 같아야 함). CORS 도 같은 목록을 쓴다.
+    frontend_allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    session_cookie_name: str = "echo_session"
+    session_ttl_seconds: int = Field(default=SEVEN_DAYS_SECONDS, gt=0)
+    session_cookie_secure: bool = True
+    oauth_state_ttl_seconds: int = Field(default=600, gt=0)
+    # 설정하면 이 GitHub 조직의 active 멤버만 로그인할 수 있다. 비면 모든 GitHub 계정.
+    login_allowed_github_org: str | None = None
+    # 사람이 API 로 만들 수 없는 조직 slug(데모 준비 명령만 만든다).
+    reserved_org_slugs: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_RESERVED_ORG_SLUGS)
+    )
+    agent_token_default_days: int = Field(default=30, ge=1)
+    agent_token_max_days: int = Field(default=90, ge=1)
+    invitation_ttl_seconds: int = Field(default=SEVEN_DAYS_SECONDS, gt=0)
+
     # 단계별 제한 시간(초).
     build_timeout_seconds: float = Field(default=900.0, gt=0)
     deploy_timeout_seconds: float = Field(default=300.0, gt=0)
@@ -79,6 +118,40 @@ class Settings(BaseSettings):
         if len(value) > PUBLIC_BASE_DOMAIN_MAX_LENGTH or not _DOMAIN_PATTERN.fullmatch(value):
             raise ValueError("public_base_domain must be a lowercase domain of 125 chars or less")
         return value
+
+    @field_validator("frontend_allowed_origins", "reserved_org_slugs", mode="before")
+    @classmethod
+    def _split_lists(cls, value: object) -> object:
+        return _split_comma_list(value)
+
+    @field_validator("frontend_base_url")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.rstrip("/") or None
+
+    @field_validator("github_app_client_secret_ref")
+    @classmethod
+    def _check_client_secret_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError("github_app_client_secret_ref must be a secret reference") from None
+        return value
+
+    @property
+    def is_login_configured(self) -> bool:
+        return all(
+            (
+                self.github_app_client_id,
+                self.github_app_client_secret_ref,
+                self.github_oauth_redirect_uri,
+                self.frontend_base_url,
+            )
+        )
 
     @field_validator("executor_mode")
     @classmethod

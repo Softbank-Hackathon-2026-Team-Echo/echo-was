@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.registry import get_environment_adapter
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
+from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
 from app.core.clock import Clock, SystemClock
@@ -15,6 +16,8 @@ from app.core.config import Settings, SourceClientMode, get_settings
 from app.core.database import get_session_factory
 from app.core.secrets import parse_secret_ref
 from app.repositories.environment_repository import EnvironmentRepository
+from app.services.agent_token_service import AgentTokenService
+from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.environment_connection_service import (
     AdapterResolver,
@@ -22,14 +25,9 @@ from app.services.environment_connection_service import (
 )
 from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
+from app.services.invitation_service import InvitationService
+from app.services.organization_service import OrganizationService
 from app.services.service_service import ServiceService
-
-
-async def authorize_request() -> None:
-    """권한 검사 자리(API 서버 6: GitHub 로그인 + 역할 4종). 지금은 아무것도 검사하지 않는다.
-
-    인증이 없으므로 이 서버는 인터넷에 열지 않는다(팀 내부 실행만).
-    """
 
 
 async def get_session(
@@ -133,4 +131,69 @@ def get_deploy_request_service(
         clock=clock,
         executor_mode=settings.executor_mode,
         public_base_domain=settings.public_base_domain,
+    )
+
+
+def get_github_user_client(
+    settings: Annotated[Settings, Depends(get_settings)],
+    secret_client: Annotated[SecretClient, Depends(get_secret_client)],
+) -> GithubUserClient:
+    """실제 GitHub 사용자 클라이언트. 가짜는 시험의 dependency_overrides 로만 넣는다."""
+    return HttpGithubUserClient(
+        oauth_base_url=settings.github_oauth_base_url,
+        api_base_url=settings.github_api_base_url,
+        client_id=settings.github_app_client_id,
+        client_secret_ref=(
+            parse_secret_ref(settings.github_app_client_secret_ref)
+            if settings.github_app_client_secret_ref
+            else None
+        ),
+        secret_client=secret_client,
+        timeout_seconds=settings.github_request_timeout_seconds,
+    )
+
+
+def get_auth_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    github_client: Annotated[GithubUserClient, Depends(get_github_user_client)],
+) -> AuthService:
+    return AuthService(session=session, settings=settings, clock=clock, github_client=github_client)
+
+
+def get_organization_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> OrganizationService:
+    return OrganizationService(
+        session=session, clock=clock, reserved_slugs=settings.reserved_org_slugs
+    )
+
+
+def get_invitation_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    github_client: Annotated[GithubUserClient, Depends(get_github_user_client)],
+) -> InvitationService:
+    return InvitationService(
+        session=session,
+        clock=clock,
+        github_client=github_client,
+        invitation_ttl_seconds=settings.invitation_ttl_seconds,
+    )
+
+
+def get_agent_token_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> AgentTokenService:
+    return AgentTokenService(
+        session=session,
+        clock=clock,
+        default_days=settings.agent_token_default_days,
+        max_days=settings.agent_token_max_days,
     )

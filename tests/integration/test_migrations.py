@@ -217,6 +217,92 @@ EXPECTED_CONSTRAINTS = {
         "'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))"
     ),
     ("jobs", "pk_jobs"): "PRIMARY KEY (id)",
+    # --- API 서버 6: 로그인·조직 ---
+    ("services", "fk_services_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("environments", "fk_environments_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("users", "pk_users"): "PRIMARY KEY (id)",
+    ("users", "uq_users_github_id"): "UNIQUE (github_id)",
+    ("organizations", "ck_organizations_name_not_empty"): (
+        "CHECK ((char_length((name)::text) >= 1))"
+    ),
+    ("organizations", "ck_organizations_slug_format"): (
+        "CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))"
+    ),
+    ("organizations", "fk_organizations_created_by_user_id_users"): (
+        "FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("organizations", "pk_organizations"): "PRIMARY KEY (id)",
+    ("organizations", "uq_organizations_slug"): "UNIQUE (slug)",
+    ("organization_members", "ck_organization_members_role_valid"): (
+        "CHECK (((role)::text = ANY ((ARRAY['ADMIN'::character varying, "
+        "'DEVELOPER'::character varying, 'VIEWER'::character varying])::text[])))"
+    ),
+    ("organization_members", "fk_organization_members_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("organization_members", "fk_organization_members_user_id_users"): (
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("organization_members", "pk_organization_members"): "PRIMARY KEY (id)",
+    ("organization_members", "uq_organization_members_organization_id_user_id"): (
+        "UNIQUE (organization_id, user_id)"
+    ),
+    ("invitations", "ck_invitations_accepted_at_consistency"): (
+        "CHECK ((((status)::text = 'ACCEPTED'::text) = (accepted_at IS NOT NULL)))"
+    ),
+    ("invitations", "ck_invitations_role_valid"): (
+        "CHECK (((role)::text = ANY ((ARRAY['ADMIN'::character varying, "
+        "'DEVELOPER'::character varying, 'VIEWER'::character varying])::text[])))"
+    ),
+    ("invitations", "ck_invitations_status_valid"): (
+        "CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, "
+        "'ACCEPTED'::character varying, 'EXPIRED'::character varying, "
+        "'REVOKED'::character varying])::text[])))"
+    ),
+    ("invitations", "fk_invitations_invited_by_user_id_users"): (
+        "FOREIGN KEY (invited_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("invitations", "fk_invitations_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("invitations", "pk_invitations"): "PRIMARY KEY (id)",
+    ("sessions", "fk_sessions_user_id_users"): (
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("sessions", "pk_sessions"): "PRIMARY KEY (id)",
+    ("sessions", "uq_sessions_token_hash"): "UNIQUE (token_hash)",
+    ("agent_tokens", "fk_agent_tokens_created_by_user_id_users"): (
+        "FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("agent_tokens", "fk_agent_tokens_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("agent_tokens", "pk_agent_tokens"): "PRIMARY KEY (id)",
+    ("agent_tokens", "uq_agent_tokens_token_hash"): "UNIQUE (token_hash)",
+    ("audit_logs", "ck_audit_logs_actor_consistency"): (
+        "CHECK (((((actor_type)::text = 'USER'::text) AND (actor_user_id IS NOT NULL) "
+        "AND (actor_agent_token_id IS NULL)) OR (((actor_type)::text = 'AGENT'::text) "
+        "AND (actor_agent_token_id IS NOT NULL) AND (actor_user_id IS NULL))))"
+    ),
+    ("audit_logs", "ck_audit_logs_actor_type_valid"): (
+        "CHECK (((actor_type)::text = ANY ((ARRAY['USER'::character varying, "
+        "'AGENT'::character varying])::text[])))"
+    ),
+    ("audit_logs", "ck_audit_logs_result_valid"): "CHECK (((result)::text = 'DENIED'::text))",
+    ("audit_logs", "fk_audit_logs_actor_agent_token_id_agent_tokens"): (
+        "FOREIGN KEY (actor_agent_token_id) REFERENCES agent_tokens(id) ON DELETE RESTRICT"
+    ),
+    ("audit_logs", "fk_audit_logs_actor_user_id_users"): (
+        "FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("audit_logs", "fk_audit_logs_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("audit_logs", "pk_audit_logs"): "PRIMARY KEY (id)",
 }
 
 EXPECTED_INDEXES = {
@@ -234,9 +320,10 @@ EXPECTED_INDEXES = {
         "CREATE UNIQUE INDEX uq_deployments_id_service_environment_id ON deployments "
         "USING btree (id, service_environment_id)"
     ),
-    "uq_environments_name_live": (
-        "CREATE UNIQUE INDEX uq_environments_name_live ON environments USING btree (name) "
-        "WHERE (is_deleted = false)"
+    # API 서버 6 이 uq_environments_name_live(전역)를 조직 안 유일로 바꿨다.
+    "uq_environments_org_name_live": (
+        "CREATE UNIQUE INDEX uq_environments_org_name_live ON environments "
+        "USING btree (organization_id, name) WHERE (is_deleted = false)"
     ),
     "uq_service_environments_service_id_environment_id_live": (
         "CREATE UNIQUE INDEX uq_service_environments_service_id_environment_id_live "
@@ -294,6 +381,53 @@ EXPECTED_INDEXES = {
         "WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, "
         "'RUNNING'::character varying])::text[]))"
     ),
+    # --- API 서버 6: 로그인·조직 ---
+    "ix_services_organization_id": (
+        "CREATE INDEX ix_services_organization_id ON services USING btree (organization_id)"
+    ),
+    "pk_users": "CREATE UNIQUE INDEX pk_users ON users USING btree (id)",
+    "uq_users_github_id": (
+        "CREATE UNIQUE INDEX uq_users_github_id ON users USING btree (github_id)"
+    ),
+    "pk_organizations": "CREATE UNIQUE INDEX pk_organizations ON organizations USING btree (id)",
+    "uq_organizations_slug": (
+        "CREATE UNIQUE INDEX uq_organizations_slug ON organizations USING btree (slug)"
+    ),
+    "pk_organization_members": (
+        "CREATE UNIQUE INDEX pk_organization_members ON organization_members USING btree (id)"
+    ),
+    "uq_organization_members_organization_id_user_id": (
+        "CREATE UNIQUE INDEX uq_organization_members_organization_id_user_id "
+        "ON organization_members USING btree (organization_id, user_id)"
+    ),
+    "ix_organization_members_user_id": (
+        "CREATE INDEX ix_organization_members_user_id ON organization_members USING btree (user_id)"
+    ),
+    "pk_invitations": "CREATE UNIQUE INDEX pk_invitations ON invitations USING btree (id)",
+    "ix_invitations_github_id": (
+        "CREATE INDEX ix_invitations_github_id ON invitations USING btree (github_id)"
+    ),
+    "uq_invitations_organization_id_github_id_pending": (
+        "CREATE UNIQUE INDEX uq_invitations_organization_id_github_id_pending ON invitations "
+        "USING btree (organization_id, github_id) WHERE ((status)::text = 'PENDING'::text)"
+    ),
+    "pk_sessions": "CREATE UNIQUE INDEX pk_sessions ON sessions USING btree (id)",
+    "uq_sessions_token_hash": (
+        "CREATE UNIQUE INDEX uq_sessions_token_hash ON sessions USING btree (token_hash)"
+    ),
+    "pk_agent_tokens": "CREATE UNIQUE INDEX pk_agent_tokens ON agent_tokens USING btree (id)",
+    "uq_agent_tokens_token_hash": (
+        "CREATE UNIQUE INDEX uq_agent_tokens_token_hash ON agent_tokens USING btree (token_hash)"
+    ),
+    "ix_agent_tokens_organization_id_created_at": (
+        "CREATE INDEX ix_agent_tokens_organization_id_created_at ON agent_tokens "
+        "USING btree (organization_id, created_at)"
+    ),
+    "pk_audit_logs": "CREATE UNIQUE INDEX pk_audit_logs ON audit_logs USING btree (id)",
+    "ix_audit_logs_organization_id_created_at": (
+        "CREATE INDEX ix_audit_logs_organization_id_created_at ON audit_logs "
+        "USING btree (organization_id, created_at)"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -305,10 +439,17 @@ EXPECTED_TRIGGERS = {
         "CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON deploy_requests "
         "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
     ),
+    # 거부 기록도 지우지 않는다(API 서버 3 의 공용 함수).
+    ("audit_logs", "trg_audit_logs_prevent_delete"): (
+        "CREATE TRIGGER trg_audit_logs_prevent_delete BEFORE DELETE ON audit_logs "
+        "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
+    ),
 }
 
 # 기존 표에 칸을 더하기 전(접속 상태 revision) 시점.
 BEFORE_ONE_TOUCH_DEPLOY = "6f6d92350314"
+# 조직·로그인 표를 더하기 전(API 서버 3 head) 시점.
+BEFORE_ORGANIZATIONS = "d95d675cb256"
 BEFORE_CONNECTION_STATUS = "b17994eaa7aa"
 
 
@@ -389,18 +530,25 @@ async def test_migration_downgrade_one_removes_connection_columns_and_upgrade_re
     engine: AsyncEngine,
 ) -> None:
     async with engine.begin() as connection:
-        await connection.execute(
-            text("INSERT INTO environments (name, kind, config) VALUES ('legacy-env', 'aws', '{}')")
-        )
         await connection.run_sync(
             run_alembic(lambda config: command.downgrade(config, BEFORE_CONNECTION_STATUS))
         )
         columns_down, checks_down = await connection.run_sync(_environment_columns_and_checks)
-        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        # 조직 칸이 생기기 전 시점에 행을 넣고,
+        # 행이 있어도 되는 revision(API 서버 3 head)까지만 올린다.
+        await connection.execute(
+            text("INSERT INTO environments (name, kind, config) VALUES ('legacy-env', 'aws', '{}')")
+        )
+        await connection.run_sync(
+            run_alembic(lambda config: command.upgrade(config, BEFORE_ORGANIZATIONS))
+        )
         columns_up, checks_up = await connection.run_sync(_environment_columns_and_checks)
         legacy_status = await connection.scalar(
             text("SELECT connection_status FROM environments WHERE name = 'legacy-env'")
         )
+        # 조직 revision 은 빈 표를 가정한다. 행을 지운 뒤 head 로 올린다.
+        await connection.execute(text("DELETE FROM environments"))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
         await connection.run_sync(run_alembic(command.check))
         # downgrade -1 → upgrade head 는 지운 칸 번호를 다시 쓰지 않아 칸 위치가 달라진다.
         # 같은 세션의 다른 비교 시험이 실행 순서에 흔들리지 않게 표를 처음부터 다시 만든다.
@@ -432,14 +580,21 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
     assert tables_after_downgrade == ["alembic_version"]
     assert functions_after_downgrade == 0
     assert sorted(tables_after_upgrade) == [
+        "agent_tokens",
         "alembic_version",
+        "audit_logs",
         "builds",
         "deploy_requests",
         "deployments",
         "environments",
+        "invitations",
         "jobs",
+        "organization_members",
+        "organizations",
         "service_environments",
         "services",
+        "sessions",
+        "users",
     ]
 
 
@@ -490,6 +645,86 @@ async def test_one_touch_deploy_revision_upgrade_with_existing_services_fails_cl
         await transaction.rollback()
 
     assert "expects services to be empty" in str(raised.value)
+
+
+ORGANIZATION_TABLES = {
+    "users",
+    "organizations",
+    "organization_members",
+    "invitations",
+    "sessions",
+    "agent_tokens",
+    "audit_logs",
+}
+
+
+def _organization_state(connection: Connection) -> tuple[set[str], set[str], set[str], int]:
+    inspector = inspect(connection)
+    tables = set(inspector.get_table_names()) & ORGANIZATION_TABLES
+    organization_columns = {
+        table
+        for table in ("services", "environments")
+        if "organization_id" in {column["name"] for column in inspector.get_columns(table)}
+    }
+    environment_indexes = {index["name"] or "" for index in inspector.get_indexes("environments")}
+    functions = connection.scalar(
+        text("SELECT count(*) FROM pg_proc WHERE proname = 'prevent_append_only_delete'")
+    )
+    return tables, organization_columns, environment_indexes, int(functions or 0)
+
+
+async def test_organization_revision_downgrade_removes_tables_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_ORGANIZATIONS))
+        )
+        down = await connection.run_sync(_organization_state)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_organization_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    tables_down, columns_down, indexes_down, functions_down = down
+    assert (tables_down, columns_down) == (set(), set())
+    assert "uq_environments_name_live" in indexes_down
+    assert "uq_environments_org_name_live" not in indexes_down
+    # 공용 DELETE 금지 함수는 API 서버 3 소유라 내려도 남는다.
+    assert functions_down == 1
+    tables_up, columns_up, indexes_up, functions_up = up
+    assert (tables_up, columns_up) == (ORGANIZATION_TABLES, {"services", "environments"})
+    assert "uq_environments_org_name_live" in indexes_up
+    assert "uq_environments_name_live" not in indexes_up
+    assert functions_up == 1
+
+
+@pytest.mark.parametrize(
+    ("table", "insert"),
+    [
+        ("environments", "INSERT INTO environments (name, kind, config) VALUES ('e', 'aws', '{}')"),
+        (
+            "services",
+            "INSERT INTO services (name, repo_url, repo_private, public_host) "
+            "VALUES ('s', 'https://github.com/a/b', false, 's.apps.echo.test')",
+        ),
+    ],
+)
+async def test_organization_revision_upgrade_with_existing_rows_fails_clearly(
+    engine: AsyncEngine, table: str, insert: str
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_ORGANIZATIONS))
+        )
+        await connection.execute(text(insert))
+        with pytest.raises(RuntimeError, match=f"{table} has 1 rows") as raised:
+            await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        await transaction.rollback()
+
+    assert f"expects {table} to be empty" in str(raised.value)
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

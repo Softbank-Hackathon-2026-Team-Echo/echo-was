@@ -11,7 +11,7 @@ from app.enums import (
     DeployRequestStatus,
     DeployRequestTrigger,
 )
-from app.models import DeployRequest
+from app.models import DeployRequest, Service
 from app.repositories.conditional_update import update_where
 
 _OPEN_STATUSES = (DeployRequestStatus.QUEUED, *ACTIVE_DEPLOY_REQUEST_STATUSES)
@@ -36,6 +36,20 @@ class DeployRequestRepository:
         )
         if lock:
             statement = statement.with_for_update(key_share=True)
+        return await self._session.scalar(statement)
+
+    async def find_in_organization(
+        self, organization_id: uuid.UUID, deploy_request_id: uuid.UUID
+    ) -> DeployRequest | None:
+        """배포 요청에는 조직 칸이 없어 서비스의 조직으로 거른다(소프트 삭제된 서비스 포함)."""
+        statement = (
+            select(DeployRequest)
+            .join(Service, Service.id == DeployRequest.service_id)
+            .where(
+                DeployRequest.id == deploy_request_id, Service.organization_id == organization_id
+            )
+            .execution_options(populate_existing=True)
+        )
         return await self._session.scalar(statement)
 
     async def transition(
@@ -122,6 +136,7 @@ class DeployRequestRepository:
 
     async def search_by_service(
         self,
+        organization_id: uuid.UUID,
         service_id: uuid.UUID,
         environment_id: uuid.UUID | None,
         offset: int,
@@ -129,7 +144,7 @@ class DeployRequestRepository:
     ) -> list[DeployRequest]:
         """최신순(created_at 내림차순, 같으면 id 내림차순)."""
         statement = (
-            _filter_by_service(select(DeployRequest), service_id, environment_id)
+            _filter_by_service(select(DeployRequest), organization_id, service_id, environment_id)
             .order_by(DeployRequest.created_at.desc(), DeployRequest.id.desc())
             .offset(offset)
             .limit(limit)
@@ -137,10 +152,13 @@ class DeployRequestRepository:
         return list((await self._session.scalars(statement)).all())
 
     async def count_by_service(
-        self, service_id: uuid.UUID, environment_id: uuid.UUID | None
+        self, organization_id: uuid.UUID, service_id: uuid.UUID, environment_id: uuid.UUID | None
     ) -> int:
         statement = _filter_by_service(
-            select(func.count()).select_from(DeployRequest), service_id, environment_id
+            select(func.count()).select_from(DeployRequest),
+            organization_id,
+            service_id,
+            environment_id,
         )
         return await self._session.scalar(statement) or 0
 
@@ -187,9 +205,14 @@ class DeployRequestRepository:
 
 
 def _filter_by_service[*Ts](
-    statement: Select[*Ts], service_id: uuid.UUID, environment_id: uuid.UUID | None
+    statement: Select[*Ts],
+    organization_id: uuid.UUID,
+    service_id: uuid.UUID,
+    environment_id: uuid.UUID | None,
 ) -> Select[*Ts]:
-    statement = statement.where(DeployRequest.service_id == service_id)
+    statement = statement.join(Service, Service.id == DeployRequest.service_id).where(
+        DeployRequest.service_id == service_id, Service.organization_id == organization_id
+    )
     if environment_id is not None:
         statement = statement.where(DeployRequest.environment_id == environment_id)
     return statement

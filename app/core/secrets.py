@@ -3,8 +3,10 @@
 DB 에는 비밀값을 두지 않고 비밀 저장소의 보관 위치(secret_ref)만 둔다. 형식은 `<저장소>:<위치>` 이고
 저장소 이름은 첫 콜론에서만 나눈다.
 
-- `env:<NAME>` — 서버 프로세스 환경변수. NAME 은 `ECHO_SECRET_` 로 시작해야 한다. 인증 없는 API 로
-  서버 자체 설정(DATABASE_URL 등)을 열쇠로 지정하지 못하게 하기 위해서다.
+- `env:<NAME>` — 서버 프로세스 환경변수. NAME 은 `ECHO_SECRET_` 로 시작해야 한다. API 로 서버 자체
+  설정(DATABASE_URL 등)을 열쇠로 지정하지 못하게 하기 위해서다. 환경 API 에서는 한 겹 더 좁혀
+  `ECHO_SECRET_<조직 키>__` 로 시작해야 한다(organization_env_secret_prefix). 다른 조직의 열쇠를
+  가리키지 못하게 하기 위해서다.
 - `k8s:<namespace>/<secret>/<key>` — Kubernetes Secret 의 키 하나.
 - `aws-sm:<이름 또는 ARN>` — AWS Secrets Manager.
 - `gcp-sm:projects/<project>/secrets/<secret>[/versions/<version>]` — GCP Secret Manager.
@@ -74,3 +76,28 @@ def parse_secret_ref(value: str) -> SecretRef:
     if not _LOCATION_PATTERNS[store].fullmatch(location):
         raise InvalidSecretRefError
     return SecretRef(store=store, location=location)
+
+
+ORGANIZATION_KEY_SEPARATOR = "__"
+
+
+def organization_secret_key(slug: str) -> str:
+    """조직 열쇠 키: slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`).
+
+    slug 에는 하이픈 연속이 없어 키에 `__` 가 생기지 않는다. 그래서 `a-corp` 와 `a-corp-x` 가
+    서로의 열쇠 이름을 가리킬 수 없다.
+    """
+    return slug.replace("-", "_").upper()
+
+
+def organization_env_secret_prefix(slug: str) -> str:
+    """이 조직의 env 비밀 참조가 시작해야 하는 이름(`ECHO_SECRET_TEAM_ECHO__`)."""
+    return f"ECHO_SECRET_{organization_secret_key(slug)}{ORGANIZATION_KEY_SEPARATOR}"
+
+
+def is_secret_ref_in_organization(ref: SecretRef, slug: str) -> bool:
+    """env 참조는 조직 열쇠 이름으로 시작해야 한다. 형식만 검사하는 다른 저장소는 묶지 않는다."""
+    if ref.store is not SecretStore.ENV:
+        return True
+    prefix = organization_env_secret_prefix(slug)
+    return ref.location.startswith(prefix) and len(ref.location) > len(prefix)

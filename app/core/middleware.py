@@ -43,6 +43,8 @@ class RequestContextMiddleware:
             return
 
         request_id = resolve_request_id(scope)
+        # 거부 기록(audit_logs)이 요청 ID 를 request.state 에서 읽는다.
+        scope.setdefault("state", {})["request_id"] = request_id
         status_code: int = HTTPStatus.INTERNAL_SERVER_ERROR
         response_started = False
 

@@ -176,3 +176,48 @@ class VersionStatus(StrEnum):
 
     IN_SYNC = "IN_SYNC"
     OUT_OF_SYNC = "OUT_OF_SYNC"
+
+
+class OrganizationRole(StrEnum):
+    """조직 멤버 역할. VIEWER < DEVELOPER < ADMIN. 에이전트 토큰은 역할 없이 읽기만 한다."""
+
+    ADMIN = "ADMIN"
+    DEVELOPER = "DEVELOPER"
+    VIEWER = "VIEWER"
+
+    @property
+    def rank(self) -> int:
+        return _ROLE_RANKS[self]
+
+    def includes(self, required: "OrganizationRole") -> bool:
+        """이 역할이 required 역할 이상인가."""
+        return self.rank >= required.rank
+
+
+_ROLE_RANKS = {
+    OrganizationRole.VIEWER: 1,
+    OrganizationRole.DEVELOPER: 2,
+    OrganizationRole.ADMIN: 3,
+}
+
+
+class InvitationStatus(StrEnum):
+    """초대 상태. PENDING 에서만 ACCEPTED·EXPIRED·REVOKED 로 바뀐다."""
+
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+
+
+class ActorType(StrEnum):
+    """요청한 쪽. USER 는 세션 쿠키로 들어온 사람, AGENT 는 에이전트 토큰."""
+
+    USER = "USER"
+    AGENT = "AGENT"
+
+
+class AuditResult(StrEnum):
+    """거부 기록 결과. 이번에는 거부(403)만 남긴다."""
+
+    DENIED = "DENIED"

@@ -24,14 +24,14 @@ from app.executors.fake import (
     FakeMainRouteExecutor,
     FakeTeardownExecutor,
 )
-from app.models import DeployRequest, Environment, Job
+from app.models import DeployRequest, Environment, Job, Organization
 from app.worker.runner import Worker
+from tests.github_user_fake import FakeGithubUserClient
+from tests.integration.auth_support import Member, org_path
 from tests.integration.factories import ENVIRONMENT_CONFIGS, make_environment, secret_ref_for
 
 SessionFactory = async_sessionmaker[AsyncSession]
 
-SERVICES = "/api/v1/services"
-DEPLOY_REQUESTS = "/api/v1/deploy-requests"
 START_TIME = datetime(2026, 11, 2, 3, 0, tzinfo=UTC)
 
 
@@ -103,7 +103,23 @@ class DeployHarness:
     settings: Settings
     source_client: SourceRepositoryClient
     executors: FakeExecutors
+    organization: Organization
+    admin: Member
+    github_users: FakeGithubUserClient
     responses: list[str] = field(default_factory=list)
+
+    @property
+    def services(self) -> str:
+        """이 조직의 서비스 경로 `/api/v1/orgs/{org_id}/services`."""
+        return org_path(self.organization.id, "/services")
+
+    @property
+    def environments(self) -> str:
+        return org_path(self.organization.id, "/environments")
+
+    @property
+    def deploy_requests(self) -> str:
+        return org_path(self.organization.id, "/deploy-requests")
 
     def worker(self, owner: str = "worker-1") -> Worker:
         return Worker(
@@ -165,18 +181,28 @@ class DeployHarness:
             return request.status
 
     async def add_environment(
-        self, name: str, failed: bool = False, deleted: bool = False
+        self,
+        name: str,
+        failed: bool = False,
+        deleted: bool = False,
+        organization: Organization | None = None,
     ) -> Environment:
         """환경 행을 접속 확인이 끝난 상태로 넣는다(failed=True 면 마지막 확인 실패).
 
-        factories 의 이름(aws-seoul 등)이 아니면 aws 설정으로 만든다.
+        factories 의 이름(aws-seoul 등)이 아니면 aws 설정으로 만든다. 조직을 주지 않으면 이
+        도구의 조직(team-echo)에 넣는다.
         """
+        organization = organization or self.organization
         if name in ENVIRONMENT_CONFIGS:
-            environment = make_environment(name)
+            environment = make_environment(name, organization)
         else:
             kind, config = ENVIRONMENT_CONFIGS["aws-seoul"]
             environment = Environment(
-                name=name, kind=kind, config=dict(config), secret_ref=secret_ref_for(name)
+                organization_id=organization.id,
+                name=name,
+                kind=kind,
+                config=dict(config),
+                secret_ref=secret_ref_for(name, organization.slug),
             )
         environment.record_connection_check(
             self.clock.now(), ConnectionErrorCode.AUTH_FAILED if failed else None
@@ -191,7 +217,7 @@ class DeployHarness:
         self, name: str = "shop-api", repo_url: str | None = None, **extra: Any
     ) -> dict[str, Any]:
         body = {"name": name, "repoUrl": repo_url or f"https://github.com/team-echo/{name}"}
-        response = await self.client.post(SERVICES, json={**body, **extra})
+        response = await self.client.post(self.services, json={**body, **extra})
         assert response.status_code == 201, response.text
         return self._data(response.text, response.json())
 
@@ -210,22 +236,26 @@ class DeployHarness:
     ) -> Any:
         """본문을 그대로 보낸다(칸이 하나도 없을 때만 branch=main)."""
         body = {"environmentId": str(environment_id), **(fields or {"branch": "main"})}
-        response = await self.client.post(f"{SERVICES}/{service_id}/deploy-requests", json=body)
+        response = await self.client.post(
+            f"{self.services}/{service_id}/deploy-requests", json=body
+        )
         self.responses.append(response.text)
         return response
 
     async def get_request(self, request_id: str) -> dict[str, Any]:
-        response = await self.client.get(f"{DEPLOY_REQUESTS}/{request_id}")
+        response = await self.client.get(f"{self.deploy_requests}/{request_id}")
         assert response.status_code == 200, response.text
         return self._data(response.text, response.json())
 
     async def get_service(self, service_id: str) -> dict[str, Any]:
-        response = await self.client.get(f"{SERVICES}/{service_id}")
+        response = await self.client.get(f"{self.services}/{service_id}")
         assert response.status_code == 200, response.text
         return self._data(response.text, response.json())
 
     async def list_requests(self, service_id: str, **params: Any) -> list[dict[str, Any]]:
-        response = await self.client.get(f"{SERVICES}/{service_id}/deploy-requests", params=params)
+        response = await self.client.get(
+            f"{self.services}/{service_id}/deploy-requests", params=params
+        )
         assert response.status_code == 200, response.text
         items: list[dict[str, Any]] = self._data(response.text, response.json())["items"]
         return items

@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from tests.integration.deploy_harness import SERVICES, DeployHarness
+from tests.integration.deploy_harness import DeployHarness
 
 SERVICE_KEYS = {
     "id",
@@ -52,7 +52,7 @@ async def test_create_service_inaccessible_repo_returns_404_with_install_url(
     harness: DeployHarness, owner: str
 ) -> None:
     response = await harness.client.post(
-        SERVICES, json={"name": "shop-api", "repoUrl": f"https://github.com/{owner}/shop"}
+        harness.services, json={"name": "shop-api", "repoUrl": f"https://github.com/{owner}/shop"}
     )
 
     body = response.json()
@@ -69,7 +69,7 @@ async def test_create_service_inaccessible_repo_returns_404_with_install_url(
 
 async def test_create_service_flaky_provider_returns_502(harness: DeployHarness) -> None:
     response = await harness.client.post(
-        SERVICES, json={"name": "shop-api", "repoUrl": "https://github.com/flaky-acme/shop"}
+        harness.services, json={"name": "shop-api", "repoUrl": "https://github.com/flaky-acme/shop"}
     )
 
     assert response.status_code == 502
@@ -90,7 +90,9 @@ async def test_create_service_flaky_provider_returns_502(harness: DeployHarness)
 async def test_create_service_invalid_repo_url_returns_422(
     harness: DeployHarness, repo_url: str
 ) -> None:
-    response = await harness.client.post(SERVICES, json={"name": "shop-api", "repoUrl": repo_url})
+    response = await harness.client.post(
+        harness.services, json={"name": "shop-api", "repoUrl": repo_url}
+    )
 
     assert response.status_code == 422
     assert response.json()["details"] == [{"field": "repoUrl", "reason": "INVALID_REPO_URL"}]
@@ -112,7 +114,7 @@ async def test_create_service_out_of_range_field_returns_422(
 ) -> None:
     body = {"name": "shop-api", "repoUrl": "https://github.com/team-echo/shop-api", field: value}
 
-    response = await harness.client.post(SERVICES, json=body)
+    response = await harness.client.post(harness.services, json=body)
 
     assert response.status_code == 422
     assert response.json()["code"] == "VALIDATION_ERROR"
@@ -122,7 +124,7 @@ async def test_create_service_duplicate_name_returns_409(harness: DeployHarness)
     await harness.create_service("shop-api")
 
     response = await harness.client.post(
-        SERVICES, json={"name": "shop-api", "repoUrl": "https://github.com/team-echo/other"}
+        harness.services, json={"name": "shop-api", "repoUrl": "https://github.com/team-echo/other"}
     )
 
     assert response.status_code == 409
@@ -133,7 +135,7 @@ async def test_search_services_returns_page_in_created_order(harness: DeployHarn
     await harness.create_service("shop-api")
     await harness.create_service("billing")
 
-    response = await harness.client.get(SERVICES, params={"size": 1, "page": 1})
+    response = await harness.client.get(harness.services, params={"size": 1, "page": 1})
 
     page = response.json()["data"]
     assert response.status_code == 200
@@ -143,7 +145,7 @@ async def test_search_services_returns_page_in_created_order(harness: DeployHarn
 
 
 async def test_get_service_unknown_id_returns_404(harness: DeployHarness) -> None:
-    response = await harness.client.get(f"{SERVICES}/00000000-0000-0000-0000-000000000000")
+    response = await harness.client.get(f"{harness.services}/00000000-0000-0000-0000-000000000000")
 
     assert response.status_code == 404
     assert response.json()["code"] == "SERVICE_NOT_FOUND"
@@ -153,7 +155,7 @@ async def test_update_service_changes_fields_and_rechecks_repo(harness: DeployHa
     service = await harness.create_service("shop-api", description="old")
 
     response = await harness.client.patch(
-        f"{SERVICES}/{service['id']}",
+        f"{harness.services}/{service['id']}",
         json={
             "name": "shop-api",
             "description": None,
@@ -177,7 +179,9 @@ async def test_update_service_changes_fields_and_rechecks_repo(harness: DeployHa
 async def test_update_service_name_change_returns_422(harness: DeployHarness) -> None:
     service = await harness.create_service("shop-api")
 
-    response = await harness.client.patch(f"{SERVICES}/{service['id']}", json={"name": "other"})
+    response = await harness.client.patch(
+        f"{harness.services}/{service['id']}", json={"name": "other"}
+    )
 
     assert response.status_code == 422
     assert response.json()["code"] == "SERVICE_NAME_IMMUTABLE"
@@ -191,7 +195,7 @@ async def test_update_service_null_other_than_description_returns_422(
 ) -> None:
     service = await harness.create_service("shop-api")
 
-    response = await harness.client.patch(f"{SERVICES}/{service['id']}", json={field: None})
+    response = await harness.client.patch(f"{harness.services}/{service['id']}", json={field: None})
 
     assert response.status_code == 422
     assert response.json()["details"] == [{"field": field, "reason": "NULL_NOT_ALLOWED"}]
@@ -203,7 +207,7 @@ async def test_update_service_inaccessible_new_repo_returns_404_and_keeps_old(
     service = await harness.create_service("shop-api")
 
     response = await harness.client.patch(
-        f"{SERVICES}/{service['id']}", json={"repoUrl": "https://github.com/denied-x/shop"}
+        f"{harness.services}/{service['id']}", json={"repoUrl": "https://github.com/denied-x/shop"}
     )
 
     assert response.status_code == 404
