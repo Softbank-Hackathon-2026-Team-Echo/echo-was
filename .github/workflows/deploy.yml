@@ -1,0 +1,144 @@
+name: deploy
+
+# PR 에서는 test 만 돌고, main 에 push 되면 test 통과 뒤 운영(echo-dev-eks)에 배포한다.
+# 설명: deploy/README.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 운영 배포는 한 번에 하나만. 진행 중인 배포는 취소하지 않고 기다린다.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('test-{0}', github.ref) || 'deploy-prod' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-1
+  ROLE_ARN: arn:aws:iam::706878591119:role/echo-was-deploy
+  ECR_REPO: 706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo/app
+  CLUSTER: echo-dev-eks
+  NAMESPACE: echo-was
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: echo
+          POSTGRES_PASSWORD: echo
+          POSTGRES_DB: echo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U echo -d echo_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      # 개발용 더미 계정이다(compose.yaml 과 같다). 실제 비밀값이 아니다.
+      DATABASE_URL: postgresql+asyncpg://echo:echo@localhost:5432/echo_test
+      TEST_DATABASE_URL: postgresql+asyncpg://echo:echo@localhost:5432/echo_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy app
+      - run: uv run pytest
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # AWS OIDC
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 이미지 태그 정하기
+        # ECR 태그는 바꿀 수 없다. 같은 커밋을 다시 돌려도 겹치지 않게 실행 번호를 붙인다.
+        run: echo "IMAGE_TAG=was-${GITHUB_SHA::7}-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: 이미지 빌드·푸시
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 클러스터 접속
+        run: aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+      - name: 매니페스트 준비
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${ECR_REPO}@${{ steps.build.outputs.digest }}"
+          SUFFIX="${GITHUB_SHA::7}"
+          echo "배포 이미지: ${IMAGE_REF}"
+          mkdir -p out
+          cp deploy/base.yaml out/base.yaml
+          sed -e "s#IMAGE_REF#${IMAGE_REF}#g" -e "s#MIGRATE_SUFFIX#${SUFFIX}#g" deploy/migrate-job.yaml > out/migrate-job.yaml
+          sed -e "s#IMAGE_REF#${IMAGE_REF}#g" deploy/app.yaml > out/app.yaml
+          echo "MIGRATE_JOB=echo-was-migrate-${SUFFIX}" >> "$GITHUB_ENV"
+
+      - name: 설정·DB·Ingress 적용
+        run: kubectl apply -n "$NAMESPACE" -f out/base.yaml
+
+      - name: 마이그레이션
+        run: |
+          set -euo pipefail
+          # 같은 커밋을 다시 돌릴 때를 위해 같은 이름의 옛 Job 은 지운다.
+          kubectl -n "$NAMESPACE" delete job "$MIGRATE_JOB" --ignore-not-found
+          kubectl apply -n "$NAMESPACE" -f out/migrate-job.yaml
+          if ! kubectl -n "$NAMESPACE" wait --for=condition=complete "job/$MIGRATE_JOB" --timeout=300s; then
+            echo "::error::마이그레이션 실패. 롤아웃하지 않고 기존 파드를 그대로 둔다."
+            kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=50 || true
+            exit 1
+          fi
+          kubectl -n "$NAMESPACE" logs "job/$MIGRATE_JOB" --tail=10
+
+      - name: 롤아웃
+        run: |
+          set -euo pipefail
+          kubectl apply -n "$NAMESPACE" -f out/app.yaml
+          if ! kubectl -n "$NAMESPACE" rollout status deploy/echo-was-api --timeout=300s \
+            || ! kubectl -n "$NAMESPACE" rollout status deploy/echo-was-worker --timeout=300s; then
+            echo "::error::롤아웃 실패. 직전 버전으로 되돌린다."
+            kubectl -n "$NAMESPACE" rollout undo deploy/echo-was-api deploy/echo-was-worker || true
+            exit 1
+          fi
+
+      - name: 운영 확인
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://api.echoport.uk/readyz || true)
+            echo "readyz -> ${code}"
+            if [ "$code" = "204" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::/readyz 가 204 가 아니다"
+          exit 1
