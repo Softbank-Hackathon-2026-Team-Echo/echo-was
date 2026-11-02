@@ -25,7 +25,8 @@ erDiagram
     service_environments ||--o{ deploy_requests : "어느 연결에"
     builds |o--o{ deploy_requests : "빌드 1 : 요청 N"
     deploy_requests |o--o| deployments : "빌드 성공 뒤 배포 기록"
-    deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청"
+    deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청·되돌리기 대상"
+    deploy_requests ||--o{ deploy_request_logs : "배포 작업 로그"
 
     services {
         uuid id PK
@@ -54,12 +55,25 @@ erDiagram
     deploy_requests {
         uuid id PK
         uuid service_environment_id FK
-        varchar16 trigger "MANUAL · STANDBY_SYNC"
+        varchar16 trigger "MANUAL · STANDBY_SYNC · ROLLBACK"
         char40 commit_sha "접수 순간 고정"
         varchar16 status "QUEUED ... CANCELLED"
         uuid build_id FK
         uuid deployment_id FK
         jsonb config_snapshot "접수 때 설정 사본"
+        bool simulated
+        uuid rollback_of_request_id FK "되돌리기 대상 요청"
+        uuid rollback_base_deployment_id FK "접수 때 현재 배포"
+    }
+    deploy_request_logs {
+        uuid id PK
+        uuid deploy_request_id FK
+        int seq "요청마다 1부터, (요청, seq) 유일"
+        timestamptz logged_at "주입한 시계"
+        varchar8 level "INFO · WARN · ERROR"
+        varchar16 stage "요청 상태 값 · REVERT"
+        varchar48 code "REQUEST_ACCEPTED ..."
+        varchar500 message "고정 문장"
         bool simulated
     }
     jobs {
@@ -201,12 +215,12 @@ erDiagram
 |---|---|---|---|---|
 | `id` | uuid | N | PK | 접수 번호 |
 | `service_id`·`environment_id`·`service_environment_id` | uuid | N | FK | 어느 서비스를 어느 연결에 |
-| `trigger` | varchar(16) | N | `MANUAL`·`STANDBY_SYNC`, `STANDBY_SYNC ⇔ source_request_id 있음` | 사람이 보냈나, 예비 따라가기인가 |
+| `trigger` | varchar(16) | N | `MANUAL`·`STANDBY_SYNC`·`ROLLBACK`, `STANDBY_SYNC ⇔ source_request_id 있음` | 사람이 보냈나, 예비 따라가기인가, 되돌리기인가(API 서버 4) |
 | `source_request_id` | uuid | Y | FK 자기 참조 | 따라가기의 원본 요청 |
 | `ref_type`·`ref_value` | varchar(8)·varchar(255) | N | `BRANCH`·`COMMIT` | 사용자가 준 브랜치·커밋 |
 | `repo_url`·`commit_sha` | varchar(300)·char(40) | N | SHA 형식 CHECK | **접수 순간 고정**한 저장소·커밋 |
 | `status` | varchar(16) | N | 7개 값 CHECK | ④-3 |
-| `cancel_reason` | varchar(16) | Y | `SUPERSEDED`·`SERVICE_DELETED`, `CANCELLED ⇔ 값 있음` | |
+| `cancel_reason` | varchar(16) | Y | `SUPERSEDED`·`SERVICE_DELETED`·`BASE_CHANGED`, `CANCELLED ⇔ 값 있음` | `BASE_CHANGED`: 되돌리기를 시작할 때 현재 배포가 접수 때와 달랐다 |
 | `superseded_by_id` | uuid | Y | FK 자기 참조 | 이 요청을 밀어낸 새 요청 |
 | `error_code` | varchar(32) | Y | `FAILED ⇔ 값 있음`, 값 CHECK 없음 | 실패 이유 코드 |
 | `build_id`·`build_reused` | uuid·boolean | Y | FK `builds.id`, 둘은 함께 NULL | 쓰는 빌드와 재사용 여부 |
@@ -218,10 +232,33 @@ erDiagram
 | `simulate` | jsonb | Y | object CHECK | `{"failAt": …}` 가짜 모드 실패 지정 |
 | `simulated` | boolean | N | | 가짜 실행기로 처리했는지(저장 값) |
 | `building_at`·`deploying_at`·`verifying_at`·`started_at`·`finished_at` | timestamptz | Y | 끝 상태 ⇔ `finished_at` 있음 | 단계 시각(배포·헬스 제한 시간 기준) |
+| `rollback_of_request_id` | uuid | Y | FK 자기 참조, `ROLLBACK ⇔ 값 있음`, 자기 자신 금지 | 되돌리기 대상(이력에서 고른 `SUCCEEDED` 요청). API 서버 4 |
+| `rollback_base_deployment_id` | uuid | Y | FK `deployments.id`, `ROLLBACK ⇔ 값 있음` | 되돌리기 접수 순간 연결의 현재 배포. 시작 때 다르면 `CANCELLED(BASE_CHANGED)` |
 | (실행 1 + 대기 1) | | | `uq_deploy_requests_service_environment_id_active`(`BUILDING`·`DEPLOYING`·`VERIFYING`), `uq_deploy_requests_service_environment_id_queued`(`QUEUED`) | 같은 연결에 실행 중 1개 + 대기 1개까지 |
 | (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_deploy_requests_prevent_delete` → 공용 함수 `prevent_append_only_delete()` | 행 DELETE 는 예외(23001) |
 
-- 인덱스: `(service_id, created_at)`(목록), `(service_environment_id, created_at)`(연결별 최근 요청), `build_id`(빌드를 기다리는 요청).
+- 인덱스: `(service_id, created_at)`(목록), `(service_environment_id, created_at)`(연결별 최근 요청), `build_id`(빌드를 기다리는 요청), `rollback_of_request_id`(되돌리기 대상).
+- 되돌리기 요청은 대상의 `commit_sha`·`repo_url`·`build_id`(`build_reused = true`)와 대상 배포 기록의 `config_snapshot` 사본을 쓰고 `ref = COMMIT` 이다. 새 배포 기록은 `deployments.rollback_of_id = 대상 요청의 deployment_id` 다.
+
+### `deploy_request_logs` — 배포 작업 로그 (지우지 않는 기록, API 서버 4)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `deploy_request_id` | uuid | N | FK `deploy_requests.id`(RESTRICT) | 어느 요청의 줄인가 |
+| `seq` | int | N | `>= 1`, unique(`deploy_request_id`, `seq`) | 요청마다 1부터 빈틈없이. 서비스 행 잠금 안에서 `max(seq) + 1` |
+| `logged_at` | timestamptz | N | | 주입한 `Clock.now()`(DB `now()` 아님) |
+| `level` | varchar(8) | N | `INFO`·`WARN`·`ERROR` | |
+| `stage` | varchar(16) | N | | 요청 상태 값 또는 `REVERT` |
+| `code` | varchar(48) | N | 값 CHECK 없음(`DeployLogCode`) | `REQUEST_ACCEPTED`·`STARTED`·`BUILD_ATTACHED`·`BUILD_REUSED`·`DEPLOYMENT_CREATED`·`DEPLOY_REQUESTED`·`DEPLOY_APPLIED`·`HEALTH_PROBE_*`·`SUCCEEDED`·`STANDBY_SYNC_REQUESTED`·`FAILED`·`REVERT_*`·`CANCELLED_*`·`LOG_TRUNCATED` |
+| `message` | varchar(500) | N | | 코드별 **고정 문장**(`FAILED` 는 실패 코드 문장). 외부 응답 원문·토큰 없음 |
+| `simulated` | boolean | N | | 그 요청의 `simulated` |
+| `created_at` | timestamptz | N | | |
+| (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_deploy_request_logs_prevent_delete` → 공용 함수 `prevent_append_only_delete()` | |
+
+- 줄은 그 줄을 일으킨 상태 전환(또는 요청 삽입)과 **같은 트랜잭션**에서, 조건부 UPDATE 가 실제로 반영됐을 때만 쓴다. 그래서 일꾼이 다시 시작해도 줄이 겹치거나 빠지지 않는다. 쓰는 지점은 접수·밀어내기·예비 따라가기·일꾼 단계·서비스 삭제 API·내리기 일꾼이 전부다([api/deploy-requests.md](api/deploy-requests.md#배포-작업-로그-줄)).
+- 요청당 500줄. 500번째 자리에 `LOG_TRUNCATED` 를 쓰고 그 뒤 줄은 쓰지 않는다(상태 진행은 계속).
+- 빌드 로그·실행 로그는 저장하지 않는다. 로그 API 가 실행기의 `read_logs`·`read_runtime_logs` 로 즉석 조회한다([executors.md](executors.md)).
 
 ### `jobs` — 할 일 (일꾼 큐)
 
@@ -337,8 +374,8 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QUEUED : 접수 (커밋 SHA 고정)
-    QUEUED --> CANCELLED : 새 요청이 밀어냄(SUPERSEDED) · 서비스 삭제(SERVICE_DELETED)
+    [*] --> QUEUED : 접수 (커밋 SHA 고정) · 되돌리기 접수(ROLLBACK)
+    QUEUED --> CANCELLED : 새 요청이 밀어냄(SUPERSEDED) · 서비스 삭제(SERVICE_DELETED) · 되돌리기 기준 바뀜(BASE_CHANGED)
     QUEUED --> BUILDING : 같은 연결에 실행 중 요청이 없음
     BUILDING --> DEPLOYING : 빌드 성공(재사용이면 바로) / 배포 기록 IN_PROGRESS
     BUILDING --> FAILED : BUILD_FAILED · BUILD_TIMEOUT · REPO_NOT_ACCESSIBLE …
@@ -352,6 +389,7 @@ stateDiagram-v2
 ```
 
 - 일꾼이 임대를 3번 잃으면 어느 진행 상태에서든 `FAILED`(`WORKER_LOST`)로 끝난다(배포 기록이 있으면 되돌리기).
+- 되돌리기(`trigger = ROLLBACK`, API 서버 4)는 같은 흐름이다. `BUILDING` 은 대상의 성공한 빌드를 재사용해 바로 지나고, 시작할 때 연결의 현재 배포가 `rollback_base_deployment_id` 와 다르면 `CANCELLED(BASE_CHANGED)` 로 끝난다. 서비스 중 연결에서 성공하면 예비 연결이 따라간다(예비를 직접 되돌리면 따라가기 없음).
 - 빌드(`builds.status`): `QUEUED` → `RUNNING`(실행기 시작) → `SUCCEEDED`·`FAILED`. 끝 상태는 조건부 UPDATE 로 한 번만 적는다. 빌드가 `FAILED` 면 그 빌드를 기다리는 요청은 모두 같은 코드로 끝난다.
 - 서비스(`services.status`): `ACTIVE` → `DELETING`(삭제 접수) → 소프트 삭제(모든 연결을 내림). 내리기 실패면 `DELETING` + `delete_error` 로 남고, 다시 DELETE 하면 남은 연결만 내린다.
 
@@ -407,6 +445,8 @@ stateDiagram-v2
 | 할 일 표 + 별도 일꾼(`FOR UPDATE SKIP LOCKED` + 임대) | API 재시작·일꾼 장애에도 일이 남고, 임대가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 호출은 우리 행 id 를 멱등 키로 넘겨 두 번 만들지 않는다 | 요청 안에서 처리·인메모리 큐: 재시작하면 일이 사라진다 |
 | 잠금 순서 하나(조직(멤버 변경·초대만) → 환경 → 서비스 → 연결(id 순) → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
 | `simulated` 를 행에 저장 | 실제 실행기로 바꾼 뒤에도 과거 가짜 기록을 구분한다(해커톤 목업 공개 규칙) | 응답 때 설정으로 계산: 모드를 바꾸면 과거 기록이 진짜처럼 보인다 |
+| 되돌리기 = `trigger = ROLLBACK` 배포 요청(API 서버 4) | 겹침 규칙·헬스체크·실패 때 직전 버전 유지·가짜 실패 주입을 그대로 쓴다. 새 빌드 없이 대상의 빌드를 재사용하고, 접수 순간 현재 배포를 적어 두어 그사이 다른 배포가 성공했으면 덮어쓰지 않는다(`BASE_CHANGED`) | 별도 되돌리기 API·표: 대기열·헬스체크·실패 처리를 다시 만들어야 한다 |
+| 배포 작업 로그는 DB, 빌드·실행 로그는 실행기 즉석 조회 | 작업 로그는 상태 전환과 같은 트랜잭션이라 겹침·누락이 없다. 실행 로그는 끝없이 늘어 DB 에 담지 않고, 실제 실행기로 바꿀 때 구현만 바꾼다 | 모든 로그 저장: 표가 끝없이 커진다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
 | 고객 앱 주소 = 이름 + 무작위 8자, 도메인 바로 아래 한 단계(`host_suffix`) | 지운 서비스와 같은 이름의 새 서비스가 옛 주소를 잇지 못한다(하위 도메인 탈취 방지). `*.도메인` 와일드카드 하나로 DNS·인증서를 덮는다. 주소 유일성을 suffix 가 맡으니 서비스 이름은 조직 안에서만 유일하면 된다 | `{서비스}.{도메인}`·`{서비스}.{환경}.{도메인}`: 이름이 Echo 전체에서 유일해야 하고, 지운 이름을 남이 다시 쓰면 옛 주소를 이어받으며, 두 단계 주소는 환경마다 와일드카드가 따로 필요하다 |
@@ -467,11 +507,10 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 
 ## ⑧ 후속 표
 
-아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3, 사용자·조직·역할·거부 기록은 API 서버 6 에서 만들었다.)
+아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3, 사용자·조직·역할·거부 기록은 API 서버 6, 배포 작업 로그(`deploy_request_logs`)는 API 서버 4 에서 만들었다.)
 
 | 표(예정) | 내용 | 담당 태스크 |
 |---|---|---|
-| (배포·빌드·실행 로그) | 로그 저장·조회 | API 서버 4 (배포 이력·되돌리기·로그) |
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
 | `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
 | `migration_plans` | 이전 계획·승인·실행 | API 서버 8 (이전 계획) |

@@ -1,6 +1,8 @@
-# 배포 요청 API — 원터치 배포 (API 서버 3)
+# 배포 요청 API — 원터치 배포 (API 서버 3) · 이력·되돌리기·로그 (API 서버 4)
 
 등록한 서비스의 Git 브랜치나 커밋을 **요청 한 번**으로 빌드해 고른 환경 1곳에 배포한다. 헬스체크를 통과해야 새 버전으로 바꾸고, 대표 주소와 환경별 주소를 돌려준다. 근거: SPEC [specs/api-3-one-touch-deploy.md](../../specs/api-3-one-touch-deploy.md), 원장 F1. 서비스 등록은 [services.md](services.md).
+
+API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 버전·되돌리기 가능 여부·필터), 이력에서 고른 이전 성공 버전으로 **되돌리기**(`trigger = ROLLBACK` 요청)와 **세 가지 로그**(배포 작업·빌드·실행) 조회를 더한다. 근거: SPEC [specs/api-4-history-rollback-logs.md](../../specs/api-4-history-rollback-logs.md).
 
 - 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 경로는 `/api/v1/orgs/{orgId}` 아래이고 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 접수는 **개발자 이상의 사람**이다(에이전트 토큰은 403 `AGENT_READ_ONLY`, [auth.md](auth.md)).
 - **접수만 동기다.** API 는 요청을 `QUEUED` 로 저장하고 202 를 준다. 빌드·배포·헬스체크는 별도 일꾼(`python -m app.worker`)이 진행한다. **일꾼이 없으면 요청은 `QUEUED` 에 남는다.** 진행 상황은 단건 조회로 폴링한다(실시간 푸시 없음).
@@ -11,10 +13,12 @@
 | 메서드 · 경로 | 요청 | 성공 | 실패 | 최소 역할 |
 |---|---|---|---|---|
 | `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests` | `CreateDeployRequest` | 202 `DeployRequestDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`·`REPO_NOT_ACCESSIBLE`, 409 `SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`PUBLIC_HOST_CONFLICT`, 422 `VALIDATION_ERROR`·`REF_NOT_FOUND`·`SIMULATE_NOT_ALLOWED`, 502 `SOURCE_PROVIDER_UNAVAILABLE` | 개발자 |
-| `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests?page&size&environmentId` | — | 200 `Page[DeployRequestSummary]`(최신순) | 404 `SERVICE_NOT_FOUND` | 뷰어·에이전트 |
+| `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests?page&size&environmentId&trigger&status` | — | 200 `Page[DeployRequestSummary]`(최신순) | 404 `SERVICE_NOT_FOUND`, 422 `VALIDATION_ERROR` | 뷰어·에이전트 |
 | `GET /api/v1/orgs/{orgId}/deploy-requests/{id}` | — | 200 `DeployRequestDetail` | 404 `DEPLOY_REQUEST_NOT_FOUND` | 뷰어·에이전트 |
+| `POST /api/v1/orgs/{orgId}/deploy-requests/{id}/rollback` | `RollbackRequest`(바디 선택) | 202 `DeployRequestDetail` | 403 `AGENT_READ_ONLY`·`ROLE_FORBIDDEN`, 404 `DEPLOY_REQUEST_NOT_FOUND`·`SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409 `NOT_ROLLBACKABLE`·`ALREADY_CURRENT`·`SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`, 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자 |
+| `GET /api/v1/orgs/{orgId}/deploy-requests/{id}/logs?source&cursor&limit` | — | 200 `LogPage` | 404 `DEPLOY_REQUEST_NOT_FOUND`, 422 `VALIDATION_ERROR` | 뷰어·에이전트 |
 
-코드 클래스: `CreateDeployRequest`, `DeployRequestSummary` = `DeployRequestSummaryResponse`, `DeployRequestDetail` = `DeployRequestDetailResponse`(`app/schemas/deploy_request.py`).
+코드 클래스: `CreateDeployRequest`, `RollbackRequest`, `DeployRequestSummary` = `DeployRequestSummaryResponse`, `DeployRequestDetail` = `DeployRequestDetailResponse`, `LogPage` = `LogPageResponse`(`app/schemas/deploy_request.py`).
 
 ### 접수 `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
 
@@ -41,7 +45,7 @@
 ```mermaid
 stateDiagram-v2
     [*] --> QUEUED
-    QUEUED --> CANCELLED : SUPERSEDED · SERVICE_DELETED
+    QUEUED --> CANCELLED : SUPERSEDED · SERVICE_DELETED · BASE_CHANGED(되돌리기)
     QUEUED --> BUILDING
     BUILDING --> DEPLOYING : 빌드 성공(같은 커밋 빌드가 있으면 재사용)
     DEPLOYING --> VERIFYING : 배포 반영
@@ -55,18 +59,106 @@ stateDiagram-v2
 - **배포**: 빌드가 성공하면 배포 기록(`deploymentId`)을 만들고 배포 실행기가 반영한다. 제한 시간은 `DEPLOYING` 시작 기준 `DEPLOY_TIMEOUT_SECONDS`(300).
 - **헬스체크**: 일꾼이 실행될 때마다 **환경별 주소 + `healthCheckPath`** 를 한 번 GET 한다(요청 하나 5초, 리다이렉트 따르지 않음). 2xx 면 통과, 아니면 `HEALTH_CHECK_INTERVAL_SECONDS`(5) 뒤 다시 확인한다. `VERIFYING` 시작 + `healthCheckTimeoutSeconds`(접수 때 사본)를 넘기면 마지막 결과로 끝낸다: 2xx 가 아닌 응답이면 `HEALTH_CHECK_FAILED`, 연결 실패면 `PUBLIC_URL_UNREACHABLE`, 한 번도 확인하지 못했으면 `HEALTH_CHECK_TIMEOUT`. 대표 주소는 성공 처리 뒤에야 이 환경을 가리키므로 이 단계에서 확인하지 않는다.
 - **성공 처리**: 연결의 현재 배포를 새 배포 기록으로 바꾼다. 이 서비스에 서비스 중(`trafficWeight > 0`) 연결이 없으면 대표 주소 라우터가 이 연결로 주소를 보내고, "적용했다"고 답하면 `trafficWeight = 100` 이 된다(**서비스 중**). 이미 서비스 중인 연결이 있으면 이 연결은 **예비**(`trafficWeight = 0`)로 남는다. 트래픽 전환·이전은 API 서버 8 이 한다.
-- **예비 자동 따라가기**: 서비스 중 연결의 수동 요청이 성공하면, 현재 배포가 있는 예비 연결마다 `trigger = STANDBY_SYNC` 요청이 생긴다(`sourceRequestId` = 원본, 같은 커밋·같은 빌드 — 재빌드 없음, 설정 사본은 환경별 주소만 다름). 이 요청도 같은 겹침 규칙을 따라 예비 연결의 대기 요청을 밀어낸다. 예비 연결 요청의 성공·실패는 서비스 중 연결에 영향이 없고, 예비 요청은 다시 따라가기를 만들지 않는다. 서비스가 `DELETING` 이면 만들지 않는다. 예비 연결에 사용자가 다른 커밋을 직접 배포하는 것은 막지 않는다(그때는 서비스 상세에서 `OUT_OF_SYNC` 로 보인다).
+- **예비 자동 따라가기**: 서비스 중 연결의 수동 요청·되돌리기 요청이 성공하면, 현재 배포가 있는 예비 연결마다 `trigger = STANDBY_SYNC` 요청이 생긴다(`sourceRequestId` = 원본, 같은 커밋·같은 빌드 — 재빌드 없음, 설정 사본은 환경별 주소만 다름). 이 요청도 같은 겹침 규칙을 따라 예비 연결의 대기 요청을 밀어낸다. 예비 연결 요청의 성공·실패는 서비스 중 연결에 영향이 없고, 예비 요청은 다시 따라가기를 만들지 않는다. 서비스가 `DELETING` 이면 만들지 않는다. 예비 연결에 사용자가 다른 커밋을 직접 배포하는 것은 막지 않는다(그때는 서비스 상세에서 `OUT_OF_SYNC` 로 보인다).
 - **실패와 되돌리기**: 배포 기록이 생긴 뒤의 모든 실패(배포 실패·시간 초과, 헬스 실패 3종, 일꾼 상실)는 되돌리기를 불러 직전 버전을 유지하고 결과를 `revertStatus`(`SUCCEEDED`·`FAILED`)에 적는다. 되돌리기가 실패해도 `errorCode` 는 바꾸지 않는다. 연결의 현재 배포·비율은 그대로다.
 - **일꾼 복구**: 일꾼이 죽어도 임대(30초)가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 작업은 멱등 키로 두 번 만들지 않는다([executors.md](../executors.md)). 같은 요청에서 임대를 3번 잃으면 `WORKER_LOST` 로 끝난다.
 
-### 목록 `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
+### 목록(이력) `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
 
-- 쿼리: `page`(0부터), `size`(1~100, 기본 20), `environmentId`(선택, 그 환경 요청만).
-- `createdAt` 내림차순(최신 먼저), 같으면 `id` 내림차순. 삭제가 끝난 서비스는 404.
+- 쿼리: `page`(0부터), `size`(1~100, 기본 20), `environmentId`(선택, 그 환경 요청만), `trigger`(선택, 반복 가능: `MANUAL`·`STANDBY_SYNC`·`ROLLBACK`), `status`(선택, 반복 가능: 7개 상태). 모르는 값은 422 `VALIDATION_ERROR`. 예: `?environmentId=…&status=SUCCEEDED&status=FAILED`.
+- `createdAt` 내림차순(최신 먼저), 같으면 `id` 내림차순. 성공·실패·취소·대기 요청이 모두 나온다. `total` 은 필터를 적용한 개수. 삭제가 끝난 서비스는 404(그 요청들은 단건으로 조회).
+- 각 항목의 `isCurrent`·`rollbackable` 은 한 페이지의 연결·서비스를 한 번에 읽어 계산한다(요청 수와 상관없이 쿼리 수가 같다).
 
 ### 단건 `GET /api/v1/orgs/{orgId}/deploy-requests/{id}`
 
-이력이므로 서비스가 삭제된 뒤에도 조회된다. 배포 요청 행은 지우지 않는다(DB 트리거가 DELETE 를 막는다).
+이력이므로 서비스가 삭제된 뒤에도 조회된다(이때 `rollbackable = false`). 배포 요청 행은 지우지 않는다(DB 트리거가 DELETE 를 막는다).
+
+### 되돌리기 `POST /api/v1/orgs/{orgId}/deploy-requests/{id}/rollback`
+
+이력에서 고른 **성공한 요청 하나**(`{id}`)가 만든 배포 기록의 **이미지(digest)와 설정 사본을 함께** 그 연결(같은 서비스 × 같은 환경)에 다시 올린다. 새 빌드를 만들지 않는다.
+
+```json
+{}
+```
+
+```json
+{"simulate": {"failAt": "VERIFYING"}}
+```
+
+| 칸 | 규칙 |
+|---|---|
+| (바디) | 비어도 된다(바디 없이 보내도 된다). `simulate` 밖의 칸은 422 |
+| `simulate` | 선택. `{"failAt": "DEPLOYING" \| "VERIFYING"}`. 되돌리기에는 빌드 단계가 없어 `BUILDING` 은 422 `VALIDATION_ERROR`. 가짜 실행기 모드에서만 받는다(아니면 422 `SIMULATE_NOT_ALLOWED`) |
+
+접수(거절 순서: 권한 → 바디 → 대상 요청 → 서비스·환경 → 상태):
+
+1. 권한: **개발자 이상의 사람**(배포 요청 접수와 같은 검사기). 뷰어 403 `ROLE_FORBIDDEN`, 에이전트 토큰 403 `AGENT_READ_ONLY`(둘 다 거부 기록).
+2. 대상 요청이 없거나 다른 조직이면 404 `DEPLOY_REQUEST_NOT_FOUND`.
+3. 서비스가 삭제를 마쳤으면 404 `SERVICE_NOT_FOUND`, `DELETING` 이면 409 `SERVICE_DELETING`. 환경이 삭제됐으면 404 `ENVIRONMENT_NOT_FOUND`, 마지막 접속 확인 `FAILED` 면 409 `ENVIRONMENT_UNHEALTHY`.
+4. 대상이 `SUCCEEDED` 가 아니거나 배포 기록이 없으면(또는 연결이 내려갔으면) 409 `NOT_ROLLBACKABLE`. 대상의 배포 기록이 이미 그 연결의 현재 배포면 409 `ALREADY_CURRENT`. 판정은 **배포 기록 id** 로 한다 — 현재와 이미지·설정이 같은 다른 행(예: 되돌리기의 원본)은 되돌릴 수 있고, 그때는 같은 이미지를 다시 반영한다.
+5. 같은 연결의 대기 요청은 `SUPERSEDED` 로 밀어내고 새 요청을 넣는다: `trigger = ROLLBACK`, `rollbackOfRequestId = {id}`, `ref = {type: COMMIT, value: 대상 커밋}`, 커밋·저장소 = 대상 값, `build` = 대상의 빌드(`reused = true`), 설정 사본 = 대상 배포 기록의 사본. 접수 순간 연결의 현재 배포를 함께 기억한다.
+6. 202 + `DeployRequestDetail`(`status = QUEUED`, `trigger = ROLLBACK`).
+
+진행(일꾼, 원터치 배포와 같은 흐름에 아래만 다르다):
+
+- **시작 때 다시 확인**: 같은 연결에 실행 중 요청이 끝나 이 요청이 시작할 때, 연결의 현재 배포가 접수 때 기억한 값과 **다르면** `CANCELLED`(`cancelReason = BASE_CHANGED`)로 끝낸다. 그사이 다른 배포가 성공했다면 사용자가 보지 못한 새 버전을 되돌리기로 덮어쓰지 않는다. 같으면 시작한다.
+- `BUILDING` 은 재사용한 빌드를 바로 지난다. 새 배포 기록의 `rollback_of_id` 는 대상의 배포 기록이고, 이미지·digest·설정 사본은 대상과 같다.
+- 헬스체크·실패·되돌리기(실패한 새 버전을 거두는 것)·일꾼 상실·겹침 규칙은 원터치 배포와 같다. **배포·헬스체크에 실패하면 연결의 현재 배포와 `trafficWeight` 는 그대로**이고, 새 배포 기록은 `FAILED`, `revertStatus` 와 `errorCode` 가 남는다.
+- **예비 따라가기**: 서비스 중 연결(`trafficWeight > 0`)의 되돌리기가 성공하면 현재 배포가 있는 예비 연결마다 `STANDBY_SYNC` 요청이 생긴다(`sourceRequestId` = 되돌리기 요청, 같은 빌드). 예비 연결을 직접 되돌리면 따라가기를 만들지 않는다. 서비스가 `DELETING` 이면 만들지 않는다.
+- 대상 요청이 `STANDBY_SYNC` 이거나 이미 `ROLLBACK` 이어도 `SUCCEEDED` 면 대상이 될 수 있다.
+
+### 로그 `GET /api/v1/orgs/{orgId}/deploy-requests/{id}/logs`
+
+| 쿼리 | 규칙 |
+|---|---|
+| `source` | 필수. `DEPLOY_JOB`(배포 작업 로그) · `BUILD`(빌드 로그) · `RUNTIME`(실행 로그) |
+| `cursor` | 선택. 앞 페이지의 `nextCursor` 를 그대로 넘긴다. `DEPLOY_JOB` 은 0 이상 정수 문자열, `BUILD`·`RUNTIME` 은 실행기가 정한 값. 잘못된 값은 422 `VALIDATION_ERROR`(`details: [{field: cursor, reason: INVALID_CURSOR}]`) |
+| `limit` | 선택. 1~500, 기본 200 |
+
+- 요청이 없거나 다른 조직이면 404 `DEPLOY_REQUEST_NOT_FOUND`. 서비스가 삭제된 뒤에도 읽는다.
+- `DEPLOY_JOB`: 일꾼이 DB 에 저장한 줄(아래 "배포 작업 로그 줄")을 `seq` 순으로 준다. `nextCursor` = 돌려준 마지막 줄의 `seq`.
+- `BUILD`: 그 요청이 쓰는 빌드(재사용 빌드 포함 — 되돌리기·예비 따라가기는 원본 빌드의 로그)를 빌드 실행기가 즉석으로 읽는다. 빌드가 아직 없거나 시작 전이면 빈 페이지.
+- `RUNTIME`: 그 요청의 배포(배포 기록 + 배포 실행기 번호)의 실행 로그를 배포 실행기가 즉석으로 읽는다. 배포 요청 전이거나 연결을 내렸으면 빈 페이지.
+- 실행기를 쓸 수 없으면(실제 실행기 미구현 모드) 또는 실행기의 `simulated` 가 기록과 다르면 빈 페이지(오류 아님).
+- 모든 줄의 `message` 는 응답 직전에 알려진 비밀값 모양(GitHub 토큰, AWS 액세스 키, `Bearer` 토큰, `sk-` 키, 개인 키 블록)을 `***` 로 바꾼다. 실행기도 가려서 돌려줘야 한다([executors.md](../executors.md)).
+- 실시간 스트리밍·검색·보존 기간은 없다(폴링).
+
+```json
+{
+  "success": true,
+  "data": {
+    "source": "DEPLOY_JOB",
+    "simulated": true,
+    "items": [
+      {"at": "2026-11-02T03:00:00Z", "level": "INFO", "message": "Deploy request accepted."},
+      {"at": "2026-11-02T03:00:01Z", "level": "INFO", "message": "Deploy request started."}
+    ],
+    "nextCursor": "2",
+    "hasMore": true
+  }
+}
+```
+
+### 배포 작업 로그 줄
+
+상태 전환과 **같은 트랜잭션**에서, 전환이 실제로 반영됐을 때만 한 줄씩 쓴다(일꾼이 다시 시작해도 줄이 겹치거나 빠지지 않는다). 문장은 코드별 고정 영어 문장이고 외부 응답 원문을 넣지 않는다. 요청당 500줄까지이며 500번째 자리에 `LOG_TRUNCATED` 를 쓰고 그 뒤 줄은 버린다(상태 진행은 계속).
+
+| 코드 | 수준 | 단계(`stage`) | 언제 |
+|---|---|---|---|
+| `REQUEST_ACCEPTED` | INFO | QUEUED | 접수·되돌리기 접수·예비 따라가기 요청 생성 |
+| `STARTED` | INFO | BUILDING | `QUEUED → BUILDING` |
+| `BUILD_ATTACHED` · `BUILD_REUSED` | INFO | BUILDING | 새 빌드를 만들었다 · 있는 빌드를 쓴다(되돌리기·따라가기는 시작 직후) |
+| `DEPLOYMENT_CREATED` | INFO | DEPLOYING | 배포 기록 생성(`BUILDING → DEPLOYING`) |
+| `DEPLOY_REQUESTED` · `DEPLOY_APPLIED` | INFO | DEPLOYING | 배포 실행기 요청 · 반영(`DEPLOYING → VERIFYING`) |
+| `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` | WARN | VERIFYING | 헬스 결과 종류가 **바뀔 때만**(같은 실패가 이어지면 한 줄) |
+| `HEALTH_PROBE_OK` · `SUCCEEDED` | INFO | VERIFYING · SUCCEEDED | 성공 처리 |
+| `STANDBY_SYNC_REQUESTED` | INFO | SUCCEEDED | 원본 요청에, 예비 연결마다 한 줄 |
+| `FAILED` | ERROR | FAILED | 문장 = 그 `errorCode` 의 `errorMessage` |
+| `REVERT_SUCCEEDED` · `REVERT_FAILED` | INFO · ERROR | REVERT | 실패한 새 버전을 거둔 결과 |
+| `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` | INFO | CANCELLED | 취소 3종(서비스 삭제 API·내리기 일꾼·일꾼 시작 경로 포함) |
+| `LOG_TRUNCATED` | INFO | (대신한 줄의 단계) | 500줄 상한 |
+
+정상 순서: 새 빌드 수동 = `REQUEST_ACCEPTED, STARTED, BUILD_ATTACHED, DEPLOYMENT_CREATED, DEPLOY_REQUESTED, DEPLOY_APPLIED, HEALTH_PROBE_OK, SUCCEEDED`. 재사용 수동·되돌리기·예비 따라가기는 `BUILD_ATTACHED` 대신 `BUILD_REUSED`. 빌드 자체의 시작·성공·실패는 이 로그에 쓰지 않는다(공유 빌드를 여러 요청이 기다리므로) — 빌드 진행은 `source = BUILD` 로 본다. `simulate.failAt = VERIFYING` 은 헬스 줄 없이 `FAILED`·`REVERT_*` 로 끝난다.
 
 ## 응답 스키마
 
@@ -78,16 +170,19 @@ stateDiagram-v2
 | `serviceId` | uuid | |
 | `environment` | `{id, name, kind}` | |
 | `serviceEnvironmentId` | uuid | 연결 id |
-| `trigger` | `MANUAL`·`STANDBY_SYNC` | |
+| `trigger` | `MANUAL`·`STANDBY_SYNC`·`ROLLBACK` | |
 | `sourceRequestId` | uuid \| null | 따라가기의 원본 요청 |
 | `ref` | `{type: BRANCH \| COMMIT, value}` | 사용자가 준 값 |
 | `commitSha` | string | 접수 때 고정한 40자 SHA |
 | `status` | `QUEUED`·`BUILDING`·`DEPLOYING`·`VERIFYING`·`SUCCEEDED`·`FAILED`·`CANCELLED` | |
-| `cancelReason` | `SUPERSEDED`·`SERVICE_DELETED` \| null | `CANCELLED` 일 때만 |
+| `cancelReason` | `SUPERSEDED`·`SERVICE_DELETED`·`BASE_CHANGED` \| null | `CANCELLED` 일 때만. `BASE_CHANGED` = 되돌리기 시작 때 현재 배포가 접수 때와 달랐다 |
 | `errorCode` | 코드 \| null | `FAILED` 일 때만 |
 | `revertStatus` | `SUCCEEDED`·`FAILED` \| null | 되돌리기가 필요 없었으면 null |
 | `stageTimes` | `{queuedAt, buildingAt, deployingAt, verifyingAt, finishedAt}` | 지나지 않은 단계는 null |
 | `simulated` | boolean | 가짜 실행기로 처리한 요청인지 |
+| `isCurrent` | boolean | 이 요청이 만든 배포 기록이 지금 그 연결의 현재 배포인가(API 서버 4) |
+| `rollbackable` | boolean | 이 요청을 골라 되돌릴 수 있는가: `SUCCEEDED` · 배포 기록 있음 · 현재 아님 · 연결 살아 있음 · 서비스 `ACTIVE`. 환경 접속 상태는 보지 않는다(접수에서 409) |
+| `rollbackOfRequestId` | uuid \| null | 되돌리기 요청이면 대상 요청 id |
 
 `DeployRequestDetail` = 위 + 아래.
 
@@ -96,7 +191,7 @@ stateDiagram-v2
 | `repoUrl` | string | 접수 때 고정한 저장소 |
 | `supersededById` | uuid \| null | 이 요청을 밀어낸 요청 |
 | `errorMessage` | string \| null | 오류 코드별 **고정 문장**(외부 응답 원문은 싣지 않는다) |
-| `build` | `{id, status, imageRepository, imageDigest, reused}` \| null | 쓰는 빌드. `reused = true` 면 이 요청이 새로 만든 빌드가 아니다 |
+| `build` | `{id, status, imageRepository, imageDigest, reused}` \| null | 쓰는 빌드. `reused = true` 면 이 요청이 새로 만든 빌드가 아니다(되돌리기·예비 따라가기는 늘 true) |
 | `deploymentId` | uuid \| null | 빌드 성공 뒤 만든 배포 기록 |
 | `urls` | `{main, environment}` | 대표 주소, 환경별 주소(접수 때 사본) |
 
@@ -125,10 +220,15 @@ stateDiagram-v2
     "deploymentId": "d1…",
     "urls": {"main": "https://shop-api-a1b2c3d4.apps.echo.test", "environment": "https://shop-api-aws-seoul-a1b2c3d4.apps.echo.test"},
     "stageTimes": {"queuedAt": "2026-11-02T03:00:00Z", "buildingAt": "2026-11-02T03:00:01Z", "deployingAt": "2026-11-02T03:00:05Z", "verifyingAt": "2026-11-02T03:00:08Z", "finishedAt": "2026-11-02T03:00:09Z"},
-    "simulated": true
+    "simulated": true,
+    "isCurrent": true,
+    "rollbackable": false,
+    "rollbackOfRequestId": null
   }
 }
 ```
+
+`LogPage`(로그 한 페이지) — `source`(`DEPLOY_JOB`·`BUILD`·`RUNTIME`), `simulated`(행에 저장한 값: `DEPLOY_JOB`·`RUNTIME` 은 요청, `BUILD` 는 빌드), `items[{at, level(INFO·WARN·ERROR), message}]`(시간 순), `nextCursor`(string \| null, 줄이 없으면 받은 cursor), `hasMore`.
 
 ## 실패 이유 코드 (`errorCode`)
 
@@ -146,6 +246,19 @@ stateDiagram-v2
 | `HEALTH_CHECK_TIMEOUT` | 헬스 | 마감까지 한 번도 확인하지 못함 |
 | `WORKER_LOST` | 아무 단계 | 일꾼이 같은 요청에서 임대를 3번 잃음 |
 | `INTERNAL_ERROR` | — | 예약(지금은 쓰지 않음) |
+
+## HTTP 오류 (되돌리기)
+
+| 상황 | HTTP | code |
+|---|---|---|
+| 모르는 칸, `failAt` 이 `DEPLOYING`·`VERIFYING` 이 아님(`BUILDING` 포함) | 422 | `VALIDATION_ERROR` |
+| `simulate` 를 가짜가 아닌 실행기 모드에서 보냄 | 422 | `SIMULATE_NOT_ALLOWED` |
+| 에이전트 토큰 · 뷰어 | 403 | `AGENT_READ_ONLY` · `ROLE_FORBIDDEN`(거부 기록 남음) |
+| 대상 요청 없음·다른 조직 | 404 | `DEPLOY_REQUEST_NOT_FOUND` |
+| 서비스 삭제를 마침 · 환경 삭제됨 | 404 | `SERVICE_NOT_FOUND` · `ENVIRONMENT_NOT_FOUND` |
+| 서비스 삭제 중 · 환경 마지막 접속 확인 실패 | 409 | `SERVICE_DELETING` · `ENVIRONMENT_UNHEALTHY` |
+| 대상이 `SUCCEEDED` 가 아님(실패·취소·대기·진행 중)·배포 기록 없음·연결이 내려감 | 409 | `NOT_ROLLBACKABLE` |
+| 대상의 배포 기록이 이미 현재 배포 | 409 | `ALREADY_CURRENT` |
 
 ## HTTP 오류 (접수)
 

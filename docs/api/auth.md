@@ -91,9 +91,11 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | 경로 (`/api/v1/orgs/{orgId}` 아래) | 최소 역할 | 에이전트 |
 |---|---|---|
 | `GET ` (조직 하나) · `GET /environments…` · `GET /services…` · `GET /services/{id}/deploy-requests` · `GET /deploy-requests/{id}` | 뷰어 | 읽기 가능 |
+| `GET /deploy-requests/{id}/logs` (배포 작업·빌드·실행 로그, API 서버 4) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
 | `POST /services` · `PATCH /services/{id}` · `POST /services/{id}/deploy-requests` | 개발자 | 403 |
+| `POST /deploy-requests/{id}/rollback` (되돌리기, API 서버 4. 배포 요청 접수와 같은 검사기) | 개발자 | 403 |
 | `POST·GET /agent-tokens` · `DELETE /agent-tokens/{id}` | 개발자(사람만) | 403 |
 | `DELETE /environments/{id}` · `DELETE /services/{id}` | 어드민 | 403 |
 | `PATCH /members/{userId}` · `POST·GET /invitations` · `DELETE /invitations/{id}` | 어드민(사람만) | 403 |
