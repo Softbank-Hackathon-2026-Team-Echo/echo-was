@@ -1,0 +1,64 @@
+# API·일꾼. 이미지는 digest 로만 지정한다(IMAGE_REF 를 워크플로가 바꾼다).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-was-api
+  namespace: echo-was
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: echo-was-api}
+  template:
+    metadata:
+      labels: {app: echo-was-api}
+    spec:
+      containers:
+        - name: api
+          image: IMAGE_REF
+          ports: [{containerPort: 8000}]
+          envFrom:
+            - configMapRef: {name: echo-was-config}
+            - secretRef: {name: echo-was-env}
+            - secretRef: {name: echo-was-github, optional: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-was-worker
+  namespace: echo-was
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: echo-was-worker}
+  template:
+    metadata:
+      labels: {app: echo-was-worker}
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: worker
+          image: IMAGE_REF
+          command: ["python", "-m", "app.worker"]
+          envFrom:
+            - configMapRef: {name: echo-was-config}
+            - secretRef: {name: echo-was-env}
+            - secretRef: {name: echo-was-github, optional: true}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 384Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false

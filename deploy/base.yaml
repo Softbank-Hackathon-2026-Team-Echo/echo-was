@@ -1,0 +1,111 @@
+# 운영(해커톤 AWS 도쿄 echo-dev-eks, 네임스페이스 echo-was)에 적용하는 매니페스트. .github/workflows/deploy.yml 이 쓴다.
+# 비밀값은 여기 없다: Secret echo-was-db·echo-was-env·echo-was-github 은 클러스터에 손으로 만든다(deploy/README.md).
+# PostgreSQL 17 (데모용, 클러스터 안, EBS gp3 10Gi). 비밀번호는 Secret echo-was-db 에서만 읽는다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-db
+  namespace: echo-was
+spec:
+  clusterIP: None
+  selector: {app: echo-db}
+  ports: [{name: pg, port: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: echo-db
+  namespace: echo-was
+spec:
+  serviceName: echo-db
+  replicas: 1
+  selector:
+    matchLabels: {app: echo-db}
+  template:
+    metadata:
+      labels: {app: echo-db}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17
+          env:
+            - {name: POSTGRES_USER, value: echo}
+            - {name: POSTGRES_DB, value: echo}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: echo-was-db, key: password}}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "echo", "-d", "echo"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ebs-csi-default-sc
+        resources:
+          requests: {storage: 10Gi}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-was-config
+  namespace: echo-was
+data:
+  LOG_LEVEL: INFO
+  PUBLIC_BASE_DOMAIN: echoport.uk
+  EXECUTOR_MODE: fake
+  HEALTH_CHECKER_MODE: fake
+  SOURCE_CLIENT_MODE: github
+  GITHUB_APP_ID: "5574944"
+  GITHUB_APP_PRIVATE_KEY_REF: env:ECHO_SECRET_GITHUB_APP_PRIVATE_KEY
+  GITHUB_APP_INSTALL_URL: https://github.com/apps/echoport-deploy/installations/new
+  GITHUB_APP_CLIENT_ID: Iv23lipNlpKaIxNuvR17
+  GITHUB_APP_CLIENT_SECRET_REF: env:ECHO_SECRET_GITHUB_APP_CLIENT_SECRET
+  SESSION_COOKIE_NAME: __Host-echo_session
+  FRONTEND_BASE_URL: https://app.echoport.uk
+  LOGIN_ALLOWED_GITHUB_ORG: softbank-hackathon-2026-team-echo
+  FRONTEND_ALLOWED_ORIGINS: https://app.echoport.uk
+  GITHUB_OAUTH_REDIRECT_URI: https://api.echoport.uk/api/v1/auth/github/callback
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-was-api
+  namespace: echo-was
+spec:
+  selector: {app: echo-was-api}
+  ports: [{port: 80, targetPort: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-was-api
+  namespace: echo-was
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-1:706878591119:certificate/735a46d0-2838-47be-8e44-dae373ab941f
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/success-codes: "204"
+    alb.ingress.kubernetes.io/tags: project=echo,managed-by=jimin-manual
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.echoport.uk
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-was-api
+                port: {number: 80}

@@ -1,0 +1,19 @@
+# 배포마다 새 이름으로 한 번 돌리는 마이그레이션(alembic upgrade head). 앱 시작 때는 실행하지 않는다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: echo-was-migrate-MIGRATE_SUFFIX
+  namespace: echo-was
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: IMAGE_REF
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: {name: echo-was-config}
+            - secretRef: {name: echo-was-env}
