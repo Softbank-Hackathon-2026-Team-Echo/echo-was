@@ -89,6 +89,20 @@
 | 에이전트 토큰 | Agent token | `AgentToken` / `agent_tokens`, `Authorization: Bearer echo_agt_…` | AI 에이전트 출입증. 조직 하나에 묶이고 그 조직을 읽기만 한다. 원문은 발급 응답에 한 번만 | F14·F16 |
 | 거부 기록 | Denial record (audit log) | `AuditLog` / `audit_logs` | 권한이 없어 막힌 요청(403) 한 건. 요청과 따로 커밋하고 지우지 않는다. 조회·다른 행위 기록은 API 서버 7 | F5, NFR-07·08 |
 | 권한 검사기 | Organization guard | `require_org_role(min_role, human_only=False)` (`app/auth/guards.py`) | 조직 경로마다 거는 FastAPI 의존성. 로그인 → 조직 멤버 → 최소 역할 → Origin 순서로 본문·리소스보다 먼저 검사 | F4, NFR-07 |
+| 이전 계획 | Migration plan | `MigrationPlan` / `migration_plans`, 경로 `/services/{id}/migration-plans`·`/migration-plans/{id}` | 서비스 트래픽을 출발 연결(지금 100%)에서 같은 이미지의 예비 연결(도착)로 옮기는 계획과 그 실행 기록. 고정 5단계·단계별 예상 시간·롤백 조건을 담는다. 서비스당 끝나지 않은 계획은 하나, 지우지 않는다 | F10, API 8 |
+| 출발 · 도착 | Source · Target | `source_service_environment_id` · `target_service_environment_id` | 출발 = 계획을 만들 때 비율 100 인 연결 하나. 도착 = 출발과 같은 이미지가 올라간 예비 연결(따라가는 중이면 `TARGET_SYNCING`, 없거나 다른 버전이면 `TARGET_NOT_READY`) | F10, API 8 |
+| 이전 단계 | Migration step | `steps[i]` (`MigrationStepKind`) | 고정 5개: `0 PREFLIGHT`, `1 SHIFT(10)`, `2 SHIFT(50)`, `3 DATA_SYNC_CHECK`, `4 SHIFT(100)`. 만든 뒤 바꾸지 않는다. 실제 결과는 같은 번호의 `step_results[i]` | F10, API 8 |
+| 사전 확인 | Preflight | 단계 0 `PREFLIGHT` | 도착 환경별 주소 헬스체크 1번 + 도착 이미지가 출발과 같은가. 실패하면 트래픽을 바꾸지 않고 `FAILED(PREFLIGHT_FAILED)`. AI 에이전트의 사전 점검 체크리스트(F11)와 다르다 | API 8 |
+| 지켜보기 | Observe | `observe_seconds`·`observe_until`, `step_phase = OBSERVE` | 비율을 적용한 뒤 판정까지 기다리는 시간(기본 5초, 계획마다 1~600). 끝나기 전에는 판정하지 않는다 | F7, API 8 |
+| 판정 | Judge | `step_phase = JUDGE` | 지켜본 구간을 헬스체크 + 지표(오류율·p95)로, 데이터 확인 단계는 복제 지연으로 본다. 통과하면 사람 개입 없이 다음 단계 | F7, API 8 |
+| 롤백 조건 | Rollback conditions | `rollback_conditions` (`maxErrorRatePercent`·`maxP95Ms`·`maxReplicationLagSeconds`) | 판정 실패 기준(기본 1.0%·800ms·1.0초). 헬스체크 실패는 늘 실패 | F10, API 8 |
+| 이전 롤백 | Migration rollback | `status = ROLLING_BACK`, `rollback_status`, 키 `{plan}:rollback:{n}` | 판정 실패·판단 불가·적용 실패·중단·일꾼 상실 때 출발 100%·도착 0% 로 되돌리는 것. 배포 되돌리기(`rollback_of_id`)·실패한 새 버전 거두기(`revert_status`)와 다르다 | F10, API 8 |
+| 지문 | Fingerprint | `migration_plans.fingerprint` | 계획을 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경 설정 해시·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 낡은 계획(`STALE`) | API 8 |
+| 승인 | Approval | `approved_by_user_id`·`approved_at`, `POST …/approve` | 개발자 이상의 사람이 실행을 허락한 것. 승인이 곧 실행 시작이다. 에이전트는 할 수 없다 | F10, API 8 |
+| 자기 승인 | Self approval | `self_approved`, 조직 `allow_self_approval` | 계획을 만든 사람이 스스로 승인하는 것. 조직 스위치가 꺼져 있으면(기본) 403 `SELF_APPROVAL_FORBIDDEN`. 어드민만 켠다 | F10, API 8 |
+| 중단 | Abort | `abort_requested_at`·`aborted_by_user_id`, `POST …/abort` | 사람이 실행 중 계획을 멈추는 것. `RUNNING` 이면 롤백(`ABORTED`), 시작 전이면 `CANCELLED`. 멱등 | F10, API 8 |
+| 이전 실행 로그 | Migration log | `MigrationPlanLog` / `migration_plan_logs` | 계획 한 건의 진행 줄. 계획 단계 번호(`step`)를 달고 상태 변경과 같은 트랜잭션에서 쓴다. 계획마다 `seq` 1부터, 500줄 상한 | F10·F17, API 8 |
+| 트래픽 실행기 · 지표 공급자 · 데이터 확인기 | Traffic executor · Metrics provider · Data sync checker | `TrafficExecutor.set_weights` · `MetricsProvider.read` · `DataSyncChecker.replication_lag` | 비율 나눠 보내기(실제 Envoy, 인프라 6) · 구간 지표(OpenTelemetry, 인프라 9) · 복제 지연(인프라 7). 지금은 가짜(`simulated`) | F7·F17, API 8 |
 | 조직 열쇠 키 | Organization secret key | `organization_secret_key(slug)` | slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). `env:` 비밀 참조는 `ECHO_SECRET_{키}__` 로 시작해야 한다 | F16 |
 
 ---
@@ -151,10 +165,24 @@
 |---|---|---|
 | `QUEUED` → `RUNNING` → `SUCCEEDED`·`FAILED` | `builds.status` (`BuildStatus`) | `SUCCEEDED` 일 때만 digest 가 있다. 같은 서비스·저장소·커밋의 `FAILED` 아닌 빌드는 하나 |
 | `QUEUED` → `RUNNING` → `DONE`·`FAILED`·`CANCELLED` | `jobs.status` (`JobStatus`) | 미룰 때는 `QUEUED` + `run_after`. `RUNNING` 이면 임대 칸이 있다 |
-| `DEPLOY_REQUEST` · `SERVICE_TEARDOWN` | `jobs.kind` (`JobKind`) | 대상(`subject_id`)은 배포 요청 id · 서비스 id |
+| `DEPLOY_REQUEST` · `SERVICE_TEARDOWN` · `MIGRATION_PLAN` | `jobs.kind` (`JobKind`) | 대상(`subject_id`)은 배포 요청 id · 서비스 id · 이전 계획 id(API 서버 8) |
 | `ACTIVE` → `DELETING` → (소프트 삭제) | `services.status` (`ServiceStatus`) | 삭제 실패 이유 `delete_error`(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`)는 `DELETING` 일 때만 |
 | `SERVING` · `STANDBY` · `NONE` | 응답 `role` (`ServiceEnvironmentRole`, 저장 안 함) | 비율 > 0 · 비율 0 + 현재 배포 있음 · 현재 배포 없음 |
 | `IN_SYNC` · `OUT_OF_SYNC` | 응답 `versionStatus` (`VersionStatus`) | 예비 연결만. 서비스 중 연결이 없으면 null |
+
+### 이전 계획 값 (API 서버 8)
+
+| 값 목록 | 표·칸 | 뜻 |
+|---|---|---|
+| `PENDING_APPROVAL` → `APPROVED` → `RUNNING` → `SUCCEEDED` / `RUNNING` → `ROLLING_BACK` → `ROLLED_BACK`·`FAILED` / `PENDING_APPROVAL` → `REJECTED`·`CANCELLED`·`EXPIRED`·`STALE` / `APPROVED` → `STALE`·`CANCELLED`·`FAILED` | `migration_plans.status` (`MigrationPlanStatus`) | 끝나지 않은 4개(`PENDING_APPROVAL`·`APPROVED`·`RUNNING`·`ROLLING_BACK`)는 서비스당 하나(부분 unique). 실행 중 3개(`APPROVED`·`RUNNING`·`ROLLING_BACK`)면 그 서비스의 배포 요청·되돌리기·삭제가 409 `MIGRATION_IN_PROGRESS` |
+| `PREFLIGHT` · `SHIFT` · `DATA_SYNC_CHECK` | `steps[i].kind` (`MigrationStepKind`) | 사전 확인 · 비율 단계 · 데이터 확인 |
+| `APPLY` · `OBSERVE` · `JUDGE` | `migration_plans.step_phase` (`MigrationStepPhase`) | 비율 단계는 적용 → 지켜보기 → 판정, 사전 확인·데이터 확인은 판정만 |
+| `PENDING` · `RUNNING` · `PASSED` · `FAILED` · `SKIPPED` | `step_results[i].status` (`MigrationStepStatus`) | 롤백·실패로 끝나면 남은 단계는 `SKIPPED` |
+| `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` | `migration_plans.error_code` (`MigrationErrorCode`) | 원인 코드. 판정 실패(`HEALTH_CHECK_FAILED`·`THRESHOLD_EXCEEDED`·`DATA_LAG_EXCEEDED`)와 판단 불가(`METRICS_UNAVAILABLE`)·적용 실패를 나눈다 |
+| `SUCCEEDED` · `FAILED` · `NOT_NEEDED` | `migration_plans.rollback_status` (`MigrationRollbackStatus`) | 출발 100% 로 되돌린 결과. `NOT_NEEDED` 는 트래픽을 바꾼 적이 없었음 |
+| `ERROR_RATE` · `LATENCY` · `HEALTH` · `DATA_LAG` · `TRAFFIC` | `simulate.reason` (`MigrationSimulateReason`) | 가짜 모드에서 `failAtStep` 단계를 일부러 실패시킬 원인. `DATA_LAG` 는 단계 3 만 |
+| `PLAN_CREATED` · `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` · `STALE` · `ABORT_REQUESTED` · `STARTED` · `PREFLIGHT_OK` · `PREFLIGHT_FAILED` · `WEIGHT_APPLIED` · `WEIGHT_APPLY_FAILED` · `JUDGE_PASSED` · `JUDGE_FAILED` · `DATA_SYNC_OK` · `DATA_SYNC_FAILED` · `SUCCEEDED` · `ROLLBACK_STARTED` · `ROLLBACK_APPLIED` · `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` · `FAILED` · `LOG_TRUNCATED` | `migration_plan_logs.code` (`MigrationLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/migration_log_messages.py` |
+| `serviceStatus` · `connections` · `sourceEnvironment` · `targetEnvironment` · `openDeployRequests` | 지문 항목(409 `PLAN_STALE` 의 `details[].field`) | 달라진 항목 이름 |
 
 ### 환경 종류 (`environments.kind`)
 
@@ -227,8 +255,7 @@
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
 | 감사 로그\* | Audit log | `audit_logs` (거부 기록만 API 서버 6 이 만듦) | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다. 거부 밖의 행위 기록·조회 API 가 후속 | F5, NFR-08 | API 서버 7 |
-| 이전 계획\* | Migration plan | `migration_plans` | 단계·예상 시간·롤백 조건을 담은 계획. 개발자 이상이 실행(검사기 `require_org_role(DEVELOPER, human_only=True)`) | F10 | API 서버 8 |
-| 승인\* | Approval | (이전 계획·에이전트 변경에 붙음) | 개발자 이상의 사람이 실행·운영 반영을 허락한 기록(자기 승인 규칙은 API 서버 8) | F10·F15 | API 서버 8 |
+| 승인(에이전트 변경)\* | Approval (agent change) | (에이전트 변경에 붙음) | AI 수정의 운영 반영을 개발자 이상의 사람이 허락한 기록. 이전 계획 승인은 §2 | F15 | AI 파트 |
 | 사전 점검\* | Preflight check | (미정) | 이전 전 점검 | F11 | API 서버 8 |
 | 정책\* | Policy | `policies` | 모든 환경에 같이 적용하는 보안 규칙(Rego 파일 하나) | F13 | 보안 파트 |
 | finding\* | Finding | `findings` | 클라우드별 보안 결과를 공통 스키마로 정규화한 한 건 | F12 | 보안 파트 |
@@ -249,7 +276,8 @@
 | Adapter | 환경 종류 하나의 묶음(설정 양식 + 이후 동작 코드) | 설정 양식은 어댑터의 "검사" 부분만 말한다 |
 | Traffic weight | 마지막으로 프록시에 적용한 값 | 지금 실제로 흐르는 비율(측정값, F7·F17) |
 | Deploy request | 원터치 배포 한 번(`deploy_requests`: 빌드·대기·취소·실패 이유 포함) | 배포 기록(`deployments`: 연결에 이미지를 올린 것, 빌드 성공 뒤에만 생긴다) |
-| Revert | 실패한 새 버전을 거두는 실행기 호출(`revert_status`) | 사용자 되돌리기(`trigger = ROLLBACK` 배포 요청 → `rollback_of_id` 새 배포 행, API 서버 4) |
+| Revert | 실패한 새 버전을 거두는 실행기 호출(`revert_status`) | 사용자 되돌리기(`trigger = ROLLBACK` 배포 요청 → `rollback_of_id` 새 배포 행, API 서버 4), 이전 롤백(출발 100% 로 비율 되돌리기, `migration_plans.rollback_status`, API 서버 8) |
+| Migration | 이전 계획(`migration_plans`, 트래픽을 다른 환경으로 옮기기) | DB 스키마 마이그레이션(Alembic revision). 코드에서는 `MigrationPlan*` 처럼 늘 `Plan` 을 붙인다 |
 | Log | 배포 작업 로그(`deploy_request_logs`)·빌드 로그·실행 로그(API 서버 4) | 감사 로그(`audit_logs`, 누가 무엇을 했나), 서버 자체 구조화 로그(`logger`) |
 | Session | 로그인 세션 한 행(`sessions`, 클래스 `UserSession`) | SQLAlchemy `Session`·`AsyncSession`(DB 세션). 그래서 모델 클래스 이름을 `UserSession` 으로 둔다 |
 | Role | 조직 멤버 역할(`OrganizationRole`: VIEWER·DEVELOPER·ADMIN) | 서비스-환경 연결의 역할(`ServiceEnvironmentRole`: SERVING·STANDBY·NONE) |

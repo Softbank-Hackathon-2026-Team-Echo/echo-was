@@ -16,7 +16,7 @@
 | `GET /api/v1/orgs/{orgId}/services?page&size` | — | 200 `Page[ServiceSummary]` | 422(page·size 범위) | 뷰어·에이전트 |
 | `GET /api/v1/orgs/{orgId}/services/{id}` | — | 200 `ServiceDetail` | 404 `SERVICE_NOT_FOUND` | 뷰어·에이전트 |
 | `PATCH /api/v1/orgs/{orgId}/services/{id}` | `UpdateServiceRequest` | 200 `ServiceDetail` | 404, 409 `SERVICE_DELETING`, 422 `SERVICE_NAME_IMMUTABLE`·`VALIDATION_ERROR`, 404·502(새 `repoUrl` 확인) | 개발자 |
-| `DELETE /api/v1/orgs/{orgId}/services/{id}` | — | 202 `ServiceDetail`(`status = DELETING`) | 404 `SERVICE_NOT_FOUND` | 어드민 |
+| `DELETE /api/v1/orgs/{orgId}/services/{id}` | — | 202 `ServiceDetail`(`status = DELETING`) | 404 `SERVICE_NOT_FOUND`, 409 `MIGRATION_IN_PROGRESS`(+`planId`) | 어드민 |
 
 코드 클래스: `CreateServiceRequest`·`UpdateServiceRequest`, `ServiceSummary` = `ServiceSummaryResponse`, `ServiceDetail` = `ServiceDetailResponse`(`app/schemas/service.py`).
 
@@ -57,7 +57,7 @@
 }
 ```
 
-`details[].value` 는 안내 값이 있을 때만 싣는 칸이다(다른 오류의 `details` 에는 없다). 비공개 저장소라면 이 주소로 App 을 설치한 뒤 다시 등록한다.
+`details[].value` 는 안내 값이 있을 때만 싣는 칸이다. 지금 값을 싣는 곳은 `installUrl`(App 설치 주소), 이전 계획(API 서버 8)의 `planId`·`deployRequestId`(가리키는 계획·배포 요청 id), `lastSyncError`(마지막 예비 따라가기 실패 코드)뿐이다. 비공개 저장소라면 이 주소로 App 을 설치한 뒤 다시 등록한다.
 
 가짜 소스 저장소 규칙(`SOURCE_CLIENT_MODE=fake`): owner 가 `private-` 로 시작하면 비공개 + 설치 있음, `denied-`·`missing-` 이면 404 `REPO_NOT_ACCESSIBLE`, `flaky-` 면 502 `SOURCE_PROVIDER_UNAVAILABLE`.
 
@@ -85,6 +85,8 @@
 4. 한 연결이라도 내리기에 실패하면 서비스는 `DELETING` 에 남고 `deleteError`(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`)와 그 연결의 `teardownError` 가 보인다. **다시 DELETE** 를 보내면 남은 연결만 다시 내린다(새 멱등 키).
 
 `DELETING` 중에는 단건·목록 조회만 되고, PATCH·배포 요청은 409 `SERVICE_DELETING` 이다.
+
+이전 계획이 실행 중(`APPROVED`·`RUNNING`·`ROLLING_BACK`, API 서버 8)이면 삭제는 409 `MIGRATION_IN_PROGRESS`(`details = [{field: "planId", reason: "MIGRATION_IN_PROGRESS", value: <계획 id>}]`)다. 승인 대기 계획은 막지 않는다([migration-plans.md](migration-plans.md)).
 
 ## 응답 스키마
 
@@ -116,9 +118,12 @@
 | `currentDeployment` | `{id, commitSha, imageDigest, finishedAt}` \| null | 지금 돌고 있는 배포 |
 | `versionStatus` | `IN_SYNC`·`OUT_OF_SYNC` \| null | `STANDBY` 만. 기준 연결(비율이 가장 큰 연결, 같으면 `traffic_applied_at` 이 늦은 쪽, 그다음 id)의 현재 이미지 digest 와 같은가. 서비스 중 연결이 없으면 null |
 | `lastSyncError` | 코드 \| null | 이 연결의 가장 최근 예비 따라가기(`STANDBY_SYNC`) 요청이 실패했으면 그 `errorCode` |
-| `activeRequestId`·`queuedRequestId` | uuid \| null | 실행 중·대기 중 배포 요청 |
+| `activeRequestId`·`queuedRequestId` | uuid \| null | 실행 중·대기 중 배포 요청(예비가 따라가는 중이면 여기 `STANDBY_SYNC` 요청이 보인다) |
+| `lastSyncSeconds` | number \| null | 이 연결의 마지막 **성공** 예비 따라가기가 원본 요청이 끝난 뒤 끝나기까지 걸린 초(소수 1자리). 없으면 null(API 서버 8) |
 | `simulated` | boolean \| null | 현재 배포를 만든 요청의 값. 현재 배포가 없으면 null |
 | `teardownError` | 코드 \| null | 이 연결 내리기 실패 이유 |
+
+`ServiceDetail.activeMigrationPlanId`(uuid \| null): 이 서비스의 끝나지 않은 이전 계획 id(API 서버 8). 승인 대기(`PENDING_APPROVAL`)는 만료 전일 때만 센다(조회는 저장된 상태를 바꾸지 않는다).
 
 예 (aws 서비스 중 + onprem 예비):
 
@@ -153,7 +158,8 @@
         "activeRequestId": null,
         "queuedRequestId": null,
         "simulated": true,
-        "teardownError": null
+        "teardownError": null,
+        "lastSyncSeconds": null
       },
       {
         "serviceEnvironmentId": "b2…",
@@ -167,9 +173,11 @@
         "activeRequestId": null,
         "queuedRequestId": null,
         "simulated": true,
-        "teardownError": null
+        "teardownError": null,
+        "lastSyncSeconds": 4.2
       }
-    ]
+    ],
+    "activeMigrationPlanId": null
   }
 }
 ```
@@ -185,5 +193,6 @@
 | 같은 조직의 살아 있는 서비스와 이름 중복 | 409 | `SERVICE_NAME_CONFLICT` |
 | 대표 주소가 새 suffix 로 4번(첫 시도 + 3번) 모두 이미 쓰임 | 409 | `PUBLIC_HOST_CONFLICT` |
 | 삭제 중 수정 | 409 | `SERVICE_DELETING` |
+| 이전 계획 실행 중 삭제 | 409 | `MIGRATION_IN_PROGRESS` + `details[{field: "planId", reason, value}]` |
 | 없거나 삭제된 서비스, 다른 조직의 서비스 | 404 | `SERVICE_NOT_FOUND` |
 | 로그인 안 함 · 조직 멤버 아님 · 역할 모자람 | 401 · 404 · 403 | `UNAUTHENTICATED` · `ORGANIZATION_NOT_FOUND` · `ROLE_FORBIDDEN` 등([auth.md](auth.md)) |

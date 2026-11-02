@@ -12,10 +12,10 @@ API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 �
 
 | 메서드 · 경로 | 요청 | 성공 | 실패 | 최소 역할 |
 |---|---|---|---|---|
-| `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests` | `CreateDeployRequest` | 202 `DeployRequestDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`·`REPO_NOT_ACCESSIBLE`, 409 `SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`PUBLIC_HOST_CONFLICT`, 422 `VALIDATION_ERROR`·`REF_NOT_FOUND`·`SIMULATE_NOT_ALLOWED`, 502 `SOURCE_PROVIDER_UNAVAILABLE` | 개발자 |
+| `POST /api/v1/orgs/{orgId}/services/{id}/deploy-requests` | `CreateDeployRequest` | 202 `DeployRequestDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`·`REPO_NOT_ACCESSIBLE`, 409 `SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`PUBLIC_HOST_CONFLICT`·`MIGRATION_IN_PROGRESS`, 422 `VALIDATION_ERROR`·`REF_NOT_FOUND`·`SIMULATE_NOT_ALLOWED`, 502 `SOURCE_PROVIDER_UNAVAILABLE` | 개발자 |
 | `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests?page&size&environmentId&trigger&status` | — | 200 `Page[DeployRequestSummary]`(최신순) | 404 `SERVICE_NOT_FOUND`, 422 `VALIDATION_ERROR` | 뷰어·에이전트 |
 | `GET /api/v1/orgs/{orgId}/deploy-requests/{id}` | — | 200 `DeployRequestDetail` | 404 `DEPLOY_REQUEST_NOT_FOUND` | 뷰어·에이전트 |
-| `POST /api/v1/orgs/{orgId}/deploy-requests/{id}/rollback` | `RollbackRequest`(바디 선택) | 202 `DeployRequestDetail` | 403 `AGENT_READ_ONLY`·`ROLE_FORBIDDEN`, 404 `DEPLOY_REQUEST_NOT_FOUND`·`SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409 `NOT_ROLLBACKABLE`·`ALREADY_CURRENT`·`SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`, 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자 |
+| `POST /api/v1/orgs/{orgId}/deploy-requests/{id}/rollback` | `RollbackRequest`(바디 선택) | 202 `DeployRequestDetail` | 403 `AGENT_READ_ONLY`·`ROLE_FORBIDDEN`, 404 `DEPLOY_REQUEST_NOT_FOUND`·`SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409 `NOT_ROLLBACKABLE`·`ALREADY_CURRENT`·`SERVICE_DELETING`·`ENVIRONMENT_UNHEALTHY`·`MIGRATION_IN_PROGRESS`, 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자 |
 | `GET /api/v1/orgs/{orgId}/deploy-requests/{id}/logs?source&cursor&limit` | — | 200 `LogPage` | 404 `DEPLOY_REQUEST_NOT_FOUND`, 422 `VALIDATION_ERROR` | 뷰어·에이전트 |
 
 코드 클래스: `CreateDeployRequest`, `RollbackRequest`, `DeployRequestSummary` = `DeployRequestSummaryResponse`, `DeployRequestDetail` = `DeployRequestDetailResponse`, `LogPage` = `LogPageResponse`(`app/schemas/deploy_request.py`).
@@ -257,6 +257,7 @@ stateDiagram-v2
 | 대상 요청 없음·다른 조직 | 404 | `DEPLOY_REQUEST_NOT_FOUND` |
 | 서비스 삭제를 마침 · 환경 삭제됨 | 404 | `SERVICE_NOT_FOUND` · `ENVIRONMENT_NOT_FOUND` |
 | 서비스 삭제 중 · 환경 마지막 접속 확인 실패 | 409 | `SERVICE_DELETING` · `ENVIRONMENT_UNHEALTHY` |
+| 그 서비스의 이전 계획이 실행 중(`APPROVED`·`RUNNING`·`ROLLING_BACK`, 대상 상태 검사보다 먼저) | 409 | `MIGRATION_IN_PROGRESS` + `details[{field: "planId", reason, value}]` |
 | 대상이 `SUCCEEDED` 가 아님(실패·취소·대기·진행 중)·배포 기록 없음·연결이 내려감 | 409 | `NOT_ROLLBACKABLE` |
 | 대상의 배포 기록이 이미 현재 배포 | 409 | `ALREADY_CURRENT` |
 
@@ -274,5 +275,6 @@ stateDiagram-v2
 | 저장소 접근 불가 | 404 | `REPO_NOT_ACCESSIBLE` (+ `installUrl`) |
 | 서비스 삭제 중 | 409 | `SERVICE_DELETING` |
 | 환경 마지막 접속 확인 실패 | 409 | `ENVIRONMENT_UNHEALTHY` |
+| 그 서비스의 이전 계획이 실행 중(API 서버 8. 승인 대기 계획은 막지 않고, 그 계획이 승인 때 `STALE` 이 된다) | 409 | `MIGRATION_IN_PROGRESS` + `details[{field: "planId", reason, value}]` |
 | 같은 환경별 주소를 가진 살아 있는 연결 있음(옛 환경 이름 재사용, 63자 자르기) | 409 | `PUBLIC_HOST_CONFLICT` |
 | GitHub 한도 초과·5xx·시간 초과 | 502 | `SOURCE_PROVIDER_UNAVAILABLE` |

@@ -1,6 +1,6 @@
-# 실행기 계약 (빌드·배포·대표 주소·헬스체크·내리기)
+# 실행기 계약 (빌드·배포·대표 주소·헬스체크·내리기·트래픽·지표·데이터 확인)
 
-원터치 배포의 흐름·상태·DB 기록은 echo-was 일꾼이 맡고, 외부 시스템을 실제로 움직이는 일은 **실행기**가 맡는다. 이번에는 모두 가짜 구현(`EXECUTOR_MODE=fake`)이고, 인프라 3(Argo CD + 빌드·배포 파이프라인)·인프라 5(고정 진입점 프록시)가 준비되면 **실행기 구현만** 바꾼다. 표·API 계약은 바꾸지 않는 것이 목표다.
+원터치 배포의 흐름·상태·DB 기록은 echo-was 일꾼이 맡고, 외부 시스템을 실제로 움직이는 일은 **실행기**가 맡는다. 이번에는 모두 가짜 구현(`EXECUTOR_MODE=fake`)이고, 인프라 3(Argo CD + 빌드·배포 파이프라인)·인프라 5(고정 진입점 프록시)가 준비되면 **실행기 구현만** 바꾼다. 이전 계획(API 서버 8)의 트래픽 나눠 보내기·지표·데이터 복제 확인도 같은 방식이다(실제 연결은 인프라 6 Envoy·인프라 9 OpenTelemetry·인프라 7 복제). 표·API 계약은 바꾸지 않는 것이 목표다.
 
 - 인터페이스: `app/executors/base.py`(Protocol + 값 객체). 가짜 구현: `app/executors/fake.py`. 실제 HTTP 헬스체커: `app/executors/http_health_checker.py`. 고르는 곳: `app/executors/__init__.py::build_executor_set`.
 - 공통 계약 시험: `tests/executor_contract.py`. 실제 구현도 같은 검사를 스텁 전송으로 통과해야 한다.
@@ -21,6 +21,9 @@
 | `HealthChecker` | `probe(url, path, timeout_seconds)` | `HealthOk(status)` · `HealthHttpError(status)` · `HealthUnreachable` |
 | `TeardownExecutor` | `remove(target, idempotency_key) -> external_ref` | |
 | | `poll(external_ref)` | `TeardownPending` · `TeardownRemoved` · `TeardownFailed(code)` |
+| `TrafficExecutor` | `set_weights(route, weights: tuple[WeightedTarget(target, weight)], idempotency_key)` | `TrafficApplied(applied_at)` · `TrafficFailed(code)` (API 서버 8) |
+| `MetricsProvider` | `read(target, since, until)` | `Metrics(error_rate_percent, p95_ms, request_count)` · `MetricsUnavailable` (API 서버 8) |
+| `DataSyncChecker` | `replication_lag(source, target)` | `DataSyncLag(seconds)` · `DataSyncUnavailable` (API 서버 8) |
 
 모든 실행기는 `simulated` 속성을 가진다(가짜면 true). 결과의 `simulated` 는 요청·빌드 행에 저장된다.
 
@@ -33,12 +36,14 @@
 | 되돌리기 | 실패한 `deployments.id` |
 | 대표 주소 연결 | 성공한 `deployments.id` |
 | 내리기 | `{service_environments.id}:{teardown_attempt}` (서비스 삭제를 다시 보내면 attempt 가 1 늘어 새 키) |
+| 이전 단계 비율 적용 | `{migration_plans.id}:{단계 번호}` (1·2·4) |
+| 이전 롤백(출발 100%) | `{migration_plans.id}:rollback:{rollback_attempts}` (시도마다 새 키, 최대 `MIGRATION_ROLLBACK_MAX_ATTEMPTS` 번) |
 
 일꾼은 언제든 죽을 수 있다. 그래서 외부 호출은 항상 이 순서다.
 
-1. **요청함 시각을 저장·커밋한다**(`builds.start_requested_at`, `deploy_requests.deploy_requested_at`, `service_environments.teardown_requested_at`).
+1. **요청함 시각을 저장·커밋한다**(`builds.start_requested_at`, `deploy_requests.deploy_requested_at`, `service_environments.teardown_requested_at`, 이전 `migration_plans.traffic_requested_at`·`rollback_requested_at`).
 2. **트랜잭션 밖에서** 실행기를 부른다(멱등 키 포함).
-3. 돌아온 `external_ref` 를 저장한다(`builds.external_ref`, `deploy_requests.deploy_external_ref`, `service_environments.teardown_external_ref`).
+3. 돌아온 `external_ref` 를 저장한다(`builds.external_ref`, `deploy_requests.deploy_external_ref`, `service_environments.teardown_external_ref`). 트래픽은 결과(`TrafficApplied`)가 오면 두 연결의 `traffic_weight`·`traffic_applied_at` 을 **한 트랜잭션에서 함께** 적는다(합계 100).
 
 다시 시작한 일꾼은 요청함 시각이 있고 `external_ref` 가 없으면 **같은 키로 다시 부른다.** 그래서 실제 구현은:
 
@@ -89,6 +94,23 @@
 - 공통 계약 시험: `tests/executor_contract.py::assert_log_reader_contract`(같은 cursor 같은 줄, limit 준수, 시간 순, 이어 읽기, 잘못된 cursor).
 - 연결안: 빌드는 빌드 시스템의 작업 로그(`external_ref` = 작업 번호), 실행은 그 연결 네임스페이스의 Pod 로그(`target` + 배포 기록으로 고른다). cursor 는 실행기가 정하는 불투명한 문자열이다.
 
+### 트래픽 (`TrafficExecutor`, API 서버 8)
+
+- 대표 주소(`route`)의 트래픽을 `weights` 대로 연결들에 나눠 보낸다. 이전 계획은 늘 두 연결(출발·도착)을 넘긴다: 단계 1 `(90, 10)`, 단계 2 `(50, 50)`, 단계 4 `(0, 100)`, 롤백 `(100, 0)`.
+- 비율 합계가 100 이 아니거나 0~100 밖이면 `ValueError`(`check_weights_total`). 부르는 쪽의 버그라 실행기 결과로 돌려주지 않는다.
+- **적용했다고 답할 때만** 일꾼이 비율 칸을 적는다. `TrafficFailed` 면 비율 칸은 바꾸지 않는다(단계 실패 `TRAFFIC_APPLY_FAILED` → 롤백, 롤백 실패면 다음 시도).
+- 같은 키면 같은 결과다. 다시 시작한 일꾼은 `traffic_requested_at`(또는 `rollback_requested_at`)만 있고 결과가 없으면 같은 키로 다시 부른다.
+- 연결안: Envoy 가중치 클러스터(인프라 6). 같은 키를 Envoy 설정 버전 이름에 넣어 두 번 적용하지 않는다.
+
+### 지표 (`MetricsProvider`, API 서버 8)
+
+- 연결 하나의 `[since, until)` 구간 오류율(%)·p95(ms)·요청 수. 일꾼은 지켜보기 구간(비율 적용 시각 ~ 판정 시각)을 넘긴다. 읽을 수 없으면 `MetricsUnavailable` 이고 판정은 실패(`METRICS_UNAVAILABLE`, 판단 불가 → 롤백)다.
+- 상태를 바꾸지 않는 조회다. 연결안: OpenTelemetry 수집기(인프라 9).
+
+### 데이터 확인 (`DataSyncChecker`, API 서버 8)
+
+- 출발 → 도착 데이터 복제 지연(초). 읽을 수 없으면 `DataSyncUnavailable`(판정 `METRICS_UNAVAILABLE`). 연결안: 인프라 7 복제 상태.
+
 ### 내리기 (`TeardownExecutor`)
 
 - 서비스 삭제 때 연결 하나를 클러스터에서 내린다(그 서비스의 Deployment·Service·Ingress 등). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.
@@ -102,6 +124,10 @@
 | 빌드 결과 | 이미지 `registry.echo.test/<서비스 이름>`, digest `sha256(서비스 id + 커밋)` |
 | 대표 주소 | 늘 적용(`applied_at` = 그 시각) |
 | 헬스체크 | 늘 2xx(`HEALTH_CHECKER_MODE=fake`) |
+| 트래픽 | 바로 `TrafficApplied(지금 시각)`. 같은 키면 처음 결과. 연결마다 마지막으로 적용한 비율을 기억한다(가짜 지표가 읽는다) |
+| 지표 | 오류율 0.1% · p95 120ms · 요청 수 `max(1, round(10 × 비율/100 × 창 초))` (결정적) |
+| 데이터 확인 | 복제 지연 0.3초 |
+| 이전 실패 주입 | 시험만: 트래픽 `fail_when(키 → 참이면 실패)`, 지표·데이터 확인 `unavailable = True`. 사용자 계획 단위 실패는 `simulate {failAtStep, reason}`(처리기가 실패 값을 만들고 실행기를 부르지 않는다) |
 | 실패 주입 | 시험만: 인스턴스를 만들 때 실패·멈춤 대상 커밋·연결을 넣는다(운영 설정에는 없다). 사용자 요청 단위 실패는 `simulate.failAt` |
 | 호출 기록 | `calls`(호출마다 멱등 키), `operation_keys`(만든 작업) — 시험이 "같은 키는 같은 작업"을 확인한다 |
 | 로그 | 빌드 5~7줄(저장소 받기·이미지 만들기·digest 기록 등), 실행 5줄(이미지 받기·서버 시작·헬스 경로 응답 등). 줄 시각은 `external_ref` 의 시작 시각부터 2초 간격(시계를 보지 않는다), cursor 는 줄 번호 문자열. 실패 주입 대상이면 마지막 줄이 `ERROR` |

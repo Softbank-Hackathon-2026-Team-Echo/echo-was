@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -28,6 +28,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·오류 코드·secretRef 형식·null 규칙)을 바꾸거나 쓸 때 |
 | [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포·이력·되돌리기·로그 API 계약(역할·버전 상태·겹침 규칙·실패 코드·로그 줄·`simulated`)을 바꾸거나 쓸 때 |
 | [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기·로그 읽기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서·로그 읽기·마스킹 계약 |
+| [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -37,18 +38,21 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·deploy_request 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·deploy_request·migration_plan 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · audit(403 거부 기록 처리기) · tokens · cookies · actors
 ├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수·되돌리기·이력·로그)
 │                     #   AuthService(로그인·세션·/me) · OrganizationService · InvitationService · AgentTokenService
 │                     #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · deploy_support · service_view · job_lease
 │                     #   deploy_job_log(배포 작업 로그 기록기) · deploy_log_messages(로그·오류 고정 문장)
+│                     #   MigrationPlanService(이전 계획 API) · MigrationPlanProcessor(이전 일꾼 단계) · migration_plan_support(단계·지문·대상)
+│                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
+│                     #   MigrationPlan·MigrationPlanLog Repository
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
-├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기 포함) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
+├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
@@ -56,22 +60,24 @@ app/
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나
 ├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, deploy_request_logs, jobs
 │                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
+│                     #   migration_plans, migration_plan_logs
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
 ├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기·로그용 실행기 묶음 get_executor_set)
-└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류 (용어 사전 §3)
+└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·단계·원인 (용어 사전 §3)
 alembic/              # 마이그레이션
 scripts/              # dump_schema.sh
 tests/                # 단위 테스트 · adapter_contract.py·executor_contract.py(공통 계약) · github_fake.py·github_user_fake.py(가짜 GitHub)
-                      #   integration/ (실제 PostgreSQL, deploy_harness.py, auth_support.py: 멤버·세션·토큰 행 + 쿠키 클라이언트)
+                      #   integration/ (실제 PostgreSQL, deploy_harness.py, auth_support.py: 멤버·세션·토큰 행 + 쿠키 클라이언트,
+                      #   migration_support.py: aws 서비스 중 + gcp 예비 + 개발자 A·B, conftest 의 migration 픽스처)
 ```
 
 - 레이어는 `routers/`(API) → `services/`(유스케이스, `session.begin()` 블록으로 트랜잭션) → `repositories/`(DB) 순서다. 외부 시스템 호출은 `clients/` 와 `adapters/` 의 동작 코드가 맡는다.
 - **권한 검사는 라우트마다 의존성 하나**: 조직 경로는 `ViewerAccess`·`DeveloperAccess`·`AdminAccess`·`Human*Access`(= `require_org_role(min_role, human_only)`), 조직 밖은 `Human`(`require_human`)·`LoggedIn`(`require_login`). 공개 경로는 `/healthz`·`/readyz`·로그인 시작·콜백·로그아웃뿐이다. 검사기는 요청 공용 세션을 쓰지 않고 팩토리로 짧은 세션을 따로 연다. 새 라우트에 검사기가 빠지면 `test_every_route_has_guards` 와 역할 표 시험(`test_role_table_covers_every_api_route`)이 실패한다.
 - 세션은 `get_session_factory()`(`expire_on_commit=False`)로 만들고 요청 의존성은 트랜잭션을 열지 않은 세션을 넘긴다. 시험은 `app.dependency_overrides` 로 세션 팩토리·설정·어댑터 조회를 바꾼다.
 - **import 방향**: `app.models` → `app.adapters` 만 허용한다. `app.adapters` 는 `app.models` 를 import 하지 않는다(테스트가 확인).
-- Worker 진입점은 `python -m app.worker`(같은 이미지, compose `worker` 프로필). 로그 `component` 는 `echo-worker`. 일꾼은 `Worker.run_once()` 와 주입한 시계(`Clock`)로 시험한다(실제 sleep 없음).
+- Worker 진입점은 `python -m app.worker`(같은 이미지, compose `worker` 프로필). 로그 `component` 는 `echo-worker`. 일꾼은 `Worker.run_once()` 와 주입한 시계(`Clock`)로 시험한다(실제 sleep 없음). `Worker._advance` 는 `match job.kind` 로 처리기를 고르고 모르는 kind 는 `UnknownJobKindError`(조용히 DONE 금지).
 
 ---
 
@@ -122,6 +128,14 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **되돌리기는 `trigger = ROLLBACK` 배포 요청**이다(`DeployRequestService.create_rollback`). 대상의 `build_id`(`build_reused = true`)·커밋·배포 기록 `config_snapshot` 사본을 쓰고, 접수 순간 현재 배포를 `rollback_base_deployment_id` 에 적는다. 일꾼 `_start` 가 현재 배포가 다르면 `CANCELLED(BASE_CHANGED)`. 새 배포 기록은 `rollback_of_id` = 대상의 배포 기록. 예비 따라가기는 `MANUAL`·`ROLLBACK` 성공(서비스 중 연결)일 때만.
 - **배포 작업 로그 줄은 `DeployJobLog.append` 로만 쓴다.** 상태 전환과 같은 트랜잭션에서, 조건부 UPDATE 가 반영됐을 때만(`if await …transition(...)`) 부른다. 서비스 행을 잠근 트랜잭션 안이어야 한다(`seq = max + 1`). 새 줄 종류는 `DeployLogCode` + `deploy_log_messages.DEPLOY_LOG_ENTRIES` 에 고정 문장으로 더한다(외부 원문 금지). 빌드 진행 줄은 쓰지 않는다(공유 빌드).
 - 빌드·실행 로그는 저장하지 않고 실행기 `read_logs`·`read_runtime_logs` 로 즉석 조회한다(트랜잭션 밖). 응답 직전 `mask_secrets()` 를 거친다. API 프로세스의 실행기는 `get_executor_set`(가짜가 아닌 모드면 None → 빈 페이지).
+
+### 이전 계획 (자주 어기는 것)
+- **승인 = 실행 시작.** 개발자 이상 사람만, 기본은 만든 사람이 아닌 사람(조직 `allow_self_approval` 이 켜져 있을 때만 자기 승인, 막힌 자기 승인·거절은 403 `SELF_APPROVAL_FORBIDDEN` = `AuditedForbiddenError`). 에이전트는 승인 불가.
+- **`EXPIRED`·`STALE` 전환은 `begin()` 블록 안에서 적고 커밋한 뒤 블록 밖에서 409 를 올린다**(안에서 올리면 전환·로그가 되돌려진다). 지문(`read_fingerprint`)은 승인과 일꾼 시작 두 번 비교하고, 접속 확인 시각·`updated_at` 은 넣지 않는다.
+- 잠금 순서: 서비스 → 연결(전체, id 순) → 이전 계획 → 할 일. 상태·위치(`current_step`·`step_phase`)는 `MigrationPlanRepository.transition`(조건부)으로만 바꾸고, 실행 로그 줄은 `MigrationPlanLogWriter.append` 로 반영됐을 때만 쓴다.
+- **비율은 트래픽 실행기가 적용했다고 답했을 때만** 두 연결에 한 트랜잭션에서 함께 적는다(합계 100). 외부 호출은 "요청함 시각(`traffic_requested_at`·`rollback_requested_at`) 저장·커밋 → 호출(키 `{plan}:{step}`·`{plan}:rollback:{n}`) → 결과 저장".
+- 실행 중(`APPROVED`·`RUNNING`·`ROLLING_BACK`) 그 서비스의 배포 요청·되돌리기·서비스 삭제는 서비스 행을 잠근 뒤 `check_no_migration_in_progress` 로 409 `MIGRATION_IN_PROGRESS`. 승인 대기 계획은 막지 않는다.
+- 임대 상실(`lease.is_exhausted`, 한 번 참이면 계속 참)이어도 롤백 시도는 남은 횟수만큼 한다. `simulate` 는 처리기가 실패 값을 만들고 실행기를 부르지 않는다.
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.
