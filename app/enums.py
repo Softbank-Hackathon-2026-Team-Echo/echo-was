@@ -87,11 +87,15 @@ class DeployRequestTrigger(StrEnum):
     MANUAL = "MANUAL"
     # 서비스 중 연결의 성공을 예비 연결이 따라가는 요청.
     STANDBY_SYNC = "STANDBY_SYNC"
+    # 이력에서 고른 이전 성공 요청의 이미지·설정으로 되돌리는 요청(새 빌드 없음).
+    ROLLBACK = "ROLLBACK"
 
 
 class DeployRequestCancelReason(StrEnum):
     SUPERSEDED = "SUPERSEDED"
     SERVICE_DELETED = "SERVICE_DELETED"
+    # 되돌리기를 시작할 때 연결의 현재 배포가 접수 때와 달랐다(그사이 다른 배포가 성공).
+    BASE_CHANGED = "BASE_CHANGED"
 
 
 class DeployRequestErrorCode(StrEnum):
@@ -137,6 +141,59 @@ class SimulatedFailureStage(StrEnum):
     BUILDING = "BUILDING"
     DEPLOYING = "DEPLOYING"
     VERIFYING = "VERIFYING"
+
+
+class LogLevel(StrEnum):
+    """로그 한 줄의 수준(배포 작업 로그·빌드·실행 로그 공통)."""
+
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
+
+class LogSource(StrEnum):
+    """로그 조회 대상. DEPLOY_JOB 은 DB 에 저장한 배포 작업 로그, 나머지는 실행기 즉석 조회."""
+
+    DEPLOY_JOB = "DEPLOY_JOB"
+    BUILD = "BUILD"
+    RUNTIME = "RUNTIME"
+
+
+class DeployLogStage(StrEnum):
+    """배포 작업 로그 한 줄이 속한 단계. 요청 상태 값과 되돌리기(REVERT)."""
+
+    QUEUED = "QUEUED"
+    BUILDING = "BUILDING"
+    DEPLOYING = "DEPLOYING"
+    VERIFYING = "VERIFYING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    REVERT = "REVERT"
+
+
+class DeployLogCode(StrEnum):
+    """배포 작업 로그 한 줄의 코드(deploy_request_logs.code). DB CHECK 없이 앱이 이 값만 쓴다."""
+
+    REQUEST_ACCEPTED = "REQUEST_ACCEPTED"
+    STARTED = "STARTED"
+    BUILD_ATTACHED = "BUILD_ATTACHED"
+    BUILD_REUSED = "BUILD_REUSED"
+    DEPLOYMENT_CREATED = "DEPLOYMENT_CREATED"
+    DEPLOY_REQUESTED = "DEPLOY_REQUESTED"
+    DEPLOY_APPLIED = "DEPLOY_APPLIED"
+    HEALTH_PROBE_OK = "HEALTH_PROBE_OK"
+    HEALTH_PROBE_HTTP_ERROR = "HEALTH_PROBE_HTTP_ERROR"
+    HEALTH_PROBE_UNREACHABLE = "HEALTH_PROBE_UNREACHABLE"
+    SUCCEEDED = "SUCCEEDED"
+    STANDBY_SYNC_REQUESTED = "STANDBY_SYNC_REQUESTED"
+    FAILED = "FAILED"
+    REVERT_SUCCEEDED = "REVERT_SUCCEEDED"
+    REVERT_FAILED = "REVERT_FAILED"
+    CANCELLED_SUPERSEDED = "CANCELLED_SUPERSEDED"
+    CANCELLED_SERVICE_DELETED = "CANCELLED_SERVICE_DELETED"
+    CANCELLED_BASE_CHANGED = "CANCELLED_BASE_CHANGED"
+    LOG_TRUNCATED = "LOG_TRUNCATED"
 
 
 class BuildStatus(StrEnum):

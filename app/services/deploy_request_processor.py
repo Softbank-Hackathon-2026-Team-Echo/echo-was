@@ -10,6 +10,11 @@
   키로 다시 부른다. 가짜 대표 주소 라우터만 I/O 가 없어 성공 처리 트랜잭션 안에서 부른다.
 - 배포 기록이 생긴 뒤의 실패는 모두 되돌리기를 불러 직전 버전을 유지하고 결과를 revert_status 에
   적는다.
+- 배포 작업 로그는 그 줄을 일으킨 전환과 같은 트랜잭션에서, 전환이 반영됐을 때만 쓴다(DeployJobLog).
+- 되돌리기 요청(trigger = ROLLBACK)은 시작할 때 연결의 현재 배포가 접수 때 값
+  (rollback_base_deployment_id)와 다르면 CANCELLED(BASE_CHANGED) 로 끝난다. 빌드는 대상 요청의
+  성공한 빌드를 재사용하므로 BUILDING 을 바로 지나 배포 기록(rollback_of_id = 대상의 배포 기록)을
+  만든다.
 """
 
 import logging
@@ -28,6 +33,7 @@ from app.core.exceptions import RepoNotAccessibleError, SourceProviderUnavailabl
 from app.core.repo_url import parse_repo_url
 from app.enums import (
     BuildStatus,
+    DeployLogCode,
     DeploymentStatus,
     DeployRequestCancelReason,
     DeployRequestErrorCode,
@@ -62,6 +68,7 @@ from app.repositories.deployment_repository import DeploymentRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
     SNAPSHOT_ENVIRONMENT_URL,
@@ -82,6 +89,12 @@ _HEALTH_FAILURE_BY_LAST_RESULT = {
     HealthCheckResult.HTTP_ERROR: DeployRequestErrorCode.HEALTH_CHECK_FAILED,
     HealthCheckResult.UNREACHABLE: DeployRequestErrorCode.PUBLIC_URL_UNREACHABLE,
 }
+_HEALTH_PROBE_LOG_CODES = {
+    HealthCheckResult.HTTP_ERROR: DeployLogCode.HEALTH_PROBE_HTTP_ERROR,
+    HealthCheckResult.UNREACHABLE: DeployLogCode.HEALTH_PROBE_UNREACHABLE,
+}
+# 서비스 중 연결에서 성공하면 예비 연결이 따라가는 요청 종류.
+_STANDBY_SYNC_SOURCE_TRIGGERS = (DeployRequestTrigger.MANUAL, DeployRequestTrigger.ROLLBACK)
 
 
 @dataclass(frozen=True)
@@ -114,6 +127,7 @@ class DeployRequestProcessor:
         self._builds = BuildRepository(session)
         self._deployments = DeploymentRepository(session)
         self._jobs = JobRepository(session)
+        self._job_log = DeployJobLog(session)
         self._request_id = lease.job.subject_id
 
     async def advance(self) -> JobOutcome:
@@ -149,22 +163,30 @@ class DeployRequestProcessor:
                 return self._next_run_now()
             service = locked.service
             if service.is_deleted or service.status == ServiceStatus.DELETING:
-                await self._requests.transition(
-                    request.id,
-                    DeployRequestStatus.QUEUED,
-                    {
-                        "status": DeployRequestStatus.CANCELLED,
-                        "cancel_reason": DeployRequestCancelReason.SERVICE_DELETED,
-                        "finished_at": now,
-                        "updated_at": now,
-                    },
+                await self._cancel_queued(
+                    request,
+                    DeployRequestCancelReason.SERVICE_DELETED,
+                    DeployLogCode.CANCELLED_SERVICE_DELETED,
+                    now,
                 )
-                self._log("deploy request cancelled", request, DeployRequestStatus.CANCELLED)
                 return JobOutcome.done()
             if await self._requests.find_active_for_connection(locked.connection.id) is not None:
                 # 같은 연결에 실행 중 요청이 있다(실행 1 + 대기 1). 끝날 때까지 기다린다.
                 return self._next_run_after_poll()
-            await self._requests.transition(
+            if (
+                request.trigger == DeployRequestTrigger.ROLLBACK
+                and locked.connection.current_deployment_id != request.rollback_base_deployment_id
+            ):
+                # 접수 뒤 다른 배포가 성공해 현재 배포가 바뀌었다. 사용자가 보지 못한 새 배포를
+                # 되돌리기로 덮어쓰지 않는다.
+                await self._cancel_queued(
+                    request,
+                    DeployRequestCancelReason.BASE_CHANGED,
+                    DeployLogCode.CANCELLED_BASE_CHANGED,
+                    now,
+                )
+                return JobOutcome.done()
+            if await self._requests.transition(
                 request.id,
                 DeployRequestStatus.QUEUED,
                 {
@@ -173,9 +195,43 @@ class DeployRequestProcessor:
                     "building_at": now,
                     "updated_at": now,
                 },
-            )
+            ):
+                await self._job_log.append(request, DeployLogCode.STARTED, now)
+                if request.build_id is not None:
+                    # 되돌리기·예비 따라가기는 접수 때 성공한 빌드를 이미 연결했다.
+                    await self._job_log.append(request, DeployLogCode.BUILD_REUSED, now)
         self._log("deploy request started", request, DeployRequestStatus.BUILDING)
         return self._next_run_now()
+
+    async def _cancel_queued(
+        self,
+        request: DeployRequest,
+        reason: DeployRequestCancelReason,
+        log_code: DeployLogCode,
+        now: datetime,
+    ) -> None:
+        """잠근 트랜잭션 안에서 QUEUED 요청을 취소한다. 반영됐을 때만 로그 줄을 쓴다."""
+        if await self._requests.transition(
+            request.id,
+            DeployRequestStatus.QUEUED,
+            {
+                "status": DeployRequestStatus.CANCELLED,
+                "cancel_reason": reason,
+                "finished_at": now,
+                "updated_at": now,
+            },
+        ):
+            await self._job_log.append(request, log_code, now)
+        logger.info(
+            "deploy request cancelled",
+            extra={
+                "action": "advance_deploy_request",
+                "deploy_request_id": str(request.id),
+                "service_environment_id": str(request.service_environment_id),
+                "status": DeployRequestStatus.CANCELLED,
+                "cancel_reason": reason,
+            },
+        )
 
     # --- BUILDING ---
 
@@ -218,14 +274,19 @@ class DeployRequestProcessor:
             if build is None:
                 build, reused = await self._insert_build(request, now)
             await self._lease.hold()
-            await self._requests.update_if(
+            if await self._requests.update_if(
                 request.id,
                 [
                     DeployRequest.status == DeployRequestStatus.BUILDING,
                     DeployRequest.build_id.is_(None),
                 ],
                 {"build_id": build.id, "build_reused": reused, "updated_at": now},
-            )
+            ):
+                await self._job_log.append(
+                    request,
+                    DeployLogCode.BUILD_REUSED if reused else DeployLogCode.BUILD_ATTACHED,
+                    now,
+                )
         logger.info(
             "build attached",
             extra={
@@ -368,6 +429,7 @@ class DeployRequestProcessor:
                 await self._lease.hold()
                 return self._next_run_now()
             assert build.image_repository is not None and build.image_digest is not None
+            rollback_of_id = await self._rollback_target_deployment_id(request)
             deployment = Deployment(
                 id=uuid.uuid4(),
                 service_environment_id=locked.connection.id,
@@ -375,6 +437,7 @@ class DeployRequestProcessor:
                 image_digest=build.image_digest,
                 config_snapshot=dict(request.config_snapshot),
                 status=DeploymentStatus.IN_PROGRESS,
+                rollback_of_id=rollback_of_id,
                 started_at=now,
                 created_at=now,
                 updated_at=now,
@@ -382,7 +445,7 @@ class DeployRequestProcessor:
             self._deployments.add(deployment)
             await self._session.flush()
             await self._lease.hold()
-            await self._requests.transition(
+            if await self._requests.transition(
                 request.id,
                 DeployRequestStatus.BUILDING,
                 {
@@ -391,9 +454,22 @@ class DeployRequestProcessor:
                     "deploying_at": now,
                     "updated_at": now,
                 },
-            )
+            ):
+                await self._job_log.append(request, DeployLogCode.DEPLOYMENT_CREATED, now)
         self._log("deploy request deploying", request, DeployRequestStatus.DEPLOYING)
         return self._next_run_now()
+
+    async def _rollback_target_deployment_id(self, request: DeployRequest) -> uuid.UUID | None:
+        """되돌리기면 대상 요청이 만든 배포 기록(새 배포 기록의 rollback_of_id). 아니면 None.
+
+        이미지·digest 는 대상과 같은 빌드에서, 설정은 접수 때 복사한 대상 배포 기록의 사본에서 온다.
+        """
+        if request.trigger != DeployRequestTrigger.ROLLBACK:
+            return None
+        assert request.rollback_of_request_id is not None
+        target = await self._requests.find_by_id(request.rollback_of_request_id)
+        assert target is not None and target.deployment_id is not None
+        return target.deployment_id
 
     # --- DEPLOYING ---
 
@@ -410,14 +486,15 @@ class DeployRequestProcessor:
             if request.deploy_requested_at is None:
                 async with self._session.begin():
                     await self._lock()
-                    await self._requests.update_if(
+                    if await self._requests.update_if(
                         request.id,
                         [
                             DeployRequest.status == DeployRequestStatus.DEPLOYING,
                             DeployRequest.deploy_requested_at.is_(None),
                         ],
                         {"deploy_requested_at": now, "updated_at": now},
-                    )
+                    ):
+                        await self._job_log.append(request, DeployLogCode.DEPLOY_REQUESTED, now)
             async with self._session.begin():
                 deployment = await self._deployments.find_by_id(request.deployment_id)
                 service, connection, environment = await self._target_rows(request)
@@ -450,15 +527,19 @@ class DeployRequestProcessor:
             case DeployApplied():
                 async with self._session.begin():
                     await self._lock()
-                    await self._requests.transition(
+                    applied_at = self._clock.now()
+                    if await self._requests.transition(
                         request.id,
                         DeployRequestStatus.DEPLOYING,
                         {
                             "status": DeployRequestStatus.VERIFYING,
-                            "verifying_at": self._clock.now(),
-                            "updated_at": self._clock.now(),
+                            "verifying_at": applied_at,
+                            "updated_at": applied_at,
                         },
-                    )
+                    ):
+                        await self._job_log.append(
+                            request, DeployLogCode.DEPLOY_APPLIED, applied_at
+                        )
                 self._log("deploy request verifying", request, DeployRequestStatus.VERIFYING)
                 return self._next_run_now()
 
@@ -501,11 +582,17 @@ class DeployRequestProcessor:
         )
         async with self._session.begin():
             await self._lock()
-            await self._requests.update_if(
+            probed_at = self._clock.now()
+            # 결과 종류가 바뀔 때만 적고 로그 줄을 쓴다(같은 실패가 이어져도 한 줄).
+            if await self._requests.update_if(
                 request.id,
-                [DeployRequest.status == DeployRequestStatus.VERIFYING],
-                {"last_health_result": last_result, "updated_at": self._clock.now()},
-            )
+                [
+                    DeployRequest.status == DeployRequestStatus.VERIFYING,
+                    DeployRequest.last_health_result.is_distinct_from(last_result),
+                ],
+                {"last_health_result": last_result, "updated_at": probed_at},
+            ):
+                await self._job_log.append(request, _HEALTH_PROBE_LOG_CODES[last_result], probed_at)
         return JobOutcome.again(
             self._clock.now() + timedelta(seconds=self._settings.health_check_interval_seconds)
         )
@@ -529,7 +616,7 @@ class DeployRequestProcessor:
             connection = next(
                 item for item in connections if item.id == request.service_environment_id
             )
-            await self._requests.transition(
+            if not await self._requests.transition(
                 request.id,
                 DeployRequestStatus.VERIFYING,
                 {
@@ -538,7 +625,10 @@ class DeployRequestProcessor:
                     "finished_at": now,
                     "updated_at": now,
                 },
-            )
+            ):
+                return self._next_run_now()
+            await self._job_log.append(request, DeployLogCode.HEALTH_PROBE_OK, now)
+            await self._job_log.append(request, DeployLogCode.SUCCEEDED, now)
             await self._deployments.transition(
                 request.deployment_id,
                 DeploymentStatus.IN_PROGRESS,
@@ -557,8 +647,9 @@ class DeployRequestProcessor:
                 is_serving
                 and service.status == ServiceStatus.ACTIVE
                 and not service.is_deleted
-                and request.trigger == DeployRequestTrigger.MANUAL
+                and request.trigger in _STANDBY_SYNC_SOURCE_TRIGGERS
             ):
+                # 예비 연결을 직접 되돌린 경우(비율 0)는 따라가기를 만들지 않는다.
                 for standby in others:
                     if standby.traffic_weight == 0 and standby.current_deployment_id is not None:
                         created_syncs.append(
@@ -607,7 +698,8 @@ class DeployRequestProcessor:
     ) -> uuid.UUID:
         """예비 연결이 같은 빌드(같은 이미지)·같은 설정으로 따라간다.
 
-        설정 사본에서 환경별 주소만 그 연결의 것으로 바꾼다.
+        설정 사본에서 환경별 주소만 그 연결의 것으로 바꾼다. 원본 요청에 STANDBY_SYNC_REQUESTED 줄을
+        쓴다(새 요청의 REQUEST_ACCEPTED 는 enqueue_deploy_request 가 쓴다).
         """
         request = DeployRequest(
             id=uuid.uuid4(),
@@ -632,7 +724,10 @@ class DeployRequestProcessor:
             created_at=now,
             updated_at=now,
         )
-        await enqueue_deploy_request(self._session, self._requests, self._jobs, request, now)
+        await enqueue_deploy_request(
+            self._session, self._requests, self._jobs, self._job_log, request, now
+        )
+        await self._job_log.append(source, DeployLogCode.STANDBY_SYNC_REQUESTED, now)
         return request.id
 
     # --- 실패·되돌리기·일꾼 상실 ---
@@ -645,7 +740,7 @@ class DeployRequestProcessor:
             status = DeployRequestStatus(request.status)
             if status.is_terminal:
                 return self._next_run_now()
-            await self._requests.transition(
+            if await self._requests.transition(
                 request.id,
                 status,
                 {
@@ -654,7 +749,8 @@ class DeployRequestProcessor:
                     "finished_at": now,
                     "updated_at": now,
                 },
-            )
+            ):
+                await self._job_log.append(request, DeployLogCode.FAILED, now, error_code=code)
             if request.deployment_id is not None:
                 await self._deployments.transition(
                     request.deployment_id,
@@ -710,7 +806,8 @@ class DeployRequestProcessor:
         )
         async with self._session.begin():
             await self._lock()
-            await self._requests.update_if(
+            reverted_at = self._clock.now()
+            if await self._requests.update_if(
                 request.id,
                 [DeployRequest.revert_status.is_(None)],
                 {
@@ -718,9 +815,16 @@ class DeployRequestProcessor:
                     "revert_external_ref": (
                         result.external_ref if isinstance(result, Reverted) else None
                     ),
-                    "updated_at": self._clock.now(),
+                    "updated_at": reverted_at,
                 },
-            )
+            ):
+                await self._job_log.append(
+                    request,
+                    DeployLogCode.REVERT_SUCCEEDED
+                    if revert_status is RevertStatus.SUCCEEDED
+                    else DeployLogCode.REVERT_FAILED,
+                    reverted_at,
+                )
         logger.info(
             "deploy request reverted",
             extra={

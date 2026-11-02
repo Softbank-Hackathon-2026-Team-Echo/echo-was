@@ -75,6 +75,21 @@ CREATE TABLE public.builds (
     CONSTRAINT ck_builds_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])))
 );
 
+CREATE TABLE public.deploy_request_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    deploy_request_id uuid NOT NULL,
+    seq integer NOT NULL,
+    logged_at timestamp with time zone NOT NULL,
+    level character varying(8) NOT NULL,
+    stage character varying(16) NOT NULL,
+    code character varying(48) NOT NULL,
+    message character varying(500) NOT NULL,
+    simulated boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_deploy_request_logs_level_valid CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character varying, 'ERROR'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_request_logs_seq_positive CHECK ((seq >= 1))
+);
+
 CREATE TABLE public.deploy_requests (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_id uuid NOT NULL,
@@ -108,9 +123,11 @@ CREATE TABLE public.deploy_requests (
     finished_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    rollback_of_request_id uuid,
+    rollback_base_deployment_id uuid,
     CONSTRAINT ck_deploy_requests_build_reused_consistency CHECK (((build_id IS NULL) = (build_reused IS NULL))),
     CONSTRAINT ck_deploy_requests_cancel_reason_consistency CHECK ((((status)::text = 'CANCELLED'::text) = (cancel_reason IS NOT NULL))),
-    CONSTRAINT ck_deploy_requests_cancel_reason_valid CHECK (((cancel_reason)::text = ANY ((ARRAY['SUPERSEDED'::character varying, 'SERVICE_DELETED'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_cancel_reason_valid CHECK (((cancel_reason)::text = ANY ((ARRAY['SUPERSEDED'::character varying, 'SERVICE_DELETED'::character varying, 'BASE_CHANGED'::character varying])::text[]))),
     CONSTRAINT ck_deploy_requests_commit_sha_format CHECK ((commit_sha ~ '^[0-9a-f]{40}$'::text)),
     CONSTRAINT ck_deploy_requests_config_snapshot_is_object CHECK ((jsonb_typeof(config_snapshot) = 'object'::text)),
     CONSTRAINT ck_deploy_requests_error_code_consistency CHECK ((((status)::text = 'FAILED'::text) = (error_code IS NOT NULL))),
@@ -118,10 +135,13 @@ CREATE TABLE public.deploy_requests (
     CONSTRAINT ck_deploy_requests_last_health_result_valid CHECK (((last_health_result)::text = ANY ((ARRAY['OK'::character varying, 'HTTP_ERROR'::character varying, 'UNREACHABLE'::character varying])::text[]))),
     CONSTRAINT ck_deploy_requests_ref_type_valid CHECK (((ref_type)::text = ANY ((ARRAY['BRANCH'::character varying, 'COMMIT'::character varying])::text[]))),
     CONSTRAINT ck_deploy_requests_revert_status_valid CHECK (((revert_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[]))),
+    CONSTRAINT ck_deploy_requests_rollback_base_consistency CHECK ((((trigger)::text = 'ROLLBACK'::text) = (rollback_base_deployment_id IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_rollback_of_request_consistency CHECK ((((trigger)::text = 'ROLLBACK'::text) = (rollback_of_request_id IS NOT NULL))),
+    CONSTRAINT ck_deploy_requests_rollback_of_request_not_self CHECK ((rollback_of_request_id <> id)),
     CONSTRAINT ck_deploy_requests_simulate_is_object CHECK ((jsonb_typeof(simulate) = 'object'::text)),
     CONSTRAINT ck_deploy_requests_source_request_consistency CHECK ((((trigger)::text = 'STANDBY_SYNC'::text) = (source_request_id IS NOT NULL))),
     CONSTRAINT ck_deploy_requests_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'BUILDING'::character varying, 'DEPLOYING'::character varying, 'VERIFYING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[]))),
-    CONSTRAINT ck_deploy_requests_trigger_valid CHECK (((trigger)::text = ANY ((ARRAY['MANUAL'::character varying, 'STANDBY_SYNC'::character varying])::text[])))
+    CONSTRAINT ck_deploy_requests_trigger_valid CHECK (((trigger)::text = ANY ((ARRAY['MANUAL'::character varying, 'STANDBY_SYNC'::character varying, 'ROLLBACK'::character varying])::text[])))
 );
 
 CREATE TABLE public.deployments (
@@ -299,6 +319,9 @@ ALTER TABLE ONLY public.audit_logs
 ALTER TABLE ONLY public.builds
     ADD CONSTRAINT pk_builds PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.deploy_request_logs
+    ADD CONSTRAINT pk_deploy_request_logs PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.deploy_requests
     ADD CONSTRAINT pk_deploy_requests PRIMARY KEY (id);
 
@@ -335,6 +358,9 @@ ALTER TABLE ONLY public.users
 ALTER TABLE ONLY public.agent_tokens
     ADD CONSTRAINT uq_agent_tokens_token_hash UNIQUE (token_hash);
 
+ALTER TABLE ONLY public.deploy_request_logs
+    ADD CONSTRAINT uq_deploy_request_logs_deploy_request_id_seq UNIQUE (deploy_request_id, seq);
+
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT uq_deployments_id_service_environment_id UNIQUE (id, service_environment_id);
 
@@ -355,6 +381,8 @@ CREATE INDEX ix_agent_tokens_organization_id_created_at ON public.agent_tokens U
 CREATE INDEX ix_audit_logs_organization_id_created_at ON public.audit_logs USING btree (organization_id, created_at);
 
 CREATE INDEX ix_deploy_requests_build_id ON public.deploy_requests USING btree (build_id);
+
+CREATE INDEX ix_deploy_requests_rollback_of_request_id ON public.deploy_requests USING btree (rollback_of_request_id);
 
 CREATE INDEX ix_deploy_requests_service_environment_id_created_at ON public.deploy_requests USING btree (service_environment_id, created_at);
 
@@ -392,6 +420,8 @@ CREATE UNIQUE INDEX uq_services_public_host_live ON public.services USING btree 
 
 CREATE TRIGGER trg_audit_logs_prevent_delete BEFORE DELETE ON public.audit_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
+CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON public.deploy_request_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
+
 CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON public.deploy_requests FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployments FOR EACH ROW EXECUTE FUNCTION public.prevent_deployment_delete();
@@ -414,6 +444,9 @@ ALTER TABLE ONLY public.audit_logs
 ALTER TABLE ONLY public.builds
     ADD CONSTRAINT fk_builds_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY public.deploy_request_logs
+    ADD CONSTRAINT fk_deploy_request_logs_deploy_request_id_deploy_requests FOREIGN KEY (deploy_request_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY public.deploy_requests
     ADD CONSTRAINT fk_deploy_requests_build_id_builds FOREIGN KEY (build_id) REFERENCES public.builds(id) ON DELETE RESTRICT;
 
@@ -422,6 +455,12 @@ ALTER TABLE ONLY public.deploy_requests
 
 ALTER TABLE ONLY public.deploy_requests
     ADD CONSTRAINT fk_deploy_requests_environment_id_environments FOREIGN KEY (environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_rollback_base_deployment_id_deployments FOREIGN KEY (rollback_base_deployment_id) REFERENCES public.deployments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.deploy_requests
+    ADD CONSTRAINT fk_deploy_requests_rollback_of_request_id_deploy_requests FOREIGN KEY (rollback_of_request_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.deploy_requests
     ADD CONSTRAINT fk_deploy_requests_service_environment_id_service_environments FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;

@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -26,8 +26,8 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 |---|---|
 | [docs/schema.md](docs/schema.md) | 공통 모델(ER·칸 설명·행 예시·상태 흐름·설계 이유·새 환경 추가 방법)을 다룰 때. **스키마 설명의 원본** |
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·오류 코드·secretRef 형식·null 규칙)을 바꾸거나 쓸 때 |
-| [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포 API 계약(역할·버전 상태·겹침 규칙·실패 코드·`simulated`)을 바꾸거나 쓸 때 |
-| [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서 계약 |
+| [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포·이력·되돌리기·로그 API 계약(역할·버전 상태·겹침 규칙·실패 코드·로그 줄·`simulated`)을 바꾸거나 쓸 때 |
+| [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기·로그 읽기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서·로그 읽기·마스킹 계약 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -40,25 +40,26 @@ app/
 ├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·deploy_request 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · audit(403 거부 기록 처리기) · tokens · cookies · actors
-├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수)
+├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수·되돌리기·이력·로그)
 │                     #   AuthService(로그인·세션·/me) · OrganizationService · InvitationService · AgentTokenService
 │                     #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · deploy_support · service_view · job_lease
-├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·Build·Deployment·Job Repository (조건부 UPDATE)
+│                     #   deploy_job_log(배포 작업 로그 기록기) · deploy_log_messages(로그·오류 고정 문장)
+├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
-├─ executors/         # 실행기 인터페이스(base) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
+├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기 포함) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
 │   ├─ registry.py    #   discover()(양식·동작 짝 검사), validate_environment_config(by_alias), get_environment_adapter()
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나
-├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, jobs
+├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, deploy_request_logs, jobs
 │                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
-├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url
-├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기)
+├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
+├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기·로그용 실행기 묶음 get_executor_set)
 └─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류 (용어 사전 §3)
 alembic/              # 마이그레이션
 scripts/              # dump_schema.sh
@@ -116,6 +117,11 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 일꾼·배포 코드의 시각은 주입한 `Clock` 으로 정한다(DB `now()` 에 기대지 않는다).
 - 같은 연결은 실행 1 + 대기 1(부분 unique 2개). 새 대기 요청은 `enqueue_deploy_request` 로만 넣는다(밀어내기 포함).
 - 가짜 결과는 `simulated = true` 를 **행에 저장**하고, 응답 때 설정으로 다시 계산하지 않는다. 설치 토큰·App 개인키는 `SecretValue`/메모리로만 다루고 저장·로그·응답에 넣지 않는다.
+
+### 되돌리기·배포 작업 로그 (자주 어기는 것)
+- **되돌리기는 `trigger = ROLLBACK` 배포 요청**이다(`DeployRequestService.create_rollback`). 대상의 `build_id`(`build_reused = true`)·커밋·배포 기록 `config_snapshot` 사본을 쓰고, 접수 순간 현재 배포를 `rollback_base_deployment_id` 에 적는다. 일꾼 `_start` 가 현재 배포가 다르면 `CANCELLED(BASE_CHANGED)`. 새 배포 기록은 `rollback_of_id` = 대상의 배포 기록. 예비 따라가기는 `MANUAL`·`ROLLBACK` 성공(서비스 중 연결)일 때만.
+- **배포 작업 로그 줄은 `DeployJobLog.append` 로만 쓴다.** 상태 전환과 같은 트랜잭션에서, 조건부 UPDATE 가 반영됐을 때만(`if await …transition(...)`) 부른다. 서비스 행을 잠근 트랜잭션 안이어야 한다(`seq = max + 1`). 새 줄 종류는 `DeployLogCode` + `deploy_log_messages.DEPLOY_LOG_ENTRIES` 에 고정 문장으로 더한다(외부 원문 금지). 빌드 진행 줄은 쓰지 않는다(공유 빌드).
+- 빌드·실행 로그는 저장하지 않고 실행기 `read_logs`·`read_runtime_logs` 로 즉석 조회한다(트랜잭션 밖). 응답 직전 `mask_secrets()` 를 거친다. API 프로세스의 실행기는 `get_executor_set`(가짜가 아닌 모드면 None → 빈 페이지).
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

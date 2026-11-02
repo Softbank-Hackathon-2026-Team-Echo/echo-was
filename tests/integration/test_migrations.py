@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.models import Base
 from tests.integration.conftest import run_alembic
+from tests.integration.deploy_harness import DeployHarness
+from tests.integration.rollback_support import create_rollback_fixture
 
 MODEL_SCHEMA = "model_check"
 
@@ -135,7 +137,7 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("deploy_requests", "ck_deploy_requests_cancel_reason_valid"): (
         "CHECK (((cancel_reason)::text = ANY ((ARRAY['SUPERSEDED'::character varying, "
-        "'SERVICE_DELETED'::character varying])::text[])))"
+        "'SERVICE_DELETED'::character varying, 'BASE_CHANGED'::character varying])::text[])))"
     ),
     ("deploy_requests", "ck_deploy_requests_commit_sha_format"): (
         "CHECK ((commit_sha ~ '^[0-9a-f]{40}$'::text))"
@@ -177,7 +179,7 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("deploy_requests", "ck_deploy_requests_trigger_valid"): (
         "CHECK (((trigger)::text = ANY ((ARRAY['MANUAL'::character varying, "
-        "'STANDBY_SYNC'::character varying])::text[])))"
+        "'STANDBY_SYNC'::character varying, 'ROLLBACK'::character varying])::text[])))"
     ),
     ("deploy_requests", "fk_deploy_requests_build_id_builds"): (
         "FOREIGN KEY (build_id) REFERENCES builds(id) ON DELETE RESTRICT"
@@ -305,6 +307,34 @@ EXPECTED_CONSTRAINTS = {
     ("audit_logs", "pk_audit_logs"): "PRIMARY KEY (id)",
     # --- API 서버 3-1: 고객 앱 주소 형식 ---
     ("services", "ck_services_host_suffix_format"): "CHECK ((host_suffix ~ '^[a-z0-9]{8}$'::text))",
+    # --- API 서버 4: 되돌리기·배포 작업 로그 ---
+    ("deploy_requests", "ck_deploy_requests_rollback_of_request_consistency"): (
+        "CHECK ((((trigger)::text = 'ROLLBACK'::text) = (rollback_of_request_id IS NOT NULL)))"
+    ),
+    ("deploy_requests", "ck_deploy_requests_rollback_base_consistency"): (
+        "CHECK ((((trigger)::text = 'ROLLBACK'::text) = (rollback_base_deployment_id IS NOT NULL)))"
+    ),
+    ("deploy_requests", "ck_deploy_requests_rollback_of_request_not_self"): (
+        "CHECK ((rollback_of_request_id <> id))"
+    ),
+    ("deploy_requests", "fk_deploy_requests_rollback_of_request_id_deploy_requests"): (
+        "FOREIGN KEY (rollback_of_request_id) REFERENCES deploy_requests(id) ON DELETE RESTRICT"
+    ),
+    ("deploy_requests", "fk_deploy_requests_rollback_base_deployment_id_deployments"): (
+        "FOREIGN KEY (rollback_base_deployment_id) REFERENCES deployments(id) ON DELETE RESTRICT"
+    ),
+    ("deploy_request_logs", "ck_deploy_request_logs_level_valid"): (
+        "CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, "
+        "'WARN'::character varying, 'ERROR'::character varying])::text[])))"
+    ),
+    ("deploy_request_logs", "ck_deploy_request_logs_seq_positive"): "CHECK ((seq >= 1))",
+    ("deploy_request_logs", "fk_deploy_request_logs_deploy_request_id_deploy_requests"): (
+        "FOREIGN KEY (deploy_request_id) REFERENCES deploy_requests(id) ON DELETE RESTRICT"
+    ),
+    ("deploy_request_logs", "pk_deploy_request_logs"): "PRIMARY KEY (id)",
+    ("deploy_request_logs", "uq_deploy_request_logs_deploy_request_id_seq"): (
+        "UNIQUE (deploy_request_id, seq)"
+    ),
 }
 
 EXPECTED_INDEXES = {
@@ -427,6 +457,18 @@ EXPECTED_INDEXES = {
         "USING btree (organization_id, created_at)"
     ),
     "pk_audit_logs": "CREATE UNIQUE INDEX pk_audit_logs ON audit_logs USING btree (id)",
+    # --- API 서버 4 ---
+    "ix_deploy_requests_rollback_of_request_id": (
+        "CREATE INDEX ix_deploy_requests_rollback_of_request_id ON deploy_requests "
+        "USING btree (rollback_of_request_id)"
+    ),
+    "pk_deploy_request_logs": (
+        "CREATE UNIQUE INDEX pk_deploy_request_logs ON deploy_request_logs USING btree (id)"
+    ),
+    "uq_deploy_request_logs_deploy_request_id_seq": (
+        "CREATE UNIQUE INDEX uq_deploy_request_logs_deploy_request_id_seq "
+        "ON deploy_request_logs USING btree (deploy_request_id, seq)"
+    ),
     "ix_audit_logs_organization_id_created_at": (
         "CREATE INDEX ix_audit_logs_organization_id_created_at ON audit_logs "
         "USING btree (organization_id, created_at)"
@@ -447,6 +489,11 @@ EXPECTED_TRIGGERS = {
         "CREATE TRIGGER trg_audit_logs_prevent_delete BEFORE DELETE ON audit_logs "
         "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
     ),
+    # 배포 작업 로그도 지우지 않는다(같은 공용 함수).
+    ("deploy_request_logs", "trg_deploy_request_logs_prevent_delete"): (
+        "CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON "
+        "deploy_request_logs FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
+    ),
 }
 
 # 기존 표에 칸을 더하기 전(접속 상태 revision) 시점.
@@ -456,6 +503,9 @@ BEFORE_ORGANIZATIONS = "d95d675cb256"
 BEFORE_CONNECTION_STATUS = "b17994eaa7aa"
 # 고객 앱 주소 suffix 를 더하기 전(API 서버 6 head) 시점.
 BEFORE_HOST_SUFFIX = "ce35cab9b2e9"
+# 되돌리기·배포 작업 로그를 더하기 전(API 서버 3-1 head) 시점.
+BEFORE_ROLLBACK = "1d1601c0111a"
+ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 SERVICE_NAME_INDEXES = {"uq_services_name_live", "uq_services_org_name_live"}
 HOST_SUFFIX_CHECK = "ck_services_host_suffix_format"
 
@@ -591,6 +641,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "alembic_version",
         "audit_logs",
         "builds",
+        "deploy_request_logs",
         "deploy_requests",
         "deployments",
         "environments",
@@ -783,6 +834,73 @@ async def test_host_suffix_revision_upgrade_with_existing_services_fails_clearly
         await transaction.rollback()
 
     assert "expects services to be empty" in str(raised.value)
+
+
+def _rollback_state(connection: Connection) -> tuple[bool, set[str], set[str], int]:
+    inspector = inspect(connection)
+    has_table = "deploy_request_logs" in inspector.get_table_names()
+    columns = {column["name"] for column in inspector.get_columns("deploy_requests")}
+    checks = {check["name"] or "" for check in inspector.get_check_constraints("deploy_requests")}
+    functions = connection.scalar(
+        text("SELECT count(*) FROM pg_proc WHERE proname = 'prevent_append_only_delete'")
+    )
+    return (
+        has_table,
+        columns & ROLLBACK_COLUMNS,
+        {name for name in checks if "rollback" in name},
+        int(functions or 0),
+    )
+
+
+async def test_rollback_revision_downgrade_removes_table_and_columns_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_ROLLBACK))
+        )
+        down = await connection.run_sync(_rollback_state)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_rollback_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    # 공용 DELETE 금지 함수는 API 서버 3 소유라 내려도 남는다.
+    assert down == (False, set(), set(), 1)
+    assert up == (
+        True,
+        ROLLBACK_COLUMNS,
+        {
+            "ck_deploy_requests_rollback_of_request_consistency",
+            "ck_deploy_requests_rollback_base_consistency",
+            "ck_deploy_requests_rollback_of_request_not_self",
+        },
+        1,
+    )
+
+
+async def test_rollback_revision_downgrade_with_rollback_rows_fails_clearly(
+    harness: DeployHarness, engine: AsyncEngine
+) -> None:
+    rollback = await create_rollback_fixture(harness)
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(RuntimeError, match="deploy_requests has 1 rollback rows") as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_ROLLBACK))
+            )
+        await transaction.rollback()
+    async with harness.session_factory() as session:
+        still_there = await session.scalar(
+            text("SELECT count(*) FROM deploy_requests WHERE id = :id"), {"id": rollback["id"]}
+        )
+        version = await session.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert "does not delete request history" in str(raised.value)
+    assert still_there == 1
+    assert version == "33ad047a493c"
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

@@ -22,6 +22,7 @@ from app.core.exceptions import (
 )
 from app.core.repo_url import normalize_repo_url, parse_repo_url
 from app.enums import (
+    DeployLogCode,
     DeployRequestCancelReason,
     DeployRequestStatus,
     JobKind,
@@ -33,6 +34,7 @@ from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import HostSuffixGenerator, service_public_host
 from app.services.integrity import violated_constraint_name
 from app.services.service_view import ServiceDetailView, load_service_detail
@@ -97,6 +99,7 @@ class ServiceService:
         self._service_environments = ServiceEnvironmentRepository(session)
         self._deploy_requests = DeployRequestRepository(session)
         self._jobs = JobRepository(session)
+        self._job_log = DeployJobLog(session)
 
     async def create_service(self, command: CreateServiceCommand) -> ServiceDetailView:
         """저장소 접근을 확인하고 서비스를 ACTIVE 로 저장한다.
@@ -219,6 +222,7 @@ class ServiceService:
                         "updated_at": now,
                     },
                 ):
+                    await self._job_log.append(queued, DeployLogCode.CANCELLED_SERVICE_DELETED, now)
                     await self._jobs.cancel_queued_for_subject(queued.id, now)
             if await self._jobs.find_open_for_subject(service.id) is None:
                 self._jobs.add(

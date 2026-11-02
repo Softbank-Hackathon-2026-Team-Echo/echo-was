@@ -26,7 +26,12 @@ from app.enums import (
     RefType,
     RevertStatus,
 )
-from app.models.base import Base, TimestampMixin, UuidPrimaryKeyMixin
+from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
+    Base,
+    TimestampMixin,
+    UuidPrimaryKeyMixin,
+)
 from app.models.build import COMMIT_SHA_PATTERN, EXTERNAL_REF_MAX_LENGTH, REPO_URL_MAX_LENGTH
 
 REF_VALUE_MAX_LENGTH = 255
@@ -50,6 +55,9 @@ class DeployRequest(UuidPrimaryKeyMixin, TimestampMixin, Base):
     - build_id 는 이 요청이 쓰는 빌드(재사용이면 build_reused = true), deployment_id 는 빌드 성공
       뒤 만든 배포 기록이다. 배포 기록의 id 가 배포 실행기의 멱등 키다.
     - config_snapshot 에는 비밀값을 넣지 않는다.
+    - 되돌리기(trigger = ROLLBACK)는 rollback_of_request_id 로 이력에서 고른 성공 요청을,
+      rollback_base_deployment_id 로 접수 순간 연결의 현재 배포를 가리킨다. 시작할 때 현재 배포가
+      이 값과 다르면 CANCELLED(BASE_CHANGED) 로 끝낸다.
     """
 
     __tablename__ = "deploy_requests"
@@ -84,6 +92,15 @@ class DeployRequest(UuidPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "(build_id IS NULL) = (build_reused IS NULL)", name="build_reused_consistency"
         ),
+        CheckConstraint(
+            "(trigger = 'ROLLBACK') = (rollback_of_request_id IS NOT NULL)",
+            name="rollback_of_request_consistency",
+        ),
+        CheckConstraint(
+            "(trigger = 'ROLLBACK') = (rollback_base_deployment_id IS NOT NULL)",
+            name="rollback_base_consistency",
+        ),
+        CheckConstraint("rollback_of_request_id <> id", name="rollback_of_request_not_self"),
         CheckConstraint(f"commit_sha ~ '{COMMIT_SHA_PATTERN}'", name="commit_sha_format"),
         CheckConstraint(
             "jsonb_typeof(config_snapshot) = 'object'", name="config_snapshot_is_object"
@@ -96,6 +113,7 @@ class DeployRequest(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "created_at",
         ),
         Index("ix_deploy_requests_build_id", "build_id"),
+        Index("ix_deploy_requests_rollback_of_request_id", "rollback_of_request_id"),
         Index(
             ACTIVE_REQUEST_UNIQUE_INDEX,
             "service_environment_id",
@@ -167,3 +185,13 @@ class DeployRequest(UuidPrimaryKeyMixin, TimestampMixin, Base):
     verifying_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback_of_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deploy_requests.id", ondelete="RESTRICT"),
+        nullable=True,
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    rollback_base_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deployments.id", ondelete="RESTRICT"),
+        nullable=True,
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )

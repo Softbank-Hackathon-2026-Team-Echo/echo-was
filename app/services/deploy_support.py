@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import (
+    DeployLogCode,
     DeployRequestCancelReason,
     DeployRequestStatus,
     JobKind,
@@ -23,6 +24,7 @@ from app.models import Deployment, DeployRequest, Environment, Job, Service, Ser
 from app.models.service import HOST_SUFFIX_LENGTH
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
+from app.services.deploy_job_log import DeployJobLog
 
 # config_snapshot 키(요청·배포 기록 공통). 비밀값·토큰은 넣지 않는다.
 SNAPSHOT_HEALTH_CHECK_PATH = "healthCheckPath"
@@ -89,12 +91,14 @@ async def enqueue_deploy_request(
     session: AsyncSession,
     deploy_requests: DeployRequestRepository,
     jobs: JobRepository,
+    job_log: DeployJobLog,
     request: DeployRequest,
     now: datetime,
 ) -> uuid.UUID | None:
     """새 요청과 할 일을 저장한다. 같은 연결의 대기 요청이 있으면 SUPERSEDED 로 취소한다.
 
     호출하는 쪽이 서비스 행 → 연결 행을 잠근 트랜잭션 안에서 부른다. 밀려난 요청의 id 를 돌려준다.
+    배포 작업 로그: 밀려난 요청에 CANCELLED_SUPERSEDED, 새 요청에 REQUEST_ACCEPTED.
     대기 요청은 연결마다 하나뿐이므로(부분 unique), 먼저 취소하고 새 행을 넣은 뒤
     superseded_by_id 를 적는다. 취소한 요청의 할 일이 QUEUED 면 닫고, RUNNING 이면 그 일꾼이
     끝 상태를 보고 닫는다.
@@ -112,8 +116,10 @@ async def enqueue_deploy_request(
         },
     ):
         superseded_id = queued.id
+        await job_log.append(queued, DeployLogCode.CANCELLED_SUPERSEDED, now)
     deploy_requests.add(request)
     await session.flush()
+    await job_log.append(request, DeployLogCode.REQUEST_ACCEPTED, now)
     if superseded_id is not None:
         await deploy_requests.update_if(
             superseded_id, [], {"superseded_by_id": request.id, "updated_at": now}

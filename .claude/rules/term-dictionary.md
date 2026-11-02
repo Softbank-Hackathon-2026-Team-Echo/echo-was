@@ -39,7 +39,14 @@
 | 서비스-환경 연결 | Service environment | `ServiceEnvironment` / `service_environments` | 서비스 하나가 환경 하나에 올라가 있는 관계. 현재 배포와 트래픽 비율을 담는다 | F2·F3·F7 |
 | 배포 | Deployment | `Deployment` / `deployments` | 연결 하나에 이미지 하나를 올린 기록. 지우지 않는 이력이다 | F1 |
 | 현재 배포 | Current deployment | `service_environments.current_deployment_id` | 그 연결에서 지금 돌고 있는 배포. 같은 연결의 배포만 가리킨다 | F1·F3 |
-| 되돌리기 | Rollback | `deployments.rollback_of_id` | 예전 배포의 이미지·설정으로 **새 배포 행**을 만드는 것. 원본을 가리킨다 | F1·F9 |
+| 되돌리기 | Rollback | `deployments.rollback_of_id` | 예전 배포의 이미지·설정으로 **새 배포 행**을 만드는 것. 원본을 가리킨다. API 로는 이력에서 고른 성공 요청을 대상으로 한 `trigger = ROLLBACK` 배포 요청으로 한다(API 서버 4) | F1·F9 |
+| 되돌리기 요청 | Rollback request | `deploy_requests.trigger = ROLLBACK`, `rollback_of_request_id` / `POST …/deploy-requests/{id}/rollback` | 이력에서 고른 `SUCCEEDED` 요청(대상)의 빌드·커밋·배포 기록 설정 사본으로 같은 연결에 다시 올리는 배포 요청. 새 빌드 없음(`build_reused = true`). 겹침·헬스체크·실패 처리는 원터치 배포와 같다 | F1·F9, API 4 |
+| 되돌리기 기준 배포 | Rollback base deployment | `deploy_requests.rollback_base_deployment_id` | 되돌리기 접수 순간 연결의 현재 배포. 일꾼이 시작할 때 현재 배포가 이것과 다르면 `CANCELLED(BASE_CHANGED)` | API 4 |
+| 현재 버전 표시 | Is current | 응답 `isCurrent` (저장 안 함) | 요청이 만든 배포 기록이 지금 그 연결의 현재 배포인가 | API 4 |
+| 되돌리기 가능 | Rollbackable | 응답 `rollbackable` (저장 안 함) | `SUCCEEDED` · 배포 기록 있음 · 현재 아님 · 연결 살아 있음 · 서비스 `ACTIVE`. 판정은 배포 기록 id 로 한다 | API 4 |
+| 배포 작업 로그 | Deploy job log | `DeployRequestLog` / `deploy_request_logs`, `source = DEPLOY_JOB` | 배포 요청 한 건의 진행 줄(접수·시작·빌드 연결·배포·헬스·성공·실패·되돌리기·취소). 상태 전환과 같은 트랜잭션에서 반영됐을 때만 쓰고, 요청마다 `seq` 1부터, 500줄 상한, 지우지 않는다 | F1, API 4 |
+| 빌드 로그 · 실행 로그 | Build log · Runtime log | `source = BUILD` · `RUNTIME`, `BuildExecutor.read_logs` · `DeployExecutor.read_runtime_logs` | 실행기가 즉석으로 읽는 로그(저장 안 함). 실행기는 비밀값을 가려서 돌려준다. 지금은 가짜(`simulated`) | F1, API 4 |
+| 로그 마스킹 | Log masking | `app/core/log_masking.py::mask_secrets` | 로그 응답 직전 알려진 비밀값 모양(GitHub 토큰·AWS 키·Bearer·`sk-`·개인 키 블록)을 `***` 로 바꾸는 방어용 이중 검사 | F16, API 4 |
 | 트래픽 비율 | Traffic weight | `service_environments.traffic_weight` | 앞단 프록시에 **마지막으로 적용한** 비율(0~100). 실제 분배는 프록시(Envoy)가 한다. API 서버 3 에서는 가짜 대표 주소 라우터가 "적용했다"고 답한 값이며, 그 연결의 현재 배포 요청에 `simulated` 로 표시된다 | F3·F7 |
 | 비율 적용 시각 | Traffic applied at | `service_environments.traffic_applied_at` | 위 비율을 프록시에 적용한 시각 | F7 |
 | 어댑터 | Adapter | `app/adapters/<kind>.py` | 환경 종류마다 파일 하나. 설정 양식 + 동작 클래스를 함께 등록한다 | F2, NFR-15 |
@@ -67,7 +74,7 @@
 | 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}-{suffix}.{public_base_domain}`(도메인 바로 아래 한 단계). 서비스 중 연결로 간다 | F1·D8, API 3-1 |
 | 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | `https://{서비스}-{환경}-{suffix}.{public_base_domain}`(서비스의 suffix). 연결을 만들 때 정해 저장한다(환경 이름이 바뀌어도 그대로). 헬스체크 대상 | F1·D8, API 3-1 |
 | 주소 suffix | Host suffix | `services.host_suffix` | 대표·환경별 주소 끝의 소문자·숫자 무작위 8자. 서비스를 만들 때 한 번 정하고 바꾸지 않는다(지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게). 레이블이 63자를 넘으면 앞부분을 54자로 자르고 suffix 는 남긴다 | API 3-1 |
-| 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기를 실제로 하는 쪽. 이번에는 가짜(`simulated`) | F1 |
+| 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기와 빌드·실행 로그 읽기를 실제로 하는 쪽. 이번에는 가짜(`simulated`) | F1 |
 | 멱등 키 | Idempotency key | 빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt` | 외부 작업을 두 번 만들지 않게 우리가 먼저 정해 넘기는 키. 같은 키 재호출은 같은 작업 | F1 |
 | 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다 | F1·D7 |
 | 소스 저장소 클라이언트 | Source repository client | `SourceRepositoryClient` (`app/clients/source_repository.py`) | 저장소 접근 확인·브랜치/커밋 → 40자 SHA·빌드용 읽기 토큰. 가짜와 GitHub App 구현 | F1·D9 |
@@ -121,12 +128,22 @@
 
 - 같은 연결에는 실행 중(`BUILDING`·`DEPLOYING`·`VERIFYING`) 1개 + `QUEUED` 1개까지(부분 unique). 새 요청이 대기 요청을 밀어낸다.
 - 일꾼이 임대를 3번 잃으면 어느 진행 상태에서든 `FAILED`(`WORKER_LOST`).
-- 촉발(`trigger`): `MANUAL`(사람) · `STANDBY_SYNC`(예비 따라가기).
-- 취소 이유(`cancel_reason`, `CANCELLED` 일 때만): `SUPERSEDED`(새 요청이 밀어냄) · `SERVICE_DELETED`.
+- 촉발(`trigger`): `MANUAL`(사람) · `STANDBY_SYNC`(예비 따라가기) · `ROLLBACK`(되돌리기, `rollback_of_request_id`·`rollback_base_deployment_id` 가 있다).
+- 취소 이유(`cancel_reason`, `CANCELLED` 일 때만): `SUPERSEDED`(새 요청이 밀어냄) · `SERVICE_DELETED` · `BASE_CHANGED`(되돌리기를 시작할 때 연결의 현재 배포가 접수 때와 달랐다).
+- 되돌리기의 가짜 실패 단계(`simulate.failAt`): `DEPLOYING` · `VERIFYING` 만(빌드 단계가 없다).
 - 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR`. 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
 - 되돌리기 결과(`revert_status`): `SUCCEEDED` · `FAILED` · NULL(필요 없었음).
 - 마지막 헬스 결과(`last_health_result`): `OK` · `HTTP_ERROR` · `UNREACHABLE`.
 - 가짜 실패 단계(`simulate.failAt`): `BUILDING` · `DEPLOYING` · `VERIFYING`.
+
+### 로그 값 (API 서버 4)
+
+| 값 목록 | 표·칸 | 뜻 |
+|---|---|---|
+| `DEPLOY_JOB` · `BUILD` · `RUNTIME` | 로그 API `source` (`LogSource`) | 배포 작업 로그(DB) · 빌드 로그 · 실행 로그(실행기 즉석 조회) |
+| `INFO` · `WARN` · `ERROR` | `deploy_request_logs.level`, 응답 `level` (`LogLevel`) | `FAILED`·`REVERT_FAILED` 는 ERROR, 헬스 실패 줄은 WARN |
+| 요청 상태 7개 · `REVERT` | `deploy_request_logs.stage` (`DeployLogStage`) | 줄이 속한 단계 |
+| `REQUEST_ACCEPTED` · `STARTED` · `BUILD_ATTACHED` · `BUILD_REUSED` · `DEPLOYMENT_CREATED` · `DEPLOY_REQUESTED` · `DEPLOY_APPLIED` · `HEALTH_PROBE_OK` · `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` · `SUCCEEDED` · `STANDBY_SYNC_REQUESTED` · `FAILED` · `REVERT_SUCCEEDED` · `REVERT_FAILED` · `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` · `LOG_TRUNCATED` | `deploy_request_logs.code` (`DeployLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/deploy_log_messages.py` |
 
 ### 빌드·할 일·서비스 상태
 
@@ -209,7 +226,6 @@
 
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
-| 배포 로그\* | Deployment log | (저장 방식 미정) | 배포 작업 로그·빌드 로그·실행 로그 | F1 | API 서버 4 |
 | 감사 로그\* | Audit log | `audit_logs` (거부 기록만 API 서버 6 이 만듦) | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다. 거부 밖의 행위 기록·조회 API 가 후속 | F5, NFR-08 | API 서버 7 |
 | 이전 계획\* | Migration plan | `migration_plans` | 단계·예상 시간·롤백 조건을 담은 계획. 개발자 이상이 실행(검사기 `require_org_role(DEVELOPER, human_only=True)`) | F10 | API 서버 8 |
 | 승인\* | Approval | (이전 계획·에이전트 변경에 붙음) | 개발자 이상의 사람이 실행·운영 반영을 허락한 기록(자기 승인 규칙은 API 서버 8) | F10·F15 | API 서버 8 |
@@ -233,7 +249,8 @@
 | Adapter | 환경 종류 하나의 묶음(설정 양식 + 이후 동작 코드) | 설정 양식은 어댑터의 "검사" 부분만 말한다 |
 | Traffic weight | 마지막으로 프록시에 적용한 값 | 지금 실제로 흐르는 비율(측정값, F7·F17) |
 | Deploy request | 원터치 배포 한 번(`deploy_requests`: 빌드·대기·취소·실패 이유 포함) | 배포 기록(`deployments`: 연결에 이미지를 올린 것, 빌드 성공 뒤에만 생긴다) |
-| Revert | 실패한 새 버전을 거두는 실행기 호출(`revert_status`) | 사용자 되돌리기(`rollback_of_id`, 새 배포 행, API 서버 4) |
+| Revert | 실패한 새 버전을 거두는 실행기 호출(`revert_status`) | 사용자 되돌리기(`trigger = ROLLBACK` 배포 요청 → `rollback_of_id` 새 배포 행, API 서버 4) |
+| Log | 배포 작업 로그(`deploy_request_logs`)·빌드 로그·실행 로그(API 서버 4) | 감사 로그(`audit_logs`, 누가 무엇을 했나), 서버 자체 구조화 로그(`logger`) |
 | Session | 로그인 세션 한 행(`sessions`, 클래스 `UserSession`) | SQLAlchemy `Session`·`AsyncSession`(DB 세션). 그래서 모델 클래스 이름을 `UserSession` 으로 둔다 |
 | Role | 조직 멤버 역할(`OrganizationRole`: VIEWER·DEVELOPER·ADMIN) | 서비스-환경 연결의 역할(`ServiceEnvironmentRole`: SERVING·STANDBY·NONE) |
 | Organization | Echo 의 고객 조직(`organizations`) | GitHub 조직(로그인 허용 스위치 `login_allowed_github_org`) |

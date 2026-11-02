@@ -6,6 +6,11 @@
 - 시험은 인스턴스를 만들 때 실패·멈춤 대상을 넣어 특정 커밋·연결에서 실패하게 만들 수 있다
   (운영 설정에는 이 값이 없다).
 - 가짜 digest 는 sha256(서비스 id + 커밋), 이미지 주소는 registry.echo.test/<서비스 이름> 이다.
+- 로그 읽기(read_logs·read_runtime_logs)는 external_ref 만으로 정해지는 줄을 준다. 줄 시각은
+  external_ref 에 든 시작 시각부터 LOG_LINE_INTERVAL 간격이다(시계를 쓰지 않아 같은 cursor 면 늘
+  같은 줄). cursor 는 줄 번호 문자열이다.
+- 시험은 log_injections 로 "토큰처럼 보이는 줄"을 넣을 수 있다. 이 줄은 가리지 않고 그대로 돌려줘
+  서버 쪽 마스킹을 시험한다(운영 설정에는 이 값이 없다).
 """
 
 import hashlib
@@ -15,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.clock import Clock
+from app.enums import LogLevel
 from app.executors.base import (
     BuildFailed,
     BuildPollResult,
@@ -29,6 +35,9 @@ from app.executors.base import (
     DeployTarget,
     HealthOk,
     HealthProbeResult,
+    InvalidLogCursor,
+    LogChunk,
+    LogLine,
     MainRoute,
     Reverted,
     RevertFailed,
@@ -44,6 +53,36 @@ from app.executors.base import (
 
 FAKE_REGISTRY = "registry.echo.test"
 _SEPARATOR = "|"
+LOG_LINE_INTERVAL = timedelta(seconds=2)
+
+
+def _log_lines(started_at: datetime, messages: list[tuple[LogLevel, str]]) -> list[LogLine]:
+    return [
+        LogLine(at=started_at + LOG_LINE_INTERVAL * index, level=level, message=message)
+        for index, (level, message) in enumerate(messages)
+    ]
+
+
+def _page(lines: list[LogLine], cursor: str | None, limit: int) -> LogChunk:
+    """cursor = 다음에 읽을 줄 번호. 끝을 넘은 번호는 빈 청크다."""
+    if cursor is None:
+        start = 0
+    elif cursor.isascii() and cursor.isdigit():
+        start = int(cursor)
+    else:
+        raise InvalidLogCursor
+    page = lines[start : start + limit]
+    if not page:
+        return LogChunk(lines=(), next_cursor=cursor, has_more=False)
+    end = start + len(page)
+    return LogChunk(lines=tuple(page), next_cursor=str(end), has_more=end < len(lines))
+
+
+def _inject(
+    messages: list[tuple[LogLevel, str]], injections: tuple[str, ...]
+) -> list[tuple[LogLevel, str]]:
+    """시험이 넣은 줄을 첫 줄 뒤에 끼운다."""
+    return [*messages[:1], *((LogLevel.INFO, line) for line in injections), *messages[1:]]
 
 
 @dataclass(frozen=True)
@@ -74,11 +113,15 @@ class _FakeOperations:
 
     def parse(self, external_ref: str) -> tuple[bool, list[str]]:
         """(step_seconds 가 지났는지, 담아 둔 값들)."""
+        started_at, values = self.parse_started(external_ref)
+        return self._clock.now() >= started_at + self._step, values
+
+    def parse_started(self, external_ref: str) -> tuple[datetime, list[str]]:
+        """(시작 시각, 담아 둔 값들). 시계를 보지 않는다."""
         prefix, _key, started_ms, *values = external_ref.split(_SEPARATOR)
         if prefix != self._prefix:
             raise ValueError("unknown external_ref")
-        started_at = datetime.fromtimestamp(int(started_ms) / 1000, UTC)
-        return self._clock.now() >= started_at + self._step, values
+        return datetime.fromtimestamp(int(started_ms) / 1000, UTC), values
 
     @property
     def operation_keys(self) -> list[str]:
@@ -93,10 +136,12 @@ class FakeBuildExecutor:
         *,
         fail_commits: Iterable[str] = (),
         stall_commits: Iterable[str] = (),
+        log_injections: Iterable[str] = (),
     ) -> None:
         self._operations = _FakeOperations("fake-build", clock, step_seconds)
         self._fail_commits = frozenset(fail_commits)
         self._stall_commits = frozenset(stall_commits)
+        self._log_injections = tuple(log_injections)
         self.received_tokens = 0
 
     @property
@@ -124,10 +169,35 @@ class FakeBuildExecutor:
             return BuildRunning()
         if commit_sha in self._fail_commits:
             return BuildFailed()
-        digest = hashlib.sha256(f"{service_id}{commit_sha}".encode()).hexdigest()
         return BuildSucceeded(
-            image_repository=f"{FAKE_REGISTRY}/{service_name}", image_digest=f"sha256:{digest}"
+            image_repository=f"{FAKE_REGISTRY}/{service_name}",
+            image_digest=_fake_digest(service_id, commit_sha),
         )
+
+    async def read_logs(self, external_ref: str, cursor: str | None, limit: int) -> LogChunk:
+        started_at, (service_id, commit_sha, service_name) = self._operations.parse_started(
+            external_ref
+        )
+        image = f"{FAKE_REGISTRY}/{service_name}"
+        messages = [
+            (LogLevel.INFO, f"Fetching source at commit {commit_sha[:12]}"),
+            (LogLevel.INFO, "Detecting build configuration"),
+            (LogLevel.INFO, "Installing dependencies"),
+            (LogLevel.INFO, f"Building image {image}"),
+        ]
+        if commit_sha in self._fail_commits:
+            messages.append((LogLevel.ERROR, "Build step failed with exit code 1"))
+        else:
+            messages += [
+                (LogLevel.INFO, f"Pushing image {image}"),
+                (LogLevel.INFO, f"Image digest {_fake_digest(service_id, commit_sha)}"),
+                (LogLevel.INFO, "Build finished"),
+            ]
+        return _page(_log_lines(started_at, _inject(messages, self._log_injections)), cursor, limit)
+
+
+def _fake_digest(service_id: str, commit_sha: str) -> str:
+    return "sha256:" + hashlib.sha256(f"{service_id}{commit_sha}".encode()).hexdigest()
 
 
 class FakeDeployExecutor:
@@ -139,11 +209,13 @@ class FakeDeployExecutor:
         fail_service_environment_ids: Iterable[uuid.UUID] = (),
         stall_service_environment_ids: Iterable[uuid.UUID] = (),
         fail_revert: bool = False,
+        log_injections: Iterable[str] = (),
     ) -> None:
         self._operations = _FakeOperations("fake-deploy", clock, step_seconds)
         self._fail = {str(value) for value in fail_service_environment_ids}
         self._stall = {str(value) for value in stall_service_environment_ids}
         self._fail_revert = fail_revert
+        self._log_injections = tuple(log_injections)
         self.reverts: list[FakeCall] = []
 
     @property
@@ -181,6 +253,33 @@ class FakeDeployExecutor:
         if self._fail_revert:
             return RevertFailed()
         return Reverted(external_ref=f"fake-revert{_SEPARATOR}{idempotency_key}")
+
+    async def read_runtime_logs(
+        self,
+        target: DeployTarget,
+        deployment: DeploymentSpec,
+        external_ref: str,
+        cursor: str | None,
+        limit: int,
+    ) -> LogChunk:
+        started_at, (service_environment_id,) = self._operations.parse_started(external_ref)
+        health_path = str(deployment.config_snapshot.get("healthCheckPath", "/"))
+        messages = [
+            (
+                LogLevel.INFO,
+                f"Pulling image {deployment.image_repository}@{deployment.image_digest}",
+            ),
+            (LogLevel.INFO, f"Starting {target.service_name} ({target.environment_kind})"),
+            (LogLevel.INFO, f"Listening on 0.0.0.0:{target.container_port}"),
+        ]
+        if service_environment_id in self._fail:
+            messages.append((LogLevel.ERROR, "Container exited with code 1"))
+        else:
+            messages += [
+                (LogLevel.INFO, f"GET {health_path} 200"),
+                (LogLevel.INFO, "Ready to serve traffic"),
+            ]
+        return _page(_log_lines(started_at, _inject(messages, self._log_injections)), cursor, limit)
 
 
 class FakeMainRouteExecutor:

@@ -10,6 +10,11 @@
 deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown_attempt). 같은 키로 다시
 불러도 같은 작업을 돌려줘야 한다. external_ref·실패 코드에는 비밀값을 넣지 않는다.
 
+로그 읽기 계약(read_logs·read_runtime_logs): 상태를 바꾸지 않는 조회다. limit 을 넘지 않는 줄을
+시간 순으로 돌려주고, 같은 cursor 면 같은 줄을 준다. 알아보지 못하는 cursor 는 InvalidLogCursor 다.
+비밀값(설치 토큰·레지스트리 비밀번호·환경변수 값 등)은 가려서 돌려준다. 보존 기간이 지나 없으면
+빈 청크다. 서버는 응답 직전에 알려진 토큰 모양을 한 번 더 가리지만 이 책임을 대신하지 않는다.
+
 이 패키지는 app.models 를 import 하지 않는다. 호출하는 쪽이 아래 값 객체로 바꿔 넘긴다.
 """
 
@@ -19,7 +24,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from app.core.secrets import SecretValue
-from app.enums import DeployRequestErrorCode, TeardownErrorCode
+from app.enums import DeployRequestErrorCode, LogLevel, TeardownErrorCode
 
 # --- 넘기는 값 ---
 
@@ -174,6 +179,29 @@ class TeardownFailed:
 type TeardownPollResult = TeardownPending | TeardownRemoved | TeardownFailed
 
 
+# --- 로그 읽기 ---
+
+
+@dataclass(frozen=True)
+class LogLine:
+    at: datetime
+    level: LogLevel
+    message: str
+
+
+@dataclass(frozen=True)
+class LogChunk:
+    """시간 순 줄들. next_cursor 로 다음 줄부터 이어 읽는다. 줄이 없으면 받은 cursor 를 돌려준다."""
+
+    lines: tuple[LogLine, ...]
+    next_cursor: str | None
+    has_more: bool
+
+
+class InvalidLogCursor(Exception):
+    """실행기가 알아보지 못하는 cursor."""
+
+
 # --- 인터페이스 ---
 
 
@@ -186,6 +214,10 @@ class BuildExecutor(Protocol):
         ...
 
     async def poll(self, external_ref: str) -> BuildPollResult: ...
+
+    async def read_logs(self, external_ref: str, cursor: str | None, limit: int) -> LogChunk:
+        """빌드 로그를 읽는다(상태를 바꾸지 않는다). 계약은 아래 '로그 읽기 계약'과 같다."""
+        ...
 
 
 class DeployExecutor(Protocol):
@@ -202,6 +234,17 @@ class DeployExecutor(Protocol):
         self, target: DeployTarget, previous: DeploymentSpec | None, idempotency_key: str
     ) -> RevertResult:
         """실패한 새 버전을 거두고 직전 버전(previous, 없으면 아무것도 없는 상태)을 유지한다."""
+        ...
+
+    async def read_runtime_logs(
+        self,
+        target: DeployTarget,
+        deployment: DeploymentSpec,
+        external_ref: str,
+        cursor: str | None,
+        limit: int,
+    ) -> LogChunk:
+        """배포 하나(external_ref = apply 가 돌려준 값)의 실행 로그를 읽는다."""
         ...
 
 

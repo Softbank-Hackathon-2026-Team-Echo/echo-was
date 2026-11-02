@@ -6,6 +6,8 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-02T08:49Z · app/models/deploy_request_log.py (Write) · deploy_request_logs 표 신규 (revision 33ad047a493c)
+- 2026-11-02T08:45Z · app/models/deploy_request.py (스크립트 편집, 훅 미기록분 수기) · rollback_of_request_id·rollback_base_deployment_id 칸, CHECK 3개, ix_deploy_requests_rollback_of_request_id, trigger·cancel_reason 값 추가 (revision 33ad047a493c)
 - 2026-11-02T03:38Z · app/models/service_environment.py (Edit) · +2 −2
 - 2026-11-02T03:29Z · app/models/service.py (Edit) · host_suffix 컬럼 추가
 - 2026-11-02T03:27Z · app/models/service.py (Edit) · host_suffix 컬럼 추가

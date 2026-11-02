@@ -12,9 +12,10 @@ from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
 from app.core.clock import Clock, SystemClock
-from app.core.config import Settings, SourceClientMode, get_settings
+from app.core.config import ExecutorMode, Settings, SourceClientMode, get_settings
 from app.core.database import get_session_factory
 from app.core.secrets import parse_secret_ref
+from app.executors import ExecutorSet, build_executor_set
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
 from app.services.auth_service import AuthService
@@ -127,11 +128,26 @@ def get_service_service(
     )
 
 
+def get_executor_set(
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> ExecutorSet | None:
+    """API 프로세스가 로그를 읽을 실행기 묶음(배포는 일꾼만 한다).
+
+    실제 실행기가 아직 없는 모드(executor_mode != fake)면 None 이고, 빌드·실행 로그는 빈 페이지다.
+    시험은 dependency_overrides 로 시험용 가짜 실행기를 넣는다.
+    """
+    if settings.executor_mode is not ExecutorMode.FAKE:
+        return None
+    return build_executor_set(settings, clock)
+
+
 def get_deploy_request_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
     source_client: Annotated[SourceRepositoryClient, Depends(get_source_repository_client)],
+    executors: Annotated[ExecutorSet | None, Depends(get_executor_set)],
 ) -> DeployRequestService:
     return DeployRequestService(
         session=session,
@@ -139,6 +155,7 @@ def get_deploy_request_service(
         clock=clock,
         executor_mode=settings.executor_mode,
         public_base_domain=settings.public_base_domain,
+        executors=executors,
     )
 
 

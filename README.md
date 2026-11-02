@@ -27,13 +27,14 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 구성 요소 | 상태 | 설명 |
 |---|---|---|
 | API 골격 | 있음 | 공통 응답 봉투·예외·JSON 로깅·요청 ID·`/healthz`·`/readyz` |
-| 공통 모델 | 있음 | `services`·`environments`·`service_environments`·`deployments` + `builds`·`deploy_requests`·`jobs` + `users`·`organizations`·`organization_members`·`invitations`·`sessions`·`agent_tokens`·`audit_logs`, 마이그레이션 4개 |
+| 공통 모델 | 있음 | `services`·`environments`·`service_environments`·`deployments` + `builds`·`deploy_requests`·`jobs` + `users`·`organizations`·`organization_members`·`invitations`·`sessions`·`agent_tokens`·`audit_logs` + `deploy_request_logs`, 마이그레이션 6개 |
 | 환경 설정 양식 | 있음 | `aws`·`gcp`·`onprem` 설정 검사(저장 전). 새 종류는 파일 하나 |
 | 환경 API | 있음 | 등록·목록·단건·수정·삭제·다시 확인·종류 목록 ([docs/api/environments.md](docs/api/environments.md)) |
 | 어댑터 동작 | 있음(가짜) | 접속 확인·클러스터 정보 읽기. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업 |
 | 비밀값 조회기 | 있음 | `secretRef` 형식 4종. `env:` 만 실제 조회, 나머지는 형식만 |
 | 서비스 API | 있음 | 등록·목록·단건·수정·삭제(모든 환경에서 내린 뒤) ([docs/api/services.md](docs/api/services.md)) |
 | 원터치 배포 API | 있음 | 접수·목록·단건. 서비스 중·예비, 예비 자동 따라가기, 실행 1 + 대기 1 ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
+| 배포 이력·되돌리기·로그 | 있음 | 이력 필터·`isCurrent`·`rollbackable`, 이력에서 고른 성공 버전으로 되돌리기(`trigger = ROLLBACK`, 예비 따라가기), 배포 작업 로그(DB)·빌드·실행 로그(실행기, 가짜) ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 일꾼 | 있음 | `python -m app.worker`. 할 일 표 + 임대 + 멱등 키로 복구 |
 | 실행기(빌드·배포·대표 주소·헬스·내리기) | 있음(가짜) | 실제 빌드·배포·라우터·내리기는 인프라 3·5 이후 실행기만 교체 ([docs/executors.md](docs/executors.md)). HTTP 헬스체커는 실제 구현 있음 |
 | 소스 저장소 클라이언트 | 있음 | 가짜(기본) + 실제 GitHub App(공개·비공개 저장소). 실제 App 생성·설치는 별도 승인 |
@@ -68,6 +69,19 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 실패          배포 기록이 생긴 뒤 실패면 되돌리기 → 직전 버전 유지(revertStatus)
 ```
 
+이력·되돌리기·로그(API 서버 4)
+
+```text
+이력          GET /orgs/{orgId}/services/{id}/deploy-requests?environmentId&trigger&status (성공·실패·취소, isCurrent·rollbackable)
+   │
+되돌리기      POST /orgs/{orgId}/deploy-requests/{성공한 요청 id}/rollback (202, trigger=ROLLBACK, 새 빌드 없음)
+   │          └ 같은 대기열·헬스체크. 시작 때 현재 배포가 접수 때와 다르면 CANCELLED(BASE_CHANGED)
+성공          그 요청의 이미지·설정 사본으로 새 배포 기록(rollback_of_id) · 서비스 중 연결이면 예비도 따라감
+실패          현재 배포·비율 그대로, revertStatus·errorCode·로그에 남김
+   │
+로그          GET /orgs/{orgId}/deploy-requests/{id}/logs?source=DEPLOY_JOB|BUILD|RUNTIME&cursor&limit
+```
+
 ## 기술 스택
 
 Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2.0(async) · PostgreSQL 17(asyncpg) · Alembic · uv · ruff · mypy(strict) · pytest(+pytest-asyncio)
@@ -79,20 +93,21 @@ app/
 ├─ main.py         # FastAPI 앱, /healthz·/readyz, 라우터 등록, 환경 종류 discover()
 ├─ routers/        # auth · organization · invitation · agent_token · environment · environment_kind · service · deploy_request (/api/v1)
 ├─ auth/           # 권한 검사기(guards) · 403 거부 기록 처리기(audit) · 토큰·쿠키
-├─ services/       # Environment*Service · ServiceService · DeployRequestService(접수) · Auth·Organization·Invitation·AgentToken Service
+├─ services/       # Environment*Service · ServiceService · DeployRequestService(접수·되돌리기·이력·로그) · Auth·Organization·Invitation·AgentToken Service
 │                  #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · service_view(역할·버전 상태)
-├─ repositories/   # Environment·Service·ServiceEnvironment·DeployRequest·Build·Deployment·Job Repository
+│                  #   deploy_job_log(배포 작업 로그 기록기) · deploy_log_messages(로그·오류 고정 문장)
+├─ repositories/   # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository
 ├─ clients/        # secret_client · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App) · github_user(로그인·초대)
-├─ executors/      # 실행기 인터페이스(base) · 가짜(fake) · HTTP 헬스체커
+├─ executors/      # 실행기 인터페이스(base, 빌드·실행 로그 읽기 포함) · 가짜(fake) · HTTP 헬스체커
 ├─ worker/         # 일꾼 (python -m app.worker): 할 일 폴링·임대·종료 신호
 ├─ adapters/       # 환경 종류별 설정 양식 + 동작 클래스 (aws.py · gcp.py · onprem.py) + 레지스트리
-├─ models/         # SQLAlchemy 모델 (표 14개)
+├─ models/         # SQLAlchemy 모델 (표 15개)
 ├─ scripts/        # demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ schemas/        # 공통 응답 봉투, 환경·서비스·배포 요청 API 요청·응답
-├─ core/           # 설정·DB 엔진·예외·로깅·요청 ID 미들웨어·비밀값 타입·시계·저장소 주소
-├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스·GitHub 사용자 클라이언트·시계)
+├─ core/           # 설정·DB 엔진·예외·로깅·요청 ID 미들웨어·비밀값 타입·시계·저장소 주소·로그 마스킹
+├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스·GitHub 사용자 클라이언트·시계·로그용 실행기 묶음)
 └─ enums.py        # 배포·배포 요청·빌드·할 일·서비스 상태와 코드
-alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸, 조직·로그인 표·칸, 주소 suffix 칸)
+alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸, 조직·로그인 표·칸, 주소 suffix 칸, 되돌리기 칸·배포 작업 로그 표)
 scripts/           # dump_schema.sh (db-schema.sql 생성)
 tests/             # 단위 테스트, adapter_contract.py·executor_contract.py(공통 계약), integration/ (실제 PostgreSQL)
 docs/schema.md     # 스키마 설명 원본
@@ -142,6 +157,24 @@ curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/d
   -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"environmentId":"<환경 id>","branch":"main"}'
 # → 202 QUEUED. GET /api/v1/orgs/<조직 id>/deploy-requests/<요청 id> 를 폴링하면 몇 초 뒤 SUCCEEDED (가짜 실행기 단계당 2초)
+```
+
+되돌리기·로그 데모 순서(일꾼을 띄운 채로) — 같은 환경에 두 번 배포한 뒤 첫 번째로 되돌린다.
+
+```bash
+# 1) main 배포(v1) → 2) release 배포(v2). 각각 SUCCEEDED 가 될 때까지 폴링
+# 3) 이력: v1 은 rollbackable=true, v2 는 isCurrent=true
+curl -s 'localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/deploy-requests?environmentId=<환경 id>&status=SUCCEEDED' \
+  -b 'echo_session=<세션 쿠키>'
+# 4) v1 으로 되돌리기 (개발자 이상 사람만. 에이전트 토큰은 403 AGENT_READ_ONLY)
+curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/deploy-requests/<v1 요청 id>/rollback \
+  -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>'
+# → 202 QUEUED, trigger=ROLLBACK, rollbackOfRequestId=<v1 요청 id>, build.reused=true
+#   다시 하면 409 ALREADY_CURRENT. 일부러 실패: -d '{"simulate":{"failAt":"VERIFYING"}}' → 현재 배포 유지
+# 5) 로그 (뷰어·에이전트도 읽는다)
+curl -s 'localhost:8000/api/v1/orgs/<조직 id>/deploy-requests/<요청 id>/logs?source=DEPLOY_JOB' -b 'echo_session=<세션 쿠키>'
+curl -s 'localhost:8000/api/v1/orgs/<조직 id>/deploy-requests/<요청 id>/logs?source=BUILD&limit=3' -b 'echo_session=<세션 쿠키>'
+# → simulated=true (가짜 실행기 로그). 다음 페이지는 &cursor=<nextCursor>
 ```
 
 가짜 모드 규칙(기본값): 저장소 owner 가 `private-` 면 비공개, `denied-`·`missing-` 면 404, `flaky-` 면 502. 브랜치가 `missing-` 로 시작하면 422 `REF_NOT_FOUND`. `"simulate": {"failAt": "BUILDING"|"DEPLOYING"|"VERIFYING"}` 로 그 단계를 일부러 실패시킬 수 있다(가짜 모드에서만).
@@ -270,8 +303,10 @@ docker compose down                                   # DB 끄기 (데이터는 
 | PATCH | `/api/v1/orgs/{orgId}/services/{id}` | 200 | 설명·저장소·헬스·포트 수정(이름 변경 422) |
 | DELETE | `/api/v1/orgs/{orgId}/services/{id}` | 202 | 모든 환경에서 내린 뒤 소프트 삭제(어드민) |
 | POST | `/api/v1/orgs/{orgId}/services/{id}/deploy-requests` | 202 | 원터치 배포 접수(개발자, 환경 1개 + 브랜치·커밋) |
-| GET | `/api/v1/orgs/{orgId}/services/{id}/deploy-requests` | 200 | 배포 요청 목록(최신순, `environmentId`) |
+| GET | `/api/v1/orgs/{orgId}/services/{id}/deploy-requests` | 200 | 배포 이력(최신순, `environmentId`·`trigger`·`status`, `isCurrent`·`rollbackable`) |
 | GET | `/api/v1/orgs/{orgId}/deploy-requests/{id}` | 200 | 배포 요청 진행 상황 |
+| POST | `/api/v1/orgs/{orgId}/deploy-requests/{id}/rollback` | 202 | 이력에서 고른 성공 버전으로 되돌리기(개발자, 사람만) |
+| GET | `/api/v1/orgs/{orgId}/deploy-requests/{id}/logs` | 200 | 배포 작업·빌드·실행 로그(`source`·`cursor`·`limit`) |
 
 - 모든 JSON 응답은 `{"success", "code", "message", "data", "details"}` 봉투다. 봉투의 `code`·`message`·`details` 는 값이 없으면 빼고, **성공 응답의 `data` 안 칸은 항상 있고 값이 없으면 null** 이다. 오류도 같은 봉투다(`data` 없음).
 - 다른 파트는 환경을 `id` 로만 가리킨다(`name` 은 바뀔 수 있다). 자세한 계약: [docs/api/environments.md](docs/api/environments.md).
@@ -282,6 +317,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 ## 배포
 
 - `Dockerfile`: uv 멀티스테이지, 비루트 UID 1001, 기본 명령 `uvicorn app.main:app --host 0.0.0.0 --port 8000`. 일꾼은 같은 이미지로 명령만 `python -m app.worker` 로 바꿔 띄운다(`compose.yaml` 의 `worker` 서비스, `--profile worker`). 일꾼은 HTTP 포트가 없다.
+- **일꾼과 API 는 같은 이미지로 함께 올린다.** 일꾼만 옛 코드면 되돌리기(`trigger = ROLLBACK`) 요청을 처리하지 못하고, API 만 옛 코드면 배포 작업 로그가 빠진다. 마이그레이션(`33ad047a493c`)을 먼저 적용한다.
 - 마이그레이션은 **앱 시작 때 돌리지 않는다.** 같은 이미지로 `alembic upgrade head` 를 한 번 따로 실행한다. 클러스터에서 어떻게 실행할지는 인프라 파트와 정한다.
 - 프로브: liveness `/healthz`, readiness `/readyz`.
 - CI 워크플로는 아직 없다(팀 회의에서 정한다).
@@ -290,11 +326,12 @@ docker compose down                                   # DB 끄기 (데이터는 
 
 - 업무 API 는 로그인·조직·환경·서비스·배포 요청 API 다. **실제 GitHub 로그인은 GitHub App 설정 뒤에만 된다**(시험은 가짜 GitHub 를 의존성 교체로 쓴다). API 2·3 경로는 모두 `/api/v1/orgs/{orgId}` 아래로 옮겼다(깨지는 변경, 프론트 미연결).
 - **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
-- 롤백(API 서버 4)·이전(API 서버 8)·AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 거부 기록은 있다. 거부 밖의 행위 기록·감사 로그 조회는 API 서버 7.
+- 이전(API 서버 8)·AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 거부 기록은 있다. 거부 밖의 행위 기록·감사 로그 조회는 API 서버 7(되돌리기 요청자 기록도 그때).
+- **빌드·실행 로그는 가짜 실행기가 만든 줄이다**(`simulated: true`). 실제 빌드·클러스터 로그는 인프라 3·5 이후 실행기만 바꿔 연결한다(이슈 #4 는 그때까지 `In Progress`). 실제 실행기가 없는 모드(`EXECUTOR_MODE != fake`)에서는 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
 - 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
 - 어댑터는 **가짜**다. 접속 확인·클러스터 정보는 고정 값이고 `simulated: true` 로 표시한다. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업에서 같은 인터페이스·계약 검사로 바꾼다.
 - **원터치 배포의 실행은 가짜다.** 빌드·배포·대표 주소 연결·되돌리기·내리기는 가짜 실행기가 흉내 내고 결과에 `simulated: true` 를 저장한다. 흐름·상태·DB 기록·계약은 실제다. 실제 실행기(인프라 3 Argo CD 파이프라인·인프라 5 고정 진입점 프록시)가 준비되면 실행기만 바꾼다. 이 이슈(#3)의 완료 기준은 실제 배포까지라 실제 실행기 연결 전에는 이슈를 닫지 않는다.
-- 대표 주소의 실제 헬스 확인은 실제 라우터 연결 뒤에 더한다(지금은 환경별 주소만 확인). 트래픽 전환·이전은 API 서버 8, 사용자 되돌리기·배포 로그는 API 서버 4.
+- 대표 주소의 실제 헬스 확인은 실제 라우터 연결 뒤에 더한다(지금은 환경별 주소만 확인). 트래픽 전환·이전은 API 서버 8.
 - 일꾼이 없으면 배포 요청은 `QUEUED` 에 남는다. `/readyz` 는 일꾼을 보지 않는다.
 - 비밀값은 `env:` 저장소만 실제로 읽는다. `k8s:`·`aws-sm:`·`gcp-sm:` 은 형식만 받고 접속 확인은 `SECRET_STORE_UNSUPPORTED` 로 실패한다.
 - 접속 확인은 등록·다시 확인·config/secretRef 수정 때만 한다. 자동 주기 확인은 없다(API 서버 5).
@@ -311,8 +348,8 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/api/organizations.md](docs/api/organizations.md) | 조직·멤버·초대·에이전트 토큰 API, 조직 열쇠 이름, 데모 준비 명령 |
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·스키마·오류 코드·secretRef 형식·null 규칙) |
 | [docs/api/services.md](docs/api/services.md) | 서비스 API 계약(등록·수정·삭제, 역할·버전 상태, `simulated` 뜻) |
-| [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포 API 계약(접수 규칙·진행 단계·실패 코드) |
-| [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·가짜 구현) |
+| [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포·이력·되돌리기·로그 API 계약(접수 규칙·진행 단계·실패 코드·로그 줄) |
+| [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·로그 읽기·마스킹·가짜 구현) |
 | [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md) | AI 도구용 작업 규칙 |
 | [.claude/rules/](.claude/rules/) | 용어 사전·DB 스키마(DDL)·마이그레이션·백엔드·Git 규칙 |
 | [specs/](specs/) | 태스크별 SPEC |

@@ -44,6 +44,10 @@ DETAIL_KEYS = {
     "urls",
     "stageTimes",
     "simulated",
+    # API 서버 4: 이력 칸
+    "isCurrent",
+    "rollbackable",
+    "rollbackOfRequestId",
 }
 
 
