@@ -124,6 +124,17 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("PATCH", "/services/{service_id}", D),
     _org("POST", "/services/{service_id}/deploy-requests", D),
     _org("DELETE", "/services/{service_id}", A),
+    # --- API 서버 8: 이전 계획(조회는 뷰어·에이전트, 바꾸는 일은 개발자 이상 사람) ---
+    _org("GET", "/services/{service_id}/migration-plans", V),
+    _org("GET", "/migration-plans/{plan_id}", V),
+    _org("GET", "/migration-plans/{plan_id}/logs", V),
+    _org("POST", "/services/{service_id}/migration-plans", D, human_only=True),
+    _org("POST", "/migration-plans/{plan_id}/approve", D, human_only=True),
+    _org("POST", "/migration-plans/{plan_id}/reject", D, human_only=True),
+    _org("POST", "/migration-plans/{plan_id}/cancel", D, human_only=True),
+    _org("POST", "/migration-plans/{plan_id}/abort", D, human_only=True),
+    # 자기 승인 스위치는 어드민(사람)만 바꾼다.
+    _org("PATCH", "/settings", A, human_only=True),
 ]
 
 

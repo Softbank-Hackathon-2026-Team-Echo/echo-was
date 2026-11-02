@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     worker_lease_seconds: float = Field(default=30.0, gt=0)
     worker_concurrency: int = Field(default=1, ge=1, le=32)
 
+    # 이전 계획(API 서버 8). 지켜보기 기본값(계획마다 1~600 으로 바꿀 수 있다), 단계마다 더하는
+    # 여유 시간(예상 시간 계산), 승인 대기 만료, 롤백 비율 적용 최대 시도 횟수.
+    migration_observe_seconds_default: int = Field(default=5, ge=1, le=600)
+    migration_step_overhead_seconds: int = Field(default=2, ge=0, le=60)
+    migration_plan_approval_ttl_seconds: int = Field(default=24 * 60 * 60, gt=0)
+    migration_rollback_max_attempts: int = Field(default=3, ge=1, le=10)
+
     @field_validator("public_base_domain")
     @classmethod
     def _check_public_base_domain(cls, value: str) -> str:

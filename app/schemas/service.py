@@ -132,6 +132,8 @@ class ServiceEnvironmentResponse(ApiModel):
     queued_request_id: uuid.UUID | None
     simulated: bool | None
     teardown_error: TeardownErrorCode | None
+    # 마지막 성공 예비 따라가기가 원본 요청이 끝난 뒤 끝나기까지 걸린 초(소수 1자리). 없으면 null.
+    last_sync_seconds: float | None
 
     @classmethod
     def from_view(cls, view: ServiceEnvironmentView) -> Self:
@@ -159,6 +161,7 @@ class ServiceEnvironmentResponse(ApiModel):
             queued_request_id=view.queued_request_id,
             simulated=current.simulated if current is not None else None,
             teardown_error=connection.teardown_error,
+            last_sync_seconds=view.last_sync_seconds,
         )
 
 
@@ -201,9 +204,10 @@ class ServiceSummaryResponse(ApiModel):
 
 
 class ServiceDetailResponse(ServiceSummaryResponse):
-    """서비스 한 건 + 올라간 환경들(만든 순서)."""
+    """서비스 한 건 + 올라간 환경들(만든 순서) + 끝나지 않은 이전 계획 id(없으면 null)."""
 
     environments: list[ServiceEnvironmentResponse]
+    active_migration_plan_id: uuid.UUID | None
 
     @classmethod
     def from_view(cls, view: ServiceDetailView) -> Self:
@@ -211,4 +215,5 @@ class ServiceDetailResponse(ServiceSummaryResponse):
         return cls(
             **summary.model_dump(),
             environments=[ServiceEnvironmentResponse.from_view(item) for item in view.environments],
+            active_migration_plan_id=view.active_migration_plan_id,
         )

@@ -214,10 +214,83 @@ CREATE TABLE public.jobs (
     last_error_code character varying(32),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT ck_jobs_kind_valid CHECK (((kind)::text = ANY ((ARRAY['DEPLOY_REQUEST'::character varying, 'SERVICE_TEARDOWN'::character varying])::text[]))),
+    CONSTRAINT ck_jobs_kind_valid CHECK (((kind)::text = ANY ((ARRAY['DEPLOY_REQUEST'::character varying, 'SERVICE_TEARDOWN'::character varying, 'MIGRATION_PLAN'::character varying])::text[]))),
     CONSTRAINT ck_jobs_lease_consistency CHECK ((((status)::text = 'RUNNING'::text) = ((lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)))),
     CONSTRAINT ck_jobs_lease_losses_non_negative CHECK ((lease_losses >= 0)),
     CONSTRAINT ck_jobs_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying, 'DONE'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
+);
+
+CREATE TABLE public.migration_plan_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    migration_plan_id uuid NOT NULL,
+    seq integer NOT NULL,
+    step smallint,
+    logged_at timestamp with time zone NOT NULL,
+    level character varying(8) NOT NULL,
+    code character varying(48) NOT NULL,
+    message character varying(500) NOT NULL,
+    data jsonb,
+    simulated boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_migration_plan_logs_data_is_object CHECK ((jsonb_typeof(data) = 'object'::text)),
+    CONSTRAINT ck_migration_plan_logs_level_valid CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character varying, 'ERROR'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plan_logs_seq_positive CHECK ((seq >= 1)),
+    CONSTRAINT ck_migration_plan_logs_step_range CHECK (((step >= 0) AND (step <= 4)))
+);
+
+CREATE TABLE public.migration_plans (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_id uuid NOT NULL,
+    source_service_environment_id uuid NOT NULL,
+    target_service_environment_id uuid NOT NULL,
+    status character varying(16) NOT NULL,
+    steps jsonb NOT NULL,
+    step_results jsonb NOT NULL,
+    rollback_conditions jsonb NOT NULL,
+    observe_seconds integer NOT NULL,
+    expected_seconds integer NOT NULL,
+    fingerprint jsonb NOT NULL,
+    simulate jsonb,
+    simulated boolean NOT NULL,
+    current_step smallint DEFAULT 0 NOT NULL,
+    step_phase character varying(8),
+    phase_started_at timestamp with time zone,
+    observe_until timestamp with time zone,
+    traffic_requested_at timestamp with time zone,
+    rollback_requested_at timestamp with time zone,
+    rollback_attempts smallint DEFAULT 0 NOT NULL,
+    error_code character varying(32),
+    rollback_status character varying(16),
+    created_by_user_id uuid NOT NULL,
+    approved_by_user_id uuid,
+    rejected_by_user_id uuid,
+    cancelled_by_user_id uuid,
+    aborted_by_user_id uuid,
+    self_approved boolean DEFAULT false NOT NULL,
+    approved_at timestamp with time zone,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    abort_requested_at timestamp with time zone,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_migration_plans_approved_consistency CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL))),
+    CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 4))),
+    CONSTRAINT ck_migration_plans_error_code_consistency CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying])::text[])) = (error_code IS NOT NULL))),
+    CONSTRAINT ck_migration_plans_error_code_valid CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, 'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, 'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, 'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, 'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_expected_seconds_non_negative CHECK ((expected_seconds >= 0)),
+    CONSTRAINT ck_migration_plans_fingerprint_is_object CHECK ((jsonb_typeof(fingerprint) = 'object'::text)),
+    CONSTRAINT ck_migration_plans_finished_at_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[])) = (finished_at IS NOT NULL))),
+    CONSTRAINT ck_migration_plans_observe_seconds_range CHECK (((observe_seconds >= 1) AND (observe_seconds <= 600))),
+    CONSTRAINT ck_migration_plans_rollback_attempts_non_negative CHECK ((rollback_attempts >= 0)),
+    CONSTRAINT ck_migration_plans_rollback_conditions_is_object CHECK ((jsonb_typeof(rollback_conditions) = 'object'::text)),
+    CONSTRAINT ck_migration_plans_rollback_status_valid CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'NOT_NEEDED'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_simulate_is_object CHECK ((jsonb_typeof(simulate) = 'object'::text)),
+    CONSTRAINT ck_migration_plans_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying, 'SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_step_phase_valid CHECK (((step_phase)::text = ANY ((ARRAY['APPLY'::character varying, 'OBSERVE'::character varying, 'JUDGE'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_step_results_is_array CHECK ((jsonb_typeof(step_results) = 'array'::text)),
+    CONSTRAINT ck_migration_plans_steps_is_array CHECK ((jsonb_typeof(steps) = 'array'::text)),
+    CONSTRAINT ck_migration_plans_target_not_source CHECK ((target_service_environment_id <> source_service_environment_id))
 );
 
 CREATE TABLE public.organization_members (
@@ -238,6 +311,7 @@ CREATE TABLE public.organizations (
     created_by_user_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    allow_self_approval boolean DEFAULT false NOT NULL,
     CONSTRAINT ck_organizations_name_not_empty CHECK ((char_length((name)::text) >= 1)),
     CONSTRAINT ck_organizations_slug_format CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))
 );
@@ -337,6 +411,12 @@ ALTER TABLE ONLY public.invitations
 ALTER TABLE ONLY public.jobs
     ADD CONSTRAINT pk_jobs PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.migration_plan_logs
+    ADD CONSTRAINT pk_migration_plan_logs PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT pk_migration_plans PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.organization_members
     ADD CONSTRAINT pk_organization_members PRIMARY KEY (id);
 
@@ -363,6 +443,9 @@ ALTER TABLE ONLY public.deploy_request_logs
 
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT uq_deployments_id_service_environment_id UNIQUE (id, service_environment_id);
+
+ALTER TABLE ONLY public.migration_plan_logs
+    ADD CONSTRAINT uq_migration_plan_logs_migration_plan_id_seq UNIQUE (migration_plan_id, seq);
 
 ALTER TABLE ONLY public.organization_members
     ADD CONSTRAINT uq_organization_members_organization_id_user_id UNIQUE (organization_id, user_id);
@@ -394,6 +477,8 @@ CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_
 
 CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
 
+CREATE INDEX ix_migration_plans_service_id_created_at ON public.migration_plans USING btree (service_id, created_at);
+
 CREATE INDEX ix_organization_members_user_id ON public.organization_members USING btree (user_id);
 
 CREATE INDEX ix_services_organization_id ON public.services USING btree (organization_id);
@@ -410,6 +495,8 @@ CREATE UNIQUE INDEX uq_invitations_organization_id_github_id_pending ON public.i
 
 CREATE UNIQUE INDEX uq_jobs_subject_id_open ON public.jobs USING btree (subject_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying])::text[]));
 
+CREATE UNIQUE INDEX uq_migration_plans_service_id_open ON public.migration_plans USING btree (service_id) WHERE ((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying])::text[]));
+
 CREATE UNIQUE INDEX uq_service_environments_public_host_live ON public.service_environments USING btree (public_host) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_service_environments_service_id_environment_id_live ON public.service_environments USING btree (service_id, environment_id) WHERE (is_deleted = false);
@@ -425,6 +512,10 @@ CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON public.de
 CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON public.deploy_requests FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployments FOR EACH ROW EXECUTE FUNCTION public.prevent_deployment_delete();
+
+CREATE TRIGGER trg_migration_plan_logs_prevent_delete BEFORE DELETE ON public.migration_plan_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
+
+CREATE TRIGGER trg_migration_plans_prevent_delete BEFORE DELETE ON public.migration_plans FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 ALTER TABLE ONLY public.agent_tokens
     ADD CONSTRAINT fk_agent_tokens_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
@@ -488,6 +579,33 @@ ALTER TABLE ONLY public.invitations
 
 ALTER TABLE ONLY public.invitations
     ADD CONSTRAINT fk_invitations_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plan_logs
+    ADD CONSTRAINT fk_migration_plan_logs_migration_plan_id_migration_plans FOREIGN KEY (migration_plan_id) REFERENCES public.migration_plans(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_aborted_by_user_id_users FOREIGN KEY (aborted_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_approved_by_user_id_users FOREIGN KEY (approved_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_cancelled_by_user_id_users FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_rejected_by_user_id_users FOREIGN KEY (rejected_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_source_service_environment_id_servic_067d FOREIGN KEY (source_service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_target_service_environment_id_servic_a900 FOREIGN KEY (target_service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.organization_members
     ADD CONSTRAINT fk_organization_members_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;

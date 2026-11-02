@@ -37,6 +37,7 @@ from app.repositories.service_repository import ServiceRepository
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import HostSuffixGenerator, service_public_host
 from app.services.integrity import violated_constraint_name
+from app.services.migration_guard import check_no_migration_in_progress
 from app.services.service_view import ServiceDetailView, load_service_detail
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ class ServiceService:
     ) -> ServiceDetailView:
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id)
-            return await load_service_detail(self._session, service)
+            return await load_service_detail(self._session, service, self._clock.now())
 
     async def update_service(
         self, organization_id: uuid.UUID, service_id: uuid.UUID, changes: ServiceChanges
@@ -186,7 +187,7 @@ class ServiceService:
             if changes.container_port is not None:
                 service.container_port = changes.container_port
             await self._session.flush()
-            view = await load_service_detail(self._session, service)
+            view = await load_service_detail(self._session, service, self._clock.now())
         _log("service updated", "update_service", service)
         return view
 
@@ -195,13 +196,14 @@ class ServiceService:
     ) -> ServiceDetailView:
         """DELETING 으로 바꾸고 대기 요청을 취소한 뒤 내리기 할 일을 만든다.
 
-        이미 DELETING 이면 재시도다. 내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려
-        새 멱등 키로 다시 내린다.
+        실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다. 이미 DELETING 이면 재시도다.
+        내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려 새 멱등 키로 다시 내린다.
         """
         now = self._clock.now()
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             connections = await self._service_environments.lock_live_by_service(service.id)
+            await check_no_migration_in_progress(self._session, service.id)
             if service.status == ServiceStatus.DELETING:
                 for connection in connections:
                     if connection.teardown_error is not None:
@@ -236,7 +238,7 @@ class ServiceService:
                     )
                 )
             await self._session.flush()
-            view = await load_service_detail(self._session, service)
+            view = await load_service_detail(self._session, service, self._clock.now())
         _log("service deletion requested", "delete_service", service)
         return view
 
@@ -255,7 +257,7 @@ class ServiceService:
                 raise _PublicHostTakenError
             self._services.add(service)
             await self._flush()
-            return await load_service_detail(self._session, service)
+            return await load_service_detail(self._session, service, self._clock.now())
 
     async def _flush(self) -> None:
         try:

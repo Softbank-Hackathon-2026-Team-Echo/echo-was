@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +56,20 @@ class ServiceEnvironmentRepository:
             .execution_options(populate_existing=True)
         )
         return list((await self._session.scalars(statement)).all())
+
+    async def search_environment_ids(
+        self, service_environment_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, uuid.UUID]:
+        """연결 id → 환경 id(지운 연결 포함)."""
+        ids = set(service_environment_ids)
+        if not ids:
+            return {}
+        rows = await self._session.execute(
+            select(ServiceEnvironment.id, ServiceEnvironment.environment_id).where(
+                ServiceEnvironment.id.in_(ids)
+            )
+        )
+        return {connection_id: environment_id for connection_id, environment_id in rows.all()}
 
     async def is_public_host_in_use(self, public_host: str) -> bool:
         statement = select(

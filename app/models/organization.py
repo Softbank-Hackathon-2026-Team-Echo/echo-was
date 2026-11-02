@@ -12,7 +12,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.enums import OrganizationRole
-from app.models.base import Base, TimestampMixin, UuidPrimaryKeyMixin
+from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
+    Base,
+    TimestampMixin,
+    UuidPrimaryKeyMixin,
+)
 
 # 1~39자, 소문자·숫자·하이픈. 하이픈은 처음·끝·연속 금지(조직 열쇠 키에 `__` 가 생기지 않게).
 ORGANIZATION_SLUG_PATTERN = "^[a-z0-9](-?[a-z0-9]){0,38}$"
@@ -27,6 +32,8 @@ class Organization(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     slug 는 전체에서 유일하고 만든 뒤 바꾸지 않는다(env 비밀 참조의 조직 키가 slug 에서 나온다).
     personal 은 처음 로그인할 때 자동으로 만든 개인 조직이다.
+    allow_self_approval 은 이전 계획을 만든 사람이 스스로 승인·거절할 수 있는지다(기본 막음,
+    어드민만 바꾼다).
     """
 
     __tablename__ = "organizations"
@@ -44,6 +51,13 @@ class Organization(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    allow_self_approval: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
     )
 
 

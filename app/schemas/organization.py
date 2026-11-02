@@ -54,13 +54,17 @@ class UserResponse(ApiModel):
 
 
 class OrganizationResponse(ApiModel):
-    """role 은 요청한 사람의 역할이다. 에이전트 토큰으로 읽으면 null."""
+    """role 은 요청한 사람의 역할이다. 에이전트 토큰으로 읽으면 null.
+
+    allowSelfApproval 은 이전 계획을 만든 사람이 스스로 승인·거절할 수 있는지다(기본 false).
+    """
 
     id: uuid.UUID
     slug: str
     name: str
     personal: bool
     role: OrganizationRole | None
+    allow_self_approval: bool
     created_at: datetime
 
     @classmethod
@@ -72,6 +76,7 @@ class OrganizationResponse(ApiModel):
             name=organization.name,
             personal=organization.personal,
             role=view.role,
+            allow_self_approval=organization.allow_self_approval,
             created_at=organization.created_at,
         )
 
@@ -93,6 +98,12 @@ class CreateOrganizationRequest(ApiRequestModel):
 
     slug: OrganizationSlug
     name: OrganizationName
+
+
+class UpdateOrganizationSettingsRequest(ApiRequestModel):
+    """조직 설정 변경(어드민). allowSelfApproval 은 필수다."""
+
+    allow_self_approval: bool
 
 
 class MemberResponse(ApiModel):

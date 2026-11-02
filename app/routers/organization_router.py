@@ -10,6 +10,7 @@ from app.schemas.organization import (
     MemberResponse,
     OrganizationResponse,
     UpdateMemberRoleRequest,
+    UpdateOrganizationSettingsRequest,
 )
 from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
 from app.services.organization_service import OrganizationService, OrganizationView
@@ -52,6 +53,18 @@ async def search_organizations(
 @router.get("/{org_id}", response_model=ApiResponse[OrganizationResponse])
 async def get_organization(access: ViewerAccess) -> ApiResponse[OrganizationResponse]:
     view = OrganizationView(organization=access.organization, role=access.role)
+    return ApiResponse(data=OrganizationResponse.from_view(view))
+
+
+@router.patch("/{org_id}/settings", response_model=ApiResponse[OrganizationResponse])
+async def update_organization_settings(
+    access: HumanAdminAccess,
+    request: UpdateOrganizationSettingsRequest,
+    organizations: Organizations,
+) -> ApiResponse[OrganizationResponse]:
+    view = await organizations.update_settings(
+        access.organization_id, access.role, request.allow_self_approval
+    )
     return ApiResponse(data=OrganizationResponse.from_view(view))
 
 

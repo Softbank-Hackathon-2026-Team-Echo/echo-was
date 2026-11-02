@@ -185,6 +185,31 @@ class OrganizationService:
         )
         return OrganizationView(organization=organization, role=OrganizationRole.ADMIN)
 
+    async def update_settings(
+        self, organization_id: uuid.UUID, role: OrganizationRole | None, allow_self_approval: bool
+    ) -> OrganizationView:
+        """조직 행을 `FOR NO KEY UPDATE` 로 잠그고 자기 승인 스위치를 바꾼다.
+
+        어드민 검사는 라우트의 검사기가 한다.
+        """
+        now = self._clock.now()
+        async with self._session.begin():
+            organization = await self._organizations.find_by_id(organization_id, lock=True)
+            if organization is None:
+                raise OrganizationNotFoundError
+            organization.allow_self_approval = allow_self_approval
+            organization.updated_at = now
+            await self._session.flush()
+        logger.info(
+            "organization settings changed",
+            extra={
+                "action": "update_organization_settings",
+                "organization_id": str(organization_id),
+                "allow_self_approval": allow_self_approval,
+            },
+        )
+        return OrganizationView(organization=organization, role=role)
+
     async def search_my_organizations(
         self, user_id: uuid.UUID, page: int, size: int
     ) -> OrganizationSearchResult:

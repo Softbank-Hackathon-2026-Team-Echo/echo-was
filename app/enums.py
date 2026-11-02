@@ -210,6 +210,8 @@ class BuildStatus(StrEnum):
 class JobKind(StrEnum):
     DEPLOY_REQUEST = "DEPLOY_REQUEST"
     SERVICE_TEARDOWN = "SERVICE_TEARDOWN"
+    # 대상(subject_id)은 이전 계획 id 다.
+    MIGRATION_PLAN = "MIGRATION_PLAN"
 
 
 class JobStatus(StrEnum):
@@ -278,3 +280,132 @@ class AuditResult(StrEnum):
     """거부 기록 결과. 이번에는 거부(403)만 남긴다."""
 
     DENIED = "DENIED"
+
+
+# --- 이전 계획 (API 서버 8) ---
+
+
+class MigrationPlanStatus(StrEnum):
+    """이전 계획 상태. 승인이 곧 실행 시작이다. 끝 상태는 되감지 않는다."""
+
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    RUNNING = "RUNNING"
+    ROLLING_BACK = "ROLLING_BACK"
+    SUCCEEDED = "SUCCEEDED"
+    ROLLED_BACK = "ROLLED_BACK"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+    STALE = "STALE"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self not in OPEN_MIGRATION_PLAN_STATUSES
+
+
+# 서비스당 하나만 있을 수 있는 끝나지 않은 상태(부분 unique).
+OPEN_MIGRATION_PLAN_STATUSES = frozenset(
+    {
+        MigrationPlanStatus.PENDING_APPROVAL,
+        MigrationPlanStatus.APPROVED,
+        MigrationPlanStatus.RUNNING,
+        MigrationPlanStatus.ROLLING_BACK,
+    }
+)
+# 실행 중(승인 뒤): 이 동안 그 서비스의 배포 요청·되돌리기·서비스 삭제 접수를 막는다.
+IN_PROGRESS_MIGRATION_PLAN_STATUSES = frozenset(
+    {
+        MigrationPlanStatus.APPROVED,
+        MigrationPlanStatus.RUNNING,
+        MigrationPlanStatus.ROLLING_BACK,
+    }
+)
+
+
+class MigrationStepKind(StrEnum):
+    """계획 단계 종류. 단계는 고정 5개(사전 확인 → 10% → 50% → 데이터 확인 → 100%)다."""
+
+    PREFLIGHT = "PREFLIGHT"
+    SHIFT = "SHIFT"
+    DATA_SYNC_CHECK = "DATA_SYNC_CHECK"
+
+
+class MigrationStepPhase(StrEnum):
+    """지금 단계 안의 위치. 비율 단계는 APPLY → OBSERVE → JUDGE, 데이터 확인은 JUDGE 만."""
+
+    APPLY = "APPLY"
+    OBSERVE = "OBSERVE"
+    JUDGE = "JUDGE"
+
+
+class MigrationStepStatus(StrEnum):
+    """단계 결과(step_results[i].status)."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class MigrationErrorCode(StrEnum):
+    """이전 계획 실패·롤백 원인. 롤백 결과는 MigrationRollbackStatus 로 따로 둔다."""
+
+    PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
+    TRAFFIC_APPLY_FAILED = "TRAFFIC_APPLY_FAILED"
+    HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
+    METRICS_UNAVAILABLE = "METRICS_UNAVAILABLE"
+    THRESHOLD_EXCEEDED = "THRESHOLD_EXCEEDED"
+    DATA_LAG_EXCEEDED = "DATA_LAG_EXCEEDED"
+    ABORTED = "ABORTED"
+    WORKER_LOST = "WORKER_LOST"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class MigrationRollbackStatus(StrEnum):
+    """출발 100% 로 되돌린 결과. NOT_NEEDED 는 트래픽을 바꾼 적이 없어 되돌릴 필요가 없었다."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    NOT_NEEDED = "NOT_NEEDED"
+
+
+class MigrationSimulateReason(StrEnum):
+    """가짜 모드에서 단계 하나를 일부러 실패시킬 원인(simulate.reason)."""
+
+    ERROR_RATE = "ERROR_RATE"
+    LATENCY = "LATENCY"
+    HEALTH = "HEALTH"
+    DATA_LAG = "DATA_LAG"
+    TRAFFIC = "TRAFFIC"
+
+
+class MigrationLogCode(StrEnum):
+    """이전 실행 로그 한 줄의 코드(migration_plan_logs.code). DB CHECK 없이 앱이 이 값만 쓴다."""
+
+    PLAN_CREATED = "PLAN_CREATED"
+    APPROVED = "APPROVED"
+    SELF_APPROVED = "SELF_APPROVED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+    STALE = "STALE"
+    ABORT_REQUESTED = "ABORT_REQUESTED"
+    STARTED = "STARTED"
+    PREFLIGHT_OK = "PREFLIGHT_OK"
+    PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
+    WEIGHT_APPLIED = "WEIGHT_APPLIED"
+    WEIGHT_APPLY_FAILED = "WEIGHT_APPLY_FAILED"
+    JUDGE_PASSED = "JUDGE_PASSED"
+    JUDGE_FAILED = "JUDGE_FAILED"
+    DATA_SYNC_OK = "DATA_SYNC_OK"
+    DATA_SYNC_FAILED = "DATA_SYNC_FAILED"
+    SUCCEEDED = "SUCCEEDED"
+    ROLLBACK_STARTED = "ROLLBACK_STARTED"
+    ROLLBACK_APPLIED = "ROLLBACK_APPLIED"
+    ROLLBACK_APPLY_FAILED = "ROLLBACK_APPLY_FAILED"
+    ROLLBACK_FAILED = "ROLLBACK_FAILED"
+    FAILED = "FAILED"
+    LOG_TRUNCATED = "LOG_TRUNCATED"

@@ -6,11 +6,15 @@
 - 빌드 결과는 sha256 digest 다(배포는 digest 로만 한다).
 - 로그 읽기: 같은 cursor 면 같은 줄, limit 을 넘지 않음, 시간 순, cursor 로 이어 읽으면 겹침·누락
   없음, 알아보지 못하는 cursor 는 InvalidLogCursor.
+- 트래픽(이전 계획): 같은 멱등 키면 같은 결과, 비율 합계가 100 이 아니면 ValueError.
+- 지표·데이터 확인: 같은 입력이면 같은 값(결정적), 값 범위(오류율 0~100, p95·요청 수·지연 ≥ 0).
 """
 
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -20,6 +24,8 @@ from app.executors.base import (
     BuildRunning,
     BuildSpec,
     BuildSucceeded,
+    DataSyncChecker,
+    DataSyncLag,
     DeployApplied,
     DeployExecutor,
     DeploymentSpec,
@@ -28,11 +34,17 @@ from app.executors.base import (
     InvalidLogCursor,
     LogChunk,
     LogLine,
+    MainRoute,
+    Metrics,
+    MetricsProvider,
     Reverted,
     SourceAccess,
     TeardownExecutor,
     TeardownPending,
     TeardownRemoved,
+    TrafficApplied,
+    TrafficExecutor,
+    WeightedTarget,
 )
 
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -175,6 +187,68 @@ async def assert_runtime_log_contract(executor: DeployExecutor) -> list[LogLine]
         return await executor.read_runtime_logs(TARGET, DEPLOYMENT, external_ref, cursor, limit)
 
     return await assert_log_reader_contract(read)
+
+
+# --- 이전 계획: 트래픽·지표·데이터 확인 ---
+
+STANDBY_TARGET = replace(
+    TARGET,
+    service_environment_id=uuid.uuid4(),
+    environment_id=uuid.uuid4(),
+    environment_kind="gcp",
+    public_host="shop-api-gcp-seoul.apps.echo.test",
+)
+ROUTE = MainRoute(
+    service_id=TARGET.service_id, service_name="shop-api", public_host="shop-api.apps.echo.test"
+)
+INVALID_WEIGHTS = ((90, 20), (50, 40), (110, -10))
+WINDOW_END = datetime(2026, 11, 2, 3, 0, 5, tzinfo=UTC)
+
+
+async def assert_traffic_executor_contract(executor: TrafficExecutor, advance: Advance) -> None:
+    key = f"{uuid.uuid4()}:1"
+    weights = (WeightedTarget(TARGET, 90), WeightedTarget(STANDBY_TARGET, 10))
+
+    first = await executor.set_weights(ROUTE, weights, key)
+    advance()
+    again = await executor.set_weights(ROUTE, weights, key)
+    rollback = await executor.set_weights(
+        ROUTE,
+        (WeightedTarget(TARGET, 100), WeightedTarget(STANDBY_TARGET, 0)),
+        f"{key}:rollback:0",
+    )
+
+    assert isinstance(first, TrafficApplied)
+    assert again == first
+    assert isinstance(rollback, TrafficApplied)
+    for source_weight, target_weight in INVALID_WEIGHTS:
+        bad = (WeightedTarget(TARGET, source_weight), WeightedTarget(STANDBY_TARGET, target_weight))
+        with pytest.raises(ValueError):
+            await executor.set_weights(ROUTE, bad, f"{key}:bad")
+
+
+async def assert_metrics_provider_contract(provider: MetricsProvider) -> Metrics:
+    until = WINDOW_END
+    since = until - timedelta(seconds=5)
+
+    first = await provider.read(STANDBY_TARGET, since, until)
+    again = await provider.read(STANDBY_TARGET, since, until)
+
+    assert isinstance(first, Metrics)
+    assert first == again
+    assert 0 <= first.error_rate_percent <= 100
+    assert first.p95_ms >= 0 and first.request_count >= 0
+    return first
+
+
+async def assert_data_sync_checker_contract(checker: DataSyncChecker) -> DataSyncLag:
+    first = await checker.replication_lag(TARGET, STANDBY_TARGET)
+    again = await checker.replication_lag(TARGET, STANDBY_TARGET)
+
+    assert isinstance(first, DataSyncLag)
+    assert first == again
+    assert first.seconds >= 0
+    return first
 
 
 ContractCheck = Callable[..., Awaitable[None]]

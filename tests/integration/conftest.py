@@ -53,12 +53,16 @@ from tests.integration.auth_support import (
 )
 from tests.integration.deploy_harness import DeployHarness, FakeClock, make_fake_executors
 from tests.integration.factories import DEFAULT_ORG_SLUG, add_organization
+from tests.integration.migration_support import Migration, serving_and_standby
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
 TABLES = (
     "jobs",
+    # --- API 서버 8: 이전 계획 ---
+    "migration_plan_logs",
+    "migration_plans",
     # --- API 서버 4: 배포 작업 로그 ---
     "deploy_request_logs",
     "deploy_requests",
@@ -276,3 +280,14 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
         finally:
             app.dependency_overrides.clear()
             await pooled_engine.dispose()
+
+
+@pytest.fixture
+async def migration(harness: DeployHarness) -> AsyncIterator[Migration]:
+    """aws-seoul 서비스 중(100) + gcp-seoul 예비(같은 digest), 개발자 A(만든 사람)·B(승인)."""
+    setup = await serving_and_standby(harness)
+    try:
+        yield setup
+    finally:
+        await setup.author_client.aclose()
+        await setup.approver_client.aclose()

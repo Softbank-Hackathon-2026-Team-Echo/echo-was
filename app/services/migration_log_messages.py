@@ -1,0 +1,108 @@
+"""이전 실행 로그와 실패 응답의 고정 문장.
+
+외부 응답 원문은 넣지 않는다. 줄마다 코드·수준·문장이 정해져 있고, FAILED·ROLLBACK_STARTED·
+JUDGE_FAILED·DATA_SYNC_FAILED 줄은 원인 코드의 문장을 붙인다.
+"""
+
+from dataclasses import dataclass
+
+from app.enums import LogLevel, MigrationErrorCode, MigrationLogCode
+
+# 원인 코드별 고정 문장(계획 응답 errorMessage·로그 줄).
+MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
+    MigrationErrorCode.PREFLIGHT_FAILED: (
+        "The preflight check failed: the target environment was not healthy or not on the same "
+        "image."
+    ),
+    MigrationErrorCode.TRAFFIC_APPLY_FAILED: "The traffic router did not apply the new weights.",
+    MigrationErrorCode.HEALTH_CHECK_FAILED: (
+        "The target environment health check did not return a 2xx response."
+    ),
+    MigrationErrorCode.METRICS_UNAVAILABLE: (
+        "Metrics for the target environment were unavailable, so the step could not be judged."
+    ),
+    MigrationErrorCode.THRESHOLD_EXCEEDED: (
+        "The error rate or p95 latency exceeded the rollback condition."
+    ),
+    MigrationErrorCode.DATA_LAG_EXCEEDED: (
+        "The data replication lag exceeded the rollback condition."
+    ),
+    MigrationErrorCode.ABORTED: "A person aborted the migration.",
+    MigrationErrorCode.WORKER_LOST: "The migration worker stopped repeatedly during this plan.",
+    MigrationErrorCode.INTERNAL_ERROR: "An internal error occurred.",
+}
+
+
+@dataclass(frozen=True)
+class MigrationLogEntry:
+    level: LogLevel
+    message: str
+
+
+_INFO, _WARN, _ERROR = LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR
+_C = MigrationLogCode
+
+MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
+    _C.PLAN_CREATED: MigrationLogEntry(_INFO, "Migration plan created. Waiting for approval."),
+    _C.APPROVED: MigrationLogEntry(_INFO, "Migration plan approved. Execution starts now."),
+    _C.SELF_APPROVED: MigrationLogEntry(
+        _INFO, "Migration plan approved by its creator (self approval). Execution starts now."
+    ),
+    _C.REJECTED: MigrationLogEntry(_INFO, "Migration plan rejected."),
+    _C.CANCELLED: MigrationLogEntry(_INFO, "Migration plan cancelled. Traffic was not changed."),
+    _C.EXPIRED: MigrationLogEntry(_INFO, "Migration plan expired before it was approved."),
+    _C.STALE: MigrationLogEntry(
+        _WARN, "The service or its environments changed after this plan was made. Not executed."
+    ),
+    _C.ABORT_REQUESTED: MigrationLogEntry(_WARN, "Abort requested."),
+    _C.STARTED: MigrationLogEntry(_INFO, "Migration started."),
+    _C.PREFLIGHT_OK: MigrationLogEntry(
+        _INFO, "Preflight passed: the target environment is healthy and runs the same image."
+    ),
+    _C.PREFLIGHT_FAILED: MigrationLogEntry(
+        _ERROR, MIGRATION_ERROR_MESSAGES[MigrationErrorCode.PREFLIGHT_FAILED]
+    ),
+    _C.WEIGHT_APPLIED: MigrationLogEntry(_INFO, "Traffic weights applied."),
+    _C.WEIGHT_APPLY_FAILED: MigrationLogEntry(
+        _WARN, MIGRATION_ERROR_MESSAGES[MigrationErrorCode.TRAFFIC_APPLY_FAILED]
+    ),
+    _C.JUDGE_PASSED: MigrationLogEntry(
+        _INFO, "Step judged healthy: health check, error rate and p95 latency are within limits."
+    ),
+    # JUDGE_FAILED·DATA_SYNC_FAILED·ROLLBACK_STARTED·FAILED 는 원인 코드 문장을 붙여 쓴다.
+    _C.JUDGE_FAILED: MigrationLogEntry(_WARN, "Step judged unhealthy."),
+    _C.DATA_SYNC_OK: MigrationLogEntry(
+        _INFO, "Data replication lag is within the rollback condition."
+    ),
+    _C.DATA_SYNC_FAILED: MigrationLogEntry(_WARN, "Data replication check failed."),
+    _C.SUCCEEDED: MigrationLogEntry(
+        _INFO, "Migration succeeded. The target environment now serves all traffic."
+    ),
+    _C.ROLLBACK_STARTED: MigrationLogEntry(
+        _WARN, "Rolling back: sending all traffic to the source environment."
+    ),
+    _C.ROLLBACK_APPLIED: MigrationLogEntry(
+        _INFO, "Rolled back. The source environment serves all traffic again."
+    ),
+    _C.ROLLBACK_APPLY_FAILED: MigrationLogEntry(
+        _WARN, "The traffic router did not apply the rollback weights. Retrying."
+    ),
+    _C.ROLLBACK_FAILED: MigrationLogEntry(
+        _ERROR, "Rollback failed: the traffic router did not apply the rollback weights."
+    ),
+    _C.FAILED: MigrationLogEntry(_ERROR, "Migration failed."),
+    _C.LOG_TRUNCATED: MigrationLogEntry(
+        _INFO, "Log line limit reached. Further lines for this plan are not recorded."
+    ),
+}
+
+_WITH_CAUSE = frozenset({_C.JUDGE_FAILED, _C.DATA_SYNC_FAILED, _C.ROLLBACK_STARTED, _C.FAILED})
+
+
+def migration_log_message(
+    code: MigrationLogCode, error_code: MigrationErrorCode | None = None
+) -> str:
+    message = MIGRATION_LOG_ENTRIES[code].message
+    if code in _WITH_CAUSE and error_code is not None:
+        return f"{message} {MIGRATION_ERROR_MESSAGES[error_code]}"
+    return message
