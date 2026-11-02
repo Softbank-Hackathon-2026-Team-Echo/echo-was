@@ -57,10 +57,10 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 원터치 배포(API 서버 3)
 
 ```text
-서비스 등록   POST /orgs/{orgId}/services (repoUrl 접근 확인, 대표 주소 {name}.{도메인})
+서비스 등록   POST /orgs/{orgId}/services (repoUrl 접근 확인, 대표 주소 {name}-{무작위 8자}.{도메인})
    │
 배포 요청     POST /orgs/{orgId}/services/{id}/deploy-requests (환경 1개 + 브랜치·커밋 → 40자 SHA 고정, 202 QUEUED)
-   │          └ 그 환경과 첫 요청이면 연결 생성(주소 {service}.{env}.{도메인}). 같은 연결의 대기 요청은 밀려남
+   │          └ 그 환경과 첫 요청이면 연결 생성(주소 {service}-{env}-{같은 8자}.{도메인}). 같은 연결의 대기 요청은 밀려남
 일꾼          QUEUED → BUILDING(같은 커밋 빌드 재사용) → DEPLOYING(배포 기록) → VERIFYING(환경별 주소 헬스체크)
    │
 성공 처리     현재 배포 교체 · 서비스 중 연결이 없으면 대표 주소를 이 연결로(비율 100) · 아니면 예비(비율 0)
@@ -92,7 +92,7 @@ app/
 ├─ core/           # 설정·DB 엔진·예외·로깅·요청 ID 미들웨어·비밀값 타입·시계·저장소 주소
 ├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스·GitHub 사용자 클라이언트·시계)
 └─ enums.py        # 배포·배포 요청·빌드·할 일·서비스 상태와 코드
-alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸, 조직·로그인 표·칸)
+alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태 칸, 원터치 배포 표·칸, 조직·로그인 표·칸, 주소 suffix 칸)
 scripts/           # dump_schema.sh (db-schema.sql 생성)
 tests/             # 단위 테스트, adapter_contract.py·executor_contract.py(공통 계약), integration/ (실제 PostgreSQL)
 docs/schema.md     # 스키마 설명 원본
@@ -137,7 +137,7 @@ uv run --env-file .env python -m app.worker        # 별도 터미널. 일꾼 (S
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services -H 'content-type: application/json' \
   -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"name":"shop-api","repoUrl":"https://github.com/team-echo/shop-api"}'
-# → 201, url=https://shop-api.apps.echo.test, simulated=true (가짜 소스 저장소)
+# → 201, url=https://shop-api-a1b2c3d4.apps.echo.test (끝 8자는 무작위), simulated=true (가짜 소스 저장소)
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/deploy-requests -H 'content-type: application/json' \
   -H 'Origin: http://localhost:3000' -b 'echo_session=<세션 쿠키>' \
   -d '{"environmentId":"<환경 id>","branch":"main"}'
@@ -163,9 +163,15 @@ GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 |---|---|---|
 | 프론트 | `https://app.echoport.uk` | `FRONTEND_BASE_URL`, `FRONTEND_ALLOWED_ORIGINS` |
 | API | `https://api.echoport.uk` | 같은 사이트(`echoport.uk`)라 세션 쿠키가 붙는다 |
-| 고객 앱 대표 주소 | `https://{서비스}.apps.echoport.uk` | `PUBLIC_BASE_DOMAIN=apps.echoport.uk` |
-| 고객 앱 환경별 주소 | `https://{서비스}.{환경}.apps.echoport.uk` | 같은 설정. 두 단계 아래라 DNS·인증서 와일드카드가 환경마다 따로 필요하다 |
+| 고객 앱 대표 주소 | `https://{서비스}-{무작위 8자}.echoport.uk` (예 `shop-a1b2c3d4.echoport.uk`) | `PUBLIC_BASE_DOMAIN=echoport.uk` |
+| 고객 앱 환경별 주소 | `https://{서비스}-{환경}-{무작위 8자}.echoport.uk` (예 `shop-aws-seoul-a1b2c3d4.echoport.uk`) | 같은 설정. 8자는 서비스마다 하나(대표 주소와 같은 값) |
 | GitHub App 콜백 | `https://api.echoport.uk/api/v1/auth/github/callback` | `GITHUB_OAUTH_REDIRECT_URI` + App 의 Callback URL |
+| 세션 쿠키 이름 | `__Host-echo_session` | `SESSION_COOKIE_NAME=__Host-echo_session` (`SESSION_COOKIE_SECURE=true` 필수) |
+
+- **고객 앱 주소는 도메인 바로 아래 한 단계**다. DNS 레코드·인증서는 `*.echoport.uk` 하나로 모든 고객 앱을 덮는다(Cloudflare 무료 인증서도 한 단계까지만 덮는다). `app`·`api` 는 따로 둔 레코드가 와일드카드보다 앞선다. 고객 앱 레이블에는 늘 `-{8자}` 가 붙으므로 `app`·`api`·`www` 와 겹치지 않는다(예약 이름 없음).
+- **무작위 8자**는 서비스를 만들 때 한 번 정해 `services.host_suffix` 에 저장한다. 지운 서비스와 같은 이름으로 새 서비스를 만들어도 옛 주소를 이어받지 못한다(하위 도메인 탈취 방지). 레이블이 63자를 넘으면 8자 앞부분을 54자로 자른다.
+- **서비스 이름은 조직 안에서만 유일**하다(주소 유일성은 8자가 맡는다). [specs/api-3-1-public-host-format.md](specs/api-3-1-public-host-format.md) 가 [API 6 SPEC](specs/api-6-github-login-roles.md) 의 "서비스 이름은 Echo 전체 유일"을 바꾼다.
+- **세션 쿠키 이름**: 고객 앱이 같은 등록 도메인(`echoport.uk`) 아래에 있으므로, 고객 앱 JavaScript 가 `Domain=echoport.uk` 쿠키로 우리 세션 쿠키를 덮어쓰지 못하게 데모 배포는 `__Host-echo_session` 을 쓴다(`__Host-` 쿠키는 Secure·`Path=/`·Domain 없음일 때만 저장된다. 서버는 세션 쿠키에 Domain 을 붙이지 않는다). 로컬 기본값은 `echo_session` 그대로다.
 
 ### GitHub 로그인 설정
 
@@ -219,14 +225,14 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
 | `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
-| `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `apps.echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}.{도메인}`, 환경별 `{서비스}.{환경}.{도메인}` |
+| `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 8자}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
 | `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`·`GITHUB_APP_INSTALL_URL`·`GITHUB_API_BASE_URL` | | GitHub App 설정. 개인키는 `env:ECHO_SECRET_…` 참조만 |
 | `GITHUB_APP_CLIENT_ID`·`GITHUB_APP_CLIENT_SECRET_REF`·`GITHUB_OAUTH_REDIRECT_URI`·`FRONTEND_BASE_URL` | | GitHub 로그인 설정. 하나라도 비면 로그인·콜백만 503 |
 | `FRONTEND_ALLOWED_ORIGINS` | `https://app.example` | 쉼표 구분. 쿠키 인증 쓰기 요청 허용 Origin + CORS. 비면 쓰기 403 |
-| `SESSION_COOKIE_SECURE`·`SESSION_TTL_SECONDS` | `true`·`604800` | 세션 쿠키 Secure·수명(7일) |
+| `SESSION_COOKIE_NAME`·`SESSION_COOKIE_SECURE`·`SESSION_TTL_SECONDS` | `echo_session`(로컬) · `__Host-echo_session`(데모)·`true`·`604800` | 세션 쿠키 이름·Secure·수명(7일) |
 | `LOGIN_ALLOWED_GITHUB_ORG` | | 설정하면 그 GitHub 조직 active 멤버만 로그인 |
 | `RESERVED_ORG_SLUGS` | `team-echo` | API 로 만들 수 없는 조직 slug(쉼표 구분) |
 | `AGENT_TOKEN_DEFAULT_DAYS`·`AGENT_TOKEN_MAX_DAYS`·`INVITATION_TTL_SECONDS` | `30`·`90`·`604800` | 에이전트 토큰 기간, 초대 유효 기간 |

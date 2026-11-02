@@ -52,7 +52,8 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 
 | 속성 | 값 |
 |---|---|
-| 이름 | `echo_session` (`SESSION_COOKIE_NAME`) |
+| 이름 | `echo_session` (`SESSION_COOKIE_NAME`). 데모 배포는 `__Host-echo_session`: 고객 앱(`*.echoport.uk`)이 같은 등록 도메인 아래라 `Domain=` 쿠키로 덮어쓰지 못하게 한다(API 서버 3-1, README "데모 배포 주소") |
+| Domain | 붙이지 않는다(API 호스트 전용). `__Host-` 이름의 조건(Secure·`Path=/`·Domain 없음)을 만족한다 |
 | 값 | 무작위 32바이트(base64url). DB `sessions` 에는 SHA-256 만 둔다 |
 | 속성 | `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure`(`SESSION_COOKIE_SECURE`, 기본 true), `Max-Age=604800`(7일) |
 | 만료 | 로그인 후 7일 고정(연장 없음). 로그아웃하면 즉시 무효 |

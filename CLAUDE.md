@@ -102,7 +102,8 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 
 ### 조직·권한 (자주 어기는 것)
 - **서비스·환경은 조직에 속한다**(`organization_id`). API 가 쓰는 저장소 조회(`get_live_by_id`·`search_live`·`count_live`·`find_live_by_id`)는 `organization_id` 를 필수로 받고, 다른 조직 것은 각 리소스의 404 다. 배포 요청은 조직 칸이 없어 `services` 와 JOIN 해 거른다. 일꾼이 쓰는 조회(`find_by_id`)는 조직 조건 없이 둔다.
-- 서비스 이름은 Echo 전체 유일(대표 주소), 환경 이름은 조직 안 유일(`uq_environments_org_name_live`).
+- 서비스 이름은 조직 안 유일(`uq_services_org_name_live`), 환경 이름도 조직 안 유일(`uq_environments_org_name_live`). 주소 유일성은 `services.host_suffix`(무작위 8자) + `public_host` 전체 unique 가 맡는다.
+- 고객 앱 주소는 도메인 바로 아래 한 단계: 대표 `{서비스}-{suffix}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 suffix}.{도메인}`(`deploy_support` 의 함수로만 만든다, 63자 넘으면 앞부분 54자로 자름). suffix 는 `get_host_suffix_generator` 로 주입하고 시험은 고정 값으로 바꾼다. 대표 주소가 겹치면 새 suffix 로 3번 다시 시도한 뒤 409 `PUBLIC_HOST_CONFLICT`.
 - `env:` 비밀 참조는 `ECHO_SECRET_<조직 키>__` 로 시작해야 한다(422 `SECRET_REF_NOT_IN_ORGANIZATION`). 조직 slug 는 바꾸지 않는다.
 - 403 은 `AuditedForbiddenError` 하위(ROLE_FORBIDDEN·AGENT_READ_ONLY·CANNOT_CHANGE_OWN_ROLE·ORIGIN_NOT_ALLOWED)로 raise 한다. 예외 처리기가 `request.state` 의 팩토리로 `audit_logs` 를 따로 커밋한다. 401·404 는 기록하지 않는다.
 - 멤버 변경은 조직 행 `FOR NO KEY UPDATE` 뒤 잠금 안에서 행위자 역할을 다시 읽는다(자기 역할 변경 금지·어드민 1명 이상). 첫 로그인·초대 적용·개인 조직 slug 는 `ON CONFLICT DO NOTHING`.
