@@ -1,5 +1,6 @@
 """서비스 API 통합 시험(SPEC api-3 AC-1, §5.6 수정 규칙)."""
 
+import re
 from typing import Any
 
 import pytest
@@ -31,7 +32,7 @@ async def test_create_service_public_repo_returns_201_with_main_url(
 
     assert set(service) == SERVICE_KEYS | {"environments"}
     assert service["private"] is False
-    assert service["url"] == "https://shop-api.apps.echo.test"
+    assert re.fullmatch(r"https://shop-api-[a-z0-9]{8}\.apps\.echo\.test", service["url"])
     assert service["simulated"] is True
     assert service["repoUrl"] == "https://github.com/team-echo/shop-api"
     assert service["status"] == "ACTIVE"

@@ -205,9 +205,15 @@ class DeployRequestService:
     async def _create_connection(
         self, service: Service, environment: Environment
     ) -> ServiceEnvironment:
-        """그 환경의 첫 요청 때 연결을 만든다. 주소는 이때 한 번 정해 저장한다."""
+        """그 환경의 첫 요청 때 연결을 만든다. 주소는 이때 한 번 정해 저장한다.
+
+        주소 `{서비스}-{환경}-{suffix}.{도메인}` 은 서비스의 suffix 를 쓴다. 살아 있는 연결과 겹치면
+        409 PUBLIC_HOST_CONFLICT 다(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우, 63자
+        자르기로 같은 레이블이 된 경우). 서비스 이름이 53자 이상이면 자르기 때문에 환경별 주소가
+        그 서비스의 대표 주소와 같아진다. 연결이 하나뿐이라 둘 다 같은 곳으로 가므로 막지 않는다.
+        """
         public_host = connection_public_host(
-            service.name, environment.name, self._public_base_domain
+            service.name, environment.name, service.host_suffix, self._public_base_domain
         )
         if await self._service_environments.is_public_host_in_use(public_host):
             raise PublicHostConflictError(

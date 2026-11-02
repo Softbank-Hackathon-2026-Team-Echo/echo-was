@@ -64,8 +64,9 @@
 | 예비 | Standby | `ServiceEnvironmentRole.STANDBY` (저장 안 함) | `traffic_weight = 0` 이고 현재 배포가 있는 연결. 재난·장애 때 이전(API 서버 8)이 넘어갈 곳 | F1·D5 |
 | 예비 따라가기 | Standby sync | `deploy_requests.trigger = STANDBY_SYNC` | 서비스 중 연결이 성공하면 예비 연결이 같은 빌드·같은 설정으로 자동 배포되는 요청. `source_request_id` 로 원본을 가리킨다 | F1·D11 |
 | 버전 상태 | Version status | `VersionStatus` (응답 `versionStatus`) | 예비 연결의 현재 이미지가 서비스 중 연결과 같으면 `IN_SYNC`, 다르면 `OUT_OF_SYNC` | F1·P2 |
-| 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}.{public_base_domain}`. 서비스 중 연결로 간다 | F1·D8 |
-| 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | `https://{서비스}.{환경}.{public_base_domain}`. 연결을 만들 때 정해 저장한다(환경 이름이 바뀌어도 그대로). 헬스체크 대상 | F1·D8 |
+| 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}-{suffix}.{public_base_domain}`(도메인 바로 아래 한 단계). 서비스 중 연결로 간다 | F1·D8, API 3-1 |
+| 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | `https://{서비스}-{환경}-{suffix}.{public_base_domain}`(서비스의 suffix). 연결을 만들 때 정해 저장한다(환경 이름이 바뀌어도 그대로). 헬스체크 대상 | F1·D8, API 3-1 |
+| 주소 suffix | Host suffix | `services.host_suffix` | 대표·환경별 주소 끝의 소문자·숫자 무작위 8자. 서비스를 만들 때 한 번 정하고 바꾸지 않는다(지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게). 레이블이 63자를 넘으면 앞부분을 54자로 자르고 suffix 는 남긴다 | API 3-1 |
 | 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기를 실제로 하는 쪽. 이번에는 가짜(`simulated`) | F1 |
 | 멱등 키 | Idempotency key | 빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt` | 외부 작업을 두 번 만들지 않게 우리가 먼저 정해 넘기는 키. 같은 키 재호출은 같은 작업 | F1 |
 | 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다 | F1·D7 |
@@ -194,7 +195,7 @@
 - 살아 있는 연결이 있는 환경은 지울 수 없다(409 `ENVIRONMENT_IN_USE`). 연결을 만드는 쪽(배포 요청 접수)은 환경 행을 `FOR SHARE` 로 잠근 뒤 만든다(환경 삭제의 `FOR UPDATE` 와는 줄을 서고, 일꾼의 FK 검사 `FOR KEY SHARE` 와는 부딪히지 않아 교착이 없다).
 - 서비스 삭제 = 모든 연결을 내린 뒤 소프트 삭제(`DELETING` 동안 PATCH·배포 요청 409). 내린 연결은 바로 소프트 삭제하고, 배포 기록·배포 요청은 남긴다.
 - 쓰기 경로의 잠금 순서는 하나다: 조직(멤버 변경·초대만, `FOR NO KEY UPDATE`) → 환경(연결을 만들 때만) → 서비스 → 그 서비스의 연결(id 오름차순) → 배포 요청 → 빌드 → 할 일. 상태는 조건부 UPDATE 로만 바꾼다.
-- 서비스 이름은 Echo 전체에서, 환경 이름은 조직 안에서 유일하다. 다른 조직의 리소스는 404 로 숨긴다(멤버가 아닌 조직도 `ORGANIZATION_NOT_FOUND`).
+- 서비스 이름과 환경 이름은 조직 안에서 유일하다(주소 유일성은 `host_suffix` 와 `public_host` 전체 unique 가 맡는다). 다른 조직의 리소스는 404 로 숨긴다(멤버가 아닌 조직도 `ORGANIZATION_NOT_FOUND`).
 - 멤버 변경은 조직 행을 잠근 뒤 잠금 안에서 행위자 역할을 다시 읽는다. 자기 역할은 못 바꾸고, 변경 뒤 어드민은 1명 이상이다.
 - 세션 쿠키 값·에이전트 토큰 원문(발급 응답 제외)·GitHub 사용자 토큰·client secret 은 저장·로그·응답·예외 메시지에 넣지 않는다.
 - 외부 호출은 트랜잭션 밖에서, 멱등 키와 함께, "요청함 시각 저장 → 호출 → 작업 번호 저장" 순서로 한다([docs/executors.md](../../docs/executors.md)).

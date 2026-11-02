@@ -19,6 +19,10 @@ from tests.integration.deploy_harness import (
 )
 
 TERMINAL = {DeployRequestStatus.SUCCEEDED, DeployRequestStatus.FAILED}
+# _setup 이 shop-api 를 만들 때 주입하는 주소 suffix.
+SUFFIX = "a1b2c3d4"
+MAIN_URL = f"https://shop-api-{SUFFIX}.apps.echo.test"
+AWS_URL = f"https://shop-api-aws-seoul-{SUFFIX}.apps.echo.test"
 DETAIL_KEYS = {
     "id",
     "serviceId",
@@ -44,6 +48,7 @@ DETAIL_KEYS = {
 
 
 async def _setup(harness: DeployHarness) -> tuple[dict[str, Any], Environment, Environment]:
+    harness.host_suffixes.queue(SUFFIX)
     service = await harness.create_service("shop-api")
     aws = await harness.add_environment("aws-seoul")
     onprem = await harness.add_environment("onprem-k3s")
@@ -82,10 +87,7 @@ async def test_deploy_branch_to_aws_runs_all_stages_and_serves_main_url(
     assert len(accepted["commitSha"]) == 40
     assert accepted["ref"] == {"type": "BRANCH", "value": "main"}
     assert trace == ["QUEUED", "BUILDING", "DEPLOYING", "VERIFYING", "SUCCEEDED"]
-    assert finished["urls"] == {
-        "main": "https://shop-api.apps.echo.test",
-        "environment": "https://shop-api.aws-seoul.apps.echo.test",
-    }
+    assert finished["urls"] == {"main": MAIN_URL, "environment": AWS_URL}
     assert finished["simulated"] is True
     assert finished["errorCode"] is None and finished["revertStatus"] is None
     assert finished["build"]["status"] == "SUCCEEDED"
@@ -97,7 +99,7 @@ async def test_deploy_branch_to_aws_runs_all_stages_and_serves_main_url(
     connection = connection_of(detail, "aws-seoul")
     assert connection["role"] == "SERVING"
     assert connection["trafficWeight"] == 100
-    assert connection["url"] == "https://shop-api.aws-seoul.apps.echo.test"
+    assert connection["url"] == AWS_URL
     assert connection["currentDeployment"]["id"] == finished["deploymentId"]
     assert connection["currentDeployment"]["commitSha"] == accepted["commitSha"]
     assert connection["simulated"] is True
@@ -179,7 +181,8 @@ async def test_new_commit_on_serving_creates_standby_sync_with_same_build(
     }
     assert differing == {"environmentUrl"}
     assert (
-        sync_row.config_snapshot["environmentUrl"] == "https://shop-api.onprem-k3s.apps.echo.test"
+        sync_row.config_snapshot["environmentUrl"]
+        == f"https://shop-api-onprem-k3s-{SUFFIX}.apps.echo.test"
     )
     standby = connection_of(detail, "onprem-k3s")
     assert standby["versionStatus"] == "IN_SYNC"
@@ -290,7 +293,7 @@ async def test_health_check_retries_after_interval_and_then_succeeds(
 
     assert picked_early is False
     assert (await harness.get_request(accepted["id"]))["status"] == "SUCCEEDED"
-    assert checker.calls == ["https://shop-api.aws-seoul.apps.echo.test/healthz"] * 3
+    assert checker.calls == [f"{AWS_URL}/healthz"] * 3
 
 
 @pytest.mark.parametrize(

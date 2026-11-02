@@ -9,8 +9,8 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
 
 DEFAULT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS = 5.0
-# 연결 주소 {서비스}.{환경}.{도메인} 이 DNS 이름 최대 길이(253)를 넘지 않게 한다
-# (63 + 1 + 63 + 1 + 125).
+# 퍼블릭 주소가 DNS 이름 최대 길이(253)를 넘지 않게 한다. 지금 주소는 레이블 하나(63자 이하)
+# + 도메인이라 여유가 있고, 예전 두 단계 형식(63 + 1 + 63 + 1 + 125) 때 정한 값을 그대로 둔다.
 PUBLIC_BASE_DOMAIN_MAX_LENGTH = 125
 _DOMAIN_PATTERN = re.compile(
     r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$"
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         default=DEFAULT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS, gt=0
     )
 
-    # 퍼블릭 주소: 대표 {서비스}.{도메인}, 환경별 {서비스}.{환경}.{도메인}.
+    # 퍼블릭 주소: 대표 {서비스}-{suffix}.{도메인}, 환경별 {서비스}-{환경}-{suffix}.{도메인}.
     public_base_domain: str = "apps.echo.test"
 
     executor_mode: ExecutorMode = ExecutorMode.FAKE

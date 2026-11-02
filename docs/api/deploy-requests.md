@@ -32,7 +32,7 @@
 
 1. 서비스(없음 404, `DELETING` 409)·환경(없음·삭제 404, 마지막 접속 확인 `FAILED` 409 `ENVIRONMENT_UNHEALTHY`)을 확인한다.
 2. 브랜치·커밋을 **이 순간 40자 커밋 SHA 로 고정**한다(없으면 422 `REF_NOT_FOUND`). 저장소 주소와 서비스 설정도 이 순간 사본을 저장한다 — 뒤에 서비스가 바뀌어도 이 요청은 이 값을 쓴다.
-3. 그 환경과 첫 요청이면 연결을 만든다(`trafficWeight = 0`, 주소 `https://{service}.{environment}.{도메인}`). 이 주소를 쓰는 살아 있는 연결이 이미 있으면 409 `PUBLIC_HOST_CONFLICT`(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우).
+3. 그 환경과 첫 요청이면 연결을 만든다(`trafficWeight = 0`, 주소 `https://{service}-{environment}-{서비스의 suffix}.{도메인}`, API 서버 3-1). 이 주소를 쓰는 살아 있는 연결이 이미 있으면 409 `PUBLIC_HOST_CONFLICT`(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우, 레이블 63자 자르기로 같은 주소가 된 경우). 레이블이 63자를 넘으면 `{service}-{environment}` 를 54자로 자르고 끝의 `-` 를 뗀 뒤 `-{suffix}` 를 붙인다. 서비스 이름이 53자 이상이면 환경별 주소가 대표 주소와 같아지고 그 서비스는 환경 하나에만 배포할 수 있다.
 4. **같은 연결에는 실행 중 1개 + 대기 1개까지만 둔다.** 대기 요청이 있으면 그 요청을 `CANCELLED`(`cancelReason = SUPERSEDED`, `supersededById = 새 요청`)로 밀어내고 새 요청이 대기한다. 실행 중 요청은 끝까지 진행되고, 대기 요청은 그 뒤에 시작한다. 사용자가 요청을 직접 취소하는 API 는 없다.
 5. 202 + `DeployRequestDetail`(`status = QUEUED`).
 
@@ -123,7 +123,7 @@ stateDiagram-v2
     "revertStatus": null,
     "build": {"id": "b1…", "status": "SUCCEEDED", "imageRepository": "registry.echo.test/shop-api", "imageDigest": "sha256:…", "reused": false},
     "deploymentId": "d1…",
-    "urls": {"main": "https://shop-api.apps.echo.test", "environment": "https://shop-api.aws-seoul.apps.echo.test"},
+    "urls": {"main": "https://shop-api-a1b2c3d4.apps.echo.test", "environment": "https://shop-api-aws-seoul-a1b2c3d4.apps.echo.test"},
     "stageTimes": {"queuedAt": "2026-11-02T03:00:00Z", "buildingAt": "2026-11-02T03:00:01Z", "deployingAt": "2026-11-02T03:00:05Z", "verifyingAt": "2026-11-02T03:00:08Z", "finishedAt": "2026-11-02T03:00:09Z"},
     "simulated": true
   }
@@ -161,5 +161,5 @@ stateDiagram-v2
 | 저장소 접근 불가 | 404 | `REPO_NOT_ACCESSIBLE` (+ `installUrl`) |
 | 서비스 삭제 중 | 409 | `SERVICE_DELETING` |
 | 환경 마지막 접속 확인 실패 | 409 | `ENVIRONMENT_UNHEALTHY` |
-| 같은 환경별 주소를 가진 살아 있는 연결 있음 | 409 | `PUBLIC_HOST_CONFLICT` |
+| 같은 환경별 주소를 가진 살아 있는 연결 있음(옛 환경 이름 재사용, 63자 자르기) | 409 | `PUBLIC_HOST_CONFLICT` |
 | GitHub 한도 초과·5xx·시간 초과 | 502 | `SOURCE_PROVIDER_UNAVAILABLE` |

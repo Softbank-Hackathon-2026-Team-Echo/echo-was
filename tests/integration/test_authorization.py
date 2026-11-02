@@ -316,11 +316,13 @@ async def test_cross_organization_resources_are_not_found(harness: DeployHarness
     assert cross_request.json()["code"] == "DEPLOY_REQUEST_NOT_FOUND"
     assert cross_service.json()["code"] == "SERVICE_NOT_FOUND"
     assert cross_env.json()["code"] == "ENVIRONMENT_NOT_FOUND"
-    assert (same_service_name.status_code, same_service_name.json()["code"]) == (
-        409,
-        "SERVICE_NAME_CONFLICT",
-    )
-    assert listed.json()["data"]["total"] == 0
+    # 서비스 이름은 조직 안에서만 유일하다(API 서버 3-1). 주소는 suffix 로 갈린다.
+    assert same_service_name.status_code == 201, same_service_name.text
+    assert same_service_name.json()["data"]["url"] != service["url"]
+    # 다른 조직의 목록에는 그 조직이 만든 서비스만 보인다.
+    assert [item["id"] for item in listed.json()["data"]["items"]] == [
+        same_service_name.json()["data"]["id"]
+    ]
 
 
 async def test_same_environment_name_in_two_organizations_via_api(

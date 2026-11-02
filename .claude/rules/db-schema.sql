@@ -260,10 +260,12 @@ CREATE TABLE public.services (
     delete_error character varying(32),
     simulated boolean DEFAULT false NOT NULL,
     organization_id uuid NOT NULL,
+    host_suffix character(8) NOT NULL,
     CONSTRAINT ck_services_container_port_range CHECK (((container_port >= 1) AND (container_port <= 65535))),
     CONSTRAINT ck_services_delete_error_only_when_deleting CHECK (((delete_error IS NULL) OR ((status)::text = 'DELETING'::text))),
     CONSTRAINT ck_services_health_check_path_format CHECK (((health_check_path)::text ~~ '/%'::text)),
     CONSTRAINT ck_services_health_check_timeout_range CHECK (((health_check_timeout_seconds >= 10) AND (health_check_timeout_seconds <= 1800))),
+    CONSTRAINT ck_services_host_suffix_format CHECK ((host_suffix ~ '^[a-z0-9]{8}$'::text)),
     CONSTRAINT ck_services_name_format CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'::text)),
     CONSTRAINT ck_services_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL))),
     CONSTRAINT ck_services_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'DELETING'::character varying])::text[])))
@@ -384,7 +386,7 @@ CREATE UNIQUE INDEX uq_service_environments_public_host_live ON public.service_e
 
 CREATE UNIQUE INDEX uq_service_environments_service_id_environment_id_live ON public.service_environments USING btree (service_id, environment_id) WHERE (is_deleted = false);
 
-CREATE UNIQUE INDEX uq_services_name_live ON public.services USING btree (name) WHERE (is_deleted = false);
+CREATE UNIQUE INDEX uq_services_org_name_live ON public.services USING btree (organization_id, name) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_services_public_host_live ON public.services USING btree (public_host) WHERE (is_deleted = false);
 

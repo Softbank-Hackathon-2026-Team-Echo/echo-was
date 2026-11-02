@@ -80,7 +80,7 @@
 서비스·환경·배포 요청 경로는 모두 `/api/v1/orgs/{orgId}` 아래다([services.md](services.md)·[environments.md](environments.md)·[deploy-requests.md](deploy-requests.md)).
 
 - 환경 이름은 **조직 안에서** 유일하다(두 조직에 `aws-seoul` 이 각각 있을 수 있다).
-- 서비스 이름은 대표 주소(`{서비스}.{도메인}`) 때문에 **Echo 전체에서** 유일하다.
+- 서비스 이름은 **조직 안에서만** 유일하다(API 서버 3-1이 바꿈). 대표 주소 `{서비스}-{무작위 8자}.{도메인}` 의 유일성은 무작위 8자가 맡으므로 다른 조직과 이름이 겹쳐도 된다.
 - 환경 열쇠 이름: `env:` 비밀 참조는 `ECHO_SECRET_<조직 키>__` 로 시작해야 한다. 조직 키는 slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). 예 `env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG`. 아니면 422 `SECRET_REF_NOT_IN_ORGANIZATION`. slug 에 하이픈 연속이 없어 키에 `__` 가 생기지 않으므로 `a-corp` 와 `a-corp-x` 는 서로의 열쇠를 가리킬 수 없다.
 - 다른 조직의 서비스·환경·배포 요청은 각 리소스의 404 다. 배포 요청 접수에서 환경이 서비스와 다른 조직이면 404 `ENVIRONMENT_NOT_FOUND`.
 

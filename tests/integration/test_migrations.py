@@ -303,6 +303,8 @@ EXPECTED_CONSTRAINTS = {
         "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
     ),
     ("audit_logs", "pk_audit_logs"): "PRIMARY KEY (id)",
+    # --- API 서버 3-1: 고객 앱 주소 형식 ---
+    ("services", "ck_services_host_suffix_format"): "CHECK ((host_suffix ~ '^[a-z0-9]{8}$'::text))",
 }
 
 EXPECTED_INDEXES = {
@@ -330,9 +332,10 @@ EXPECTED_INDEXES = {
         "ON service_environments USING btree (service_id, environment_id) "
         "WHERE (is_deleted = false)"
     ),
-    "uq_services_name_live": (
-        "CREATE UNIQUE INDEX uq_services_name_live ON services USING btree (name) "
-        "WHERE (is_deleted = false)"
+    # 서비스 이름은 조직 안에서만 유일하다(API 서버 3-1, 주소 유일성은 public_host 가 맡는다).
+    "uq_services_org_name_live": (
+        "CREATE UNIQUE INDEX uq_services_org_name_live ON services "
+        "USING btree (organization_id, name) WHERE (is_deleted = false)"
     ),
     # --- API 서버 3: 원터치 배포 ---
     "uq_services_public_host_live": (
@@ -451,6 +454,10 @@ BEFORE_ONE_TOUCH_DEPLOY = "6f6d92350314"
 # 조직·로그인 표를 더하기 전(API 서버 3 head) 시점.
 BEFORE_ORGANIZATIONS = "d95d675cb256"
 BEFORE_CONNECTION_STATUS = "b17994eaa7aa"
+# 고객 앱 주소 suffix 를 더하기 전(API 서버 6 head) 시점.
+BEFORE_HOST_SUFFIX = "ce35cab9b2e9"
+SERVICE_NAME_INDEXES = {"uq_services_name_live", "uq_services_org_name_live"}
+HOST_SUFFIX_CHECK = "ck_services_host_suffix_format"
 
 
 def _snapshot(connection: Connection, schema: str) -> dict[str, dict[Any, Any]]:
@@ -725,6 +732,57 @@ async def test_organization_revision_upgrade_with_existing_rows_fails_clearly(
         await transaction.rollback()
 
     assert f"expects {table} to be empty" in str(raised.value)
+
+
+def _host_suffix_state(connection: Connection) -> tuple[bool, set[str], set[str]]:
+    inspector = inspect(connection)
+    has_column = "host_suffix" in {column["name"] for column in inspector.get_columns("services")}
+    indexes = {index["name"] or "" for index in inspector.get_indexes("services")}
+    checks = {check["name"] or "" for check in inspector.get_check_constraints("services")}
+    return has_column, indexes & SERVICE_NAME_INDEXES, checks & {HOST_SUFFIX_CHECK}
+
+
+async def test_host_suffix_revision_downgrade_restores_global_name_index_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_HOST_SUFFIX))
+        )
+        down = await connection.run_sync(_host_suffix_state)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_host_suffix_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down == (False, {"uq_services_name_live"}, set())
+    assert up == (True, {"uq_services_org_name_live"}, {HOST_SUFFIX_CHECK})
+
+
+async def test_host_suffix_revision_upgrade_with_existing_services_fails_clearly(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_HOST_SUFFIX))
+        )
+        await connection.execute(
+            text(
+                "WITH u AS (INSERT INTO users (github_id, github_login) "
+                "VALUES (1, 'legacy') RETURNING id), "
+                "o AS (INSERT INTO organizations (slug, name, created_by_user_id) "
+                "SELECT 'legacy', 'Legacy', id FROM u RETURNING id) "
+                "INSERT INTO services (name, repo_url, repo_private, public_host, organization_id) "
+                "SELECT 'shop', 'https://github.com/a/b', false, 'shop.apps.echo.test', id FROM o"
+            )
+        )
+        with pytest.raises(RuntimeError, match="services has 1 rows") as raised:
+            await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        await transaction.rollback()
+
+    assert "expects services to be empty" in str(raised.value)
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

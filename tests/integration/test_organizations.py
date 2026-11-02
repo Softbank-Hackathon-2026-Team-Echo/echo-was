@@ -1,7 +1,7 @@
 """조직 만들기·개인 조직 slug·초대·멤버(SPEC api-6 AC-6~AC-8)."""
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -105,6 +105,9 @@ async def test_concurrent_same_slug_creates_one_and_conflicts_other(
 
 async def test_search_organizations_lists_only_mine(harness: DeployHarness) -> None:
     await create_organization(harness.session_factory, "someone-else")
+    # 하네스의 team-echo 는 DB now()(실제 시각)로, API 가 만든 조직은 주입 시계로 created_at 을
+    # 적는다. 실제 시각이 시계 시작값을 지나도 순서가 날짜에 흔들리지 않게 시계를 그 뒤로 옮긴다.
+    harness.clock.advance((datetime.now(UTC) - harness.clock.now()).total_seconds() + 60)
     await harness.client.post(ORGS, json={"slug": "acme", "name": "ACME"})
 
     response = await harness.client.get(ORGS)

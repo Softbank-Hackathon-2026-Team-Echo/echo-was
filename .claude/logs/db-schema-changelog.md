@@ -6,6 +6,9 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-02T03:38Z · app/models/service_environment.py (Edit) · +2 −2
+- 2026-11-02T03:29Z · app/models/service.py (Edit) · host_suffix 컬럼 추가
+- 2026-11-02T03:27Z · app/models/service.py (Edit) · host_suffix 컬럼 추가
 - 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가
 - 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가
 - 2026-11-01T19:53Z · app/models/environment.py (Edit) · organization_id 컬럼 추가

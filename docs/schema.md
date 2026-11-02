@@ -29,7 +29,7 @@ erDiagram
 
     services {
         uuid id PK
-        varchar63 name "살아 있는 행 중 유일"
+        varchar63 name "조직 안 살아 있는 행 중 유일"
         text description
         varchar300 repo_url "github.com 저장소"
         bool repo_private
@@ -40,6 +40,7 @@ erDiagram
         varchar16 status "ACTIVE · DELETING"
         varchar32 delete_error
         bool simulated
+        char8 host_suffix "주소 무작위 8자, 바꾸지 않음"
     }
     builds {
         uuid id PK "빌드 실행기 멱등 키"
@@ -122,19 +123,22 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `id` | uuid | N | PK | |
-| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_name_live` | 서비스 이름(예 `shop-api`). 바꿀 수 없다(주소가 이름에서 나온다). **Echo 전체에서** 유일(조직과 무관) |
+| `name` | varchar(63) | N | 이름 형식 CHECK, `uq_services_org_name_live`(`organization_id`, `name`) | 서비스 이름(예 `shop-api`). 바꿀 수 없다(주소가 이름에서 나온다). **조직 안에서** 유일(API 서버 3-1. 주소 유일성은 `host_suffix` 가 맡으므로 다른 조직과는 겹쳐도 된다) |
 | `description` | text | Y | | 설명 |
 | `repo_url` | varchar(300) | N | | 정규화한 `https://github.com/<owner>/<repo>` |
 | `repo_private` | boolean | N | | 등록·수정 때 GitHub 가 알려 준 비공개 여부 |
 | `health_check_path` | varchar(255) | N | 기본 `/healthz`, `LIKE '/%'` | 헬스체크 경로 |
 | `health_check_timeout_seconds` | integer | N | 기본 300, `BETWEEN 10 AND 1800` | 헬스체크 마감(VERIFYING 시작부터) |
 | `container_port` | integer | N | 기본 8080, `BETWEEN 1 AND 65535` | 앱이 듣는 포트 |
-| `public_host` | varchar(253) | N | `uq_services_public_host_live` | 대표 주소 `{name}.{public_base_domain}`. 만들 때 한 번 정한다 |
+| `public_host` | varchar(253) | N | `uq_services_public_host_live` | 대표 주소 `{name}-{host_suffix}.{public_base_domain}`(예 `shop-api-a1b2c3d4.echoport.uk`). 만들 때 한 번 정한다. 레이블이 63자를 넘으면 `{name}` 을 54자로 자르고 끝의 `-` 를 뗀다 |
 | `status` | varchar(16) | N | 기본 `ACTIVE`, `ACTIVE`·`DELETING` CHECK | 삭제를 받으면 `DELETING`, 다 내리면 소프트 삭제 |
 | `delete_error` | varchar(32) | Y | `delete_error IS NULL OR status = 'DELETING'` | 내리기 실패 이유(`TEARDOWN_FAILED`·`TEARDOWN_TIMEOUT`·`WORKER_LOST`) |
 | `simulated` | boolean | N | 기본 false | 가짜 소스 저장소 클라이언트로 등록했는지(저장 값) |
 | `organization_id` | uuid | N | FK `organizations.id`, `ix_services_organization_id` | 서비스가 속한 조직(API 서버 6) |
+| `host_suffix` | char(8) | N | `ck_services_host_suffix_format`(`^[a-z0-9]{8}$`) | 대표·환경별 주소에 붙는 무작위 8자(`secrets`). 만들 때 한 번 정하고 바꾸지 않는다(API 서버 3-1) |
 
+- **고객 앱 주소(API 서버 3-1, [SPEC](../specs/api-3-1-public-host-format.md))**: 대표 `{서비스}-{suffix}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 suffix}.{도메인}`. 기본 도메인 바로 아래 한 단계라 DNS·인증서 `*.도메인` 하나로 모든 고객 앱을 덮는다. 무작위 suffix 때문에 지운 서비스와 같은 이름으로 새 서비스를 만들어도 옛 주소를 잇지 못한다(하위 도메인 탈취 방지). 대표 주소가 이미 쓰이면(서비스·연결 표 어디든) 새 suffix 로 3번까지 다시 시도하고 그래도 겹치면 409 `PUBLIC_HOST_CONFLICT`. 이 SPEC 이 [API 6 SPEC](../specs/api-6-github-login-roles.md) 의 "서비스 이름은 Echo 전체 유일"을 "조직 안에서 유일"로 바꾼다.
+- `host_suffix` revision(`1d1601c0111a`)은 NOT NULL·기본값 없는 칸을 더하고 주소 형식을 바꾸므로 `services`·`service_environments` 가 비어 있다고 가정한다(옛 주소를 백필하지 않는다). 행이 있으면 분명한 메시지(`services has N rows …`)로 실패한다.
 - 원터치 배포 칸은 기존 표에 `add_column` 으로 더해 DB 에서 맨 뒤에 놓인다(모델은 `sort_order=APPENDED_COLUMN_SORT_ORDER`). 이 revision 은 `services`·`service_environments` 행이 0개라고 가정하고, 행이 있으면 칸을 더하기 전에 분명한 메시지로 실패한다(NOT NULL·기본값 없는 칸).
 
 ### `environments` — 환경
@@ -164,7 +168,7 @@ erDiagram
 | `current_deployment_id` | uuid | Y | 복합 FK `(current_deployment_id, id)` → `deployments(id, service_environment_id)` | 지금 이 연결에서 돌고 있는 배포 |
 | `traffic_weight` | smallint | N | 기본 0, `BETWEEN 0 AND 100` | 마지막으로 앞단 프록시에 적용한 비율(%) |
 | `traffic_applied_at` | timestamptz | Y | | 그 비율을 적용한 시각 |
-| `public_host` | varchar(253) | N | `uq_service_environments_public_host_live` | 환경별 주소 `{서비스}.{환경}.{public_base_domain}`. 만들 때 한 번 정한다(환경 이름이 바뀌어도 그대로) |
+| `public_host` | varchar(253) | N | `uq_service_environments_public_host_live` | 환경별 주소 `{서비스}-{환경}-{서비스의 host_suffix}.{public_base_domain}`. 만들 때 한 번 정한다(환경 이름이 바뀌어도 그대로). 레이블이 63자를 넘으면 `{서비스}-{환경}` 을 54자로 자른다(서비스 이름이 53자 이상이면 대표 주소와 같아지고, 같은 서비스의 두 번째 연결은 409 `PUBLIC_HOST_CONFLICT`) |
 | `teardown_attempt` | integer | N | 기본 0 | 서비스 삭제 재시도 횟수. 내리기 멱등 키 = `{id}:{teardown_attempt}` |
 | `teardown_requested_at` | timestamptz | Y | | 내리기를 요청한 시각(제한 시간 기준) |
 | `teardown_external_ref` | varchar(255) | Y | | 내리기 실행기의 작업 번호 |
@@ -405,6 +409,7 @@ stateDiagram-v2
 | `simulated` 를 행에 저장 | 실제 실행기로 바꾼 뒤에도 과거 가짜 기록을 구분한다(해커톤 목업 공개 규칙) | 응답 때 설정으로 계산: 모드를 바꾸면 과거 기록이 진짜처럼 보인다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
+| 고객 앱 주소 = 이름 + 무작위 8자, 도메인 바로 아래 한 단계(`host_suffix`) | 지운 서비스와 같은 이름의 새 서비스가 옛 주소를 잇지 못한다(하위 도메인 탈취 방지). `*.도메인` 와일드카드 하나로 DNS·인증서를 덮는다. 주소 유일성을 suffix 가 맡으니 서비스 이름은 조직 안에서만 유일하면 된다 | `{서비스}.{도메인}`·`{서비스}.{환경}.{도메인}`: 이름이 Echo 전체에서 유일해야 하고, 지운 이름을 남이 다시 쓰면 옛 주소를 이어받으며, 두 단계 주소는 환경마다 와일드카드가 따로 필요하다 |
 
 ---
 

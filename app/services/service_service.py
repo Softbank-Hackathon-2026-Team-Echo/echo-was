@@ -33,14 +33,20 @@ from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
-from app.services.deploy_support import service_public_host
+from app.services.deploy_support import HostSuffixGenerator, service_public_host
 from app.services.integrity import violated_constraint_name
 from app.services.service_view import ServiceDetailView, load_service_detail
 
 logger = logging.getLogger(__name__)
 
-NAME_UNIQUE_INDEX = "uq_services_name_live"
+NAME_UNIQUE_INDEX = "uq_services_org_name_live"
 PUBLIC_HOST_UNIQUE_INDEX = "uq_services_public_host_live"
+# 대표 주소가 이미 쓰이면 새 suffix 로 다시 시도하는 횟수(첫 시도 제외).
+PUBLIC_HOST_RETRY_LIMIT = 3
+
+
+class _PublicHostTakenError(Exception):
+    """이 suffix 로 만든 대표 주소가 이미 쓰인다. 트랜잭션을 되돌리고 새 suffix 로 다시 시도한다."""
 
 
 @dataclass(frozen=True)
@@ -80,42 +86,56 @@ class ServiceService:
         source_client: SourceRepositoryClient,
         clock: Clock,
         public_base_domain: str,
+        host_suffix_generator: HostSuffixGenerator,
     ) -> None:
         self._session = session
         self._source_client = source_client
         self._clock = clock
         self._public_base_domain = public_base_domain
+        self._host_suffix_generator = host_suffix_generator
         self._services = ServiceRepository(session)
         self._service_environments = ServiceEnvironmentRepository(session)
         self._deploy_requests = DeployRequestRepository(session)
         self._jobs = JobRepository(session)
 
     async def create_service(self, command: CreateServiceCommand) -> ServiceDetailView:
-        """저장소 접근을 확인하고 서비스를 ACTIVE 로 저장한다. 대표 주소는 이때 한 번 정한다."""
+        """저장소 접근을 확인하고 서비스를 ACTIVE 로 저장한다.
+
+        대표 주소 `{이름}-{suffix}.{도메인}` 은 이때 한 번 정한다. 이름은 조직 안에서만 유일하다.
+        주소가 이미 쓰이면 새 suffix 로 PUBLIC_HOST_RETRY_LIMIT 번까지 다시 시도하고, 그래도 겹치면
+        409 PUBLIC_HOST_CONFLICT 다.
+        """
         repo = parse_repo_url(command.repo_url)
         access = await self._source_client.check_access(repo)
-        service = Service(
-            name=command.name,
-            description=command.description,
-            repo_url=repo.url,
-            repo_private=access.private,
-            health_check_path=command.health_check_path,
-            health_check_timeout_seconds=command.health_check_timeout_seconds,
-            container_port=command.container_port,
-            public_host=service_public_host(command.name, self._public_base_domain),
-            status=ServiceStatus.ACTIVE,
-            simulated=self._source_client.simulated,
-            organization_id=command.organization_id,
-        )
-        async with self._session.begin():
-            # 이름은 대표 주소({서비스}.{도메인}) 때문에 조직과 무관하게 전체에서 유일하다.
-            if await self._services.find_live_by_name(command.name) is not None:
-                raise ServiceNameConflictError("service name already in use")
-            self._services.add(service)
-            await self._flush()
-            view = await load_service_detail(self._session, service)
-        _log("service created", "create_service", service)
-        return view
+        for attempt in range(PUBLIC_HOST_RETRY_LIMIT + 1):
+            host_suffix = self._host_suffix_generator()
+            service = Service(
+                name=command.name,
+                description=command.description,
+                repo_url=repo.url,
+                repo_private=access.private,
+                health_check_path=command.health_check_path,
+                health_check_timeout_seconds=command.health_check_timeout_seconds,
+                container_port=command.container_port,
+                host_suffix=host_suffix,
+                public_host=service_public_host(
+                    command.name, host_suffix, self._public_base_domain
+                ),
+                status=ServiceStatus.ACTIVE,
+                simulated=self._source_client.simulated,
+                organization_id=command.organization_id,
+            )
+            try:
+                view = await self._insert_service(service)
+            except _PublicHostTakenError:
+                logger.warning(
+                    "service public host collided",
+                    extra={"action": "create_service", "attempt": attempt + 1},
+                )
+                continue
+            _log("service created", "create_service", service)
+            return view
+        raise PublicHostConflictError("public host already in use")
 
     async def search_services(
         self, organization_id: uuid.UUID, page: int, size: int
@@ -216,6 +236,23 @@ class ServiceService:
         _log("service deletion requested", "delete_service", service)
         return view
 
+    async def _insert_service(self, service: Service) -> ServiceDetailView:
+        """한 트랜잭션에서 이름·주소를 확인하고 넣는다. 주소가 쓰이면 _PublicHostTakenError."""
+        async with self._session.begin():
+            if (
+                await self._services.find_live_by_name(service.organization_id, service.name)
+                is not None
+            ):
+                raise ServiceNameConflictError("service name already in use")
+            # 대표·환경별 주소는 같은 `*.도메인` 아래에 있으므로 두 표 모두에서 겹치지 않아야 한다.
+            if await self._services.is_public_host_in_use(
+                service.public_host
+            ) or await self._service_environments.is_public_host_in_use(service.public_host):
+                raise _PublicHostTakenError
+            self._services.add(service)
+            await self._flush()
+            return await load_service_detail(self._session, service)
+
     async def _flush(self) -> None:
         try:
             await self._session.flush()
@@ -224,7 +261,7 @@ class ServiceService:
             if constraint == NAME_UNIQUE_INDEX:
                 raise ServiceNameConflictError("service name already in use") from None
             if constraint == PUBLIC_HOST_UNIQUE_INDEX:
-                raise PublicHostConflictError("public host already in use") from None
+                raise _PublicHostTakenError from None
             raise
 
 
