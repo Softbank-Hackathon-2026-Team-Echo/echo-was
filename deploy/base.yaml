@@ -1,6 +1,72 @@
-# 운영(해커톤 AWS 도쿄 echo-dev-eks, 네임스페이스 echo-was)에 적용하는 매니페스트. .github/workflows/deploy.yml 이 쓴다.
-# 비밀값은 여기 없다: Secret echo-was-db·echo-was-env·echo-was-github 은 클러스터에 손으로 만든다(deploy/README.md).
-# PostgreSQL 17 (데모용, 클러스터 안, EBS gp3 10Gi). 비밀번호는 Secret echo-was-db 에서만 읽는다.
+# 운영(해커톤 GCP 서울 echo-dev-gke, 네임스페이스 echo-was)에 적용하는 매니페스트. .github/workflows/deploy.yml 이 쓴다.
+# 비밀값은 여기 없다: DB URL·GitHub App 비밀은 Secret Manager 에 있고 SecretSync 가 Secret echo-was-env 로 옮긴다.
+# DB 비밀번호 Secret echo-was-db 와 네임스페이스는 손으로 만든다(deploy/README.md).
+# 파드 신원(KSA)·비밀 연결. GSA 는 echo-infra control-plane.tf 가 만든다.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: echo-was
+  namespace: echo-was
+  annotations: {iam.gke.io/gcp-service-account: echo-dev-echo-was@team-echo-final.iam.gserviceaccount.com}
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata: {name: echo-was-secrets, namespace: echo-was}
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-database-url/versions/latest"
+        path: "database-url"
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-github-app-private-key/versions/latest"
+        path: "github-app-private-key"
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-github-app-client-secret/versions/latest"
+        path: "github-app-client-secret"
+---
+apiVersion: secret-sync.gke.io/v1
+kind: SecretSync
+metadata: {name: echo-was-env, namespace: echo-was}
+spec:
+  serviceAccountName: echo-was
+  secretProviderClassName: echo-was-secrets
+  secretObject:
+    type: Opaque
+    data:
+      - {sourcePath: "database-url", targetKey: "DATABASE_URL"}
+      - {sourcePath: "github-app-private-key", targetKey: "ECHO_SECRET_GITHUB_APP_PRIVATE_KEY"}
+      - {sourcePath: "github-app-client-secret", targetKey: "ECHO_SECRET_GITHUB_APP_CLIENT_SECRET"}
+---
+# echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
+# 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-ingress, namespace: echo-was}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-same-namespace, namespace: echo-was}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-gclb-to-api, namespace: echo-was}
+spec:
+  podSelector: {matchLabels: {app: echo-was-api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: {cidr: 35.191.0.0/16}
+        - ipBlock: {cidr: 130.211.0.0/22}
+      ports: [{port: 8000, protocol: TCP}]
+---
+# PostgreSQL 17 (데모용, 클러스터 안, PD standard-rwo 10Gi). 비밀번호는 Secret echo-was-db 에서만 읽는다.
 apiVersion: v1
 kind: Service
 metadata:
@@ -48,7 +114,7 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: ebs-csi-default-sc
+        storageClassName: standard-rwo
         resources:
           requests: {storage: 10Gi}
 ---
@@ -79,7 +145,11 @@ kind: Service
 metadata:
   name: echo-was-api
   namespace: echo-was
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "echo-was-api"}'
 spec:
+  type: ClusterIP
   selector: {app: echo-was-api}
   ports: [{port: 80, targetPort: 8000}]
 ---
@@ -89,16 +159,11 @@ metadata:
   name: echo-was-api
   namespace: echo-was
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-1:706878591119:certificate/735a46d0-2838-47be-8e44-dae373ab941f
-    alb.ingress.kubernetes.io/healthcheck-path: /healthz
-    alb.ingress.kubernetes.io/success-codes: "204"
-    alb.ingress.kubernetes.io/tags: project=echo,managed-by=jimin-manual
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: echo-dev-echo-was
+    ingress.gcp.kubernetes.io/pre-shared-cert: echo-dev-echo-was
+    networking.gke.io/v1beta1.FrontendConfig: echo-was-api
 spec:
-  ingressClassName: alb
   rules:
     - host: api.echoport.uk
       http:
