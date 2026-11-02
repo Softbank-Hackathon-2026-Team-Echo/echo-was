@@ -356,3 +356,89 @@ class LoginNotConfiguredError(AppError):
 
     def __init__(self) -> None:
         super().__init__("github login is not configured")
+
+
+# --- 이전 계획 (API 서버 8) ---
+
+
+class MigrationPlanNotFoundError(NotFoundError):
+    code = "MIGRATION_PLAN_NOT_FOUND"
+
+
+class SelfApprovalForbiddenError(AuditedForbiddenError):
+    """계획을 만든 사람이 스스로 승인·거절하려 했고 조직이 자기 승인을 허용하지 않는다."""
+
+    code = "SELF_APPROVAL_FORBIDDEN"
+
+    def __init__(self) -> None:
+        super().__init__("the plan creator cannot approve or reject it in this organization")
+
+
+class MigrationPlanOpenError(ConflictError):
+    """이 서비스에 끝나지 않은 이전 계획이 이미 있다. details.planId 가 그 계획이다."""
+
+    code = "MIGRATION_PLAN_OPEN"
+
+    def __init__(self, plan_id: str | None) -> None:
+        details = (
+            [ErrorField(field="planId", reason="MIGRATION_PLAN_OPEN", value=plan_id)]
+            if plan_id
+            else None
+        )
+        super().__init__("service already has an open migration plan", details=details)
+
+
+class SourceNotSingleError(ConflictError):
+    """서비스 중 연결이 정확히 하나(비율 100)가 아니다(없음·여럿·이전 중간 비율)."""
+
+    code = "SOURCE_NOT_SINGLE"
+
+
+class TargetNotReadyError(ConflictError):
+    """도착 연결에 앱이 없거나 출발과 다른 이미지다. details 에 이유를 싣는다."""
+
+    code = "TARGET_NOT_READY"
+
+
+class TargetSyncingError(ConflictError):
+    """도착 예비 연결이 아직 출발의 새 버전을 따라가는 중이다(열린 STANDBY_SYNC)."""
+
+    code = "TARGET_SYNCING"
+
+
+class DeployInProgressError(ConflictError):
+    """이 서비스에 끝나지 않은 배포 요청이 있다. details.deployRequestId 가 그 요청이다."""
+
+    code = "DEPLOY_IN_PROGRESS"
+
+
+class PlanNotPendingError(ConflictError):
+    code = "PLAN_NOT_PENDING"
+
+
+class PlanNotRunningError(ConflictError):
+    code = "PLAN_NOT_RUNNING"
+
+
+class PlanStaleError(ConflictError):
+    """계획을 만든 뒤 상태가 바뀌었다. 계획은 STALE 로 끝났고 details 에 달라진 항목을 싣는다."""
+
+    code = "PLAN_STALE"
+
+
+class PlanExpiredError(ConflictError):
+    """승인 대기 시간이 지났다. 계획은 EXPIRED 로 끝났다."""
+
+    code = "PLAN_EXPIRED"
+
+
+class MigrationInProgressError(ConflictError):
+    """이 서비스의 이전 계획이 실행 중이라 배포 요청·되돌리기·서비스 삭제를 받지 않는다."""
+
+    code = "MIGRATION_IN_PROGRESS"
+
+    def __init__(self, plan_id: str) -> None:
+        super().__init__(
+            "a migration plan is in progress for this service",
+            details=[ErrorField(field="planId", reason="MIGRATION_IN_PROGRESS", value=plan_id)],
+        )

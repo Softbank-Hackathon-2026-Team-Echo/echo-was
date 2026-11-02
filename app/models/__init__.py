@@ -9,6 +9,8 @@ from app.models.deployment import Deployment
 from app.models.environment import Environment
 from app.models.invitation import Invitation
 from app.models.job import Job
+from app.models.migration_plan import MigrationPlan
+from app.models.migration_plan_log import MigrationPlanLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.service import Service
 from app.models.service_environment import ServiceEnvironment
@@ -26,6 +28,8 @@ __all__ = [
     "Environment",
     "Invitation",
     "Job",
+    "MigrationPlan",
+    "MigrationPlanLog",
     "Organization",
     "OrganizationMember",
     "Service",

@@ -13,6 +13,7 @@
 | `POST /api/v1/orgs` `{slug, name}` | 로그인한 사람 | 201 `Organization`(`role = ADMIN`) | 422 `VALIDATION_ERROR`, 409 `ORGANIZATION_SLUG_CONFLICT`·`ORGANIZATION_SLUG_RESERVED` |
 | `GET /api/v1/orgs?page&size` | 로그인한 사람 | 200 `Page[Organization]`(내가 멤버인 것, 개인 조직 먼저) | — |
 | `GET /api/v1/orgs/{orgId}` | 뷰어 이상(에이전트는 자기 조직) | 200 `Organization` | 404 |
+| `PATCH /api/v1/orgs/{orgId}/settings` `{allowSelfApproval}` | 어드민, 사람 | 200 `Organization` | 422 `VALIDATION_ERROR`(칸 없음·boolean 아님·모르는 칸), 403 `ROLE_FORBIDDEN`·`AGENT_READ_ONLY` |
 | `GET /api/v1/orgs/{orgId}/members?page&size` | 뷰어 이상, 사람 | 200 `Page[Member]`(들어온 순서) | 404 |
 | `PATCH /api/v1/orgs/{orgId}/members/{userId}` `{role}` | 어드민 | 200 `Member` | 403 `CANNOT_CHANGE_OWN_ROLE`·`ROLE_FORBIDDEN`, 404 `MEMBER_NOT_FOUND`, 409 `LAST_ADMIN` |
 | `DELETE /api/v1/orgs/{orgId}/members/{userId}` | 어드민(본인 탈퇴는 누구나) | 204 | 403 `ROLE_FORBIDDEN`, 404 `MEMBER_NOT_FOUND`, 409 `LAST_ADMIN` |
@@ -33,10 +34,16 @@
 - 조직 삭제 API 는 없다(2차 후보).
 
 ```json
-{"id": "6f0c…", "slug": "acme", "name": "ACME 주식회사", "personal": false, "role": "ADMIN", "createdAt": "2026-11-02T03:00:00Z"}
+{"id": "6f0c…", "slug": "acme", "name": "ACME 주식회사", "personal": false, "role": "ADMIN", "allowSelfApproval": false, "createdAt": "2026-11-02T03:00:00Z"}
 ```
 
 `role` 은 요청한 사람의 역할이다. 에이전트 토큰으로 읽으면 `null`.
+
+### 조직 설정 `PATCH /api/v1/orgs/{orgId}/settings` (API 서버 8)
+
+- `allowSelfApproval`(boolean, 필수): 이전 계획을 **만든 사람이 스스로 승인·거절**할 수 있는가. 새 조직(개인 조직 포함)과 기존 조직은 `false` 다. `false` 면 만든 사람의 승인·거절은 403 `SELF_APPROVAL_FORBIDDEN`(거부 기록 남음)이고 다른 개발자 이상의 사람이 승인해야 한다([migration-plans.md](migration-plans.md)).
+- 어드민(사람)만 바꾼다. 조직 행을 `FOR NO KEY UPDATE` 로 잠그고 바꾼 뒤 200 `Organization`.
+- `Organization` 의 `allowSelfApproval` 은 조직 GET·목록·`/me` 의 조직 항목에 모두 있다.
 
 ## 멤버
 

@@ -28,6 +28,7 @@ from app.services.environment_connection_service import (
 from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
 from app.services.invitation_service import InvitationService
+from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
 from app.services.service_service import ServiceService
 
@@ -221,4 +222,19 @@ def get_agent_token_service(
         clock=clock,
         default_days=settings.agent_token_default_days,
         max_days=settings.agent_token_max_days,
+    )
+
+
+def get_migration_plan_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> MigrationPlanService:
+    return MigrationPlanService(
+        session=session,
+        clock=clock,
+        executor_mode=settings.executor_mode,
+        observe_seconds_default=settings.migration_observe_seconds_default,
+        step_overhead_seconds=settings.migration_step_overhead_seconds,
+        approval_ttl_seconds=settings.migration_plan_approval_ttl_seconds,
     )

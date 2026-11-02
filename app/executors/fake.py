@@ -11,11 +11,13 @@
   같은 줄). cursor 는 줄 번호 문자열이다.
 - 시험은 log_injections 로 "토큰처럼 보이는 줄"을 넣을 수 있다. 이 줄은 가리지 않고 그대로 돌려줘
   서버 쪽 마스킹을 시험한다(운영 설정에는 이 값이 없다).
+- 이전 계획용 트래픽·지표·데이터 확인 가짜는 결정적인 값을 준다: 트래픽은 바로 적용, 지표는 오류율
+  0.1%·p95 120ms·요청 수 max(1, round(10 × 비율/100 × 창 초)), 복제 지연 0.3초.
 """
 
 import hashlib
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -27,6 +29,9 @@ from app.executors.base import (
     BuildRunning,
     BuildSpec,
     BuildSucceeded,
+    DataSyncLag,
+    DataSyncResult,
+    DataSyncUnavailable,
     DeployApplied,
     DeployFailed,
     DeploymentSpec,
@@ -39,6 +44,9 @@ from app.executors.base import (
     LogChunk,
     LogLine,
     MainRoute,
+    Metrics,
+    MetricsResult,
+    MetricsUnavailable,
     Reverted,
     RevertFailed,
     RevertResult,
@@ -49,6 +57,11 @@ from app.executors.base import (
     TeardownPending,
     TeardownPollResult,
     TeardownRemoved,
+    TrafficApplied,
+    TrafficFailed,
+    TrafficResult,
+    WeightedTarget,
+    check_weights_total,
 )
 
 FAKE_REGISTRY = "registry.echo.test"
@@ -346,3 +359,113 @@ class FakeTeardownExecutor:
         if service_environment_id in self._fail:
             return TeardownFailed()
         return TeardownRemoved()
+
+
+FAKE_TRAFFIC_FAILED = "FAKE_TRAFFIC_FAILED"
+FAKE_ERROR_RATE_PERCENT = 0.1
+FAKE_P95_MS = 120.0
+# 비율 100% 일 때 초당 요청 수.
+FAKE_REQUESTS_PER_SECOND = 10
+FAKE_REPLICATION_LAG_SECONDS = 0.3
+
+
+def _never(_: str) -> bool:
+    return False
+
+
+class FakeTrafficExecutor:
+    """바로 TrafficApplied(지금 시각)를 돌려준다. 같은 키면 처음 결과를 그대로 준다.
+
+    연결마다 마지막으로 적용한 비율을 기억해 가짜 지표(요청 수)가 쓴다. 시험은 fail_when(키 → 참이면
+    실패)으로 특정 키를 TrafficFailed 로 만든다(운영 설정에는 이 값이 없다).
+    """
+
+    def __init__(self, clock: Clock, *, fail_when: Callable[[str], bool] = _never) -> None:
+        self._clock = clock
+        self._fail_when = fail_when
+        self._results: dict[str, TrafficResult] = {}
+        self._weights: dict[uuid.UUID, int] = {}
+        self.calls: list[FakeCall] = []
+        self.applied: list[tuple[str, tuple[int, ...]]] = []
+
+    @property
+    def simulated(self) -> bool:
+        return True
+
+    def fail_when(self, predicate: Callable[[str], bool]) -> None:
+        self._fail_when = predicate
+
+    def weight_of(self, service_environment_id: uuid.UUID) -> int | None:
+        return self._weights.get(service_environment_id)
+
+    async def set_weights(
+        self, route: MainRoute, weights: tuple[WeightedTarget, ...], idempotency_key: str
+    ) -> TrafficResult:
+        check_weights_total(weights)
+        self.calls.append(FakeCall("set_weights", idempotency_key))
+        existing = self._results.get(idempotency_key)
+        if existing is not None:
+            return existing
+        result: TrafficResult
+        if self._fail_when(idempotency_key):
+            result = TrafficFailed(code=FAKE_TRAFFIC_FAILED)
+        else:
+            result = TrafficApplied(applied_at=self._clock.now())
+            for item in weights:
+                self._weights[item.target.service_environment_id] = item.weight
+            self.applied.append((idempotency_key, tuple(item.weight for item in weights)))
+        self._results[idempotency_key] = result
+        return result
+
+
+class FakeMetricsProvider:
+    """오류율 0.1%·p95 120ms. 요청 수는 그 연결의 비율(weight_of, 모르면 100)과 창 길이로 정한다.
+
+    시험은 unavailable=True 로 판단 불가(MetricsUnavailable)를 만든다.
+    """
+
+    def __init__(
+        self,
+        weight_of: Callable[[uuid.UUID], int | None] | None = None,
+        *,
+        unavailable: bool = False,
+    ) -> None:
+        self._weight_of = weight_of
+        self.unavailable = unavailable
+        self.calls: list[tuple[uuid.UUID, datetime, datetime]] = []
+
+    @property
+    def simulated(self) -> bool:
+        return True
+
+    async def read(self, target: DeployTarget, since: datetime, until: datetime) -> MetricsResult:
+        self.calls.append((target.service_environment_id, since, until))
+        if self.unavailable:
+            return MetricsUnavailable()
+        known = self._weight_of(target.service_environment_id) if self._weight_of else None
+        weight = 100 if known is None else known
+        window_seconds = max((until - since).total_seconds(), 0.0)
+        request_count = max(1, round(FAKE_REQUESTS_PER_SECOND * weight / 100 * window_seconds))
+        return Metrics(
+            error_rate_percent=FAKE_ERROR_RATE_PERCENT,
+            p95_ms=FAKE_P95_MS,
+            request_count=request_count,
+        )
+
+
+class FakeDataSyncChecker:
+    """복제 지연 0.3초. 시험은 unavailable=True 로 DataSyncUnavailable 을 만든다."""
+
+    def __init__(self, *, unavailable: bool = False) -> None:
+        self.unavailable = unavailable
+        self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    @property
+    def simulated(self) -> bool:
+        return True
+
+    async def replication_lag(self, source: DeployTarget, target: DeployTarget) -> DataSyncResult:
+        self.calls.append((source.service_environment_id, target.service_environment_id))
+        if self.unavailable:
+            return DataSyncUnavailable()
+        return DataSyncLag(seconds=FAKE_REPLICATION_LAG_SECONDS)

@@ -130,6 +130,24 @@ class JobRepository:
         result = cast(CursorResult[Any], await self._session.execute(statement))
         return result.rowcount
 
+    async def pull_open_for_subject(self, subject_id: uuid.UUID, now: datetime) -> int:
+        """대상의 열린(QUEUED·RUNNING) 할 일의 run_after 를 지금으로 당긴다. 바꾼 행 수.
+
+        RUNNING 할 일은 그 일꾼이 결과를 적을 때 run_after 를 다시 정한다(중단은 다음 실행 맨 앞에서
+        본다).
+        """
+        statement = (
+            update(Job)
+            .where(
+                Job.subject_id == subject_id,
+                Job.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+            )
+            .values(run_after=now, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        result = cast(CursorResult[Any], await self._session.execute(statement))
+        return result.rowcount
+
     async def find_open_for_subject(self, subject_id: uuid.UUID) -> Job | None:
         statement = (
             select(Job)

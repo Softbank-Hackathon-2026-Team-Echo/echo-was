@@ -27,6 +27,9 @@ erDiagram
     deploy_requests |o--o| deployments : "빌드 성공 뒤 배포 기록"
     deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청·되돌리기 대상"
     deploy_requests ||--o{ deploy_request_logs : "배포 작업 로그"
+    services ||--o{ migration_plans : "이전 계획(끝나지 않은 것 하나)"
+    service_environments ||--o{ migration_plans : "출발·도착"
+    migration_plans ||--o{ migration_plan_logs : "이전 실행 로그"
 
     services {
         uuid id PK
@@ -78,8 +81,8 @@ erDiagram
     }
     jobs {
         uuid id PK
-        varchar32 kind "DEPLOY_REQUEST · SERVICE_TEARDOWN"
-        uuid subject_id "요청 id 또는 서비스 id"
+        varchar32 kind "DEPLOY_REQUEST · SERVICE_TEARDOWN · MIGRATION_PLAN"
+        uuid subject_id "요청 id · 서비스 id · 이전 계획 id"
         varchar16 status "QUEUED · RUNNING · DONE · FAILED · CANCELLED"
         uuid lease_token
         int lease_losses
@@ -265,13 +268,51 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `id` | uuid | N | PK | |
-| `kind` | varchar(32) | N | `DEPLOY_REQUEST`·`SERVICE_TEARDOWN` | |
-| `subject_id` | uuid | N | 열린 할 일 부분 unique `uq_jobs_subject_id_open`(`QUEUED`·`RUNNING`) | 배포 요청 id 또는 서비스 id |
+| `kind` | varchar(32) | N | `DEPLOY_REQUEST`·`SERVICE_TEARDOWN`·`MIGRATION_PLAN`(API 서버 8) | 일꾼이 kind 마다 처리기 하나로 보낸다. 모르는 kind 는 예외(조용히 DONE 으로 닫지 않는다) |
+| `subject_id` | uuid | N | 열린 할 일 부분 unique `uq_jobs_subject_id_open`(`QUEUED`·`RUNNING`) | 배포 요청 id · 서비스 id · 이전 계획 id |
 | `status` | varchar(16) | N | 5개 값 CHECK | ④-4 |
 | `run_after` | timestamptz | N | 인덱스 `(status, run_after)` | 이 시각 뒤에 집는다 |
 | `lease_token`·`lease_owner`·`lease_expires_at` | uuid·varchar(128)·timestamptz | Y | `RUNNING ⇔ token·만료 시각 있음` | 임대. 결과는 같은 토큰일 때만 반영 |
 | `lease_losses` | integer | N | 기본 0, `>= 0` | 임대를 잃은 횟수. 3이면 `WORKER_LOST` |
 | `last_error_code` | varchar(32) | Y | | 할 일을 FAILED 로 닫은 이유 |
+
+### `migration_plans` — 이전 계획 (지우지 않는 기록, API 서버 8)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `service_id` | uuid | N | FK `services.id`, 인덱스 `(service_id, created_at)`, **부분 unique** `uq_migration_plans_service_id_open`(`WHERE status IN ('PENDING_APPROVAL','APPROVED','RUNNING','ROLLING_BACK')`) | 서비스당 끝나지 않은 계획은 하나 |
+| `source_service_environment_id`·`target_service_environment_id` | uuid | N | FK `service_environments.id`, `target <> source` | 출발(지금 100%)·도착(같은 이미지의 예비) 연결 |
+| `status` | varchar(16) | N | 11개 값 CHECK | ④-5 |
+| `steps` | jsonb | N | 배열 | 고정 5단계 `[{index, kind, sourceWeight, targetWeight, observeSeconds, expectedSeconds}]`. 만든 뒤 바꾸지 않는다 |
+| `step_results` | jsonb | N | 배열 | 같은 길이 `[{index, status, startedAt, finishedAt, metrics, failureCode}]`. 바꿀 때 통째로 다시 넣는다 |
+| `rollback_conditions` | jsonb | N | 객체 | `{maxErrorRatePercent, maxP95Ms, maxReplicationLagSeconds}` |
+| `observe_seconds`·`expected_seconds` | int | N | 1~600 · `>= 0` | 지켜보기 시간 · 계획 전체 예상 시간 |
+| `fingerprint` | jsonb | N | 객체 | 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경의 config·secret_ref **해시**와 접속 상태·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 `STALE` |
+| `simulate`·`simulated` | jsonb NULL · bool | | 객체 | 가짜 실패 지정 `{failAtStep, reason}` · 가짜 실행기로 만든 계획 |
+| `current_step`·`step_phase`·`phase_started_at`·`observe_until` | smallint · varchar(8) NULL · timestamptz NULL | | 0~4 · `APPLY`·`OBSERVE`·`JUDGE` | 일꾼이 어디까지 했는지 |
+| `traffic_requested_at`·`rollback_requested_at`·`rollback_attempts` | timestamptz NULL · smallint | | `>= 0` | 트래픽 실행기 "요청함 시각"(멱등 키로 다시 부를 근거)·롤백 시도 횟수 |
+| `error_code`·`rollback_status` | varchar NULL | | 값 CHECK, `(ROLLING_BACK·ROLLED_BACK·FAILED) ⇔ error_code` | 원인 코드 · `SUCCEEDED`·`FAILED`·`NOT_NEEDED` |
+| `created_by_user_id`(N)·`approved_by_user_id`·`rejected_by_user_id`·`cancelled_by_user_id`·`aborted_by_user_id` | uuid | | FK `users.id`, `approved_by ⇔ approved_at` | 사람 칸 |
+| `self_approved` | bool | N | 기본 false | 만든 사람이 승인했나(조직 스위치가 켜져 있을 때만 가능) |
+| `approved_at`·`started_at`·`finished_at`·`abort_requested_at`·`expires_at`(N) | timestamptz | | `끝 상태 ⇔ finished_at` | 승인 대기 만료는 만든 시각 + 24시간 |
+| (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_migration_plans_prevent_delete` → `prevent_append_only_delete()` | |
+
+### `migration_plan_logs` — 이전 실행 로그 (지우지 않는 기록, API 서버 8)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `migration_plan_id` | uuid | N | FK `migration_plans.id` | |
+| `seq` | int | N | `>= 1`, unique(`migration_plan_id`, `seq`) | 계획마다 1부터 빈틈없이(서비스 행 잠금 안에서 `max + 1`) |
+| `step` | smallint | Y | 0~4 | 계획 단계 번호. 계획 전체 줄(만들기·승인 등)은 NULL |
+| `logged_at`·`level`·`code`·`message` | | N | `level` CHECK, `code` 는 값 CHECK 없음(`MigrationLogCode`) | 주입 시계 · 코드별 고정 문장 |
+| `data` | jsonb | Y | 객체 | 비율·지표 숫자(낡은 계획이면 `changed` 항목 이름)만 |
+| `simulated` | bool | N | | 그 계획의 `simulated` |
+| (삭제 금지) | | | 트리거 `trg_migration_plan_logs_prevent_delete` | |
+
+- 계획당 500줄(500번째 자리에 `LOG_TRUNCATED`). 줄은 상태 변경과 같은 트랜잭션에서 반영됐을 때만 쓴다.
+- `organizations.allow_self_approval`(bool, 기본 false): 만든 사람의 자기 승인 허용 스위치(⑨).
+- revision `4cea1ec99f1b` downgrade 는 `MIGRATION_PLAN` 할 일 행이 있으면 분명한 메시지(`jobs has N MIGRATION_PLAN rows …`)로 실패한다.
 
 ### `deployments` — 배포 (지우지 않는 이력)
 
@@ -397,13 +438,34 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QUEUED : 접수·성공 처리·삭제 접수
+    [*] --> QUEUED : 접수·성공 처리·삭제 접수·이전 계획 승인
     QUEUED --> RUNNING : 일꾼이 집음(SKIP LOCKED, 새 lease_token)
     RUNNING --> QUEUED : 한 단계 진행, 다시(run_after)
     RUNNING --> RUNNING : 임대 만료 → 다른 일꾼이 집음(lease_losses + 1)
     RUNNING --> DONE : 대상이 끝 상태
     RUNNING --> FAILED : 임대 3번 상실(WORKER_LOST)
     QUEUED --> CANCELLED : 대상 요청이 밀려남·서비스 삭제
+```
+
+### ④-5 이전 계획 상태 흐름 (`migration_plans.status`, API 서버 8)
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING_APPROVAL : 만들기
+    PENDING_APPROVAL --> APPROVED : 승인(= 실행 시작, 할 일 넣음)
+    PENDING_APPROVAL --> REJECTED : 거절
+    PENDING_APPROVAL --> CANCELLED : 취소
+    PENDING_APPROVAL --> EXPIRED : 24시간 지남(승인·거절·취소·새 계획 때 판정)
+    PENDING_APPROVAL --> STALE : 승인 때 지문 다름
+    APPROVED --> RUNNING : 일꾼 시작(지문 같음)
+    APPROVED --> STALE : 일꾼 시작 때 지문 다름
+    APPROVED --> CANCELLED : 시작 전 중단
+    APPROVED --> FAILED : 일꾼 상실(WORKER_LOST)
+    RUNNING --> SUCCEEDED : 단계 4 판정 통과
+    RUNNING --> FAILED : 단계 0 사전 확인 실패(rollbackStatus NOT_NEEDED)
+    RUNNING --> ROLLING_BACK : 판정 실패·판단 불가·적용 실패·중단·일꾼 상실
+    ROLLING_BACK --> ROLLED_BACK : 출발 100% 적용
+    ROLLING_BACK --> FAILED : 롤백 3번 실패(rollbackStatus FAILED)
 ```
 
 ### ④-2 환경 접속 상태 흐름 (`environments.connection_status`)
@@ -443,12 +505,14 @@ stateDiagram-v2
 | 배포 요청(`deploy_requests`)과 배포 기록(`deployments`)을 나눔 | 요청은 "원터치 한 번"(빌드·대기·취소·실패 이유 포함), 배포 기록은 "연결에 이미지를 올린 것"이다. 빌드 실패·취소 요청은 배포 기록을 만들지 않는다. `deployments` 표와 상태 값은 그대로 둔다 | 배포 표에 요청 칸 추가: 기존 계약(`DeploymentStatus`)이 바뀐다 |
 | 같은 연결은 실행 1 + 대기 1, 새 요청이 대기 요청을 밀어냄 | 최신 요청이 이긴다(Render·Vercel 기본 동작). 부분 unique 2개가 DB 에서도 막는다 | 무제한 큐: 오래된 커밋이 줄줄이 배포된다 |
 | 할 일 표 + 별도 일꾼(`FOR UPDATE SKIP LOCKED` + 임대) | API 재시작·일꾼 장애에도 일이 남고, 임대가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 호출은 우리 행 id 를 멱등 키로 넘겨 두 번 만들지 않는다 | 요청 안에서 처리·인메모리 큐: 재시작하면 일이 사라진다 |
-| 잠금 순서 하나(조직(멤버 변경·초대만) → 환경 → 서비스 → 연결(id 순) → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
+| 잠금 순서 하나(조직(멤버 변경·초대·설정만) → 환경 → 서비스 → 연결(id 순) → 이전 계획 → 요청 → 빌드 → 할 일) + 조건부 UPDATE | 교착을 막고, 동시에 같은 행을 바꾸려는 두 쪽 중 하나만 반영된다 | |
 | `simulated` 를 행에 저장 | 실제 실행기로 바꾼 뒤에도 과거 가짜 기록을 구분한다(해커톤 목업 공개 규칙) | 응답 때 설정으로 계산: 모드를 바꾸면 과거 기록이 진짜처럼 보인다 |
 | 되돌리기 = `trigger = ROLLBACK` 배포 요청(API 서버 4) | 겹침 규칙·헬스체크·실패 때 직전 버전 유지·가짜 실패 주입을 그대로 쓴다. 새 빌드 없이 대상의 빌드를 재사용하고, 접수 순간 현재 배포를 적어 두어 그사이 다른 배포가 성공했으면 덮어쓰지 않는다(`BASE_CHANGED`) | 별도 되돌리기 API·표: 대기열·헬스체크·실패 처리를 다시 만들어야 한다 |
 | 배포 작업 로그는 DB, 빌드·실행 로그는 실행기 즉석 조회 | 작업 로그는 상태 전환과 같은 트랜잭션이라 겹침·누락이 없다. 실행 로그는 끝없이 늘어 DB 에 담지 않고, 실제 실행기로 바꿀 때 구현만 바꾼다 | 모든 로그 저장: 표가 끝없이 커진다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
+| 이전 계획은 단계·결과를 JSONB 두 칸(`steps` 고정 + `step_results` 같은 길이)으로(API 서버 8) | 단계 5개가 고정이라 "계획 / 실제"를 한 행에서 나란히 보여 준다. 진행 위치(`current_step`·`step_phase`·요청함 시각)는 칸으로 두어 조건부 UPDATE 로 바꾼다 | 단계 표 따로: 고정 5단계에 조인·잠금이 늘어난다 |
+| 낡은 계획은 지문 비교로 거부(API 서버 8) | 만든 순간의 연결 값·열린 요청·환경 설정 해시를 저장하고 승인·일꾼 시작 때 다시 계산한다(API 4 `BASE_CHANGED` 와 같은 생각). 비밀값·설정 값 자체는 넣지 않는다. 접속 재확인 시각은 빼서 재확인만으로 낡지 않게 한다 | `updated_at` 비교: 상관없는 칸 변경에도 낡는다 |
 | 고객 앱 주소 = 이름 + 무작위 8자, 도메인 바로 아래 한 단계(`host_suffix`) | 지운 서비스와 같은 이름의 새 서비스가 옛 주소를 잇지 못한다(하위 도메인 탈취 방지). `*.도메인` 와일드카드 하나로 DNS·인증서를 덮는다. 주소 유일성을 suffix 가 맡으니 서비스 이름은 조직 안에서만 유일하면 된다 | `{서비스}.{도메인}`·`{서비스}.{환경}.{도메인}`: 이름이 Echo 전체에서 유일해야 하고, 지운 이름을 남이 다시 쓰면 옛 주소를 이어받으며, 두 단계 주소는 환경마다 와일드카드가 따로 필요하다 |
 
 ---
@@ -507,13 +571,12 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 
 ## ⑧ 후속 표
 
-아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3, 사용자·조직·역할·거부 기록은 API 서버 6, 배포 작업 로그(`deploy_request_logs`)는 API 서버 4 에서 만들었다.)
+아직 만들지 않았다. 이름은 용어 사전에 "후속"으로 먼저 정해 두었다. (`builds`·`deploy_requests`·`jobs` 는 API 서버 3, 사용자·조직·역할·거부 기록은 API 서버 6, 배포 작업 로그(`deploy_request_logs`)는 API 서버 4, 이전 계획(`migration_plans`·`migration_plan_logs`)은 API 서버 8 에서 만들었다.)
 
 | 표(예정) | 내용 | 담당 태스크 |
 |---|---|---|
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
 | `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
-| `migration_plans` | 이전 계획·승인·실행 | API 서버 8 (이전 계획) |
 | `policies`·`findings` | 공통 정책, 정규화한 보안 결과 | 보안 파트 |
 | 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
 
@@ -538,7 +601,7 @@ erDiagram
 | 표 | 칸(요약) | 제약 | 뜻 |
 |---|---|---|---|
 | `users` | `github_id` bigint, `github_login` varchar(39), `name`·`avatar_url` NULL | `uq_users_github_id` | GitHub 로 로그인한 사람. 아이디·이름·사진은 로그인마다 갱신. GitHub 토큰은 저장하지 않는다 |
-| `organizations` | `slug` varchar(39), `name` varchar(100), `personal` bool, `created_by_user_id` FK | `uq_organizations_slug`, `ck_organizations_slug_format`(`^[a-z0-9](-?[a-z0-9]){0,38}$`), `ck_organizations_name_not_empty` | 고객 조직(개인 조직 포함). slug 는 바꾸지 않는다 |
+| `organizations` | `slug` varchar(39), `name` varchar(100), `personal` bool, `created_by_user_id` FK, `allow_self_approval` bool(기본 false, API 서버 8) | `uq_organizations_slug`, `ck_organizations_slug_format`(`^[a-z0-9](-?[a-z0-9]){0,38}$`), `ck_organizations_name_not_empty` | 고객 조직(개인 조직 포함). slug 는 바꾸지 않는다. `allow_self_approval` 은 이전 계획 자기 승인 스위치(어드민만 바꿈) |
 | `organization_members` | `organization_id`·`user_id` FK, `role` | `uq_organization_members_organization_id_user_id`, `ck_…_role_valid`(`ADMIN`·`DEVELOPER`·`VIEWER`), `ix_organization_members_user_id` | 사람 × 조직 × 역할. 내보내기·탈퇴는 행을 지운다 |
 | `invitations` | `organization_id` FK, `github_id` bigint, `github_login`, `role`, `status`, `invited_by_user_id` FK, `expires_at`, `accepted_at` NULL | `ck_…_status_valid`, `ck_…_role_valid`, `ck_…_accepted_at_consistency`(`ACCEPTED ⇔ accepted_at`), **부분 unique** `uq_invitations_organization_id_github_id_pending`(`WHERE status = 'PENDING'`), `ix_invitations_github_id` | GitHub 번호 × 역할 대기. 상태 `PENDING` → `ACCEPTED`·`EXPIRED`·`REVOKED` |
 | `sessions` | `user_id` FK, `token_hash` char(64), `expires_at`, `revoked_at` NULL, `created_at` | `uq_sessions_token_hash` | 쿠키 값의 SHA-256 만. 7일 고정 |

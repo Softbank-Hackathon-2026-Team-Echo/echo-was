@@ -20,9 +20,12 @@ from app.executors import ExecutorSet
 from app.executors.base import HealthOk, HealthProbeResult
 from app.executors.fake import (
     FakeBuildExecutor,
+    FakeDataSyncChecker,
     FakeDeployExecutor,
     FakeMainRouteExecutor,
+    FakeMetricsProvider,
     FakeTeardownExecutor,
+    FakeTrafficExecutor,
 )
 from app.models import DeployRequest, Environment, Job, Organization
 from app.services.deploy_support import generate_host_suffix
@@ -90,6 +93,9 @@ class FakeExecutors:
     main_route: FakeMainRouteExecutor
     health: Any
     teardown: FakeTeardownExecutor
+    traffic: Any
+    metrics: FakeMetricsProvider
+    data_sync: FakeDataSyncChecker
 
     def as_set(self) -> ExecutorSet:
         return ExecutorSet(
@@ -98,16 +104,23 @@ class FakeExecutors:
             main_route=self.main_route,
             health=self.health,
             teardown=self.teardown,
+            traffic=self.traffic,
+            metrics=self.metrics,
+            data_sync=self.data_sync,
         )
 
 
 def make_fake_executors(clock: FakeClock) -> FakeExecutors:
+    traffic = FakeTrafficExecutor(clock)
     return FakeExecutors(
         build=FakeBuildExecutor(clock, 0),
         deploy=FakeDeployExecutor(clock, 0),
         main_route=FakeMainRouteExecutor(clock),
         health=ScriptedHealthChecker(),
         teardown=FakeTeardownExecutor(clock, 0),
+        traffic=traffic,
+        metrics=FakeMetricsProvider(traffic.weight_of),
+        data_sync=FakeDataSyncChecker(),
     )
 
 

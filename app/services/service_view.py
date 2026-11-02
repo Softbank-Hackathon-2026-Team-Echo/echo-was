@@ -4,6 +4,9 @@
 - SERVING: traffic_weight > 0. STANDBY: 0 이고 현재 배포 있음. NONE: 현재 배포 없음.
 - versionStatus(STANDBY 만): 기준 연결(비율이 가장 큰 연결, 같으면 traffic_applied_at 이 늦은 쪽,
   그다음 id)의 현재 배포 digest 와 같으면 IN_SYNC, 다르면 OUT_OF_SYNC. 서비스 중 연결이 없으면 null.
+- lastSyncSeconds: 그 연결의 마지막 성공 예비 따라가기가 원본 요청이 끝난 뒤 끝나기까지 걸린 초.
+- activeMigrationPlanId: 끝나지 않은 이전 계획. 승인 대기는 만료 전일 때만 센다(조회는 상태를 바꾸지
+  않는다).
 """
 
 import uuid
@@ -13,14 +16,17 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import (
+    OPEN_MIGRATION_PLAN_STATUSES,
     DeployRequestErrorCode,
     DeployRequestStatus,
+    MigrationPlanStatus,
     ServiceEnvironmentRole,
     VersionStatus,
 )
 from app.models import Deployment, DeployRequest, Environment, Service, ServiceEnvironment
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
+from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 
 _MIN_DATETIME = datetime.min.replace(tzinfo=None)
@@ -43,12 +49,14 @@ class ServiceEnvironmentView:
     last_sync_error: DeployRequestErrorCode | None
     active_request_id: uuid.UUID | None
     queued_request_id: uuid.UUID | None
+    last_sync_seconds: float | None = None
 
 
 @dataclass(frozen=True)
 class ServiceDetailView:
     service: Service
     environments: list[ServiceEnvironmentView]
+    active_migration_plan_id: uuid.UUID | None = None
 
 
 def role_of(service_environment: ServiceEnvironment) -> ServiceEnvironmentRole:
@@ -78,7 +86,9 @@ def reference_connection(
     )
 
 
-async def load_service_detail(session: AsyncSession, service: Service) -> ServiceDetailView:
+async def load_service_detail(
+    session: AsyncSession, service: Service, now: datetime
+) -> ServiceDetailView:
     """서비스의 살아 있는 연결로 상세 화면 값을 만든다. 호출하는 쪽이 트랜잭션을 연다."""
     if service.is_deleted:
         return ServiceDetailView(service=service, environments=[])
@@ -102,6 +112,16 @@ async def load_service_detail(session: AsyncSession, service: Service) -> Servic
             connection_ids
         )
     }
+
+    last_sync_seconds_by_connection = await _last_sync_seconds(deploy_requests, connection_ids)
+    open_plan = await MigrationPlanRepository(session).find_open_for_service(service.id)
+    active_migration_plan_id = (
+        open_plan.id
+        if open_plan is not None
+        and MigrationPlanStatus(open_plan.status) in OPEN_MIGRATION_PLAN_STATUSES
+        and (open_plan.status != MigrationPlanStatus.PENDING_APPROVAL or open_plan.expires_at > now)
+        else None
+    )
 
     reference = reference_connection(connections)
     reference_digest = (
@@ -168,6 +188,29 @@ async def load_service_detail(session: AsyncSession, service: Service) -> Servic
                     ),
                     None,
                 ),
+                last_sync_seconds=last_sync_seconds_by_connection.get(connection.id),
             )
         )
-    return ServiceDetailView(service=service, environments=views)
+    return ServiceDetailView(
+        service=service, environments=views, active_migration_plan_id=active_migration_plan_id
+    )
+
+
+async def _last_sync_seconds(
+    deploy_requests: DeployRequestRepository, connection_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, float]:
+    """연결마다 마지막 성공 STANDBY_SYNC 의 finished_at − 원본 요청 finished_at(초, 소수 1자리)."""
+    syncs = await deploy_requests.search_latest_succeeded_standby_sync_by_connections(
+        connection_ids
+    )
+    source_ids = [sync.source_request_id for sync in syncs if sync.source_request_id is not None]
+    sources = {request.id: request for request in await deploy_requests.search_by_ids(source_ids)}
+    seconds: dict[uuid.UUID, float] = {}
+    for sync in syncs:
+        source = sources.get(sync.source_request_id) if sync.source_request_id else None
+        if source is None or source.finished_at is None or sync.finished_at is None:
+            continue
+        seconds[sync.service_environment_id] = round(
+            (sync.finished_at - source.finished_at).total_seconds(), 1
+        )
+    return seconds

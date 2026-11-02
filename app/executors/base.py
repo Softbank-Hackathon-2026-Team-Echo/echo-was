@@ -5,10 +5,14 @@
 - MainRouteExecutor: 서비스 대표 주소를 한 연결로 보낸다(고정 진입점 프록시).
 - HealthChecker: 환경별 퍼블릭 주소 + 헬스 경로를 한 번 확인한다.
 - TeardownExecutor: 연결 하나를 클러스터에서 내린다.
+- TrafficExecutor: 대표 주소의 트래픽을 여러 연결에 비율로 나눠 보낸다(이전 계획, 실제는 Envoy).
+- MetricsProvider: 연결 하나의 구간 지표(오류율·p95·요청 수)를 읽는다(실제는 OpenTelemetry).
+- DataSyncChecker: 출발 → 도착 데이터 복제 지연을 읽는다(실제는 인프라 7).
 
 모든 시작 호출은 우리가 먼저 정한 멱등 키를 받는다(빌드 = builds.id, 배포·되돌리기 =
-deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown_attempt). 같은 키로 다시
-불러도 같은 작업을 돌려줘야 한다. external_ref·실패 코드에는 비밀값을 넣지 않는다.
+deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown_attempt, 트래픽 비율 =
+`{계획 id}:{단계}`·`{계획 id}:rollback:{시도 번호}`). 같은 키로 다시 불러도 같은 작업을 돌려줘야
+한다. external_ref·실패 코드에는 비밀값을 넣지 않는다.
 
 로그 읽기 계약(read_logs·read_runtime_logs): 상태를 바꾸지 않는 조회다. limit 을 넘지 않는 줄을
 시간 순으로 돌려주고, 같은 cursor 면 같은 줄을 준다. 알아보지 못하는 cursor 는 InvalidLogCursor 다.
@@ -161,6 +165,70 @@ class HealthUnreachable:
 type HealthProbeResult = HealthOk | HealthHttpError | HealthUnreachable
 
 
+# --- 이전 계획: 트래픽 비율·지표·데이터 복제 ---
+
+TRAFFIC_WEIGHT_TOTAL = 100
+
+
+@dataclass(frozen=True)
+class WeightedTarget:
+    """대표 주소 트래픽 중 이 연결로 보낼 비율(0~100)."""
+
+    target: DeployTarget
+    weight: int
+
+
+@dataclass(frozen=True)
+class TrafficApplied:
+    applied_at: datetime
+
+
+@dataclass(frozen=True)
+class TrafficFailed:
+    code: str
+
+
+type TrafficResult = TrafficApplied | TrafficFailed
+
+
+@dataclass(frozen=True)
+class Metrics:
+    """연결 하나의 구간 지표. 오류율은 퍼센트(0~100), p95 는 밀리초."""
+
+    error_rate_percent: float
+    p95_ms: float
+    request_count: int
+
+
+@dataclass(frozen=True)
+class MetricsUnavailable:
+    pass
+
+
+type MetricsResult = Metrics | MetricsUnavailable
+
+
+@dataclass(frozen=True)
+class DataSyncLag:
+    seconds: float
+
+
+@dataclass(frozen=True)
+class DataSyncUnavailable:
+    pass
+
+
+type DataSyncResult = DataSyncLag | DataSyncUnavailable
+
+
+def check_weights_total(weights: tuple[WeightedTarget, ...]) -> None:
+    """비율 합계가 100 이 아니면 ValueError. 부르는 쪽의 버그라 실행기에 넘기지 않는다."""
+    if sum(item.weight for item in weights) != TRAFFIC_WEIGHT_TOTAL or any(
+        not 0 <= item.weight <= TRAFFIC_WEIGHT_TOTAL for item in weights
+    ):
+        raise ValueError("traffic weights must be between 0 and 100 and add up to 100")
+
+
 @dataclass(frozen=True)
 class TeardownPending:
     pass
@@ -275,3 +343,35 @@ class TeardownExecutor(Protocol):
     async def remove(self, target: DeployTarget, idempotency_key: str) -> str: ...
 
     async def poll(self, external_ref: str) -> TeardownPollResult: ...
+
+
+class TrafficExecutor(Protocol):
+    @property
+    def simulated(self) -> bool: ...
+
+    async def set_weights(
+        self, route: MainRoute, weights: tuple[WeightedTarget, ...], idempotency_key: str
+    ) -> TrafficResult:
+        """대표 주소 트래픽을 weights 대로 나눠 보낸다. 적용했다고 답할 때만 비율을 적는다.
+
+        합계가 100 이 아니면 ValueError(check_weights_total). 같은 키면 같은 결과를 돌려준다.
+        """
+        ...
+
+
+class MetricsProvider(Protocol):
+    @property
+    def simulated(self) -> bool: ...
+
+    async def read(self, target: DeployTarget, since: datetime, until: datetime) -> MetricsResult:
+        """[since, until) 구간의 지표. 읽을 수 없으면 MetricsUnavailable(판단 불가)."""
+        ...
+
+
+class DataSyncChecker(Protocol):
+    @property
+    def simulated(self) -> bool: ...
+
+    async def replication_lag(self, source: DeployTarget, target: DeployTarget) -> DataSyncResult:
+        """출발 → 도착 데이터 복제 지연(초). 읽을 수 없으면 DataSyncUnavailable."""
+        ...

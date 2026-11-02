@@ -30,7 +30,9 @@ async def test_create_service_public_repo_returns_201_with_main_url(
 ) -> None:
     service = await harness.create_service("shop-api", "https://github.com/team-echo/shop-api.git/")
 
-    assert set(service) == SERVICE_KEYS | {"environments"}
+    # 상세에는 환경 목록과 끝나지 않은 이전 계획 id(API 서버 8)가 더 있다.
+    assert set(service) == SERVICE_KEYS | {"environments", "activeMigrationPlanId"}
+    assert service["activeMigrationPlanId"] is None
     assert service["private"] is False
     assert re.fullmatch(r"https://shop-api-[a-z0-9]{8}\.apps\.echo\.test", service["url"])
     assert service["simulated"] is True

@@ -191,6 +191,47 @@ class DeployRequestRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_open_by_service(self, service_id: uuid.UUID) -> list[DeployRequest]:
+        """서비스의 대기·실행 중 요청(모든 연결). 만든 순서."""
+        statement = (
+            select(DeployRequest)
+            .where(
+                DeployRequest.service_id == service_id,
+                DeployRequest.status.in_(_OPEN_STATUSES),
+            )
+            .order_by(DeployRequest.created_at, DeployRequest.id)
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(statement)).all())
+
+    async def search_latest_succeeded_standby_sync_by_connections(
+        self, service_environment_ids: Sequence[uuid.UUID]
+    ) -> list[DeployRequest]:
+        """연결마다 가장 최근에 끝난 SUCCEEDED STANDBY_SYNC 요청 하나."""
+        if not service_environment_ids:
+            return []
+        statement = (
+            select(DeployRequest)
+            .where(
+                DeployRequest.service_environment_id.in_(service_environment_ids),
+                DeployRequest.trigger == DeployRequestTrigger.STANDBY_SYNC,
+                DeployRequest.status == DeployRequestStatus.SUCCEEDED,
+            )
+            .order_by(
+                DeployRequest.service_environment_id,
+                DeployRequest.finished_at.desc(),
+                DeployRequest.id.desc(),
+            )
+            .ext(distinct_on(DeployRequest.service_environment_id))
+        )
+        return list((await self._session.scalars(statement)).all())
+
+    async def search_by_ids(self, deploy_request_ids: Sequence[uuid.UUID]) -> list[DeployRequest]:
+        if not deploy_request_ids:
+            return []
+        statement = select(DeployRequest).where(DeployRequest.id.in_(deploy_request_ids))
+        return list((await self._session.scalars(statement)).all())
+
     async def search_latest_standby_sync_by_connections(
         self, service_environment_ids: Sequence[uuid.UUID]
     ) -> list[DeployRequest]:

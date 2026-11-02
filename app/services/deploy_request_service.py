@@ -10,6 +10,8 @@
 4. 환경 행을 FOR SHARE 로 잠그고 다시 확인한 뒤(환경 삭제와 경쟁 방지), 서비스·연결을 잠그고
    연결이 없으면 만든다. 같은 연결의 대기 요청은 SUPERSEDED 로 밀어내고 새 요청과 할 일을 넣는다.
 
+서비스에 실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다(서비스 행을 잠근 뒤 본다).
+
 되돌리기 접수는 같은 순서로 잠그고, 이력에서 고른 성공 요청의 빌드·커밋·배포 기록 설정 사본으로
 trigger = ROLLBACK 요청을 넣는다. 접수 순간 연결의 현재 배포를 rollback_base_deployment_id 에
 적어 두고, 일꾼이 시작할 때 다시 비교한다.
@@ -70,6 +72,7 @@ from app.services.deploy_support import (
     enqueue_deploy_request,
 )
 from app.services.integrity import violated_constraint_name
+from app.services.migration_guard import check_no_migration_in_progress
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +177,7 @@ class DeployRequestService:
             service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             _check_service_accepts(service)
             connections = await self._service_environments.lock_live_by_service(service.id)
+            await check_no_migration_in_progress(self._session, service.id)
             connection = next(
                 (item for item in connections if item.environment_id == environment.id), None
             )
@@ -235,6 +239,7 @@ class DeployRequestService:
             )
             _check_service_accepts(service)
             connections = await self._service_environments.lock_live_by_service(service.id)
+            await check_no_migration_in_progress(self._session, service.id)
             connection = next(
                 (item for item in connections if item.id == target.service_environment_id), None
             )

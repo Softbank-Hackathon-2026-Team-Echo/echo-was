@@ -92,13 +92,16 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 |---|---|---|
 | `GET ` (조직 하나) · `GET /environments…` · `GET /services…` · `GET /services/{id}/deploy-requests` · `GET /deploy-requests/{id}` | 뷰어 | 읽기 가능 |
 | `GET /deploy-requests/{id}/logs` (배포 작업·빌드·실행 로그, API 서버 4) | 뷰어 | 읽기 가능 |
+| `GET /services/{id}/migration-plans` · `GET /migration-plans/{id}` · `GET /migration-plans/{id}/logs` (이전 계획, API 서버 8) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
 | `POST /services` · `PATCH /services/{id}` · `POST /services/{id}/deploy-requests` | 개발자 | 403 |
 | `POST /deploy-requests/{id}/rollback` (되돌리기, API 서버 4. 배포 요청 접수와 같은 검사기) | 개발자 | 403 |
 | `POST·GET /agent-tokens` · `DELETE /agent-tokens/{id}` | 개발자(사람만) | 403 |
+| `POST /services/{id}/migration-plans` · `POST /migration-plans/{id}/approve·reject·cancel·abort` (이전 계획 만들기·승인·거절·취소·중단, API 서버 8) | 개발자(사람만) | 403 |
 | `DELETE /environments/{id}` · `DELETE /services/{id}` | 어드민 | 403 |
 | `PATCH /members/{userId}` · `POST·GET /invitations` · `DELETE /invitations/{id}` | 어드민(사람만) | 403 |
+| `PATCH /settings` (자기 승인 스위치 `allowSelfApproval`, API 서버 8) | 어드민(사람만) | 403 |
 | `DELETE /members/{userId}` | 어드민(본인 탈퇴는 누구나) | 403 |
 
 조직 밖: `GET /api/v1/me`·`GET·POST /api/v1/orgs` 는 로그인한 사람, `GET /api/v1/environment-kinds` 는 로그인한 누구나(에이전트 포함).
@@ -119,7 +122,7 @@ async def create_rollback(access: HumanDeveloperAccess, ...) -> ...:
 
 ## 거부 기록 (`audit_logs`)
 
-403(`ROLE_FORBIDDEN`·`AGENT_READ_ONLY`·`CANNOT_CHANGE_OWN_ROLE`·`ORIGIN_NOT_ALLOWED`)마다 한 줄을 요청과 **따로 커밋**한다(요청은 실패해도 기록은 남는다). 401·404 는 기록하지 않는다. 행은 지울 수 없다(DELETE 금지 트리거). 조회 API 는 API 서버 7 이 만든다.
+403(`ROLE_FORBIDDEN`·`AGENT_READ_ONLY`·`CANNOT_CHANGE_OWN_ROLE`·`ORIGIN_NOT_ALLOWED`·`SELF_APPROVAL_FORBIDDEN`)마다 한 줄을 요청과 **따로 커밋**한다(요청은 실패해도 기록은 남는다). 401·404 는 기록하지 않는다. 행은 지울 수 없다(DELETE 금지 트리거). 조회 API 는 API 서버 7 이 만든다.
 
 | 칸 | 값 |
 |---|---|
@@ -136,6 +139,7 @@ async def create_rollback(access: HumanDeveloperAccess, ...) -> ...:
 | 403 | `ORIGIN_NOT_ALLOWED` | 쿠키 인증 변경 요청의 Origin 이 허용 목록에 없음 |
 | 403 | `ROLE_FORBIDDEN` | 역할이 모자람(서비스가 잠금 안에서 다시 본 결과 포함) |
 | 403 | `AGENT_READ_ONLY` | 에이전트의 쓰기·사람만 경로 |
+| 403 | `SELF_APPROVAL_FORBIDDEN` | 이전 계획을 만든 사람의 승인·거절인데 조직이 자기 승인을 막아 둠(API 서버 8) |
 | 404 | `ORGANIZATION_NOT_FOUND` | 조직이 없거나 멤버가 아님(구분하지 않음) |
 | 503 | `LOGIN_NOT_CONFIGURED` | 로그인 설정이 비어 있음(로그인 시작) |
 

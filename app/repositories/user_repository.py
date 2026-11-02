@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 
 from sqlalchemy import func, select, update
@@ -71,6 +72,12 @@ class UserRepository:
         return await self._session.scalar(
             select(User).where(User.id == user_id).execution_options(populate_existing=True)
         )
+
+    async def search_by_ids(self, user_ids: Iterable[uuid.UUID]) -> list[User]:
+        ids = set(user_ids)
+        if not ids:
+            return []
+        return list((await self._session.scalars(select(User).where(User.id.in_(ids)))).all())
 
     async def find_by_github_login(self, github_login: str) -> User | None:
         """GitHub 아이디는 대소문자를 가리지 않는다."""

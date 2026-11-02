@@ -206,7 +206,7 @@ EXPECTED_CONSTRAINTS = {
     ("deploy_requests", "pk_deploy_requests"): "PRIMARY KEY (id)",
     ("jobs", "ck_jobs_kind_valid"): (
         "CHECK (((kind)::text = ANY ((ARRAY['DEPLOY_REQUEST'::character varying, "
-        "'SERVICE_TEARDOWN'::character varying])::text[])))"
+        "'SERVICE_TEARDOWN'::character varying, 'MIGRATION_PLAN'::character varying])::text[])))"
     ),
     ("jobs", "ck_jobs_lease_consistency"): (
         "CHECK ((((status)::text = 'RUNNING'::text) = "
@@ -334,6 +334,118 @@ EXPECTED_CONSTRAINTS = {
     ("deploy_request_logs", "pk_deploy_request_logs"): "PRIMARY KEY (id)",
     ("deploy_request_logs", "uq_deploy_request_logs_deploy_request_id_seq"): (
         "UNIQUE (deploy_request_id, seq)"
+    ),
+    # --- API 서버 8: 이전 계획 ---
+    ("migration_plans", "ck_migration_plans_approved_consistency"): (
+        "CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL)))"
+    ),
+    ("migration_plans", "ck_migration_plans_current_step_range"): (
+        "CHECK (((current_step >= 0) AND (current_step <= 4)))"
+    ),
+    ("migration_plans", "ck_migration_plans_error_code_consistency"): (
+        "CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, "
+        "'ROLLED_BACK'::character varying, 'FAILED'::character varying])::text[])) = (error_code "
+        "IS NOT NULL)))"
+    ),
+    ("migration_plans", "ck_migration_plans_error_code_valid"): (
+        "CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, "
+        "'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, "
+        "'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, "
+        "'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, "
+        "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying])::text[])))"
+    ),
+    ("migration_plans", "ck_migration_plans_expected_seconds_non_negative"): (
+        "CHECK ((expected_seconds >= 0))"
+    ),
+    ("migration_plans", "ck_migration_plans_fingerprint_is_object"): (
+        "CHECK ((jsonb_typeof(fingerprint) = 'object'::text))"
+    ),
+    ("migration_plans", "ck_migration_plans_finished_at_consistency"): (
+        "CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, "
+        "'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character "
+        "varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, "
+        "'STALE'::character varying])::text[])) = (finished_at IS NOT NULL)))"
+    ),
+    ("migration_plans", "ck_migration_plans_observe_seconds_range"): (
+        "CHECK (((observe_seconds >= 1) AND (observe_seconds <= 600)))"
+    ),
+    ("migration_plans", "ck_migration_plans_rollback_attempts_non_negative"): (
+        "CHECK ((rollback_attempts >= 0))"
+    ),
+    ("migration_plans", "ck_migration_plans_rollback_conditions_is_object"): (
+        "CHECK ((jsonb_typeof(rollback_conditions) = 'object'::text))"
+    ),
+    ("migration_plans", "ck_migration_plans_rollback_status_valid"): (
+        "CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, "
+        "'FAILED'::character varying, 'NOT_NEEDED'::character varying])::text[])))"
+    ),
+    ("migration_plans", "ck_migration_plans_simulate_is_object"): (
+        "CHECK ((jsonb_typeof(simulate) = 'object'::text))"
+    ),
+    ("migration_plans", "ck_migration_plans_status_valid"): (
+        "CHECK (((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, "
+        "'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character "
+        "varying, 'SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, "
+        "'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character "
+        "varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[])))"
+    ),
+    ("migration_plans", "ck_migration_plans_step_phase_valid"): (
+        "CHECK (((step_phase)::text = ANY ((ARRAY['APPLY'::character varying, "
+        "'OBSERVE'::character varying, 'JUDGE'::character varying])::text[])))"
+    ),
+    ("migration_plans", "ck_migration_plans_step_results_is_array"): (
+        "CHECK ((jsonb_typeof(step_results) = 'array'::text))"
+    ),
+    ("migration_plans", "ck_migration_plans_steps_is_array"): (
+        "CHECK ((jsonb_typeof(steps) = 'array'::text))"
+    ),
+    ("migration_plans", "ck_migration_plans_target_not_source"): (
+        "CHECK ((target_service_environment_id <> source_service_environment_id))"
+    ),
+    ("migration_plans", "fk_migration_plans_aborted_by_user_id_users"): (
+        "FOREIGN KEY (aborted_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_approved_by_user_id_users"): (
+        "FOREIGN KEY (approved_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_cancelled_by_user_id_users"): (
+        "FOREIGN KEY (cancelled_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_created_by_user_id_users"): (
+        "FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_rejected_by_user_id_users"): (
+        "FOREIGN KEY (rejected_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_service_id_services"): (
+        "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_source_service_environment_id_servic_067d"): (
+        "FOREIGN KEY (source_service_environment_id) REFERENCES service_environments(id) ON "
+        "DELETE RESTRICT"
+    ),
+    ("migration_plans", "fk_migration_plans_target_service_environment_id_servic_a900"): (
+        "FOREIGN KEY (target_service_environment_id) REFERENCES service_environments(id) ON "
+        "DELETE RESTRICT"
+    ),
+    ("migration_plans", "pk_migration_plans"): ("PRIMARY KEY (id)"),
+    ("migration_plan_logs", "ck_migration_plan_logs_data_is_object"): (
+        "CHECK ((jsonb_typeof(data) = 'object'::text))"
+    ),
+    ("migration_plan_logs", "ck_migration_plan_logs_level_valid"): (
+        "CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character "
+        "varying, 'ERROR'::character varying])::text[])))"
+    ),
+    ("migration_plan_logs", "ck_migration_plan_logs_seq_positive"): ("CHECK ((seq >= 1))"),
+    ("migration_plan_logs", "ck_migration_plan_logs_step_range"): (
+        "CHECK (((step >= 0) AND (step <= 4)))"
+    ),
+    ("migration_plan_logs", "fk_migration_plan_logs_migration_plan_id_migration_plans"): (
+        "FOREIGN KEY (migration_plan_id) REFERENCES migration_plans(id) ON DELETE RESTRICT"
+    ),
+    ("migration_plan_logs", "pk_migration_plan_logs"): ("PRIMARY KEY (id)"),
+    ("migration_plan_logs", "uq_migration_plan_logs_migration_plan_id_seq"): (
+        "UNIQUE (migration_plan_id, seq)"
     ),
 }
 
@@ -473,6 +585,27 @@ EXPECTED_INDEXES = {
         "CREATE INDEX ix_audit_logs_organization_id_created_at ON audit_logs "
         "USING btree (organization_id, created_at)"
     ),
+    # --- API 서버 8 ---
+    "ix_migration_plans_service_id_created_at": (
+        "CREATE INDEX ix_migration_plans_service_id_created_at ON migration_plans USING btree "
+        "(service_id, created_at)"
+    ),
+    "pk_migration_plan_logs": (
+        "CREATE UNIQUE INDEX pk_migration_plan_logs ON migration_plan_logs USING btree (id)"
+    ),
+    "pk_migration_plans": (
+        "CREATE UNIQUE INDEX pk_migration_plans ON migration_plans USING btree (id)"
+    ),
+    "uq_migration_plan_logs_migration_plan_id_seq": (
+        "CREATE UNIQUE INDEX uq_migration_plan_logs_migration_plan_id_seq ON migration_plan_logs "
+        "USING btree (migration_plan_id, seq)"
+    ),
+    "uq_migration_plans_service_id_open": (
+        "CREATE UNIQUE INDEX uq_migration_plans_service_id_open ON migration_plans USING btree "
+        "(service_id) WHERE ((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, "
+        "'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character "
+        "varying])::text[]))"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -494,6 +627,15 @@ EXPECTED_TRIGGERS = {
         "CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON "
         "deploy_request_logs FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
     ),
+    # 이전 계획·실행 로그도 지우지 않는다(같은 공용 함수).
+    ("migration_plans", "trg_migration_plans_prevent_delete"): (
+        "CREATE TRIGGER trg_migration_plans_prevent_delete BEFORE DELETE ON migration_plans "
+        "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
+    ),
+    ("migration_plan_logs", "trg_migration_plan_logs_prevent_delete"): (
+        "CREATE TRIGGER trg_migration_plan_logs_prevent_delete BEFORE DELETE ON "
+        "migration_plan_logs FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
+    ),
 }
 
 # 기존 표에 칸을 더하기 전(접속 상태 revision) 시점.
@@ -506,6 +648,14 @@ BEFORE_HOST_SUFFIX = "ce35cab9b2e9"
 # 되돌리기·배포 작업 로그를 더하기 전(API 서버 3-1 head) 시점.
 BEFORE_ROLLBACK = "1d1601c0111a"
 ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
+# 이전 계획을 더하기 전(API 서버 4 head) 시점과 지금 head.
+BEFORE_MIGRATION_PLANS = "33ad047a493c"
+HEAD_REVISION = "4cea1ec99f1b"
+MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
+MIGRATION_PLAN_TRIGGERS = {
+    "trg_migration_plans_prevent_delete",
+    "trg_migration_plan_logs_prevent_delete",
+}
 SERVICE_NAME_INDEXES = {"uq_services_name_live", "uq_services_org_name_live"}
 HOST_SUFFIX_CHECK = "ck_services_host_suffix_format"
 
@@ -647,6 +797,8 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "environments",
         "invitations",
         "jobs",
+        "migration_plan_logs",
+        "migration_plans",
         "organization_members",
         "organizations",
         "service_environments",
@@ -900,7 +1052,95 @@ async def test_rollback_revision_downgrade_with_rollback_rows_fails_clearly(
 
     assert "does not delete request history" in str(raised.value)
     assert still_there == 1
-    assert version == "33ad047a493c"
+    assert version == HEAD_REVISION
+
+
+def _migration_plan_state(connection: Connection) -> tuple[set[str], bool, str, set[str], int]:
+    inspector = inspect(connection)
+    tables = set(inspector.get_table_names()) & MIGRATION_PLAN_TABLES
+    has_switch = "allow_self_approval" in {
+        column["name"] for column in inspector.get_columns("organizations")
+    }
+    kind_check = next(
+        check["sqltext"]
+        for check in inspector.get_check_constraints("jobs")
+        if check["name"] == "ck_jobs_kind_valid"
+    )
+    triggers = {
+        str(row)
+        for row in connection.scalars(
+            text("SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'trg_mig%'")
+        )
+    }
+    functions = connection.scalar(
+        text("SELECT count(*) FROM pg_proc WHERE proname = 'prevent_append_only_delete'")
+    )
+    return tables, has_switch, str(kind_check), triggers, int(functions or 0)
+
+
+async def test_migration_plan_revision_downgrade_removes_tables_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.execute(
+            text(
+                "WITH u AS (INSERT INTO users (github_id, github_login) "
+                "VALUES (2, 'legacy') RETURNING id) "
+                "INSERT INTO organizations (slug, name, created_by_user_id) "
+                "SELECT 'legacy-org', 'Legacy', id FROM u"
+            )
+        )
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_MIGRATION_PLANS))
+        )
+        down = await connection.run_sync(_migration_plan_state)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_migration_plan_state)
+        legacy_switch = await connection.scalar(
+            text("SELECT allow_self_approval FROM organizations WHERE slug = 'legacy-org'")
+        )
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    tables_down, switch_down, kind_down, triggers_down, functions_down = down
+    assert (tables_down, switch_down, triggers_down) == (set(), False, set())
+    assert "MIGRATION_PLAN" not in kind_down
+    # 공용 DELETE 금지 함수는 API 서버 3 소유라 내려도 남는다.
+    assert functions_down == 1
+    tables_up, switch_up, kind_up, triggers_up, functions_up = up
+    assert (tables_up, switch_up, triggers_up) == (
+        MIGRATION_PLAN_TABLES,
+        True,
+        MIGRATION_PLAN_TRIGGERS,
+    )
+    assert "MIGRATION_PLAN" in kind_up
+    assert functions_up == 1
+    # 기존 조직은 자기 승인이 막힌 채로 채워진다.
+    assert legacy_switch is False
+
+
+async def test_migration_plan_revision_downgrade_with_plan_jobs_fails_clearly(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.execute(
+            text(
+                "INSERT INTO jobs (kind, subject_id, run_after) "
+                "VALUES ('MIGRATION_PLAN', gen_random_uuid(), now())"
+            )
+        )
+        with pytest.raises(RuntimeError, match="jobs has 1 MIGRATION_PLAN rows") as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_MIGRATION_PLANS))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert "does not delete job history" in str(raised.value)
+    assert version == HEAD_REVISION
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:
