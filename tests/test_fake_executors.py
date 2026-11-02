@@ -21,6 +21,7 @@ from app.executors.base import (
     TeardownFailed,
 )
 from app.executors.fake import (
+    LOG_LINE_INTERVAL,
     FakeBuildExecutor,
     FakeDeployExecutor,
     FakeHealthChecker,
@@ -33,7 +34,9 @@ from tests.executor_contract import (
     DEPLOYMENT,
     TARGET,
     assert_build_executor_contract,
+    assert_build_log_contract,
     assert_deploy_executor_contract,
+    assert_runtime_log_contract,
     assert_teardown_executor_contract,
 )
 
@@ -151,3 +154,67 @@ def test_build_executor_set_uses_http_health_checker_when_configured() -> None:
 def test_build_executor_set_rejects_real_mode_until_implemented() -> None:
     with pytest.raises(NotImplementedError):
         build_executor_set(_settings(executor_mode=ExecutorMode.REAL), _Clock())
+
+
+# --- 로그 읽기 계약(SPEC api-4 AC-14) ---
+
+
+async def test_fake_build_log_reader_satisfies_contract() -> None:
+    clock = _Clock()
+
+    lines = await assert_build_log_contract(FakeBuildExecutor(clock, STEP_SECONDS))
+
+    assert 5 <= len(lines) <= 8
+    assert lines[0].at == clock.now()
+    assert lines[1].at - lines[0].at == LOG_LINE_INTERVAL
+
+
+async def test_fake_runtime_log_reader_satisfies_contract() -> None:
+    lines = await assert_runtime_log_contract(FakeDeployExecutor(_Clock(), STEP_SECONDS))
+
+    assert 5 <= len(lines) <= 8
+    assert any(DEPLOYMENT.image_digest in line.message for line in lines)
+
+
+async def test_fake_logs_do_not_depend_on_clock_or_instance() -> None:
+    clock = _Clock()
+    build = BuildSpec(uuid.uuid4(), TARGET.service_id, "shop-api", "https://x", COMMIT_SHA)
+    external_ref = await FakeBuildExecutor(clock, 0).start(
+        build, SourceAccess("https://x", COMMIT_SHA), "k"
+    )
+
+    before = await FakeBuildExecutor(clock, 0).read_logs(external_ref, None, 100)
+    clock.value += timedelta(hours=5)
+    after = await FakeBuildExecutor(clock, 0).read_logs(external_ref, None, 100)
+
+    assert before == after
+
+
+async def test_fake_log_injection_hook_inserts_raw_lines_after_first_line() -> None:
+    clock = _Clock()
+    builder = FakeBuildExecutor(clock, 0, log_injections=["ghs_injected_for_test"])
+    build = BuildSpec(uuid.uuid4(), TARGET.service_id, "shop-api", "https://x", COMMIT_SHA)
+    external_ref = await builder.start(build, SourceAccess("https://x", COMMIT_SHA), "k")
+
+    chunk = await builder.read_logs(external_ref, None, 100)
+
+    assert chunk.lines[1].message == "ghs_injected_for_test"
+
+
+async def test_fake_failed_build_and_runtime_logs_end_with_error_line() -> None:
+    clock = _Clock()
+    builder = FakeBuildExecutor(clock, 0, fail_commits={COMMIT_SHA})
+    deployer = FakeDeployExecutor(
+        clock, 0, fail_service_environment_ids={TARGET.service_environment_id}
+    )
+    build = BuildSpec(uuid.uuid4(), TARGET.service_id, "shop-api", "https://x", COMMIT_SHA)
+
+    build_logs = await builder.read_logs(
+        await builder.start(build, SourceAccess("https://x", COMMIT_SHA), "b"), None, 100
+    )
+    runtime_logs = await deployer.read_runtime_logs(
+        TARGET, DEPLOYMENT, await deployer.apply(DEPLOYMENT, TARGET, "d"), None, 100
+    )
+
+    assert build_logs.lines[-1].level == "ERROR"
+    assert runtime_logs.lines[-1].level == "ERROR"

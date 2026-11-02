@@ -139,26 +139,43 @@ class DeployRequestRepository:
         organization_id: uuid.UUID,
         service_id: uuid.UUID,
         environment_id: uuid.UUID | None,
+        triggers: Sequence[DeployRequestTrigger],
+        statuses: Sequence[DeployRequestStatus],
         offset: int,
         limit: int,
     ) -> list[DeployRequest]:
-        """최신순(created_at 내림차순, 같으면 id 내림차순)."""
+        """최신순(created_at 내림차순, 같으면 id 내림차순). 빈 triggers·statuses 는 조건 없음."""
         statement = (
-            _filter_by_service(select(DeployRequest), organization_id, service_id, environment_id)
+            _filter_by_service(
+                select(DeployRequest),
+                organization_id,
+                service_id,
+                environment_id,
+                triggers,
+                statuses,
+            )
             .order_by(DeployRequest.created_at.desc(), DeployRequest.id.desc())
             .offset(offset)
             .limit(limit)
+            .execution_options(populate_existing=True)
         )
         return list((await self._session.scalars(statement)).all())
 
     async def count_by_service(
-        self, organization_id: uuid.UUID, service_id: uuid.UUID, environment_id: uuid.UUID | None
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        environment_id: uuid.UUID | None,
+        triggers: Sequence[DeployRequestTrigger],
+        statuses: Sequence[DeployRequestStatus],
     ) -> int:
         statement = _filter_by_service(
             select(func.count()).select_from(DeployRequest),
             organization_id,
             service_id,
             environment_id,
+            triggers,
+            statuses,
         )
         return await self._session.scalar(statement) or 0
 
@@ -209,10 +226,16 @@ def _filter_by_service[*Ts](
     organization_id: uuid.UUID,
     service_id: uuid.UUID,
     environment_id: uuid.UUID | None,
+    triggers: Sequence[DeployRequestTrigger],
+    statuses: Sequence[DeployRequestStatus],
 ) -> Select[*Ts]:
     statement = statement.join(Service, Service.id == DeployRequest.service_id).where(
         DeployRequest.service_id == service_id, Service.organization_id == organization_id
     )
     if environment_id is not None:
         statement = statement.where(DeployRequest.environment_id == environment_id)
+    if triggers:
+        statement = statement.where(DeployRequest.trigger.in_(triggers))
+    if statuses:
+        statement = statement.where(DeployRequest.status.in_(statuses))
     return statement

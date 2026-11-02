@@ -4,6 +4,7 @@ from app.models.audit_log import AuditLog
 from app.models.base import Base
 from app.models.build import Build
 from app.models.deploy_request import DeployRequest
+from app.models.deploy_request_log import DeployRequestLog
 from app.models.deployment import Deployment
 from app.models.environment import Environment
 from app.models.invitation import Invitation
@@ -20,6 +21,7 @@ __all__ = [
     "Base",
     "Build",
     "DeployRequest",
+    "DeployRequestLog",
     "Deployment",
     "Environment",
     "Invitation",

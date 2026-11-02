@@ -117,6 +117,9 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/services/{service_id}", V),
     _org("GET", "/services/{service_id}/deploy-requests", V),
     _org("GET", "/deploy-requests/{deploy_request_id}", V),
+    _org("GET", "/deploy-requests/{deploy_request_id}/logs", V),
+    # 되돌리기는 배포 요청 접수와 같은 검사기(개발자, 에이전트는 쓰기라 403).
+    _org("POST", "/deploy-requests/{deploy_request_id}/rollback", D),
     _org("POST", "/services", D),
     _org("PATCH", "/services/{service_id}", D),
     _org("POST", "/services/{service_id}/deploy-requests", D),

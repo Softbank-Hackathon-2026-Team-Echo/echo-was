@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.enums import (
+    DeployLogCode,
     DeployRequestCancelReason,
     DeployRequestStatus,
     ServiceStatus,
@@ -29,6 +30,7 @@ from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import deploy_target
 from app.services.job_lease import JobLease, JobOutcome
 
@@ -53,6 +55,7 @@ class ServiceTeardownProcessor:
         self._connections = ServiceEnvironmentRepository(session)
         self._requests = DeployRequestRepository(session)
         self._jobs = JobRepository(session)
+        self._job_log = DeployJobLog(session)
         self._service_id = lease.job.subject_id
 
     async def advance(self) -> JobOutcome:
@@ -78,6 +81,7 @@ class ServiceTeardownProcessor:
                         "updated_at": now,
                     },
                 ):
+                    await self._job_log.append(queued, DeployLogCode.CANCELLED_SERVICE_DELETED, now)
                     await self._jobs.cancel_queued_for_subject(queued.id, now)
             has_active = await self._requests.has_active_for_service(service.id)
             await self._lease.hold()

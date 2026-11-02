@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.guards import AdminAccess, DeveloperAccess, ViewerAccess
 from app.dependencies import get_deploy_request_service, get_service_service
+from app.enums import DeployRequestStatus, DeployRequestTrigger
 from app.schemas.deploy_request import (
     CreateDeployRequest,
     DeployRequestDetailResponse,
@@ -17,7 +18,11 @@ from app.schemas.service import (
     ServiceSummaryResponse,
     UpdateServiceRequest,
 )
-from app.services.deploy_request_service import CreateDeployCommand, DeployRequestService
+from app.services.deploy_request_service import (
+    CreateDeployCommand,
+    DeployRequestFilter,
+    DeployRequestService,
+)
 from app.services.service_service import CreateServiceCommand, ServiceChanges, ServiceService
 
 # 조회는 뷰어(에이전트 가능), 등록·수정·배포 요청은 개발자, 삭제는 어드민.
@@ -144,9 +149,17 @@ async def search_deploy_requests(
     page: Annotated[int, Query(ge=0)] = 0,
     size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     environment_id: Annotated[uuid.UUID | None, Query(alias="environmentId")] = None,
+    trigger: Annotated[list[DeployRequestTrigger] | None, Query()] = None,
+    status_: Annotated[list[DeployRequestStatus] | None, Query(alias="status")] = None,
 ) -> ApiResponse[Page[DeployRequestSummaryResponse]]:
     result = await deploy_requests.search_deploy_requests(
-        access.organization_id, service_id, environment_id, page, size
+        access.organization_id,
+        service_id,
+        DeployRequestFilter(
+            environment_id=environment_id, triggers=trigger or (), statuses=status_ or ()
+        ),
+        page,
+        size,
     )
     return ApiResponse(
         data=Page(

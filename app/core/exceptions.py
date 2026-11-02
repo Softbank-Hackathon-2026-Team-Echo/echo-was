@@ -144,6 +144,18 @@ class DeployRequestNotFoundError(NotFoundError):
     code = "DEPLOY_REQUEST_NOT_FOUND"
 
 
+class NotRollbackableError(ConflictError):
+    """되돌리기 대상이 아니다: 성공하지 않았거나 배포 기록이 없거나 그 연결이 없다."""
+
+    code = "NOT_ROLLBACKABLE"
+
+
+class AlreadyCurrentError(ConflictError):
+    """되돌리기 대상이 만든 배포 기록이 이미 그 연결의 현재 배포다."""
+
+    code = "ALREADY_CURRENT"
+
+
 class SimulateNotAllowedError(InvalidInputError):
     """simulate 는 가짜 실행기 모드에서만 받는다."""
 

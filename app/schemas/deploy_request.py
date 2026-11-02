@@ -6,7 +6,7 @@ JSON 이름은 camelCase, 모든 응답 칸은 항상 있고 값이 없으면 nu
 import re
 import uuid
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import StringConstraints, field_validator, model_validator
 from pydantic_core import PydanticCustomError
@@ -17,13 +17,16 @@ from app.enums import (
     DeployRequestErrorCode,
     DeployRequestStatus,
     DeployRequestTrigger,
+    LogLevel,
+    LogSource,
     RefType,
     RevertStatus,
     SimulatedFailureStage,
 )
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.schemas.service import EnvironmentRefResponse
-from app.services.deploy_request_service import DeployRequestView
+from app.services.deploy_log_messages import ERROR_MESSAGES
+from app.services.deploy_request_service import DeployRequestView, LogPageView
 from app.services.deploy_support import SNAPSHOT_ENVIRONMENT_URL, SNAPSHOT_MAIN_URL
 
 BRANCH_MAX_LENGTH = 255
@@ -33,26 +36,6 @@ REF_REQUIRED_REASON = "EXACTLY_ONE_OF_BRANCH_OR_COMMIT_SHA"
 _BRANCH_FORBIDDEN = re.compile(r"[\s~^:?*\[\\\x00-\x1f\x7f]|\.\.|@\{")
 
 CommitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{7,40}$")]
-
-# 오류 코드별 고정 문장. 외부 응답 원문(비밀값이 섞일 수 있음)은 넣지 않는다.
-ERROR_MESSAGES: dict[DeployRequestErrorCode, str] = {
-    DeployRequestErrorCode.REPO_NOT_ACCESSIBLE: (
-        "The repository was not found or the GitHub App is not installed on it."
-    ),
-    DeployRequestErrorCode.REF_NOT_FOUND: "The branch or commit was not found in the repository.",
-    DeployRequestErrorCode.SOURCE_PROVIDER_UNAVAILABLE: (
-        "The source provider is unavailable (rate limit, server error or timeout)."
-    ),
-    DeployRequestErrorCode.BUILD_FAILED: "The image build failed.",
-    DeployRequestErrorCode.BUILD_TIMEOUT: "The image build did not finish in time.",
-    DeployRequestErrorCode.DEPLOY_FAILED: "The deployment to the environment failed.",
-    DeployRequestErrorCode.DEPLOY_TIMEOUT: "The deployment did not finish in time.",
-    DeployRequestErrorCode.HEALTH_CHECK_FAILED: "The health check did not return a 2xx response.",
-    DeployRequestErrorCode.HEALTH_CHECK_TIMEOUT: "The health check could not be completed in time.",
-    DeployRequestErrorCode.PUBLIC_URL_UNREACHABLE: "The environment public URL was unreachable.",
-    DeployRequestErrorCode.WORKER_LOST: "The deploy worker stopped repeatedly during this request.",
-    DeployRequestErrorCode.INTERNAL_ERROR: "An internal error occurred.",
-}
 
 
 def _validate_branch(value: str) -> str:
@@ -96,6 +79,18 @@ class CreateDeployRequest(ApiRequestModel):
             return RefType.BRANCH, self.branch
         assert self.commit_sha is not None
         return RefType.COMMIT, self.commit_sha
+
+
+class RollbackSimulateRequest(ApiRequestModel):
+    """되돌리기에는 빌드 단계가 없어 DEPLOYING·VERIFYING 만 받는다(BUILDING 은 422)."""
+
+    fail_at: Literal[SimulatedFailureStage.DEPLOYING, SimulatedFailureStage.VERIFYING]
+
+
+class RollbackRequest(ApiRequestModel):
+    """되돌리기 요청 본문(비워도 된다). simulate 는 가짜 실행기 모드에서만 받는다."""
+
+    simulate: RollbackSimulateRequest | None = None
 
 
 class RefResponse(ApiModel):
@@ -143,6 +138,12 @@ class DeployRequestSummaryResponse(ApiModel):
     revert_status: RevertStatus | None
     stage_times: StageTimesResponse
     simulated: bool
+    # 이 요청이 만든 배포 기록이 지금 그 연결의 현재 배포인가.
+    is_current: bool
+    # 이 요청을 골라 되돌릴 수 있는가(성공·배포 기록 있음·현재 아님·연결 살아 있음·서비스 ACTIVE).
+    rollbackable: bool
+    # 되돌리기 요청이면 대상 요청 id.
+    rollback_of_request_id: uuid.UUID | None
 
     @classmethod
     def from_view(cls, view: DeployRequestView) -> Self:
@@ -211,4 +212,36 @@ def _summary_fields(view: DeployRequestView) -> dict[str, object]:
             finished_at=request.finished_at,
         ),
         "simulated": request.simulated,
+        "is_current": view.is_current,
+        "rollbackable": view.rollbackable,
+        "rollback_of_request_id": request.rollback_of_request_id,
     }
+
+
+class LogLineResponse(ApiModel):
+    at: datetime
+    level: LogLevel
+    message: str
+
+
+class LogPageResponse(ApiModel):
+    """로그 한 페이지. simulated=true 면 가짜 실행기로 만든 기록이다. nextCursor 로 이어 읽는다."""
+
+    source: LogSource
+    simulated: bool
+    items: list[LogLineResponse]
+    next_cursor: str | None
+    has_more: bool
+
+    @classmethod
+    def from_view(cls, view: LogPageView) -> Self:
+        return cls(
+            source=view.source,
+            simulated=view.simulated,
+            items=[
+                LogLineResponse(at=line.at, level=line.level, message=line.message)
+                for line in view.lines
+            ],
+            next_cursor=view.next_cursor,
+            has_more=view.has_more,
+        )

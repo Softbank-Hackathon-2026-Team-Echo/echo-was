@@ -36,6 +36,7 @@ from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.dependencies import (
     get_clock,
+    get_executor_set,
     get_github_user_client,
     get_host_suffix_generator,
     get_source_repository_client,
@@ -58,6 +59,8 @@ CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
 TABLES = (
     "jobs",
+    # --- API 서버 4: 배포 작업 로그 ---
+    "deploy_request_logs",
     "deploy_requests",
     "builds",
     "deployments",
@@ -266,6 +269,8 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
         app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
         app.dependency_overrides[get_github_user_client] = lambda: harness.github_users
         app.dependency_overrides[get_host_suffix_generator] = lambda: harness.host_suffixes
+        # 로그 API 가 시험이 바꿔 끼운 가짜 실행기(토큰 주입 훅 포함)를 쓰게 한다(요청마다 읽는다).
+        app.dependency_overrides[get_executor_set] = lambda: harness.executors.as_set()
         try:
             yield harness
         finally:

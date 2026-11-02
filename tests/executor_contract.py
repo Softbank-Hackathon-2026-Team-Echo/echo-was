@@ -4,11 +4,15 @@
 - 끝나기 전 poll 은 진행 중, 끝나면 성공 결과를 준다.
 - external_ref 에 비밀값(읽기 토큰)이 들어가지 않는다.
 - 빌드 결과는 sha256 digest 다(배포는 digest 로만 한다).
+- 로그 읽기: 같은 cursor 면 같은 줄, limit 을 넘지 않음, 시간 순, cursor 로 이어 읽으면 겹침·누락
+  없음, 알아보지 못하는 cursor 는 InvalidLogCursor.
 """
 
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+
+import pytest
 
 from app.core.secrets import SecretValue
 from app.executors.base import (
@@ -21,6 +25,9 @@ from app.executors.base import (
     DeploymentSpec,
     DeployPending,
     DeployTarget,
+    InvalidLogCursor,
+    LogChunk,
+    LogLine,
     Reverted,
     SourceAccess,
     TeardownExecutor,
@@ -105,6 +112,69 @@ async def assert_teardown_executor_contract(executor: TeardownExecutor, finish: 
     assert other_attempt != first
     assert isinstance(before, TeardownPending)
     assert isinstance(after, TeardownRemoved)
+
+
+ReadLogs = Callable[[str | None, int], Awaitable[LogChunk]]
+INVALID_CURSORS = ("not-a-cursor", "-1", "1.5")
+
+
+async def assert_log_reader_contract(read: ReadLogs) -> list[LogLine]:
+    """한 작업의 로그를 읽는 함수(cursor, limit → LogChunk)가 로그 읽기 계약을 지키는지 본다."""
+    whole = await read(None, 500)
+    same = await read(None, 500)
+    first = await read(None, 2)
+    again = await read(None, 2)
+
+    paged: list[LogLine] = []
+    cursor: str | None = None
+    for _ in range(100):
+        chunk = await read(cursor, 2)
+        assert len(chunk.lines) <= 2
+        paged += chunk.lines
+        cursor = chunk.next_cursor
+        if not chunk.has_more:
+            break
+    resumed = await read(cursor, 2)
+
+    assert whole.lines and not whole.has_more
+    assert whole == same
+    assert first == again
+    assert len(first.lines) == 2 and first.has_more
+    assert paged == list(whole.lines)
+    assert [line.at for line in whole.lines] == sorted(line.at for line in whole.lines)
+    assert resumed.lines == () and not resumed.has_more and resumed.next_cursor == cursor
+    for invalid in INVALID_CURSORS:
+        with pytest.raises(InvalidLogCursor):
+            await read(invalid, 2)
+    return list(whole.lines)
+
+
+async def assert_build_log_contract(executor: BuildExecutor) -> list[LogLine]:
+    build = BuildSpec(
+        build_id=uuid.uuid4(),
+        service_id=TARGET.service_id,
+        service_name="shop-api",
+        repo_url="https://github.com/team-echo/shop-api",
+        commit_sha=COMMIT_SHA,
+    )
+    source = SourceAccess(build.repo_url, COMMIT_SHA, SecretValue(READ_TOKEN))
+    external_ref = await executor.start(build, source, str(build.build_id))
+
+    async def read(cursor: str | None, limit: int) -> LogChunk:
+        return await executor.read_logs(external_ref, cursor, limit)
+
+    lines = await assert_log_reader_contract(read)
+    assert all(READ_TOKEN not in line.message for line in lines)
+    return lines
+
+
+async def assert_runtime_log_contract(executor: DeployExecutor) -> list[LogLine]:
+    external_ref = await executor.apply(DEPLOYMENT, TARGET, str(DEPLOYMENT.deployment_id))
+
+    async def read(cursor: str | None, limit: int) -> LogChunk:
+        return await executor.read_runtime_logs(TARGET, DEPLOYMENT, external_ref, cursor, limit)
+
+    return await assert_log_reader_contract(read)
 
 
 ContractCheck = Callable[..., Awaitable[None]]
