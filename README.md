@@ -155,6 +155,18 @@ GITHUB_APP_PRIVATE_KEY_REF=env:ECHO_SECRET_GITHUB_APP_PRIVATE_KEY   # 값(PEM)�
 GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 ```
 
+### 데모 배포 주소
+
+도메인 `echoport.uk`(11/2 구매, Cloudflare Registrar, 1년만 쓰고 자동 갱신 꺼 둠). 배포 환경 값은 `.env.example` 의 "데모 배포 주소" 블록에 있다.
+
+| 용도 | 주소 | 설정 |
+|---|---|---|
+| 프론트 | `https://app.echoport.uk` | `FRONTEND_BASE_URL`, `FRONTEND_ALLOWED_ORIGINS` |
+| API | `https://api.echoport.uk` | 같은 사이트(`echoport.uk`)라 세션 쿠키가 붙는다 |
+| 고객 앱 대표 주소 | `https://{서비스}.apps.echoport.uk` | `PUBLIC_BASE_DOMAIN=apps.echoport.uk` |
+| 고객 앱 환경별 주소 | `https://{서비스}.{환경}.apps.echoport.uk` | 같은 설정. 두 단계 아래라 DNS·인증서 와일드카드가 환경마다 따로 필요하다 |
+| GitHub App 콜백 | `https://api.echoport.uk/api/v1/auth/github/callback` | `GITHUB_OAUTH_REDIRECT_URI` + App 의 Callback URL |
+
 ### GitHub 로그인 설정
 
 로그인 앱은 API 서버 3 의 GitHub App 을 그대로 쓴다(사용자 인증). **App 생성·설정 변경은 별도 승인 뒤**에 한다. 서버에 두는 비밀값은 client secret 하나이고 설정에는 비밀 참조만 둔다.
@@ -162,9 +174,9 @@ GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 ```bash
 GITHUB_APP_CLIENT_ID=<App 의 Client ID>
 GITHUB_APP_CLIENT_SECRET_REF=env:ECHO_SECRET_GITHUB_APP_CLIENT_SECRET   # 값은 프로세스 환경변수로만
-GITHUB_OAUTH_REDIRECT_URI=https://<이 API 호스트>/api/v1/auth/github/callback
-FRONTEND_BASE_URL=https://<프론트 호스트>
-FRONTEND_ALLOWED_ORIGINS=https://<프론트 호스트>        # 비면 쿠키로 인증한 쓰기 요청이 모두 403
+GITHUB_OAUTH_REDIRECT_URI=https://api.echoport.uk/api/v1/auth/github/callback
+FRONTEND_BASE_URL=https://app.echoport.uk
+FRONTEND_ALLOWED_ORIGINS=https://app.echoport.uk        # 비면 쿠키로 인증한 쓰기 요청이 모두 403
 # LOGIN_ALLOWED_GITHUB_ORG=<GitHub 조직>               # 설정하면 그 조직 active 멤버만 로그인
 ```
 
@@ -207,7 +219,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
 | `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
-| `PUBLIC_BASE_DOMAIN` | `apps.echo.test` | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}.{도메인}`, 환경별 `{서비스}.{환경}.{도메인}` |
+| `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `apps.echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}.{도메인}`, 환경별 `{서비스}.{환경}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
