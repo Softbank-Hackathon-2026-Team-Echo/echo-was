@@ -104,7 +104,7 @@
 
 ### 지표·요청 카운터 (`MetricsProvider`, API 서버 8 · 8-1)
 
-메서드가 둘이다. 이전 판정은 **누적 카운터(`read_counts`)** 로 하고, 구간 지표(`read`)는 p95 참고 값으로만 쓴다(8-1). 둘 다 상태를 바꾸지 않는 조회이고 트랜잭션 밖에서 부른다. 실제 구현은 고정 진입점의 `EntrypointMetricsProvider`(PR #17) 한 클래스가 두 메서드를 함께 구현한다.
+메서드가 둘이다. 이전 판정은 **누적 카운터(`read_counts`)** 로 하고, 구간 지표(`read`)는 p95 참고 값으로만 쓴다(8-1). 둘 다 상태를 바꾸지 않는 조회이고 트랜잭션 밖에서 부른다. 실제 구현은 고정 진입점의 `EntrypointMetricsProvider`(#17, `app/executors/entrypoint.py`) 한 클래스가 두 메서드를 함께 구현한다. 지금 `read` 는 실제 구현(`GET /summary`), `read_counts` 는 자리값(`CountsUnavailable`)이다(아래 "고정 진입점 실행기").
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -136,7 +136,7 @@ class MetricsProvider(Protocol):
 - 일꾼은 단계마다 출발·도착을 각각 부른다(1초마다 2번). 한 번의 호출은 짧은 제한 시간(1초 안쪽)을 권장한다.
 - `code` 에 비밀값·토큰·응답 원문을 넣지 않는다.
 
-**`GET /counters` 매핑(실제 구현, PR #17)**
+**`GET /counters` 매핑(실제 구현, #17 의 `EntrypointMetricsProvider` 에 더할 몫 — 지금은 자리값)**
 
 진입점 응답 `{"ts": "...", "envs": {"aws": {"requests": 12345, "errors_5xx": 3}, "gcp": {...}}}` 를 이렇게 바꾼다.
 
@@ -149,7 +149,7 @@ class MetricsProvider(Protocol):
 
 **전제(환경당 고객 앱 1개)**: 카운터와 가중치가 진입점 전체·환경 단위라, 같은 환경에 고객 앱이 둘 이상이면 다른 앱의 요청이 섞여 판정이 틀린다. 시연은 고객 앱 1개라 코드로 막지 않는다(앱별 라우트·카운터는 진입점 후속).
 
-**`read(target, since, until)`**: 연결 하나의 `[since, until)` 구간 오류율(%)·p95(ms)·요청 수. 일꾼은 비율 단계를 끝낼 때(통과·실패 모두) `until = 지금`, `since = 지금 − MIGRATION_P95_REFERENCE_WINDOW_SECONDS`(30초)로 한 번 불러 `p95Ms` 를 참고로 남긴다. `MetricsUnavailable` 이어도 판정에 영향이 없다(`p95Ms = null`). 연결안: 진입점 `GET /summary?window=…s`(PR #17).
+**`read(target, since, until)`**: 연결 하나의 `[since, until)` 구간 오류율(%)·p95(ms)·요청 수. 일꾼은 비율 단계를 끝낼 때(통과·실패 모두) `until = 지금`, `since = 지금 − MIGRATION_P95_REFERENCE_WINDOW_SECONDS`(30초)로 한 번 불러 `p95Ms` 를 참고로 남긴다. `MetricsUnavailable` 이어도 판정에 영향이 없다(`p95Ms = null`). 실제 구현: 진입점 `GET /summary?window=30s`(#17, 구간 초를 반올림해 넘긴다).
 
 ### 데이터 확인 (`DataSyncChecker`, API 서버 8)
 
@@ -175,7 +175,10 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 |---|---|---|
 | `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
 | `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
-| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable` |
+| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable`. 이전 처리기는 p95 참고용으로 `window=30s`(`MIGRATION_P95_REFERENCE_WINDOW_SECONDS`)를 부른다 |
+| `EntrypointMetricsProvider.read_counts` | (부르지 않음, 자리값) | 늘 `CountsUnavailable("ENTRYPOINT_COUNTS_NOT_IMPLEMENTED")`. 실제 구현은 `GET /counters`(위 `read_counts` 계약), 동옥 후속 |
+
+**`read_counts` 미구현: http 모드에서는 비율 단계가 `METRICS_UNAVAILABLE`로 롤백된다(이전 `/summary` 5초 판정과 같은 결과).** 카운터를 한 번도 읽지 못해 최대 대기(기본 30초) 끝에 판단 불가가 되기 때문이다. 가짜 모드(`ENTRYPOINT_EXECUTOR_MODE=fake`)는 영향이 없다.
 
 **제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
 
