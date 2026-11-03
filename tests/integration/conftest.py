@@ -1,6 +1,8 @@
 """DB 통합 테스트 공용 픽스처.
 
-- TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 DB 를 쓴다. DB 이름은 `_test` 로 끝나야 한다.
+- TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 서버를 쓴다. DB 이름은 `_test` 로 끝나야 하고,
+  실제로는 작업 폴더마다 다른 이름(`echo_test` → `echo_<폴더 경로 해시 8자>_test`)을 쓴다.
+  같은 기기의 다른 작업 폴더(다른 세션·worktree)가 한 DB 잠금에서 서로 기다리지 않게 하기 위해서다.
 - 세션 시작 때 DB 가 없으면 만들고, public 스키마를 비운 뒤 `alembic upgrade head` 를 실행한다.
 - DB 에 최대 10초 재시도해도 붙지 못하면 이유를 남기고 이 폴더의 테스트를 모두 건너뛴다.
 - 테스트마다 모든 표를 TRUNCATE 한다(배포·배포 요청 삭제 금지 트리거는 행 DELETE 에만 걸려
@@ -44,6 +46,7 @@ from app.dependencies import (
 from app.enums import OrganizationRole
 from app.main import app
 from app.models import Organization
+from tests.db_naming import checkout_database_name
 from tests.github_user_fake import FakeGithubUserClient
 from tests.integration.auth_support import (
     auth_settings,
@@ -197,6 +200,8 @@ def test_database_url() -> Iterator[str]:
     url = make_url(raw_url)
     if not (url.database or "").endswith("_test"):
         pytest.fail("TEST_DATABASE_URL 의 DB 이름은 _test 로 끝나야 한다 (스키마를 지운다)")
+    url = url.set(database=checkout_database_name(url.database or ""))
+    raw_url = url.render_as_string(hide_password=False)
 
     database_session = _TestDatabaseSession(url)
     try:
