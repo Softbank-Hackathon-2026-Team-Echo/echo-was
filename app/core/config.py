@@ -3,7 +3,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
@@ -42,6 +42,13 @@ class HealthCheckerMode(StrEnum):
     HTTP = "http"
 
 
+class EntrypointExecutorMode(StrEnum):
+    """트래픽·대표 주소·지표 실행기. http 면 고정 진입점(Envoy 가중치 API)을 부른다."""
+
+    FAKE = "fake"
+    HTTP = "http"
+
+
 class SourceClientMode(StrEnum):
     FAKE = "fake"
     GITHUB = "github"
@@ -63,6 +70,15 @@ class Settings(BaseSettings):
     executor_mode: ExecutorMode = ExecutorMode.FAKE
     health_checker_mode: HealthCheckerMode = HealthCheckerMode.FAKE
     source_client_mode: SourceClientMode = SourceClientMode.FAKE
+
+    # 고정 진입점(echo-infra 인프라 5·6·9). http 면 트래픽 비율·대표 주소·지표 실행기가
+    # 진입점의 가중치 API 를 부른다. 토큰은 값이 아니라 비밀 저장소 위치(env:ECHO_SECRET_...)다.
+    entrypoint_executor_mode: EntrypointExecutorMode = EntrypointExecutorMode.FAKE
+    entrypoint_base_url: str | None = None
+    entrypoint_token_ref: str | None = None
+    # 환경 id(또는 환경 종류) → 진입점 환경 이름. 비면 환경 종류(aws·gcp)를 그대로 쓴다.
+    entrypoint_environment_map: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    entrypoint_request_timeout_seconds: float = Field(default=5.0, gt=0)
 
     # GitHub App(비공개 저장소). 서버에 두는 비밀값은 개인키 참조 하나다(값은 비밀 저장소에).
     github_app_id: str | None = None
@@ -126,10 +142,53 @@ class Settings(BaseSettings):
             raise ValueError("public_base_domain must be a lowercase domain of 125 chars or less")
         return value
 
-    @field_validator("frontend_allowed_origins", "reserved_org_slugs", mode="before")
+    @field_validator(
+        "frontend_allowed_origins",
+        "reserved_org_slugs",
+        "entrypoint_environment_map",
+        mode="before",
+    )
     @classmethod
     def _split_lists(cls, value: object) -> object:
         return _split_comma_list(value)
+
+    @field_validator("entrypoint_environment_map")
+    @classmethod
+    def _check_environment_map(cls, value: list[str]) -> list[str]:
+        for item in value:
+            key, separator, name = item.partition("=")
+            if not separator or not key.strip() or not name.strip():
+                raise ValueError("entrypoint_environment_map items must be <environment>=<name>")
+        return value
+
+    @field_validator("entrypoint_base_url")
+    @classmethod
+    def _strip_entrypoint_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.rstrip("/") or None
+
+    @field_validator("entrypoint_token_ref")
+    @classmethod
+    def _check_entrypoint_token_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError("entrypoint_token_ref must be a secret reference") from None
+        return value
+
+    @model_validator(mode="after")
+    def _check_entrypoint_settings(self) -> "Settings":
+        if self.entrypoint_executor_mode is EntrypointExecutorMode.HTTP and not (
+            self.entrypoint_base_url and self.entrypoint_token_ref
+        ):
+            raise ValueError(
+                "entrypoint_base_url and entrypoint_token_ref are required when "
+                "entrypoint_executor_mode is http"
+            )
+        return self
 
     @field_validator("frontend_base_url")
     @classmethod

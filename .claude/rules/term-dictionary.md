@@ -102,7 +102,8 @@
 | 자기 승인 | Self approval | `self_approved`, 조직 `allow_self_approval` | 계획을 만든 사람이 스스로 승인하는 것. 조직 스위치가 꺼져 있으면(기본) 403 `SELF_APPROVAL_FORBIDDEN`. 어드민만 켠다 | F10, API 8 |
 | 중단 | Abort | `abort_requested_at`·`aborted_by_user_id`, `POST …/abort` | 사람이 실행 중 계획을 멈추는 것. `RUNNING` 이면 롤백(`ABORTED`), 시작 전이면 `CANCELLED`. 멱등 | F10, API 8 |
 | 이전 실행 로그 | Migration log | `MigrationPlanLog` / `migration_plan_logs` | 계획 한 건의 진행 줄. 계획 단계 번호(`step`)를 달고 상태 변경과 같은 트랜잭션에서 쓴다. 계획마다 `seq` 1부터, 500줄 상한 | F10·F17, API 8 |
-| 트래픽 실행기 · 지표 공급자 · 데이터 확인기 | Traffic executor · Metrics provider · Data sync checker | `TrafficExecutor.set_weights` · `MetricsProvider.read` · `DataSyncChecker.replication_lag` | 비율 나눠 보내기(실제 Envoy, 인프라 6) · 구간 지표(OpenTelemetry, 인프라 9) · 복제 지연(인프라 7). 지금은 가짜(`simulated`) | F7·F17, API 8 |
+| 트래픽 실행기 · 지표 공급자 · 데이터 확인기 | Traffic executor · Metrics provider · Data sync checker | `TrafficExecutor.set_weights` · `MetricsProvider.read` · `DataSyncChecker.replication_lag` | 비율 나눠 보내기(실제 Envoy, 인프라 6) · 구간 지표(인프라 9) · 복제 지연(인프라 7). 트래픽·지표는 고정 진입점 실행기(`ENTRYPOINT_EXECUTOR_MODE=http`)가 실제 구현, 데이터 확인은 가짜 | F7·F17, API 8 |
+| 고정 진입점 | Entrypoint | `app/executors/entrypoint.py`, 설정 `ENTRYPOINT_*` | echo-infra 인프라 5 의 Envoy + 가중치 API(`PUT /weights`·`GET /summary`). 진입점 환경 이름(`aws`·`gcp`)은 환경 종류와 같고, 다르면 `ENTRYPOINT_ENVIRONMENT_MAP` 으로 환경 id 를 잇는다 | F6·F7·F17 |
 | 조직 열쇠 키 | Organization secret key | `organization_secret_key(slug)` | slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). `env:` 비밀 참조는 `ECHO_SECRET_{키}__` 로 시작해야 한다 | F16 |
 
 ---
