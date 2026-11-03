@@ -21,11 +21,17 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.enums import (
     OPEN_MIGRATION_PLAN_STATUSES,
     MigrationErrorCode,
+    MigrationPlanMode,
     MigrationPlanStatus,
     MigrationRollbackStatus,
     MigrationStepPhase,
 )
-from app.models.base import Base, TimestampMixin, UuidPrimaryKeyMixin
+from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
+    Base,
+    TimestampMixin,
+    UuidPrimaryKeyMixin,
+)
 
 OPEN_PLAN_UNIQUE_INDEX = "uq_migration_plans_service_id_open"
 PREVENT_DELETE_TRIGGER = "trg_migration_plans_prevent_delete"
@@ -59,11 +65,13 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
     - current_step·step_phase·observe_until·traffic_requested_at·rollback_requested_at 은 일꾼이
       어디까지 했는지 적어 두는 칸이다. 다시 시작한 일꾼은 이 칸을 보고 같은 멱등 키로 이어 간다.
     - simulated 는 가짜 실행기로 만든 계획인지다(만들 때 저장, 응답 때 다시 계산하지 않는다).
+    - mode 는 계획 종류(PLANNED·EMERGENCY·FAILBACK)다. 만들 때 판정해 저장하고 바꾸지 않는다.
     """
 
     __tablename__ = "migration_plans"
     __table_args__ = (
         CheckConstraint(f"status IN ({_values(MigrationPlanStatus)})", name="status_valid"),
+        CheckConstraint(f"mode IN ({_values(MigrationPlanMode)})", name="mode_valid"),
         CheckConstraint(f"step_phase IN ({_values(MigrationStepPhase)})", name="step_phase_valid"),
         CheckConstraint(f"error_code IN ({_values(MigrationErrorCode)})", name="error_code_valid"),
         CheckConstraint(
@@ -174,3 +182,11 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # API 서버 8-3 에 더한 칸이라 DB 에서 맨 뒤(믹스인 칸 뒤)에 있다. 그 전 계획은 PLANNED 다.
+    mode: Mapped[MigrationPlanMode] = mapped_column(
+        String(16),
+        nullable=False,
+        default=MigrationPlanMode.PLANNED,
+        server_default=MigrationPlanMode.PLANNED.value,
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )

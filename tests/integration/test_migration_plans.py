@@ -772,6 +772,7 @@ async def test_plan_and_logs_carry_stored_simulated_flag(migration: Migration) -
         "expectedSeconds": 17,
         "requiredRequests": [20, 50, 50],
         "maxWaitSeconds": 30,
+        "mode": "PLANNED",
     }
     assert (page["nextCursor"], page["hasMore"]) == ("1", False)
     assert paged.json()["data"]["nextCursor"] == "1"
