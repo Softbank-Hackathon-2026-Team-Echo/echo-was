@@ -417,7 +417,9 @@ async def test_two_admins_removing_each_other_keep_one_admin(
     losers = [response for response in results if not response.is_success]
     assert admins == 1
     assert len(winners) == 1 and len(losers) == 1
-    assert (losers[0].status_code, losers[0].json()["code"]) in {
-        (403, "ROLE_FORBIDDEN"),
-        (409, "LAST_ADMIN"),
-    }
+    allowed = {(403, "ROLE_FORBIDDEN"), (409, "LAST_ADMIN")}
+    if method == "DELETE":
+        # 먼저 지워진 쪽은 이미 조직 멤버가 아니다. API 는 멤버가 아닌 사람에게
+        # 조직의 존재를 숨기려고 404 를 주므로 이 응답은 설계대로다.
+        allowed.add((404, "ORGANIZATION_NOT_FOUND"))
+    assert (losers[0].status_code, losers[0].json()["code"]) in allowed
