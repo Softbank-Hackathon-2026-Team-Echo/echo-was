@@ -44,7 +44,8 @@ async def create_migration_plan(
         access.user.id,
         CreateMigrationPlanCommand(
             target_environment_id=request.target_environment_id,
-            observe_seconds=request.observe_seconds,
+            required_requests=request.required_requests,
+            max_wait_seconds=request.max_wait_seconds,
             max_error_rate_percent=conditions.max_error_rate_percent,
             max_p95_ms=conditions.max_p95_ms,
             max_replication_lag_seconds=conditions.max_replication_lag_seconds,

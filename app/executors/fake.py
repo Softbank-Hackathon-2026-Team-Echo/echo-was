@@ -12,7 +12,9 @@
 - 시험은 log_injections 로 "토큰처럼 보이는 줄"을 넣을 수 있다. 이 줄은 가리지 않고 그대로 돌려줘
   서버 쪽 마스킹을 시험한다(운영 설정에는 이 값이 없다).
 - 이전 계획용 트래픽·지표·데이터 확인 가짜는 결정적인 값을 준다: 트래픽은 바로 적용, 지표는 오류율
-  0.1%·p95 120ms·요청 수 max(1, round(10 × 비율/100 × 창 초)), 복제 지연 0.3초.
+  0.1%·p95 120ms·요청 수 max(1, round(rps × 비율/100 × 창 초)), 복제 지연 0.3초. 누적 카운터
+  (read_counts)는 주입 시계로 "rps × 그 연결 비율/100 × 지난 초"를 쌓고 5xx 는 0 이다. rps 는 설정
+  MIGRATION_EXPECTED_RPS 한 값을 넣는다.
 """
 
 import hashlib
@@ -29,6 +31,8 @@ from app.executors.base import (
     BuildRunning,
     BuildSpec,
     BuildSucceeded,
+    CountsResult,
+    CountsUnavailable,
     DataSyncLag,
     DataSyncResult,
     DataSyncUnavailable,
@@ -47,6 +51,7 @@ from app.executors.base import (
     Metrics,
     MetricsResult,
     MetricsUnavailable,
+    RequestCounts,
     Reverted,
     RevertFailed,
     RevertResult,
@@ -364,8 +369,8 @@ class FakeTeardownExecutor:
 FAKE_TRAFFIC_FAILED = "FAKE_TRAFFIC_FAILED"
 FAKE_ERROR_RATE_PERCENT = 0.1
 FAKE_P95_MS = 120.0
-# 비율 100% 일 때 초당 요청 수.
-FAKE_REQUESTS_PER_SECOND = 10
+# 비율 100% 일 때 초당 요청 수(설정 MIGRATION_EXPECTED_RPS 의 기본값과 같다).
+FAKE_REQUESTS_PER_SECOND = 50
 FAKE_REPLICATION_LAG_SECONDS = 0.3
 
 
@@ -418,39 +423,109 @@ class FakeTrafficExecutor:
         return result
 
 
-class FakeMetricsProvider:
-    """오류율 0.1%·p95 120ms. 요청 수는 그 연결의 비율(weight_of, 모르면 100)과 창 길이로 정한다.
+@dataclass
+class _FakeCounter:
+    """연결 하나의 가짜 누적 카운터. requests 는 소수까지 쌓고 읽을 때 내림한다."""
 
-    시험은 unavailable=True 로 판단 불가(MetricsUnavailable)를 만든다.
+    requests: float = 0.0
+    errors_5xx: int = 0
+    read_at: datetime | None = None
+    is_frozen: bool = False
+    is_failing: bool = False
+
+
+class FakeMetricsProvider:
+    """지표(p95 참고용)와 누적 요청·5xx 카운터(판정용)를 결정적으로 준다.
+
+    - read: 오류율 0.1%·p95 120ms, 요청 수 max(1, round(rps × 비율/100 × 창 초)).
+    - read_counts: 그 연결에 처음 읽은 순간 0 에서 시작해, 읽을 때마다 지난 시간 × rps × 지금 비율
+      (weight_of, 모르면 100)/100 을 더한다. 비율이 바뀌어도 줄지 않는다. 5xx 는 0.
+
+    시험용 손잡이(운영 설정에는 쓰지 않는다): unavailable(read 가 MetricsUnavailable), freeze(카운터
+    고정), add_errors(5xx 더하기), set_counts(값 바꾸기, 줄이면 진입점 재시작 흉내),
+    fail_counts(읽기 실패, 그동안에도 카운터는 쌓인다). 손잡이는 연결 id 로 가리킨다.
     """
 
     def __init__(
         self,
+        clock: Clock,
         weight_of: Callable[[uuid.UUID], int | None] | None = None,
         *,
+        requests_per_second: int = FAKE_REQUESTS_PER_SECOND,
         unavailable: bool = False,
     ) -> None:
+        self._clock = clock
         self._weight_of = weight_of
+        self._requests_per_second = requests_per_second
+        self._counters: dict[uuid.UUID, _FakeCounter] = {}
+        self._is_all_failing = False
         self.unavailable = unavailable
         self.calls: list[tuple[uuid.UUID, datetime, datetime]] = []
+        self.count_calls: list[uuid.UUID] = []
 
     @property
     def simulated(self) -> bool:
         return True
 
+    def _weight(self, service_environment_id: uuid.UUID) -> int:
+        known = self._weight_of(service_environment_id) if self._weight_of else None
+        return 100 if known is None else known
+
     async def read(self, target: DeployTarget, since: datetime, until: datetime) -> MetricsResult:
         self.calls.append((target.service_environment_id, since, until))
         if self.unavailable:
             return MetricsUnavailable()
-        known = self._weight_of(target.service_environment_id) if self._weight_of else None
-        weight = 100 if known is None else known
+        weight = self._weight(target.service_environment_id)
         window_seconds = max((until - since).total_seconds(), 0.0)
-        request_count = max(1, round(FAKE_REQUESTS_PER_SECOND * weight / 100 * window_seconds))
+        request_count = max(1, round(self._requests_per_second * weight / 100 * window_seconds))
         return Metrics(
             error_rate_percent=FAKE_ERROR_RATE_PERCENT,
             p95_ms=FAKE_P95_MS,
             request_count=request_count,
         )
+
+    async def read_counts(self, target: DeployTarget) -> CountsResult:
+        service_environment_id = target.service_environment_id
+        self.count_calls.append(service_environment_id)
+        counter = self._accumulate(service_environment_id)
+        if counter.is_failing or self._is_all_failing:
+            return CountsUnavailable()
+        return RequestCounts(requests=int(counter.requests), errors_5xx=counter.errors_5xx)
+
+    def _accumulate(self, service_environment_id: uuid.UUID) -> _FakeCounter:
+        counter = self._counters.setdefault(service_environment_id, _FakeCounter())
+        now = self._clock.now()
+        if counter.read_at is not None and not counter.is_frozen:
+            elapsed = max((now - counter.read_at).total_seconds(), 0.0)
+            counter.requests += (
+                self._requests_per_second * self._weight(service_environment_id) / 100 * elapsed
+            )
+        counter.read_at = now
+        return counter
+
+    def freeze(self, service_environment_id: uuid.UUID, *, is_frozen: bool = True) -> None:
+        """카운터를 지금 값에 고정한다(그 환경으로 요청이 가지 않는 상황)."""
+        self._accumulate(service_environment_id).is_frozen = is_frozen
+
+    def add_errors(self, service_environment_id: uuid.UUID, count: int) -> None:
+        self._accumulate(service_environment_id).errors_5xx += count
+
+    def set_counts(
+        self, service_environment_id: uuid.UUID, requests: int, errors_5xx: int = 0
+    ) -> None:
+        """누적값을 바꾼다. 지금보다 작게 주면 진입점이 재시작해 0부터 다시 센 것처럼 보인다."""
+        counter = self._accumulate(service_environment_id)
+        counter.requests = float(requests)
+        counter.errors_5xx = errors_5xx
+
+    def fail_counts(
+        self, service_environment_id: uuid.UUID | None = None, *, is_failing: bool = True
+    ) -> None:
+        """그 연결(None 이면 모든 연결)의 카운터 읽기를 CountsUnavailable 로 만든다."""
+        if service_environment_id is None:
+            self._is_all_failing = is_failing
+            return
+        self._accumulate(service_environment_id).is_failing = is_failing
 
 
 class FakeDataSyncChecker:

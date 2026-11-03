@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.models import Base
 from tests.integration.conftest import run_alembic
 from tests.integration.deploy_harness import DeployHarness
+from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import create_rollback_fixture
 
 MODEL_SCHEMA = "model_check"
@@ -352,7 +353,8 @@ EXPECTED_CONSTRAINTS = {
         "'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, "
         "'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, "
         "'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, "
-        "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying])::text[])))"
+        "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, "
+        "'TARGET_NOT_RECEIVING'::character varying])::text[])))"
     ),
     ("migration_plans", "ck_migration_plans_expected_seconds_non_negative"): (
         "CHECK ((expected_seconds >= 0))"
@@ -648,9 +650,12 @@ BEFORE_HOST_SUFFIX = "ce35cab9b2e9"
 # 되돌리기·배포 작업 로그를 더하기 전(API 서버 3-1 head) 시점.
 BEFORE_ROLLBACK = "1d1601c0111a"
 ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
-# 이전 계획을 더하기 전(API 서버 4 head) 시점과 지금 head.
+# 이전 계획을 더하기 전(API 서버 4 head) 시점, 원인 코드 TARGET_NOT_RECEIVING 을 더하기 전
+# (API 서버 8 head) 시점과 지금 head.
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
-HEAD_REVISION = "4cea1ec99f1b"
+BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
+HEAD_REVISION = "6d89c52e39a4"
+ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
 MIGRATION_PLAN_TRIGGERS = {
     "trg_migration_plans_prevent_delete",
@@ -1140,6 +1145,61 @@ async def test_migration_plan_revision_downgrade_with_plan_jobs_fails_clearly(
         version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
     assert "does not delete job history" in str(raised.value)
+    assert version == HEAD_REVISION
+
+
+def _error_code_check(connection: Connection) -> str:
+    return str(
+        next(
+            check["sqltext"]
+            for check in inspect(connection).get_check_constraints("migration_plans")
+            if check["name"] == ERROR_CODE_CHECK
+        )
+    )
+
+
+async def test_target_not_receiving_revision_downgrade_narrows_check_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_TARGET_NOT_RECEIVING))
+        )
+        down = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert "TARGET_NOT_RECEIVING" not in down
+    assert "INTERNAL_ERROR" in down
+    assert "TARGET_NOT_RECEIVING" in up
+
+
+async def test_target_not_receiving_revision_downgrade_with_such_plans_fails_clearly(
+    engine: AsyncEngine, migration: Migration
+) -> None:
+    # 실제 처리기로 TARGET_NOT_RECEIVING 롤백까지 간 계획 한 건(새 CHECK 로 저장된다).
+    plan = await migration.create_plan(simulate={"failAtStep": 1, "reason": "TARGET_NOT_RECEIVING"})
+    await migration.approve(plan["id"])
+    await migration.harness.run_until_idle()
+    stored = await migration.plan_row(plan["id"])
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(
+            RuntimeError, match="migration_plans has 1 TARGET_NOT_RECEIVING rows"
+        ) as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_TARGET_NOT_RECEIVING))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert (stored.status, stored.error_code) == ("ROLLED_BACK", "TARGET_NOT_RECEIVING")
+    assert "does not rewrite migration plan history" in str(raised.value)
     assert version == HEAD_REVISION
 
 

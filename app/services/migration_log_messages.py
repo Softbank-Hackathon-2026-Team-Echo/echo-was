@@ -5,6 +5,7 @@ JUDGE_FAILED·DATA_SYNC_FAILED 줄은 원인 코드의 문장을 붙인다.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 from app.enums import LogLevel, MigrationErrorCode, MigrationLogCode
 
@@ -19,10 +20,11 @@ MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
         "The target environment health check did not return a 2xx response."
     ),
     MigrationErrorCode.METRICS_UNAVAILABLE: (
-        "Metrics for the target environment were unavailable, so the step could not be judged."
+        "Request counters or metrics for the target environment were unavailable, so the step "
+        "could not be judged."
     ),
     MigrationErrorCode.THRESHOLD_EXCEEDED: (
-        "The error rate or p95 latency exceeded the rollback condition."
+        "The target environment returned more 5xx responses than the rollback condition allows."
     ),
     MigrationErrorCode.DATA_LAG_EXCEEDED: (
         "The data replication lag exceeded the rollback condition."
@@ -30,7 +32,14 @@ MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
     MigrationErrorCode.ABORTED: "A person aborted the migration.",
     MigrationErrorCode.WORKER_LOST: "The migration worker stopped repeatedly during this plan.",
     MigrationErrorCode.INTERNAL_ERROR: "An internal error occurred.",
+    MigrationErrorCode.TARGET_NOT_RECEIVING: (
+        "The target environment did not receive its share of requests (check the entrypoint "
+        "weights)."
+    ),
 }
+
+# 트래픽 적음으로 통과한 JUDGE_PASSED 줄(data.lowTraffic = true)에 붙이는 문장.
+LOW_TRAFFIC_PASS_SUFFIX = "(Low traffic: passed on the health check.)"
 
 
 @dataclass(frozen=True)
@@ -67,7 +76,9 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
         _WARN, MIGRATION_ERROR_MESSAGES[MigrationErrorCode.TRAFFIC_APPLY_FAILED]
     ),
     _C.JUDGE_PASSED: MigrationLogEntry(
-        _INFO, "Step judged healthy: health check, error rate and p95 latency are within limits."
+        _INFO,
+        "Step judged healthy: the target handled the required requests within the 5xx limit "
+        "and passed the health check.",
     ),
     # JUDGE_FAILED·DATA_SYNC_FAILED·ROLLBACK_STARTED·FAILED 는 원인 코드 문장을 붙여 쓴다.
     _C.JUDGE_FAILED: MigrationLogEntry(_WARN, "Step judged unhealthy."),
@@ -91,6 +102,11 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
         _ERROR, "Rollback failed: the traffic router did not apply the rollback weights."
     ),
     _C.FAILED: MigrationLogEntry(_ERROR, "Migration failed."),
+    _C.COUNTERS_RESET: MigrationLogEntry(
+        _INFO,
+        "The entrypoint request counters went down (restart). Counting continues from the "
+        "requests already counted.",
+    ),
     _C.LOG_TRUNCATED: MigrationLogEntry(
         _INFO, "Log line limit reached. Further lines for this plan are not recorded."
     ),
@@ -100,9 +116,13 @@ _WITH_CAUSE = frozenset({_C.JUDGE_FAILED, _C.DATA_SYNC_FAILED, _C.ROLLBACK_START
 
 
 def migration_log_message(
-    code: MigrationLogCode, error_code: MigrationErrorCode | None = None
+    code: MigrationLogCode,
+    error_code: MigrationErrorCode | None = None,
+    data: dict[str, Any] | None = None,
 ) -> str:
     message = MIGRATION_LOG_ENTRIES[code].message
     if code in _WITH_CAUSE and error_code is not None:
         return f"{message} {MIGRATION_ERROR_MESSAGES[error_code]}"
+    if code is _C.JUDGE_PASSED and data is not None and data.get("lowTraffic") is True:
+        return f"{message} {LOW_TRAFFIC_PASS_SUFFIX}"
     return message

@@ -28,6 +28,7 @@ DEFAULT_CONDITIONS = {
     "maxP95Ms": 800,
     "maxReplicationLagSeconds": 1.0,
     "healthCheck": True,
+    "p95Advisory": True,
 }
 SUCCESS_LOG_CODES = [
     "PLAN_CREATED",
@@ -90,9 +91,15 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
     ]
     assert [step["targetWeight"] for step in plan["steps"]] == [None, 10, 50, None, 100]
     assert [step["sourceWeight"] for step in plan["steps"]] == [None, 90, 50, None, 0]
-    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 7, 7, 2, 7]
-    assert plan["expectedSeconds"] == 25
-    assert plan["observeSeconds"] == 5
+    # 예상 = 여유 2 + ceil(필요 건수 ÷ (50 rps × 비율)): 20 ÷ 5 = 4, 50 ÷ 25 = 2, 50 ÷ 50 = 1.
+    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 6, 4, 2, 3]
+    assert plan["expectedSeconds"] == 17
+    assert [step["requiredRequests"] for step in plan["steps"]] == [None, 20, 50, None, 50]
+    assert [step["maxWaitSeconds"] for step in plan["steps"]] == [None, 30, 30, None, 30]
+    assert plan["maxWaitSeconds"] == 30
+    assert "observeSeconds" not in plan
+    assert all("observeSeconds" not in step for step in plan["steps"])
+    assert plan["progress"] is None
     assert plan["rollbackConditions"] == DEFAULT_CONDITIONS
     assert plan["createdBy"]["login"] == "dev-a"
     assert plan["sourceEnvironmentId"] == str(migration.aws.id)
@@ -107,8 +114,18 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
     assert traced == [(100, 0), (90, 10), (50, 50), (0, 100)]
     assert (final["status"], final["currentStep"], final["errorCode"]) == ("SUCCEEDED", 4, None)
     assert [step["result"]["status"] for step in final["steps"]] == ["PASSED"] * 5
-    assert final["steps"][1]["result"]["metrics"]["errorRatePercent"] == 0.1
+    for index in (1, 2, 4):
+        metrics = final["steps"][index]["result"]["metrics"]
+        assert metrics["requestCount"] >= final["steps"][index]["requiredRequests"]
+        assert (metrics["errors5xx"], metrics["allowedErrors5xx"]) == (0, 1)
+        assert (metrics["errorRatePercent"], metrics["lowTraffic"]) == (0.0, False)
+        assert metrics["healthStatus"] == "OK"
+        # p95 는 참고 값(가짜 지표 120ms)으로만 남는다.
+        assert metrics["p95Ms"] == 120.0
+    assert final["steps"][1]["result"]["metrics"]["requestCount"] == 20
+    assert final["steps"][1]["result"]["metrics"]["sourceRequestCount"] == 180
     assert final["steps"][3]["result"]["metrics"]["replicationLagSeconds"] == 0.3
+    assert final["progress"] is None
     assert final["startedAt"] is not None and final["finishedAt"] is not None
     gcp, aws = connection_of(service, "gcp-seoul"), connection_of(service, "aws-seoul")
     assert (gcp["role"], gcp["trafficWeight"]) == ("SERVING", 100)
@@ -129,53 +146,96 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
         }
     judged = [row for row in rows if row.code == "JUDGE_PASSED"]
     assert [row.step for row in judged] == [1, 2, 4]
-    for weight_row, judge_row in zip(applied, judged, strict=True):
-        assert judge_row.logged_at - weight_row.logged_at >= timedelta(seconds=5)
+    # AC-2(8-1): 각 비율 단계는 필요 건수 이상을 센 뒤에 통과했다.
+    for judge_row in judged:
+        assert judge_row.step is not None and judge_row.data is not None
+        required = plan["steps"][judge_row.step]["requiredRequests"]
+        assert judge_row.data["requestCount"] >= required
+        assert judge_row.data["requiredRequests"] == required
+        assert judge_row.data["lowTraffic"] is False
+    # 예상(4·2·1초)대로 셌다: 적용 → 통과 시각 차.
+    assert [
+        (judge_row.logged_at - weight_row.logged_at).total_seconds()
+        for weight_row, judge_row in zip(applied, judged, strict=True)
+    ] == [4.0, 2.0, 1.0]
+    assert "COUNTERS_RESET" not in [row.code for row in rows]
     assert migration.traffic_keys() == [f"{plan['id']}:1", f"{plan['id']}:2", f"{plan['id']}:4"]
 
 
-# --- AC-3: 지켜보기 시간 ---
+# --- AC-8-1-2: 건수 경계 ---
 
 
-async def test_judgement_waits_for_observe_until(migration: Migration) -> None:
+async def test_shift_step_waits_until_target_counts_required_requests(
+    migration: Migration,
+) -> None:
     harness = migration.harness
-    plan = await migration.create_plan(observeSeconds=5)
+    plan = await migration.create_plan()
     await migration.approve(plan["id"])
+    metrics = harness.executors.metrics
+    target_id = uuid.UUID(plan["targetServiceEnvironmentId"])
+    metrics.freeze(target_id)
     worker = harness.worker()
-    started = harness.clock.now()
 
     assert await worker.run_once()
     after_apply = await migration.plan_row(plan["id"])
-    harness.clock.advance(4)
-    not_due = await worker.run_once()
-    # 할 일을 일찍 당겨도(중단 등) 지켜보기가 끝나기 전에는 판정하지 않는다.
-    async with harness.session_factory() as session, session.begin():
-        await session.execute(
-            text("UPDATE jobs SET run_after = :now WHERE subject_id = :id"),
-            {"now": harness.clock.now(), "id": plan["id"]},
-        )
-    assert await worker.run_once()
-    at_four = await migration.plan_row(plan["id"])
+    metrics.set_counts(target_id, 19)
     harness.clock.advance(1)
     assert await worker.run_once()
-    at_five = await migration.plan_row(plan["id"])
+    at_nineteen = await migration.plan_row(plan["id"])
+    probes_before = len(harness.executors.health.calls)
+    metrics.set_counts(target_id, 20)
+    harness.clock.advance(1)
+    assert await worker.run_once()
+    at_twenty = await migration.plan_row(plan["id"])
 
     assert (after_apply.current_step, after_apply.step_phase) == (1, "OBSERVE")
-    assert after_apply.observe_until == started + timedelta(seconds=5)
-    assert not_due is False
-    assert (at_four.current_step, at_four.step_phase) == (1, "OBSERVE")
-    assert (at_five.current_step, at_five.step_phase) == (2, "OBSERVE")
+    assert after_apply.observe_until == after_apply.phase_started_at + timedelta(seconds=30)
+    assert (at_nineteen.current_step, at_nineteen.step_phase) == (1, "OBSERVE")
+    # 20건이 되는 실행에서 헬스체크 한 번 뒤 통과하고 다음 단계(50%)로 간다.
+    assert len(harness.executors.health.calls) == probes_before + 1
+    assert (at_twenty.current_step, at_twenty.step_phase) == (2, "OBSERVE")
+    assert at_twenty.step_results[1]["metrics"]["requestCount"] == 20
+    assert at_twenty.step_results[1]["judgeReason"] == "COUNT_REACHED"
     assert await migration.weights() == (50, 50)
 
 
-@pytest.mark.parametrize("observe_seconds", [0, 601])
-async def test_observe_seconds_out_of_range_is_rejected(
-    migration: Migration, observe_seconds: int
-) -> None:
-    response = await migration.request_plan(observeSeconds=observe_seconds)
+# --- AC-8-1-9: 요청 검증 ---
 
-    assert _error(response) == (422, "VALIDATION_ERROR")
-    assert response.json()["details"][0]["field"] == "observeSeconds"
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"observeSeconds": 5}, "observeSeconds"),
+        ({"requiredRequests": [20, 50]}, "requiredRequests"),
+        ({"requiredRequests": [20, 50, 50, 50]}, "requiredRequests"),
+        ({"requiredRequests": [0, 50, 50]}, "requiredRequests.0"),
+        ({"requiredRequests": [20, 50, 10001]}, "requiredRequests.2"),
+        ({"maxWaitSeconds": 4}, "maxWaitSeconds"),
+        ({"maxWaitSeconds": 301}, "maxWaitSeconds"),
+        ({"simulate": {"failAtStep": 1, "reason": "LATENCY"}}, "simulate.reason"),
+    ],
+)
+async def test_create_rejects_invalid_counting_fields(
+    migration: Migration, body: dict[str, Any], field: str
+) -> None:
+    response = await migration.request_plan(**body)
+
+    assert _error(response) == (422, "VALIDATION_ERROR"), response.text
+    assert response.json()["details"][0]["field"] == field
+
+
+async def test_create_uses_given_required_requests_and_max_wait(migration: Migration) -> None:
+    plan = await migration.create_plan(requiredRequests=[100, 100, 100], maxWaitSeconds=10)
+    row = await migration.plan_row(plan["id"])
+
+    # 10%: min(10, ceil(100 ÷ 5)) = 10, 50%: ceil(100 ÷ 25) = 4, 100%: ceil(100 ÷ 50) = 2.
+    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 12, 6, 2, 4]
+    assert plan["expectedSeconds"] == 26
+    assert [step["requiredRequests"] for step in plan["steps"]] == [None, 100, 100, None, 100]
+    assert plan["maxWaitSeconds"] == 10
+    # DB 칸 observe_seconds 에는 최대 대기를, steps JSON 에는 옛 파드용 observeSeconds 도 적는다.
+    assert row.observe_seconds == 10
+    assert [step.get("observeSeconds") for step in row.steps] == [None, 10, 10, None, 10]
 
 
 # --- AC-4: 자기 승인 ---
@@ -456,14 +516,42 @@ async def test_create_rejects_unknown_service_or_environment(migration: Migratio
 async def test_create_simulate_rules(migration: Migration) -> None:
     harness = migration.harness
     mismatch = await migration.request_plan(simulate={"failAtStep": 2, "reason": "DATA_LAG"})
-    data_step = await migration.request_plan(simulate={"failAtStep": 3, "reason": "LATENCY"})
+    data_step = await migration.request_plan(simulate={"failAtStep": 3, "reason": "HEALTH"})
+    low_traffic_on_data = await migration.request_plan(
+        simulate={"failAtStep": 3, "reason": "LOW_TRAFFIC"}
+    )
+    # 단계 4 는 출발 비율이 0이라 도착 미수신을 만들 수 없다.
+    not_receiving_last = await migration.request_plan(
+        simulate={"failAtStep": 4, "reason": "TARGET_NOT_RECEIVING"}
+    )
+    latency = await migration.request_plan(simulate={"failAtStep": 1, "reason": "LATENCY"})
     preflight = await migration.request_plan(simulate={"failAtStep": 0, "reason": "HEALTH"})
     harness.use_settings(executor_mode=ExecutorMode.REAL)
     not_fake = await migration.request_plan(simulate={"failAtStep": 2, "reason": "ERROR_RATE"})
 
-    for response in (mismatch, data_step, preflight):
+    for response in (mismatch, data_step, low_traffic_on_data, not_receiving_last):
         assert _error(response) == (422, "VALIDATION_ERROR"), response.text
+        assert response.json()["details"][0]["reason"] == "SIMULATE_REASON_STEP_MISMATCH"
+    assert _error(latency) == (422, "VALIDATION_ERROR")
+    latency_detail = latency.json()["details"][0]
+    assert (latency_detail["field"], latency_detail["reason"]) == (
+        "simulate.reason",
+        "SIMULATE_REASON_NOT_SUPPORTED",
+    )
+    assert _error(preflight) == (422, "VALIDATION_ERROR")
     assert _error(not_fake) == (422, "SIMULATE_NOT_ALLOWED")
+
+
+@pytest.mark.parametrize(
+    ("step", "reason"),
+    [(1, "TARGET_NOT_RECEIVING"), (2, "TARGET_NOT_RECEIVING"), (4, "LOW_TRAFFIC")],
+)
+async def test_create_accepts_new_simulate_reasons_on_their_steps(
+    migration: Migration, step: int, reason: str
+) -> None:
+    response = await migration.request_plan(simulate={"failAtStep": step, "reason": reason})
+
+    assert response.status_code == 201, response.text
 
 
 # --- AC-13: 실행 중 겹침 ---
@@ -680,7 +768,11 @@ async def test_plan_and_logs_carry_stored_simulated_flag(migration: Migration) -
     assert [(item["seq"], item["code"], item["step"]) for item in page["items"]] == [
         (1, "PLAN_CREATED", None)
     ]
-    assert page["items"][0]["data"] == {"expectedSeconds": 25, "observeSeconds": 5}
+    assert page["items"][0]["data"] == {
+        "expectedSeconds": 17,
+        "requiredRequests": [20, 50, 50],
+        "maxWaitSeconds": 30,
+    }
     assert (page["nextCursor"], page["hasMore"]) == ("1", False)
     assert paged.json()["data"]["nextCursor"] == "1"
     assert _error(bad_cursor) == (422, "VALIDATION_ERROR")

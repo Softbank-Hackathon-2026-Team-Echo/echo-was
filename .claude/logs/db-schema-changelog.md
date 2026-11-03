@@ -6,6 +6,7 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-03T03:55Z · app/enums.py (Edit, 모델 파일 아님 — 훅 미기록분 수기) · MigrationErrorCode 에 TARGET_NOT_RECEIVING 추가 → ck_migration_plans_error_code_valid 넓힘 (revision 6d89c52e39a4)
 - 2026-11-02T13:22Z · app/models/migration_plan.py (Write) · 신규/동일
 - 2026-11-02T08:49Z · app/models/deploy_request_log.py (Write) · deploy_request_logs 표 신규 (revision 33ad047a493c)
 - 2026-11-02T08:45Z · app/models/deploy_request.py (스크립트 편집, 훅 미기록분 수기) · rollback_of_request_id·rollback_base_deployment_id 칸, CHECK 3개, ix_deploy_requests_rollback_of_request_id, trigger·cancel_reason 값 추가 (revision 33ad047a493c)

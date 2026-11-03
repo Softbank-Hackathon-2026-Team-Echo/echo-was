@@ -46,7 +46,8 @@ def build_executor_set(settings: Settings, clock: Clock) -> ExecutorSet:
     """설정에 맞는 실행기 묶음.
 
     실제 빌드·배포·라우터·내리기 실행기는 인프라 3·5 이후, 트래픽(Envoy)·지표(OpenTelemetry)·데이터
-    확인은 인프라 6·9·7 이후에 더한다. 가짜 지표는 가짜 트래픽 실행기가 적용한 비율을 읽는다.
+    확인은 인프라 6·9·7 이후에 더한다. 가짜 지표·카운터는 가짜 트래픽 실행기가 적용한 비율과 설정
+    MIGRATION_EXPECTED_RPS 로 요청 수를 만든다.
     """
     if settings.executor_mode is not ExecutorMode.FAKE:
         raise NotImplementedError("real executors are not available yet")
@@ -64,6 +65,8 @@ def build_executor_set(settings: Settings, clock: Clock) -> ExecutorSet:
         health=health,
         teardown=FakeTeardownExecutor(clock, step_seconds),
         traffic=traffic,
-        metrics=FakeMetricsProvider(traffic.weight_of),
+        metrics=FakeMetricsProvider(
+            clock, traffic.weight_of, requests_per_second=settings.migration_expected_rps
+        ),
         data_sync=FakeDataSyncChecker(),
     )

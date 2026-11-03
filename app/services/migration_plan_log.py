@@ -52,7 +52,7 @@ class MigrationPlanLogWriter:
             )
         else:
             level = MIGRATION_LOG_ENTRIES[code].level
-            message = migration_log_message(code, error_code)
+            message = migration_log_message(code, error_code, data)
         self._logs.add(
             MigrationPlanLog(
                 migration_plan_id=plan.id,

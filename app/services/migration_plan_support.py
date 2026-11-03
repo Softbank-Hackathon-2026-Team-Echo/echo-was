@@ -21,6 +21,7 @@ from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.services.deploy_support import deploy_target
+from app.services.migration_counting import expected_shift_seconds
 
 # 고정 단계: (종류, 도착 비율). 비율 목록은 바꾸지 않는다.
 STEP_DEFINITIONS: tuple[tuple[MigrationStepKind, int | None], ...] = (
@@ -32,6 +33,10 @@ STEP_DEFINITIONS: tuple[tuple[MigrationStepKind, int | None], ...] = (
 )
 LAST_STEP = len(STEP_DEFINITIONS) - 1
 DATA_SYNC_STEP = 3
+# 비율 단계 번호(10·50·100% 순). 필요 건수 목록(requiredRequests)의 순서와 같다.
+SHIFT_STEPS = tuple(
+    index for index, (kind, _) in enumerate(STEP_DEFINITIONS) if kind is MigrationStepKind.SHIFT
+)
 
 # 롤백 조건 기본값.
 DEFAULT_MAX_ERROR_RATE_PERCENT = 1.0
@@ -43,13 +48,20 @@ STEP_INDEX = "index"
 STEP_KIND = "kind"
 STEP_TARGET_WEIGHT = "targetWeight"
 STEP_SOURCE_WEIGHT = "sourceWeight"
+# observeSeconds 는 롤링 배포 중 옛 파드가 읽을 수 있게 maxWaitSeconds 와 같은 값으로 계속 적는다
+# (응답에는 내보내지 않는다).
 STEP_OBSERVE_SECONDS = "observeSeconds"
+STEP_REQUIRED_REQUESTS = "requiredRequests"
+STEP_MAX_WAIT_SECONDS = "maxWaitSeconds"
 STEP_EXPECTED_SECONDS = "expectedSeconds"
 RESULT_STATUS = "status"
 RESULT_STARTED_AT = "startedAt"
 RESULT_FINISHED_AT = "finishedAt"
 RESULT_METRICS = "metrics"
 RESULT_FAILURE_CODE = "failureCode"
+# 비율 단계의 건수 세기 상태(migration_counting.StepCounting)와 세기를 끝낸 이유.
+RESULT_COUNTING = "counting"
+RESULT_JUDGE_REASON = "judgeReason"
 CONDITION_MAX_ERROR_RATE = "maxErrorRatePercent"
 CONDITION_MAX_P95_MS = "maxP95Ms"
 CONDITION_MAX_REPLICATION_LAG = "maxReplicationLagSeconds"
@@ -71,22 +83,49 @@ FINGERPRINT_KEYS = (
 )
 
 
-def build_steps(observe_seconds: int, overhead_seconds: int) -> list[dict[str, Any]]:
-    """고정 5단계. 단계 예상 = 여유 + (비율 단계면 지켜보기 시간)."""
+def build_steps(
+    required_requests: Sequence[int],
+    max_wait_seconds: int,
+    requests_per_second: int,
+    overhead_seconds: int,
+) -> list[dict[str, Any]]:
+    """고정 5단계. 단계 예상 = 여유 + (비율 단계면 건수를 채울 예상 초, 최대 대기 이하).
+
+    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다.
+    """
+    required_by_step = dict(zip(SHIFT_STEPS, required_requests, strict=True))
     steps: list[dict[str, Any]] = []
     for index, (kind, target_weight) in enumerate(STEP_DEFINITIONS):
-        is_shift = kind is MigrationStepKind.SHIFT
+        required = required_by_step.get(index)
+        shift_seconds = (
+            expected_shift_seconds(required, max_wait_seconds, requests_per_second, target_weight)
+            if required is not None and target_weight is not None
+            else 0
+        )
+        is_shift = required is not None
         steps.append(
             {
                 STEP_INDEX: index,
                 STEP_KIND: kind.value,
                 STEP_TARGET_WEIGHT: target_weight,
                 STEP_SOURCE_WEIGHT: 100 - target_weight if target_weight is not None else None,
-                STEP_OBSERVE_SECONDS: observe_seconds if is_shift else None,
-                STEP_EXPECTED_SECONDS: overhead_seconds + (observe_seconds if is_shift else 0),
+                STEP_REQUIRED_REQUESTS: required,
+                STEP_MAX_WAIT_SECONDS: max_wait_seconds if is_shift else None,
+                STEP_OBSERVE_SECONDS: max_wait_seconds if is_shift else None,
+                STEP_EXPECTED_SECONDS: overhead_seconds + shift_seconds,
             }
         )
     return steps
+
+
+def step_required_requests(
+    steps: Sequence[dict[str, Any]], index: int, defaults: Sequence[int]
+) -> int:
+    """비율 단계의 필요 건수. 8-1 전에 만든 계획(값 없음)은 설정 기본값을 쓴다."""
+    stored = steps[index].get(STEP_REQUIRED_REQUESTS)
+    if stored is not None:
+        return int(stored)
+    return int(defaults[SHIFT_STEPS.index(index)])
 
 
 def expected_seconds(steps: Sequence[dict[str, Any]]) -> int:
