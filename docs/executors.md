@@ -25,7 +25,7 @@
 | `MetricsProvider` | `read_counts(target)` · `read(target, since, until)` | `RequestCounts(requests, errors_5xx)` · `CountsUnavailable(code)` (판정용 누적 카운터, API 서버 8-1) · `Metrics(error_rate_percent, p95_ms, request_count)` · `MetricsUnavailable` (p95 참고용) |
 | `DataSyncChecker` | `replication_lag(source, target)` | `DataSyncLag(seconds)` · `DataSyncUnavailable` (API 서버 8) |
 
-모든 실행기는 `simulated` 속성을 가진다(가짜면 true). 결과의 `simulated` 는 요청·빌드 행에 저장된다.
+모든 실행기는 `simulated` 속성을 가진다(가짜면 true). 결과의 `simulated` 는 요청·빌드 행에 저장된다. 이전 계획의 `simulated` 는 만들 때 `EXECUTOR_MODE = fake` 이면 true 로 계획 행에 저장한다. 이 모드의 묶음은 빌드·배포·내리기·데이터 복제 확인이 늘 가짜라 "계획을 실행할 묶음에 가짜가 하나라도 있으면 true" 와 같고, 트래픽·카운터가 실제 진입점(`ENTRYPOINT_EXECUTOR_MODE=http`)·헬스체크가 실제(`HEALTH_CHECKER_MODE=http`)여도 지금은 true 다([api/migration-plans.md](api/migration-plans.md) 응답).
 
 ## 멱등 키와 호출 순서 (반드시 지킬 것)
 
@@ -317,8 +317,12 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 |---|---|---|
 | `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
 | `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
-| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable`. 이전 처리기는 p95 참고용으로 `window=30s`(`MIGRATION_P95_REFERENCE_WINDOW_SECONDS`)를 부른다 |
+| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 `rps` 가 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable`. `p95_ms` 만 `null` 이면 `Metrics.p95_ms = None`(단계 결과 `p95Ms` null, 0 으로 바꾸지 않는다. `error_ratio` 의 null 은 지금처럼 0). 이전 처리기는 p95 참고용으로 `window=30s`(`MIGRATION_P95_REFERENCE_WINDOW_SECONDS`)를 부른다 |
 | `EntrypointMetricsProvider.read_counts` | `GET /counters` 의 `envs.<이름>` | `RequestCounts(requests, errors_5xx)` · `CountsUnavailable(code)`. 매핑·실패 순서는 위 "`GET /counters` 매핑". http 모드의 이전 비율 단계는 이 값으로 건수를 센다(8-1) |
+
+**`simulate` 와 실제 진입점**: `simulate` 는 `EXECUTOR_MODE=fake` 면 http 진입점에서도 받는다. 비율은 실제로 `PUT /weights` 로 적용되고 주입은 그 단계의 판정 입력(카운터 읽기·헬스체크·복제 지연)만 처리기가 만든다. 롤백도 실제 가중치를 출발 100 으로 돌린다(`TRAFFIC` 만 그 단계 PUT 을 부르지 않는다).
+
+**관찰 — 처음 요청을 받는 도착의 p95**(API 서버 8-4 리허설, 고치지 않음): 진입점 Prometheus 는 쓰인 지표만 모으고(`usedonly`) 5초마다 긁으므로, 그때까지 요청을 받은 적 없는 도착 환경은 첫 이전 내내 `/summary` 의 `p95_ms` 가 null 일 수 있다(→ `p95Ms` null). 판정에는 쓰지 않으므로 결과는 같다. 설정은 echo-infra 쪽이다.
 
 **제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
 

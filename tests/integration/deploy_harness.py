@@ -42,12 +42,19 @@ START_TIME = datetime(2026, 11, 2, 3, 0, tzinfo=UTC)
 class FakeClock:
     def __init__(self, start: datetime = START_TIME) -> None:
         self._now = start
+        self._tick = timedelta(0)
 
     def now(self) -> datetime:
-        return self._now
+        current = self._now
+        self._now += self._tick
+        return current
 
     def advance(self, seconds: float) -> None:
         self._now += timedelta(seconds=seconds)
+
+    def tick_on_read(self, seconds: float) -> None:
+        """now() 를 부를 때마다 seconds 씩 흐르게 한다(실제 시계처럼)."""
+        self._tick = timedelta(seconds=seconds)
 
 
 class ScriptedHealthChecker:

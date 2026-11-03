@@ -307,7 +307,8 @@ class EntrypointMainRouteExecutor:
 class EntrypointMetricsProvider:
     """`GET /summary?window=<구간 초>s` 의 환경 항목을 Metrics 로 바꾼다.
 
-    Prometheus 가 응답하지 않거나 그 환경에 아직 값이 없으면(`null`) MetricsUnavailable 이다.
+    Prometheus 가 응답하지 않거나 그 환경에 아직 요청 수가 없으면(`rps: null`) MetricsUnavailable
+    이다. p95 만 없으면(`p95_ms: null`) Metrics 의 p95_ms 가 None 이다(참고 값, 판정에 쓰지 않음).
     """
 
     def __init__(self, client: EntrypointClient) -> None:
@@ -344,7 +345,8 @@ class EntrypointMetricsProvider:
         p95_ms = entry.get("p95_ms")
         return Metrics(
             error_rate_percent=round(_as_float(error_ratio) * 100, 4),
-            p95_ms=_as_float(p95_ms),
+            # p95 는 참고 값이라 못 읽었으면(null) 0 으로 꾸미지 않고 None 으로 남긴다.
+            p95_ms=_as_float(p95_ms) if _is_number(p95_ms) else None,
             request_count=max(0, math.floor(float(rps) * window_seconds + 0.5)),
         )
 
@@ -390,7 +392,9 @@ def _counts_unavailable(name: str, code: str) -> CountsUnavailable:
     return CountsUnavailable(code=code)
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def _as_float(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return 0.0
-    return float(value)
+    return float(value) if _is_number(value) else 0.0

@@ -39,7 +39,7 @@
 | `requiredRequests` | 선택. 정수 3개(비율 10%·50%·100% 단계 순), 각 1~10000. 빼면 `MIGRATION_REQUIRED_REQUESTS_DEFAULT`(`20,50,50`) |
 | `maxWaitSeconds` | 선택. 5~300, 비율 단계마다 건수를 기다리는 최대 시간. 빼면 `MIGRATION_MAX_WAIT_SECONDS_DEFAULT`(30) |
 | `rollbackConditions` | 선택. `maxErrorRatePercent` 0~100(기본 1.0, 허용 5xx 계산에 쓴다), `maxP95Ms` 1~60000(기본 800, **참고용** — 판정에 쓰지 않는다), `maxReplicationLagSeconds` 0~600(기본 1.0). 헬스체크 실패는 늘 롤백 조건 |
-| `simulate` | 가짜 실행기 모드에서만(아니면 422 `SIMULATE_NOT_ALLOWED`). `failAtStep` 1~4, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
+| `simulate` | `EXECUTOR_MODE=fake` 일 때만(아니면 422 `SIMULATE_NOT_ALLOWED`). 진입점·헬스체커 모드(`ENTRYPOINT_EXECUTOR_MODE`·`HEALTH_CHECKER_MODE`)는 보지 않는다 — 실제 진입점(`http`)에서도 받는다(아래 "`simulate`"). `failAtStep` 1~4, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
 
 8-1 에서 `observeSeconds` 를 뺐다. 보내면 422 `VALIDATION_ERROR`(모르는 칸). 계획 종류 `mode` 도 요청 칸이 아니다(서버가 정한다). 보내면 422 `VALIDATION_ERROR`(`details[0].field = "mode"`, 모르는 칸 — `observeSeconds` 와 같은 규칙)이고 계획은 만들어지지 않는다.
 
@@ -152,6 +152,11 @@
 
 `requests`·`errors5xx` = 도착이 센 요청·5xx, `sourceRequests` = 출발이 센 요청, `startedAt` = 비율을 적용해 세기 시작한 시각, `deadlineAt` = 최대 대기 끝, `updatedAt` = 마지막 카운터 읽기 시각. 화면 예: "GCP 처리 14/50건 · 오류 0/허용 1".
 
+프론트 참고(API 서버 8-4 로컬 리허설, 실제 Envoy 진입점 + 50 rps):
+
+- 기준값을 읽는 순간 처리 중이던 요청 때문에 도착 `requests` 가 `errors5xx` 보다 잠깐 작게 나올 수 있다(예: 요청 2 < 5xx 3). 요청과 5xx 카운터가 같은 순간에 올라가지 않아서이고, 판정은 각 값의 증가분만 따로 쓰므로 영향이 없다. 화면은 이 경우를 오류로 다루지 않는다.
+- 단계별 실제 시간은 10% 3.5~6.7초, 50% 2.3~3.5초, 100% 약 1.2초였다(예상 시간 `expectedSeconds` 는 보수적으로 둔다). 1초 폴링이면 100% 단계의 진행 숫자는 0~1번만 보인다. 그 단계의 마지막 숫자는 단계 결과(`steps[4].result.metrics`)에 남는다.
+
 ### 중단 `POST /migration-plans/{planId}/abort`
 
 `APPROVED`·`RUNNING` 에서만(아니면 409 `PLAN_NOT_RUNNING`). `abortRequestedAt`·`abortedBy` 를 적고 그 계획의 할 일을 지금으로 당긴다 → 202. 다시 중단해도 202(기록은 그대로). 일꾼이 다음 실행 맨 앞에서 보고 `RUNNING` 이면 롤백(`ABORTED`), `APPROVED` 면 트래픽을 바꾸지 않고 `CANCELLED` 로 끝낸다. 열린 할 일이 없으면(옛 일꾼이 할 일을 닫아 버린 경우 등) `APPROVED` 는 그 자리에서 `CANCELLED`, `RUNNING` 은 할 일을 새로 넣는다.
@@ -176,11 +181,13 @@
 
 ## `simulate` (가짜 모드 시연)
 
-`failAtStep = n` 이면 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계의 카운터는 "`MIGRATION_EXPECTED_RPS` × 비율 × 적용 뒤 지난 초"로 만든다(시계 주입으로 결정적). 만든 값은 단계 결과·로그에 그대로 남는다.
+`failAtStep = n` 이면 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계의 카운터는 "`MIGRATION_EXPECTED_RPS` × 비율 × 적용 뒤 지난 초"로 만든다(시계 주입으로 결정적). 만든 값은 단계 결과·로그에 그대로 남는다. 만든 카운터도 실제 카운터처럼 **첫 읽기가 기준값**이고 그 뒤 증가분만 센다.
+
+**실제 진입점(`ENTRYPOINT_EXECUTOR_MODE=http`)에서의 `simulate`**(API 서버 8-4, [specs/api-8-4-rehearsal-fixes.md](../../specs/api-8-4-rehearsal-fixes.md) §2.2): 받는 조건은 위와 같다(`EXECUTOR_MODE=fake`). 이때 **트래픽 비율은 실제로 진입점에 적용되고**(`PUT /weights`), 주입은 `failAtStep` 단계의 판정 입력만 바꾼다(카운터 읽기 대신 만든 값, `HEALTH` 는 헬스체크 대신 503). 롤백하면 실제 가중치도 출발 100 으로 돌아간다. 시연에서 "실제 트래픽이 옮겨지다가 실패 → 자동 롤백"을 보여 주는 용도다. 예외로 `TRAFFIC` 은 그 단계에서 `PUT /weights` 를 부르지 않고 적용 실패로 만든다(앞 단계에서 실제로 옮긴 비율은 롤백이 되돌린다).
 
 | `reason` | 고를 수 있는 단계 | 결과 |
 |---|---|---|
-| `ERROR_RATE` | 1·2·4 | 첫 읽기에서 도착 5xx = 허용 + 1 → `THRESHOLD_EXCEEDED` |
+| `ERROR_RATE` | 1·2·4 | 첫 읽기(기준값)는 5xx 0, 그다음 읽기부터 도착 5xx 누적 = 허용 + 1 → 적용 약 1초 뒤 `THRESHOLD_EXCEEDED` |
 | `TARGET_NOT_RECEIVING` | 1·2 | 도착 카운터 고정, 출발은 100% 몫으로 증가(비율 미적용 흉내) → 최대 대기 끝에 `TARGET_NOT_RECEIVING` |
 | `LOW_TRAFFIC` | 1·2·4 | 두 카운터 고정 → 최대 대기 끝에 트래픽 적음 통과(`lowTraffic: true`) |
 | `HEALTH` | 1·2·4 | 건수는 정상, 헬스 503 → `HEALTH_CHECK_FAILED` |
@@ -197,7 +204,8 @@
 
 - `maxWaitSeconds` 는 계획 행의 `observe_seconds` 칸이다(새 계획은 단계 최대 대기, 8-1 전 계획은 그 계획의 지켜보기 초). 8-1 에서 `observeSeconds` 칸을 뺐다.
 - `steps[i]`: `requiredRequests`·`maxWaitSeconds` 는 비율 단계만 값이 있다(8-1 전 계획의 `requiredRequests` 는 null).
-- `steps[i].result.metrics`: 비율 단계는 `requestCount`(도착 센 요청)·`errors5xx`·`allowedErrors5xx`·`errorRatePercent`(5xx ÷ 요청 × 100, 최대 100, 요청 0이면 null)·`sourceRequestCount`·`lowTraffic`·`p95Ms`(참고)·`healthStatus`. 데이터 확인 단계는 `replicationLagSeconds`, 사전 확인은 `healthStatus`. 재지 않은 값은 null.
+- `steps[i].result.metrics`: 비율 단계는 `requestCount`(도착 센 요청)·`errors5xx`·`allowedErrors5xx`·`errorRatePercent`(5xx ÷ 요청 × 100, 최대 100, 요청 0이면 null)·`sourceRequestCount`·`lowTraffic`·`p95Ms`(참고)·`healthStatus`. 데이터 확인 단계는 `replicationLagSeconds`, 사전 확인은 `healthStatus`. 재지 않은 값은 null. `p95Ms` 는 p95 를 못 읽었으면 null 이다(진입점 `/summary` 의 그 환경 `p95_ms` 가 null 인 경우 포함, 0 으로 바꾸지 않는다).
+- `simulated`(계획·로그 페이지): 계획을 만들 때 한 번 정해 계획 행에 저장한 값이고 응답 때 다시 계산하지 않는다. 규칙은 `EXECUTOR_MODE = fake` 이면 true 다. 이 모드의 실행기 묶음에는 빌드·배포·내리기·데이터 복제 확인이 늘 가짜라, **계획을 실행할 묶음에 가짜가 하나라도 있으면 true** 와 같다. 그래서 트래픽·카운터가 실제 진입점(`ENTRYPOINT_EXECUTOR_MODE=http`)이고 헬스체크가 실제(`HEALTH_CHECKER_MODE=http`)여도 지금은 true 이며, 데이터 복제 확인이 가짜라는 것을 정직하게 표시한다([executors.md](../executors.md)).
 
 ```json
 {

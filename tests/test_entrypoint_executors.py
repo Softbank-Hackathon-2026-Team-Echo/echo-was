@@ -467,6 +467,18 @@ async def test_read_metrics_null_values_are_unavailable() -> None:
     assert result == MetricsUnavailable()
 
 
+async def test_read_metrics_null_p95_stays_none_and_keeps_other_values() -> None:
+    entrypoint = _Entrypoint()
+    summary = _summary("5s", entrypoint.weights)
+    summary["envs"]["gcp"]["p95_ms"] = None
+    entrypoint.summary_override = summary
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read(STANDBY_TARGET, SINCE, UNTIL)
+
+    # p95 를 못 읽었으면 0.0 이 아니라 None(응답 p95Ms null). 요청 수·오류율 규칙은 그대로다.
+    assert result == Metrics(error_rate_percent=0.0, p95_ms=None, request_count=13)
+
+
 async def test_read_metrics_prometheus_unreachable_is_unavailable() -> None:
     entrypoint = _Entrypoint()
     summary = _summary("5s", entrypoint.weights)

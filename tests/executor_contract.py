@@ -262,7 +262,8 @@ async def assert_metrics_provider_contract(provider: MetricsProvider) -> Metrics
     assert isinstance(first, Metrics)
     assert first == again
     assert 0 <= first.error_rate_percent <= 100
-    assert first.p95_ms >= 0 and first.request_count >= 0
+    assert first.p95_ms is None or first.p95_ms >= 0
+    assert first.request_count >= 0
     return first
 
 

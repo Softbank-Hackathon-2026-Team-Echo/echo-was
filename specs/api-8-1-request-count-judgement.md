@@ -106,7 +106,7 @@
 
 ### 5.5 simulate (가짜 모드, 처리기가 카운터를 만들어 낸다)
 - 처리기는 `simulate` 단계에서 실행기를 부르지 않고 "설정 rps(`MIGRATION_EXPECTED_RPS`) × 비율 × 지난 시간"으로 센 값을 만든다(시계 주입으로 결정적).
-- `ERROR_RATE`: 첫 읽기에서 도착 5xx = 허용 + 1 → 즉시 실패. `TARGET_NOT_RECEIVING`(단계 1·2): 도착 카운터 고정, 출발은 "rps × 100% × 지난 시간"으로 증가(비율이 적용되지 않은 상황 흉내) → 마감에 실패. `LOW_TRAFFIC`: 양쪽 고정 → 마감에 트래픽 적음 통과. `HEALTH`: 건수는 정상, 헬스체크 실패. `TRAFFIC`·`DATA_LAG`: 기존 그대로.
+- `ERROR_RATE`: 첫 읽기에서 도착 5xx = 허용 + 1 → 즉시 실패. (바뀜: [api-8-4](api-8-4-rehearsal-fixes.md) §1.1 — 첫 읽기는 기준값이라 5xx 0, 그다음 읽기부터 허용 + 1.) `TARGET_NOT_RECEIVING`(단계 1·2): 도착 카운터 고정, 출발은 "rps × 100% × 지난 시간"으로 증가(비율이 적용되지 않은 상황 흉내) → 마감에 실패. `LOW_TRAFFIC`: 양쪽 고정 → 마감에 트래픽 적음 통과. `HEALTH`: 건수는 정상, 헬스체크 실패. `TRAFFIC`·`DATA_LAG`: 기존 그대로.
 
 ## 6. 계약
 
