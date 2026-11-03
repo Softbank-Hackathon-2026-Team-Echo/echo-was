@@ -3,8 +3,9 @@
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.datastructures import State
 
 from app.adapters.registry import get_environment_adapter
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
@@ -27,6 +28,7 @@ from app.services.environment_connection_service import (
 )
 from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
+from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
@@ -63,6 +65,7 @@ def get_environment_connection_service(
 
 def get_environment_service(
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     connection_service: Annotated[
         EnvironmentConnectionService, Depends(get_environment_connection_service)
     ],
@@ -71,6 +74,7 @@ def get_environment_service(
         session=session,
         environment_repository=EnvironmentRepository(session),
         connection_service=connection_service,
+        public_base_domain=settings.public_base_domain,
     )
 
 
@@ -129,18 +133,61 @@ def get_service_service(
     )
 
 
-def get_executor_set(
+class ExecutorSetHolder:
+    """API 프로세스의 실제 실행기 묶음. 프로세스당 하나를 만들어 재사용하고 종료 때 닫는다.
+
+    만들 때 네트워크·비밀값 조회가 없다(첫 호출 때 한다). 설정 객체가 바뀌면(시험의 설정 교체)
+    옛 묶음을 닫고 새로 만든다.
+    """
+
+    def __init__(self) -> None:
+        self._settings: Settings | None = None
+        self._executors: ExecutorSet | None = None
+
+    async def get(
+        self,
+        settings: Settings,
+        clock: Clock,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> ExecutorSet:
+        if self._executors is None or self._settings is not settings:
+            await self.aclose()
+            self._executors = build_executor_set(
+                settings, clock, environment_lookup=DbEnvironmentLookup(session_factory)
+            )
+            self._settings = settings
+        return self._executors
+
+    async def aclose(self) -> None:
+        executors, self._executors, self._settings = self._executors, None, None
+        if executors is not None:
+            await executors.aclose()
+
+
+def executor_set_holder(state: State) -> ExecutorSetHolder:
+    """앱 state 의 실행기 묶음 보관함(없으면 만든다)."""
+    holder = getattr(state, "executor_set_holder", None)
+    if not isinstance(holder, ExecutorSetHolder):
+        holder = ExecutorSetHolder()
+        state.executor_set_holder = holder
+    return holder
+
+
+async def get_executor_set(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
+    session_factory: Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)],
 ) -> ExecutorSet | None:
     """API 프로세스가 로그를 읽을 실행기 묶음(배포는 일꾼만 한다).
 
-    실제 실행기가 아직 없는 모드(executor_mode != fake)면 None 이고, 빌드·실행 로그는 빈 페이지다.
+    - fake: 요청마다 가짜 묶음(상태 없음, 만드는 비용 없음).
+    - real: 프로세스당 하나(app.state, 종료 때 lifespan 이 닫는다).
     시험은 dependency_overrides 로 시험용 가짜 실행기를 넣는다.
     """
-    if settings.executor_mode is not ExecutorMode.FAKE:
-        return None
-    return build_executor_set(settings, clock)
+    if settings.executor_mode is ExecutorMode.FAKE:
+        return build_executor_set(settings, clock)
+    return await executor_set_holder(request.app.state).get(settings, clock, session_factory)
 
 
 def get_deploy_request_service(

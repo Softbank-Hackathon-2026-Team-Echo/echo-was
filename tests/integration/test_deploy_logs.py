@@ -507,7 +507,9 @@ async def test_simulated_comes_from_rows_not_settings(harness: DeployHarness) ->
     }
 
     harness.use_settings(executor_mode=ExecutorMode.REAL)
-    # 실제 의존성: 가짜가 아닌 모드면 실행기를 만들지 않는다(빌드·실행 로그는 빈 페이지).
+    # 실제 의존성: real 모드면 실제 실행기 묶음을 부작용 없이 만든다(프로세스당 하나). 실행기의
+    # simulated(false)가 가짜로 만든 기록(true)과 달라 빌드·실행 로그는 실행기를 부르지 않고
+    # 빈 페이지다.
     app.dependency_overrides.pop(get_executor_set)
     after = {
         source: (await get_logs(harness, finished["id"], source=source)).json()["data"]

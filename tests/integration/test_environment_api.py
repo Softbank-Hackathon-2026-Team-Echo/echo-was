@@ -249,7 +249,16 @@ async def test_search_environment_kinds_returns_camel_case_config_schema(
     kinds = response.json()["data"]
     assert [k["kind"] for k in kinds] == ["aws", "gcp", "onprem"]
     assert all(set(k) == {"kind", "configSchema"} for k in kinds)
-    assert set(kinds[0]["configSchema"]["properties"]) == {"region", "clusterName"}
+    assert set(kinds[0]["configSchema"]["properties"]) == {
+        "region",
+        "clusterName",
+        "roleArn",
+        "ingressDomain",
+        "ingressGroup",
+        "certificateArn",
+        "ingressClass",
+    }
+    assert set(kinds[0]["configSchema"]["required"]) == {"region", "clusterName"}
     assert set(kinds[1]["configSchema"]["required"]) == {"projectId", "region", "clusterName"}
 
 

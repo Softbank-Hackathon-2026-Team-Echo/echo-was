@@ -5,7 +5,7 @@ from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import ServiceEnvironment
+from app.models import Environment, Service, ServiceEnvironment
 
 
 class ServiceEnvironmentRepository:
@@ -70,6 +70,30 @@ class ServiceEnvironmentRepository:
             )
         )
         return {connection_id: environment_id for connection_id, environment_id in rows.all()}
+
+    async def search_live_current_by_environment_kind(self, kind: str) -> list[ServiceEnvironment]:
+        """그 종류 환경의 살아 있는 연결 중 현재 배포가 있는 것(살아 있는 서비스만).
+
+        서비스·환경·현재 배포를 함께 읽는다. 온프레 이미지 받기 자격 갱신이 쓴다.
+        """
+        statement = (
+            select(ServiceEnvironment)
+            .join(Environment, Environment.id == ServiceEnvironment.environment_id)
+            .join(Service, Service.id == ServiceEnvironment.service_id)
+            .where(
+                _is_live(),
+                ServiceEnvironment.current_deployment_id.is_not(None),
+                Environment.kind == kind,
+                Service.is_deleted.is_(False),
+            )
+            .options(
+                selectinload(ServiceEnvironment.environment),
+                selectinload(ServiceEnvironment.service),
+                selectinload(ServiceEnvironment.current_deployment),
+            )
+            .order_by(ServiceEnvironment.id)
+        )
+        return list((await self._session.scalars(statement)).all())
 
     async def is_public_host_in_use(self, public_host: str) -> bool:
         statement = select(

@@ -154,7 +154,9 @@ def _summary_fields(view: EnvironmentView) -> dict[str, Any]:
         "kind": environment.kind,
         "location": view.config.display_location() if view.config is not None else None,
         "config": (
-            view.config.model_dump(mode="json", by_alias=True) if view.config is not None else None
+            view.config.model_dump(mode="json", by_alias=True, exclude_none=True)
+            if view.config is not None
+            else None
         ),
         "secret_ref": environment.secret_ref,
         "connection_status": environment.connection_status,

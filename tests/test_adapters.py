@@ -244,7 +244,16 @@ def test_validate_environment_config_api_mode_details_have_camel_paths_and_reaso
 def test_environment_config_json_schema_uses_camel_case_keys() -> None:
     schema = GcpEnvironmentConfig.model_json_schema(by_alias=True)
 
-    assert set(schema["properties"]) == {"projectId", "region", "clusterName"}
+    # 실제 실행기용 선택 칸(clusterLocation·ingressDomain·ingressClass)은 required 가 아니다.
+    assert set(schema["properties"]) == {
+        "projectId",
+        "region",
+        "clusterName",
+        "clusterLocation",
+        "ingressDomain",
+        "ingressClass",
+    }
+    assert set(schema["required"]) == {"projectId", "region", "clusterName"}
     assert schema["additionalProperties"] is False
 
 

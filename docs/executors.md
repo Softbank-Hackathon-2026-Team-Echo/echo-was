@@ -1,8 +1,8 @@
 # 실행기 계약 (빌드·배포·대표 주소·헬스체크·내리기·트래픽·지표·데이터 확인)
 
-원터치 배포의 흐름·상태·DB 기록은 echo-was 일꾼이 맡고, 외부 시스템을 실제로 움직이는 일은 **실행기**가 맡는다. 이번에는 모두 가짜 구현(`EXECUTOR_MODE=fake`)이고, 인프라 3(Argo CD + 빌드·배포 파이프라인)·인프라 5(고정 진입점 프록시)가 준비되면 **실행기 구현만** 바꾼다. 이전 계획(API 서버 8)의 트래픽 나눠 보내기·지표·데이터 복제 확인도 같은 방식이다(실제 연결은 인프라 6 Envoy·인프라 9 OpenTelemetry·인프라 7 복제). 표·API 계약은 바꾸지 않는 것이 목표다.
+원터치 배포의 흐름·상태·DB 기록은 echo-was 일꾼이 맡고, 외부 시스템을 실제로 움직이는 일은 **실행기**가 맡는다. 기본은 가짜 구현(`EXECUTOR_MODE=fake`)이고, `EXECUTOR_MODE=real` 이면 빌드는 GitHub Actions, 배포·내리기는 쿠버네티스 직접 반영(API 서버 3-2, 아래 "실제 빌드·배포·내리기 실행기")이다. GitOps(Argo CD)는 2단계다. 이전 계획(API 서버 8)의 트래픽 나눠 보내기·지표·데이터 복제 확인도 같은 방식이다(실제 연결은 인프라 6 Envoy·인프라 9 OpenTelemetry·인프라 7 복제). 표·API 계약은 바꾸지 않는 것이 목표다.
 
-- 인터페이스: `app/executors/base.py`(Protocol + 값 객체). 가짜 구현: `app/executors/fake.py`. 실제 HTTP 헬스체커: `app/executors/http_health_checker.py`. 실제 고정 진입점 실행기(트래픽·대표 주소·지표): `app/executors/entrypoint.py`. 고르는 곳: `app/executors/__init__.py::build_executor_set`.
+- 인터페이스: `app/executors/base.py`(Protocol + 값 객체). 가짜 구현: `app/executors/fake.py`. 실제 HTTP 헬스체커: `app/executors/http_health_checker.py`. 실제 고정 진입점 실행기(트래픽·대표 주소·지표): `app/executors/entrypoint.py`. 실제 빌드: `app/executors/github_actions.py`. 실제 배포·내리기: `app/executors/kubernetes/`. 고르는 곳: `app/executors/__init__.py::build_executor_set`.
 - 공통 계약 시험: `tests/executor_contract.py`. 실제 구현도 같은 검사를 스텁 전송으로 통과해야 한다.
 - 실행기 패키지는 `app.models` 를 import 하지 않는다. 일꾼이 값 객체(`BuildSpec`·`DeploymentSpec`·`DeployTarget`·`MainRoute`·`SourceAccess`)로 바꿔 넘긴다.
 
@@ -53,7 +53,7 @@
 
 ## 실패 코드
 
-- 단계마다 정해진 코드로 실패를 돌려준다. **권한 오류를 시간 초과로 뭉개지 않는다**(예선에서 권한 오류가 시간 초과로만 보여 원인을 못 찾았다). 빌드 `BUILD_FAILED`, 배포 `DEPLOY_FAILED`, 내리기 `TEARDOWN_FAILED`. 시간 초과(`BUILD_TIMEOUT`·`DEPLOY_TIMEOUT`·`TEARDOWN_TIMEOUT`)는 일꾼이 단계 시작 시각으로 정한다(빌드 `builds.started_at`, 배포 `deploy_requests.deploying_at`, 내리기 `teardown_requested_at`).
+- 단계마다 정해진 코드로 실패를 돌려준다. **권한 오류를 시간 초과로 뭉개지 않는다**(예선에서 권한 오류가 시간 초과로만 보여 원인을 못 찾았다). 빌드 `BUILD_FAILED`, 배포 `DEPLOY_FAILED`, 내리기 `TEARDOWN_FAILED`. 실제 실행기(API 서버 3-2)는 더 나눈다: 빌드를 시작조차 못함 `BUILD_DISPATCH_FAILED`, 클러스터·자격 거절 `CLUSTER_UNAUTHORIZED`, 이미지 받기 실패 `IMAGE_PULL_FAILED`, 컨테이너가 계속 죽음 `CONTAINER_START_FAILED`(DB CHECK 없음, 마이그레이션 없음). 시간 초과(`BUILD_TIMEOUT`·`DEPLOY_TIMEOUT`·`TEARDOWN_TIMEOUT`)는 일꾼이 단계 시작 시각으로 정한다(빌드 `builds.started_at`, 배포 `deploy_requests.deploying_at`, 내리기 `teardown_requested_at`).
 - 실패 코드·`external_ref` 에 **비밀값을 넣지 않는다**(설치 토큰·kubeconfig·레지스트리 비밀번호 등). 응답의 `errorMessage` 는 코드별 고정 문장이라 외부 원문은 사용자에게 나가지 않는다.
 
 ## 실행기별 계약
@@ -66,10 +66,10 @@
 
 ### 배포 (`DeployExecutor`)
 
-- 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot)`, `DeployTarget(service, service_environment, environment kind, public_host, container_port)`.
+- 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot)`, `DeployTarget(service, service_environment, environment kind·이름·config·secret_ref, public_host(환경별), main_public_host(대표), container_port)`.
 - `apply` 는 그 연결(클러스터의 그 서비스)에 digest 이미지를 반영한다. `DeployApplied` 는 "클러스터가 새 버전을 받아들였다"이다. 사용자 트래픽 확인은 일꾼의 헬스체크가 환경별 퍼블릭 주소로 한다.
 - `revert(target, previous, key)` 는 실패한 새 버전을 거두고 `previous`(연결의 현재 배포, 없으면 아무것도 없는 상태)를 유지한다. 실패해도 일꾼은 요청의 `errorCode` 를 바꾸지 않고 `revertStatus = FAILED` 만 적는다.
-- 연결안(인프라 3): GitOps 저장소에 digest 를 커밋(커밋 SHA 를 push 전에 기록) → Argo CD 동기화 상태를 `poll`.
+- 실제 구현(API 서버 3-2): 쿠버네티스 직접 서버 측 apply(아래 "쿠버네티스 직접 반영"). GitOps(Argo CD)는 2단계.
 
 ### 대표 주소 (`MainRouteExecutor`)
 
@@ -84,7 +84,7 @@
 
 ### 로그 읽기 (`read_logs` · `read_runtime_logs`, API 서버 4)
 
-로그 API(`GET /deploy-requests/{id}/logs?source=BUILD|RUNTIME`)가 API 프로세스에서 즉석으로 부른다(저장하지 않는다). API 프로세스는 `app/dependencies.py::get_executor_set` 으로 실행기를 얻고, 실제 실행기가 아직 없는 모드(`EXECUTOR_MODE != fake`)면 실행기를 만들지 않고 빈 페이지를 준다.
+로그 API(`GET /deploy-requests/{id}/logs?source=BUILD|RUNTIME`)가 API 프로세스에서 즉석으로 부른다(저장하지 않는다). API 프로세스는 `app/dependencies.py::get_executor_set` 으로 실행기를 얻는다(`fake` 는 요청마다 가짜 묶음, `real` 은 프로세스당 하나인 실제 묶음).
 
 - **상태를 바꾸지 않는 조회**다. 트랜잭션 밖에서 부른다.
 - `limit` 을 넘지 않는 줄을 **시간 순**으로 돌려준다. **같은 `cursor` 면 같은 줄**이다(다른 프로세스가 불러도). `next_cursor` 로 이어 읽으면 겹침·누락이 없다. 줄이 없으면 받은 `cursor` 를 그대로 돌려준다.
@@ -92,7 +92,7 @@
 - **비밀값을 가려서 돌려준다**(설치 토큰·레지스트리 비밀번호·환경변수 값·kubeconfig 등). 서버는 응답 직전에 `app/core/log_masking.py::mask_secrets` 로 알려진 모양(GitHub 토큰 `gh[pousr]_…`, AWS 액세스 키 `AKIA…`, `Bearer <8자 이상>`, `sk-…`, `-----BEGIN … PRIVATE KEY-----` 블록)을 `***` 로 한 번 더 바꾸지만, 이것은 방어용이며 실행기의 책임을 대신하지 않는다.
 - API 는 실행기의 `simulated` 가 그 빌드·요청 행의 `simulated` 와 다르면(가짜로 만든 기록을 실제 실행기가 읽는 경우 등) 부르지 않고 빈 페이지를 준다.
 - 공통 계약 시험: `tests/executor_contract.py::assert_log_reader_contract`(같은 cursor 같은 줄, limit 준수, 시간 순, 이어 읽기, 잘못된 cursor).
-- 연결안: 빌드는 빌드 시스템의 작업 로그(`external_ref` = 작업 번호), 실행은 그 연결 네임스페이스의 Pod 로그(`target` + 배포 기록으로 고른다). cursor 는 실행기가 정하는 불투명한 문자열이다.
+- 실제 구현: 빌드는 Actions 잡 로그(`external_ref` = `gha:{run id}`), 실행은 그 연결 네임스페이스의 Pod 로그(`target` + 배포 기록으로 고른다). cursor 는 실행기가 정하는 불투명한 문자열이다(아래 각 절).
 
 ### 트래픽 (`TrafficExecutor`, API 서버 8)
 
@@ -174,7 +174,132 @@ class MetricsProvider(Protocol):
 
 ### 내리기 (`TeardownExecutor`)
 
-- 서비스 삭제 때 연결 하나를 클러스터에서 내린다(그 서비스의 Deployment·Service·Ingress 등). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.
+- 서비스 삭제 때 연결 하나를 클러스터에서 내린다(실제 구현은 앱 네임스페이스 삭제). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.
+
+## 실제 빌드·배포·내리기 실행기 (`EXECUTOR_MODE=real`, API 서버 3-2)
+
+SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXECUTOR_MODE=real` 이 빌드·배포·내리기 세 실행기를 함께 바꾼다(트래픽·대표 주소·지표는 `ENTRYPOINT_EXECUTOR_MODE` 가 따로 고른다). **운영 기본값은 `fake`** 이고, 저장소 밖 준비(SPEC 7절)와 AC-9 확인 뒤에 바꾼다.
+
+| 실행기 | 파일 | 외부 시스템 |
+|---|---|---|
+| `GithubActionsBuildExecutor` | `app/executors/github_actions.py` | GitHub Actions `workflow_dispatch`(빌드 저장소의 `customer-build.yml`) |
+| `KubernetesDeployExecutor`·`KubernetesTeardownExecutor` | `app/executors/kubernetes/executors.py` | 쿠버네티스 REST 직접 호출(SDK 없음, `httpx`) |
+| 클러스터 접속기 `ClusterAccessProvider` | `app/executors/kubernetes/access.py` | GKE API·AWS STS·EKS·메타데이터 서버·환경 secret_ref |
+| `CloudflareDnsClient` | `app/executors/cloudflare_dns.py` | Cloudflare DNS(온프레 앱 주소) |
+| 매니페스트(순수 함수) | `app/executors/kubernetes/manifests.py` | — |
+
+**만들 때 부작용이 없다.** 비밀값·토큰 조회와 필수값 확인은 처음 호출할 때 한다. 실행기 묶음은 프로세스당 하나다: 일꾼은 `python -m app.worker` 시작 때, API(로그 읽기)는 `app/dependencies.py::ExecutorSetHolder`(첫 요청 때 만들고 lifespan 종료 때 HTTP 클라이언트를 닫음). `poll` 처럼 external_ref 만 받는 호출은 환경 접속 정보를 `DbEnvironmentLookup`(`app/services/executor_environment_lookup.py`)으로 다시 읽는다(실행기 패키지는 `app.models` 를 import 하지 않는다).
+
+### 대상 값 (`DeployTarget` 더한 칸)
+
+| 칸 | 채우는 곳(`deploy_support.deploy_target`) | 쓰임 |
+|---|---|---|
+| `environment_name` | 환경 이름 | 앱 환경변수 `ECHO_ENVIRONMENT` |
+| `environment_config` | `environment.parsed_config()`(읽지 못하면 None → 설정 오류) | 클러스터 접속·Ingress 값 |
+| `environment_secret_ref` | 환경 `secret_ref` | 온프레 창구 토큰 위치 |
+| `main_public_host` | 서비스 대표 주소 | Ingress 두 번째 규칙, **앱 네임스페이스 = 첫 레이블** `{서비스}-{suffix}` |
+
+`public_host` 는 그대로 환경별 주소다. 헬스 경로·포트는 배포 기록의 `config_snapshot`(`healthCheckPath`·`containerPort`)에서 읽는다(되돌리기의 previous 도 자기 사본).
+
+### 실패를 알리는 예외와 일시 오류
+
+| 상황 | 실행기 | 처리기 |
+|---|---|---|
+| 빌드를 시작할 수 없다(dispatch 403·404·422, App 설치·개인키 없음) | `BuildStartError(BUILD_DISPATCH_FAILED)` | 빌드를 그 코드로 닫는다 → 다음 실행에서 요청이 그 코드로 `FAILED` |
+| 반영할 수 없다(창구·자격 401·403 → `CLUSTER_UNAUTHORIZED`, 환경 설정 누락·남의 네임스페이스·DNS 충돌·창구 4xx → `DEPLOY_FAILED`) | `DeployApplyError(code)` | 요청을 그 코드로 `FAILED`(배포 기록이 있어 되돌리기 호출) |
+| 시작 계열(start·apply·remove)이 닿지 못함(연결 실패·5xx·429) | 1·2·4초 간격 3번 재시도 뒤 `ExecutorUnavailableError` | 잡지 않는다. 임대 만료 뒤 같은 키로 다시, 3번이면 `WORKER_LOST` |
+| 조회 계열(poll)이 닿지 못함 | 진행 중(`BuildRunning`·`DeployPending`·`TeardownPending`) + 경고 로그(`*_UNREACHABLE`) | 단계 제한 시간(`BUILD_TIMEOUT`·`DEPLOY_TIMEOUT`·`TEARDOWN_TIMEOUT`)이 끝낸다 |
+| 되돌리기 실패 | `RevertFailed(code)`(예외를 올리지 않는다 — 임대 상실 경로에서도 끝나게) | `revertStatus = FAILED` |
+
+알아보지 못하는 ref(`fake-…` 등, 진행 중 모드 전환)는 `BuildFailed`/`DeployFailed(DEPLOY_FAILED)`/`TeardownFailed` 다. 경고 로그에는 코드(`ENVIRONMENT_NOT_CONFIGURED`·`CLUSTER_UNAUTHORIZED`·`CLUSTER_UNREACHABLE`·`NAMESPACE_NOT_MANAGED`·`DNS_RECORD_CONFLICT`·`BUILD_RESULT_INVALID` 등)와 id 만 남기고 토큰·응답 원문은 남기지 않는다.
+
+### GitHub Actions 빌드 (`GithubActionsBuildExecutor`)
+
+워크플로 본문은 인프라 담당이 아래 계약대로 만든다(이 저장소는 실행기만 가진다).
+
+| 항목 | 값 |
+|---|---|
+| 워크플로 | `BUILD_GITHUB_REPOSITORY`(기본 `Softbank-Hackathon-2026-Team-Echo/echo-was`)의 `.github/workflows/customer-build.yml`(`BUILD_GITHUB_WORKFLOW`), ref `BUILD_GITHUB_REF`(`main`) |
+| 시작 | `on: workflow_dispatch`, 입력 `build_id`(uuid)·`repo`(`owner/name`)·`commit_sha`(40자)·`private`(`"true"`/`"false"`) — 모두 문자열 |
+| 실행 이름 | `run-name: build ${{ inputs.build_id }}` — 실행 객체의 **`display_title`** 칸. 일꾼이 같은 빌드를 찾는 열쇠(`name` 은 워크플로 이름이라 쓰지 않는다) |
+| 동시 실행 | `concurrency: customer-build-${{ inputs.build_id }}` |
+| 소스 | 비공개면 워크플로 안에서 `actions/create-github-app-token`(App id·개인키 = Actions secret, `owner`·`repositories` = 고객 저장소)으로 1시간 읽기 토큰 → 그 커밋 checkout. **토큰을 입력값으로 받지 않는다** |
+| 빌드·게시 | ECR `echo/app` + Artifact Registry `echo/app`, 같은 digest, 태그 `b-<build_id 앞 12자>` |
+| 결과 | 아티팩트 `build-result`(파일 `build-result.json`): `{"build_id", "image_digest": "sha256:…", "ar_repository", "ecr_repository"}` |
+| 실패 | 단계 이름 고정(`checkout`, `build`, `push`) |
+
+- 인증: GitHub App JWT(`GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`) → 빌드 저장소 설치 → 설치 토큰(`permissions: {actions: write}`, 만료 5분 전까지 재사용). App 에 **Actions 읽기·쓰기** 권한과 빌드 저장소 설치가 필요하다.
+- `start(build, source, key)`: ① `GET …/workflows/{워크플로}/runs?event=workflow_dispatch&branch={ref}&per_page=50` 에서 `display_title == "build {key}"`(여럿이면 먼저 만든 것). ② 없으면 `POST …/dispatches` 본문 `{"ref", "inputs", "return_run_details": true}` → 200 `workflow_run_id`(204 면 ①을 5초 간격 3번). ③ external_ref = `gha:{run id}`.
+  - 재시작 경로(`BuildSpec.resumed_after` = 이미 있던 `start_requested_at`): ①을 5초 간격 3번(만든 시각 ≥ 요청함 시각 − 60초) 해 본 뒤에만 dispatch 한다. 그래도 중복이 생기면 ref 가 가리키는 실행만 쓴다(같은 커밋·같은 태그).
+  - `SourceAccess.read_token` 은 쓰지 않는다. 처리기는 비공개 저장소 접근 확인을 위해 지금처럼 `issue_read_token` 을 부른다.
+- `poll`: `GET …/actions/runs/{id}` — `queued|in_progress|waiting|pending|requested` → `BuildRunning`, `completed`+`success` → 아티팩트를 내려받아(302 로 넘겨받은 저장소 주소에는 우리 토큰을 싣지 않는다) `BuildSucceeded(ar_repository, image_digest)`, 그 밖 → `BuildFailed(BUILD_FAILED)`. 아티팩트가 없거나, zip·JSON 모양이 다르거나, digest 가 `^sha256:[0-9a-f]{64}$` 가 아니거나, 저장소에 tag(`:`)가 있거나, `build_id` 가 실행 이름의 키와 다르면 `BuildFailed` + 경고 `BUILD_RESULT_INVALID`.
+- `read_logs`: 실행의 잡 로그(`GET …/actions/jobs/{job}/logs`)를 잡 순서(시작 시각·id)·줄 순서로 잇는다. cursor = `"{잡 순번}:{줄 번호}"`(다음에 읽을 줄). 실행이 끝나기 전에는 빈 청크(`has_more=true`, 같은 cursor). `##[error]`·`##[warning]` 줄은 `ERROR`·`WARN`. Actions 가 이미 가린 값 위에 `mask_secrets` 를 한 번 더 거친다. 끝난 실행의 로그는 프로세스에 최근 32개 기억한다.
+
+### 쿠버네티스 직접 반영 (`KubernetesDeployExecutor`)
+
+한 연결 = 한 네임스페이스 `{서비스}-{suffix}`(대표 주소 첫 레이블), 라벨 `app.kubernetes.io/managed-by=echo-was`·`echo.service-id`. 서버 측 apply = `PATCH …?fieldManager=echo-was&force=true`, `Content-Type: application/apply-patch+yaml`(본문 JSON).
+
+| 객체 | 이름 | 내용 |
+|---|---|---|
+| Namespace | `{서비스}-{suffix}` | 없으면 `POST` 로 만든다(apply 권한 없이). 같은 이름이 있는데 echo-was 라벨이 없으면 쓰지 않는다(`DEPLOY_FAILED`, `NAMESPACE_NOT_MANAGED`) |
+| Deployment | `app` | replicas 1, 이미지 `{환경별 저장소}@{digest}`, 포트 `containerPort`, env `PORT`·`ECHO_ENVIRONMENT`(env 가 envFrom 보다 우선 — 고객 Secret 이 덮지 못함), `envFrom: secretRef {ns}-env optional`, readinessProbe `GET {healthCheckPath}`, 어노테이션·파드 라벨 `echo.deployment-id`, 온프레만 `imagePullSecrets: echo-pull`, 요청 100m/128Mi·제한 512Mi |
+| Service | `app` | ClusterIP 80 → containerPort |
+| Ingress | `app` | 규칙 = 환경별 주소 + 대표 주소(→ `app:80`). class = config `ingressClass`(비면 aws `alb`, gcp `nginx`, onprem `traefik`). aws 는 `group.name`=`ingressGroup`, `scheme: internet-facing`, `listen-ports [{"HTTP":80},{"HTTPS":443}]`, `certificate-arn`=`certificateArn`(명시 — 자동 찾기는 대표 주소용 인증서까지 찾다가 그룹 전체가 실패), `target-type: ip`, `healthcheck-path`. 80→443 강제 이동 없음(진입점이 HTTP 로 대표 주소를 보낸다) |
+
+- 이미지 주소: 배포 기록의 `image_repository`(Artifact Registry 정본). aws 환경이면 `IMAGE_REGISTRY_MIRRORS`(`<AR 접두>=<ECR 접두>`)로 바꾼다(같은 digest). 표에 없으면 그대로.
+- `apply(deployment, target, key)`: (온프레) DNS 레코드 → 네임스페이스 → (온프레) RoleBinding `echo-app-deployer`(자기 서비스 계정, 토큰 JWT 의 `sub` 에서 읽음)·이미지 받기 자격 `echo-pull` → Deployment·Service·Ingress. external_ref = `k8s:{환경 id}:{네임스페이스}:{배포 기록 id}`. 같은 키 다시 → 같은 내용(멱등). RoleBinding 을 막 만든 직후의 403 은 2초 간격 5번(10초) 다시 시도한다(권한 캐시 반영 지연).
+  - 필수 칸이 비면(onprem `apiUrl`·`secret_ref`·`tunnelTarget`·Cloudflare 설정, aws `certificateArn`·`ingressGroup`·역할, config 를 읽지 못함, 대표 주소 없음) 창구를 부르지 않고 `DeployApplyError(DEPLOY_FAILED)` + 경고 `ENVIRONMENT_NOT_CONFIGURED`. 접수 단계에서는 막지 않는다(가짜 모드 시험 유지).
+- `poll(ref)`: Deployment `app` 을 읽어
+  - 없거나 어노테이션 배포 번호가 ref 와 다르면 `DeployFailed(DEPLOY_FAILED)`(그사이 다른 반영이 덮음)
+  - `observedGeneration ≥ generation` 이고 `updatedReplicas == spec.replicas == replicas == availableReplicas` 면 `DeployApplied`
+  - 그 배포 번호 파드의 대기 이유가 `ImagePullBackOff`·`InvalidImageName`·`ErrImageNeverPull` 이거나 `ErrImagePull` 이 파드 생성 뒤 `DEPLOY_IMAGE_PULL_GRACE_SECONDS`(30)를 넘으면 `DeployFailed(IMAGE_PULL_FAILED)`, `CrashLoopBackOff` 면 `DeployFailed(CONTAINER_START_FAILED)`
+  - 401·403(토큰을 한 번 새로 받아 다시 불러도) → `DeployFailed(CLUSTER_UNAUTHORIZED)`, 닿지 못함 → `DeployPending` + 경고 `CLUSTER_UNREACHABLE`, 그 밖 → `DeployPending`
+- `revert(target, previous, key)`: previous 가 있으면 그 배포 기록으로 같은 apply(어노테이션 = previous 번호) → `Reverted("k8s-revert:{환경}:{ns}:{previous id}")`. 없으면 Ingress·Service·Deployment 를 지운다(네임스페이스·Secret 은 남긴다).
+- `read_runtime_logs`: 네임스페이스에서 라벨 `echo.deployment-id=<배포 기록 id>` 파드(가장 최근)의 `app` 컨테이너 로그(`timestamps=true`, 최대 1MB). cursor = `"{파드 이름}|{마지막 줄 시각}|{그 시각 줄 수}"`. 파드가 없으면 빈 청크, 창구 오류도 빈 청크 + 경고.
+
+### 내리기 (`KubernetesTeardownExecutor`)
+
+- `remove(target, key)`: 네임스페이스 삭제 요청(없으면 성공, echo-was 라벨이 없으면 지우지 않음) + 온프레면 앱 DNS 레코드 삭제(comment 가 같은 것만, 실패는 경고만). external_ref = `k8s-teardown:{환경 id}:{네임스페이스}:{key}`(attempt 마다 다름). 설정이 비면 호출 없이 `k8s-teardown-invalid:{key}` 를 돌려주고 poll 이 `TeardownFailed(TEARDOWN_FAILED)`.
+- `poll`: 네임스페이스 404 → `TeardownRemoved`, 있음(Terminating 포함) → `TeardownPending`, 401·403 → `TeardownFailed` + 경고 `CLUSTER_UNAUTHORIZED`, 닿지 못함 → `TeardownPending` + 경고.
+
+### 클러스터 접속기 (`ClusterAccessProvider`)
+
+| 종류 | 창구 주소·CA | 토큰 | 캐시 |
+|---|---|---|---|
+| gcp | 메타데이터 액세스 토큰으로 `GET container.googleapis.com/v1/projects/{p}/locations/{clusterLocation 또는 region}/clusters/{name}` → `endpoint`, `masterAuth.clusterCaCertificate` | 메타데이터 `…/service-accounts/default/token`(관제탑 GSA) | 토큰 만료 5분 전까지, 창구 정보는 프로세스 동안 |
+| aws | STS 임시 키로 서명한 `GET eks.{region}.amazonaws.com/clusters/{name}` → endpoint·CA | ① 메타데이터 `…/identity?audience=sts.amazonaws.com&format=full` ② `AssumeRoleWithWebIdentity`(역할 = config `roleArn` 또는 `EXECUTOR_AWS_ROLE_ARN`, 세션 `echo-executor`) ③ presigned `GetCallerIdentity`(서명 헤더 `x-k8s-aws-id: <cluster>`, 60초) → `k8s-aws-v1.` + base64url(패딩 없음) | 임시 키 만료 5분 전까지, 클러스터 토큰 10분(5분 전 재발급) |
+| onprem | config `apiUrl`(공개 인증서, 터널 창구) | 환경 `secret_ref` → 서비스 계정 토큰(만료 없음) | 프로세스 동안 |
+
+- 창구(주소·CA)마다 httpx 클라이언트 하나를 재사용한다(keep-alive. 터널 창구는 새 연결이 1~3초). 요청 하나 제한 시간 `KUBE_REQUEST_TIMEOUT_SECONDS`(15). 401 이면 토큰을 새로 받아 한 번 더 부른다.
+- AWS 서명은 `botocore` 만 쓴다(`boto3` 없음). Google 토큰은 메타데이터 서버를 `httpx` 로 직접 부른다(`google-auth` 없음).
+- **권한 범위**: 실행기는 앱 네임스페이스(echo-was 라벨) 밖을 쓰지 않는다(이름 규칙 + 라벨 확인 + 시험 `test_executor_writes_only_inside_app_namespace`). GKE·EKS 는 기존 넓은 신원(`roles/container.developer`, EKS Access Entry ClusterAdmin)을 그대로 쓰므로 **이 제한은 코드가 지킨다**(설계 문서에 밝힘). 온프레 서비스 계정 권한은 echo-infra 설치 스크립트가 준다: ClusterRole `echo-executor` = namespaces get·create·delete, rolebindings create, bind 는 `echo-app-deployer` 에만; `echo-app-deployer` = deployments·services·ingresses·secrets·pods·pods/log·events·replicasets 읽기·쓰기. RoleBinding 만들기·네임스페이스 지우기를 라벨 붙은 네임스페이스로 좁히는 ValidatingAdmissionPolicy 는 설치 스크립트 몫이고, 없으면 코드로만 제한된다.
+
+### 온프레 앱 DNS 레코드 (Cloudflare)
+
+- `apply` 전에(온프레만) `{환경별 주소}` CNAME → config `tunnelTarget`, proxied, comment `echo-was:{연결 id}`. 같은 값(CNAME·대상·proxied)이면 그대로, 다른 값이면 `DeployApplyError(DEPLOY_FAILED)` + 경고 `DNS_RECORD_CONFLICT`(남의 레코드를 덮지 않는다). 내리기 때 comment 가 같은 레코드만 지운다.
+- 설정 `CLOUDFLARE_API_TOKEN_REF`(`env:ECHO_SECRET_CLOUDFLARE_DNS_TOKEN`, 권한 = 그 존 DNS 편집만)·`CLOUDFLARE_ZONE_ID`. 클라우드 환경은 환경별 와일드카드 레코드 1개를 사람이 미리 만든다.
+
+### 온프레 이미지 받기 자격 (`echo-pull`)
+
+- `apply` 때(온프레만) 메타데이터 액세스 토큰(캐시 없이 새로)으로 dockerconfigjson Secret `echo-pull`(사용자 `oauth2accesstoken`, 서버 = 이미지 주소의 호스트)을 apply 하고 어노테이션 `echo.pull-expires-at` 에 만료 시각(지금 + `expires_in`)을 적는다.
+- 일꾼 프로세스의 갱신 루프(`app/services/onprem_pull_refresher.py`): `ONPREM_PULL_CHECK_SECONDS`(300)마다 현재 배포가 있는 살아 있는 온프레 연결을 보고, 남은 수명이 `ONPREM_PULL_MIN_REMAINING_SECONDS`(1800) 미만이면 새 토큰으로 다시 넣는다. 실패는 경고 로그만. 일꾼이 여럿이면 중복으로 돌아도 결과가 같다. 관제탑 GSA 에 Artifact Registry 읽기 권한이 있어야 한다.
+
+### 설정
+
+| 이름 | 기본 | 뜻 |
+|---|---|---|
+| `EXECUTOR_MODE` | `fake` | `real` 이면 위 실행기. **필수**: `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`, `SOURCE_CLIENT_MODE=github`, `HEALTH_CHECKER_MODE=http`(하나라도 빠지면 시작 때 설정 오류) |
+| `EXECUTOR_AWS_ROLE_ARN` | 없음 | aws 환경 config `roleArn` 이 비었을 때의 역할 |
+| `BUILD_GITHUB_REPOSITORY`·`BUILD_GITHUB_WORKFLOW`·`BUILD_GITHUB_REF` | `Softbank-Hackathon-2026-Team-Echo/echo-was` · `customer-build.yml` · `main` | 빌드 워크플로 |
+| `IMAGE_REGISTRY_MIRRORS` | 빈 목록 | `<AR 접두>=<ECR 접두>,…` 예 `asia-northeast3-docker.pkg.dev/team-echo-final/echo=706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo` |
+| `CLOUDFLARE_API_TOKEN_REF`·`CLOUDFLARE_ZONE_ID`·`CLOUDFLARE_API_BASE_URL` | 없음 · 없음 · `https://api.cloudflare.com/client/v4` | 온프레 앱 DNS |
+| `ONPREM_PULL_CHECK_SECONDS`·`ONPREM_PULL_MIN_REMAINING_SECONDS` | 300 · 1800 | 이미지 받기 자격 갱신 |
+| `DEPLOY_IMAGE_PULL_GRACE_SECONDS` | 30 | `ErrImagePull` 유예 |
+| `KUBE_REQUEST_TIMEOUT_SECONDS` | 15 | 창구·클라우드 API 요청 하나 |
+| `GOOGLE_METADATA_BASE_URL` | `http://metadata.google.internal` | 시험에서 바꾼다 |
+
+- 가짜 모드의 `simulate` 는 `EXECUTOR_MODE=fake` 일 때만 받는다(실제 모드 422 그대로). 실제 모드 기록은 `simulated = false` 로 저장된다.
+- **모드 전환 순서**: 이 코드 배포(모드 fake) → 저장소 밖 준비 → 환경 등록 → `EXECUTOR_MODE=real` → 실환경 확인. 진행 중 요청이 있을 때 모드를 바꾸지 않는다(가짜 ref 는 실제 실행기가 실패로 본다). 새 실패 코드는 실제 모드에서만 생기므로 옛 파드가 남아 있는 롤링 중에는 바꾸지 않는다.
 
 ## 고정 진입점 실행기 (`ENTRYPOINT_EXECUTOR_MODE=http`)
 

@@ -134,7 +134,8 @@ class Environment(UuidPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
 def _validate_and_normalize_config(target: Environment) -> None:
     parsed = validate_environment_config(target.kind, target.config)
-    target.config = parsed.model_dump(mode="json")
+    # 값이 없는 선택 칸은 키로 남기지 않는다(새 칸을 쓰지 않는 행은 예전과 글자까지 같다).
+    target.config = parsed.model_dump(mode="json", exclude_none=True)
 
 
 @event.listens_for(Environment, "before_insert")

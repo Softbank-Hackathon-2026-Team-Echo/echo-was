@@ -6,7 +6,7 @@ API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 �
 
 - 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 경로는 `/api/v1/orgs/{orgId}` 아래이고 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 접수는 **개발자 이상의 사람**이다(에이전트 토큰은 403 `AGENT_READ_ONLY`, [auth.md](auth.md)).
 - **접수만 동기다.** API 는 요청을 `QUEUED` 로 저장하고 202 를 준다. 빌드·배포·헬스체크는 별도 일꾼(`python -m app.worker`)이 진행한다. **일꾼이 없으면 요청은 `QUEUED` 에 남는다.** 진행 상황은 단건 조회로 폴링한다(실시간 푸시 없음).
-- **이번 실행은 가짜다(`simulated: true`).** 빌드·배포·대표 주소 연결·되돌리기·내리기는 가짜 실행기가 흉내 낸다(`EXECUTOR_MODE=fake`, 실제 실행기는 인프라 3·5 이후). 흐름·상태·DB 기록·계약은 실제와 같다. 헬스체크는 기본 가짜(늘 통과)이고 `HEALTH_CHECKER_MODE=http` 로 실제 HTTP 확인을 켤 수 있다. `simulated` 는 요청 행에 저장한 값이다.
+- **기본 실행은 가짜다(`simulated: true`).** 빌드·배포·되돌리기·내리기는 `EXECUTOR_MODE=fake`(운영 기본값)면 가짜 실행기가 흉내 낸다. `EXECUTOR_MODE=real` 이면 GitHub Actions 빌드 + 쿠버네티스 직접 반영(API 서버 3-2, [executors.md](../executors.md))이고 기록은 `simulated: false` 다. 흐름·상태·DB 기록·계약은 실제와 같다. 헬스체크는 기본 가짜(늘 통과)이고 `HEALTH_CHECKER_MODE=http` 로 실제 HTTP 확인을 켤 수 있다. `simulated` 는 요청 행에 저장한 값이다.
 
 ## 엔드포인트
 
@@ -36,7 +36,7 @@ API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 �
 
 1. 서비스(없음 404, `DELETING` 409)·환경(없음·삭제 404, 마지막 접속 확인 `FAILED` 409 `ENVIRONMENT_UNHEALTHY`)을 확인한다.
 2. 브랜치·커밋을 **이 순간 40자 커밋 SHA 로 고정**한다(없으면 422 `REF_NOT_FOUND`). 저장소 주소와 서비스 설정도 이 순간 사본을 저장한다 — 뒤에 서비스가 바뀌어도 이 요청은 이 값을 쓴다.
-3. 그 환경과 첫 요청이면 연결을 만든다(`trafficWeight = 0`, 주소 `https://{service}-{environment}-{서비스의 suffix}.{도메인}`, API 서버 3-1). 이 주소를 쓰는 살아 있는 연결이 이미 있으면 409 `PUBLIC_HOST_CONFLICT`(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우, 레이블 63자 자르기로 같은 주소가 된 경우). 레이블이 63자를 넘으면 `{service}-{environment}` 를 54자로 자르고 끝의 `-` 를 뗀 뒤 `-{suffix}` 를 붙인다. 서비스 이름이 53자 이상이면 환경별 주소가 대표 주소와 같아지고 그 서비스는 환경 하나에만 배포할 수 있다.
+3. 그 환경과 첫 요청이면 연결을 만든다(`trafficWeight = 0`, 주소는 환경 config 에 `ingressDomain`(클라우드 환경의 하위 도메인)이 있으면 `https://{service}-{서비스의 suffix}.{ingressDomain}`, 없으면 `https://{service}-{environment}-{서비스의 suffix}.{PUBLIC_BASE_DOMAIN}`(온프레·예전 환경, API 서버 3-2), API 서버 3-1). 이 주소를 쓰는 살아 있는 연결이 이미 있으면 409 `PUBLIC_HOST_CONFLICT`(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우, 레이블 63자 자르기로 같은 주소가 된 경우, 두 환경이 같은 `ingressDomain` 을 쓰는 경우). 이미 만든 연결의 주소는 환경에 `ingressDomain` 을 나중에 더해도 바뀌지 않는다. 레이블이 63자를 넘으면 `{service}-{environment}` 를 54자로 자르고 끝의 `-` 를 뗀 뒤 `-{suffix}` 를 붙인다. 서비스 이름이 53자 이상이면 환경별 주소가 대표 주소와 같아지고 그 서비스는 환경 하나에만 배포할 수 있다.
 4. **같은 연결에는 실행 중 1개 + 대기 1개까지만 둔다.** 대기 요청이 있으면 그 요청을 `CANCELLED`(`cancelReason = SUPERSEDED`, `supersededById = 새 요청`)로 밀어내고 새 요청이 대기한다. 실행 중 요청은 끝까지 진행되고, 대기 요청은 그 뒤에 시작한다. 사용자가 요청을 직접 취소하는 API 는 없다.
 5. 202 + `DeployRequestDetail`(`status = QUEUED`).
 
@@ -246,6 +246,12 @@ stateDiagram-v2
 | `HEALTH_CHECK_TIMEOUT` | 헬스 | 마감까지 한 번도 확인하지 못함 |
 | `WORKER_LOST` | 아무 단계 | 일꾼이 같은 요청에서 임대를 3번 잃음 |
 | `INTERNAL_ERROR` | — | 예약(지금은 쓰지 않음) |
+| `BUILD_DISPATCH_FAILED` | 빌드 | 실제 실행기만: 빌드 워크플로를 시작하지 못함(워크플로·App 권한·설치 없음). 다시 보내도 같다 |
+| `CLUSTER_UNAUTHORIZED` | 배포 | 실제 실행기만: 환경 클러스터(또는 클라우드 자격 발급)가 실행기를 거절함(401·403) |
+| `IMAGE_PULL_FAILED` | 배포 | 실제 실행기만: 환경이 빌드한 이미지를 받지 못함(`ImagePullBackOff`, 30초 넘은 `ErrImagePull`) |
+| `CONTAINER_START_FAILED` | 배포 | 실제 실행기만: 컨테이너가 시작 뒤 계속 죽음(`CrashLoopBackOff`) |
+
+실제 실행기에서 환경 설정이 비어 반영할 수 없을 때(온프레 `apiUrl`·`tunnelTarget`·`secretRef`, aws `certificateArn`·`ingressGroup`)는 `DEPLOY_FAILED` 다(서버 경고 로그 `ENVIRONMENT_NOT_CONFIGURED`). 새 코드 4개는 `errorMessage` 가 코드별 고정 영어 문장이다.
 
 ## HTTP 오류 (되돌리기)
 

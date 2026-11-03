@@ -26,6 +26,16 @@ ERROR_MESSAGES: dict[DeployRequestErrorCode, str] = {
     DeployRequestErrorCode.PUBLIC_URL_UNREACHABLE: "The environment public URL was unreachable.",
     DeployRequestErrorCode.WORKER_LOST: "The deploy worker stopped repeatedly during this request.",
     DeployRequestErrorCode.INTERNAL_ERROR: "An internal error occurred.",
+    DeployRequestErrorCode.BUILD_DISPATCH_FAILED: (
+        "The build workflow could not be started (missing permission or workflow)."
+    ),
+    DeployRequestErrorCode.CLUSTER_UNAUTHORIZED: (
+        "The deploy executor was not authorized by the environment cluster."
+    ),
+    DeployRequestErrorCode.IMAGE_PULL_FAILED: "The environment could not pull the built image.",
+    DeployRequestErrorCode.CONTAINER_START_FAILED: (
+        "The container kept crashing after it started."
+    ),
 }
 
 

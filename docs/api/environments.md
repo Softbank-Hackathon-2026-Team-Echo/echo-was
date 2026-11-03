@@ -55,6 +55,24 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 | `gcp` | `projectId`(예 `echo-hack-123`), `region`(예 `asia-northeast3`), `clusterName` | `region` |
 | `onprem` | `location`(예 `team-laptop`), `kubeContext` | `location` |
 
+**선택 칸(실제 실행기, API 서버 3-2)** — 비워도 되고, 기존 행·요청은 그대로 유효하다. 실제 실행기(`EXECUTOR_MODE=real`)가 반영할 때 쓴다.
+
+| kind | 칸 | 뜻 | 예 |
+|---|---|---|---|
+| `aws` | `roleArn` | 실행기가 넘겨받을 IAM 역할. 비면 서버 설정 `EXECUTOR_AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/echo-dev-executor` |
+| `aws` | `ingressDomain` | 이 환경의 하위 도메인. 있으면 새 연결의 환경별 주소가 `{service}-{suffix}.{ingressDomain}` | `aws-tokyo.echoport.uk` |
+| `aws` | `ingressGroup` | ALB 그룹 이름(실제 반영 때 필요) | `echo-apps` |
+| `aws` | `certificateArn` | ALB HTTPS 인증서 ACM ARN(실제 반영 때 필요, 자동 찾기 안 함) | `arn:aws:acm:…:certificate/…` |
+| `gcp` | `clusterLocation` | GKE 위치(존 또는 리전). 비면 `region` | `asia-northeast3-a` |
+| `gcp` | `ingressDomain` | 위와 같음 | `gcp-seoul.echoport.uk` |
+| `onprem` | `apiUrl` | 쿠버네티스 창구 공개 주소(터널, https) | `https://k3s-k2f6xje5.echoport.uk` |
+| `onprem` | `tunnelTarget` | 앱 주소 CNAME 대상 | `<터널 id>.cfargotunnel.com` |
+| 모두 | `ingressClass` | 비면 aws `alb`, gcp `nginx`, onprem `traefik` | — |
+
+- `ingressDomain` 은 서버 `PUBLIC_BASE_DOMAIN` 의 **바로 아래 한 단계**여야 한다(`aws-tokyo.{PUBLIC_BASE_DOMAIN}`). 두 단계·다른 도메인·도메인 자체는 422 `ENVIRONMENT_CONFIG_INVALID`(`field = config.ingressDomain`, `reason = INVALID_FORMAT`). 온프레에는 이 칸이 없다(`UNKNOWN_FIELD`).
+- 온프레 창구 토큰은 환경의 `secretRef`(`env:ECHO_SECRET_…`)로 가리킨다. aws·gcp 는 `secretRef` 를 실제 반영에 쓰지 않는다(워크로드 신원).
+- 값이 없는 선택 칸은 저장·응답 `config` 에 키로 남기지 않는다(새 칸을 쓰지 않는 환경은 예전과 같은 모양).
+
 각 종류의 정확한 형식은 `GET /api/v1/environment-kinds` 의 `configSchema`(JSON Schema)를 본다. 새 종류를 더하면 코드 변경 없이 여기에 나타난다.
 
 ### `secretRef` 형식

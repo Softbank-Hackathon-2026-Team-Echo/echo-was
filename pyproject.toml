@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "alembic>=1.20.1",
     "asyncpg>=0.32.0",
+    "botocore>=1.43.123",
     "fastapi>=0.162.0",
     "httpx>=0.28.1",
     "pydantic-settings>=2.16.2",
@@ -43,6 +44,7 @@ markers = ["integration: 실제 PostgreSQL 이 필요한 테스트 (TEST_DATABAS
 
 [dependency-groups]
 dev = [
+    "botocore-stubs>=1.43.123",
     "httpx>=0.28.1",
     "mypy>=2.4.1",
     "pytest>=9.2.0",

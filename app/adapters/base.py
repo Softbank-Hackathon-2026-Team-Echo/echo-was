@@ -17,9 +17,16 @@ config 키는 API 에서 camelCase, DB 에서 snake_case 다. 양식 하나가 �
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    model_serializer,
+)
 from pydantic.alias_generators import to_camel
 
 from app.core.exceptions import ErrorField, ExternalError, InvalidInputError
@@ -28,6 +35,19 @@ from app.enums import ConnectionErrorCode
 
 # 빈 문자열과 앞뒤 공백을 거부한다. 값을 바꾸지 않으므로(strip 안 함) 저장 값이 입력 값과 같다.
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1, pattern=r"^\S(?:.*\S)?$")]
+
+# 소문자 도메인(레이블 둘 이상). 예: aws-tokyo.echoport.uk
+DomainName = Annotated[
+    str,
+    StringConstraints(
+        max_length=125,
+        pattern=r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$",
+    ),
+]
+# 쿠버네티스 이름(RFC 1123 label). IngressClass·ALB 그룹 이름에 쓴다.
+KubernetesName = Annotated[
+    str, StringConstraints(pattern=r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+]
 
 # 쿠버네티스 /version 의 gitVersion 모양. 예: v1.31.0, v1.31.1-gke.1000, v1.31.4+k3s1
 KUBERNETES_VERSION_PATTERN = r"^v\d+\.\d+\.\d+([-+].*)?$"
@@ -80,9 +100,25 @@ class EnvironmentConfig(BaseModel):
 
     kind: ClassVar[str]
 
+    @model_serializer(mode="wrap")
+    def _drop_unset_optional_fields(self, handler: SerializerFunctionWrapHandler) -> Any:
+        """값이 없는(None) 선택 칸은 키로 남기지 않는다.
+
+        새 선택 칸을 쓰지 않는 환경의 저장 config·응답이 칸을 더하기 전과 글자까지 같다. 롤링 중
+        옛 파드(extra=forbid)가 읽어도 걸리지 않는다. 필수 칸은 None 이 될 수 없어 영향이 없다.
+        """
+        data = handler(self)
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
+
     @abstractmethod
     def display_location(self) -> str:
         """환경 카드(F3)의 '위치' 칸에 보일 값."""
+
+    def environment_host_domain(self) -> str | None:
+        """환경별 주소를 둘 하위 도메인. None 이면 대표 주소 도메인 아래 한 단계 형식을 쓴다."""
+        return None
 
 
 class ClusterInfo(BaseModel):

@@ -36,7 +36,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 원터치 배포 API | 있음 | 접수·목록·단건. 서비스 중·예비, 예비 자동 따라가기, 실행 1 + 대기 1 ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 배포 이력·되돌리기·로그 | 있음 | 이력 필터·`isCurrent`·`rollbackable`, 이력에서 고른 성공 버전으로 되돌리기(`trigger = ROLLBACK`, 예비 따라가기), 배포 작업 로그(DB)·빌드·실행 로그(실행기, 가짜) ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 일꾼 | 있음 | `python -m app.worker`. 할 일 표 + 임대 + 멱등 키로 복구 |
-| 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜 + 실제 일부) | 실제 빌드·배포·내리기는 인프라 3, 복제는 인프라 7 이후 실행기만 교체 ([docs/executors.md](docs/executors.md)). 실제 구현: HTTP 헬스체커, 고정 진입점 실행기(트래픽 비율·대표 주소·지표, `ENTRYPOINT_EXECUTOR_MODE=http`) |
+| 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜 + 실제) | 실제 구현: GitHub Actions 빌드 + 쿠버네티스 직접 반영·내리기(`EXECUTOR_MODE=real`, API 서버 3-2, 운영 기본값은 `fake`), HTTP 헬스체커, 고정 진입점 실행기(트래픽 비율·대표 주소·지표, `ENTRYPOINT_EXECUTOR_MODE=http`). 복제 확인은 인프라 7 이후 ([docs/executors.md](docs/executors.md)) |
 | 소스 저장소 클라이언트 | 있음 | 가짜(기본) + 실제 GitHub App(공개·비공개 저장소). 실제 App 생성·설치는 별도 승인 |
 | GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
 | 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 고정 5단계·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
@@ -237,7 +237,7 @@ GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 | 프론트 | `https://app.echoport.uk` | `FRONTEND_BASE_URL`, `FRONTEND_ALLOWED_ORIGINS` |
 | API | `https://api.echoport.uk` | 같은 사이트(`echoport.uk`)라 세션 쿠키가 붙는다 |
 | 고객 앱 대표 주소 | `https://{서비스}-{무작위 8자}.echoport.uk` (예 `shop-a1b2c3d4.echoport.uk`) | `PUBLIC_BASE_DOMAIN=echoport.uk` |
-| 고객 앱 환경별 주소 | `https://{서비스}-{환경}-{무작위 8자}.echoport.uk` (예 `shop-aws-seoul-a1b2c3d4.echoport.uk`) | 같은 설정. 8자는 서비스마다 하나(대표 주소와 같은 값) |
+| 고객 앱 환경별 주소 | 클라우드(환경 config `ingressDomain` 있음) `https://{서비스}-{무작위 8자}.{ingressDomain}` (예 `shop-a1b2c3d4.aws-tokyo.echoport.uk`) · 온프레(없음) `https://{서비스}-{환경}-{무작위 8자}.echoport.uk` (예 `shop-onprem-a1b2c3d4.echoport.uk`) | 같은 설정 + 환경 config. 8자는 서비스마다 하나(대표 주소와 같은 값). 클라우드는 `*.{ingressDomain}` 와일드카드 DNS·인증서 |
 | GitHub App 콜백 | `https://api.echoport.uk/api/v1/auth/github/callback` | `GITHUB_OAUTH_REDIRECT_URI` + App 의 Callback URL |
 | 세션 쿠키 이름 | `__Host-echo_session` | `SESSION_COOKIE_NAME=__Host-echo_session` (`SESSION_COOKIE_SECURE=true` 필수) |
 
@@ -298,8 +298,12 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
 | `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
-| `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 8자}.{도메인}` |
-| `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
+| `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{같은 8자}.{환경 ingressDomain}`(클라우드) 또는 `{서비스}-{환경}-{같은 8자}.{도메인}` |
+| `EXECUTOR_MODE` | `fake` | 빌드·배포·내리기 실행기. `real` 이면 GitHub Actions 빌드 + 쿠버네티스 직접 반영(필수: GitHub App, `SOURCE_CLIENT_MODE=github`, `HEALTH_CHECKER_MODE=http`). 운영 기본값은 실환경 확인(AC-9) 전까지 `fake` |
+| `EXECUTOR_AWS_ROLE_ARN`·`BUILD_GITHUB_REPOSITORY`·`BUILD_GITHUB_WORKFLOW`·`BUILD_GITHUB_REF` | (비움) · `Softbank-Hackathon-2026-Team-Echo/echo-was` · `customer-build.yml` · `main` | 실제 실행기: aws 기본 역할, 고객 앱 빌드 워크플로 |
+| `IMAGE_REGISTRY_MIRRORS` | (비움) | `<AR 접두>=<ECR 접두>,…`. aws 환경은 이미지 주소를 ECR 로 바꾼다(같은 digest) |
+| `CLOUDFLARE_API_TOKEN_REF`·`CLOUDFLARE_ZONE_ID` | `env:ECHO_SECRET_CLOUDFLARE_DNS_TOKEN` · (존 id) | 온프레 앱 주소 DNS 레코드(DNS 편집 권한만). 토큰은 비밀 참조만 |
+| `ONPREM_PULL_CHECK_SECONDS`·`ONPREM_PULL_MIN_REMAINING_SECONDS`·`DEPLOY_IMAGE_PULL_GRACE_SECONDS`·`KUBE_REQUEST_TIMEOUT_SECONDS`·`GOOGLE_METADATA_BASE_URL` | `300`·`1800`·`30`·`15`·`http://metadata.google.internal` | 온프레 이미지 받기 자격 갱신, `ErrImagePull` 유예, 창구 요청 제한 시간, 메타데이터 서버 |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 내부 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
 | `ENTRYPOINT_ENVIRONMENT_MAP`·`ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | (비움) · `5` | 환경 id → 진입점 환경 이름(비면 환경 종류 그대로), 요청 제한 시간 |
@@ -379,10 +383,10 @@ docker compose down                                   # DB 끄기 (데이터는 
 - **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
 - **이전 계획의 트래픽·지표·복제 확인은 가짜다**(`simulated: true`). 비율 칸·로그·판정 흐름은 실제이고, 실제 Envoy(인프라 6, 시연용은 늦으면 지민)·OpenTelemetry(인프라 9)·복제(인프라 7)가 붙으면 실행기만 바꾼다. 실제 연결 확인 전에는 이슈 #8 을 `In Progress` 로 둔다. 판정 최소 표본 수는 없다(실제 지표 연결 때 다시 본다). 예비·주력 동시 배포, 단계별 사람 승인, 비율 목록 변경은 하지 않는다.
 - AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 거부 기록은 있다. 거부 밖의 행위 기록·감사 로그 조회는 API 서버 7(되돌리기 요청자 기록도 그때).
-- **빌드·실행 로그는 가짜 실행기가 만든 줄이다**(`simulated: true`). 실제 빌드·클러스터 로그는 인프라 3·5 이후 실행기만 바꿔 연결한다(이슈 #4 는 그때까지 `In Progress`). 실제 실행기가 없는 모드(`EXECUTOR_MODE != fake`)에서는 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
+- **빌드·실행 로그는 기본(가짜 모드)에서 가짜 실행기가 만든 줄이다**(`simulated: true`). `EXECUTOR_MODE=real` 이면 Actions 잡 로그·앱 파드 로그를 즉석으로 읽는다(실행기 묶음은 API 프로세스당 하나). 가짜로 만든 기록을 실제 모드에서 읽으면 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
 - 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
 - 어댑터는 **가짜**다. 접속 확인·클러스터 정보는 고정 값이고 `simulated: true` 로 표시한다. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업에서 같은 인터페이스·계약 검사로 바꾼다.
-- **원터치 배포의 실행은 가짜다.** 빌드·배포·대표 주소 연결·되돌리기·내리기는 가짜 실행기가 흉내 내고 결과에 `simulated: true` 를 저장한다. 흐름·상태·DB 기록·계약은 실제다. 실제 실행기(인프라 3 Argo CD 파이프라인·인프라 5 고정 진입점 프록시)가 준비되면 실행기만 바꾼다. 이 이슈(#3)의 완료 기준은 실제 배포까지라 실제 실행기 연결 전에는 이슈를 닫지 않는다.
+- **원터치 배포의 실제 실행기는 있지만 운영 기본값은 가짜다.** `EXECUTOR_MODE=real` 이면 GitHub Actions 빌드(워크플로 본문은 인프라 담당) + EKS·GKE·온프레 k3s 직접 반영이다(API 서버 3-2, GitOps 는 2단계). 저장소 밖 준비(빌드 워크플로·공유 인그레스·인증서·DNS·App 권한·AR 읽기 권한)와 실환경 확인(SPEC AC-9) 전까지 `fake` 로 둔다. 이 이슈(#3)는 실환경 확인 뒤 닫는다. 실제 실행기는 앱 네임스페이스 밖을 쓰지 않지만, GKE·EKS 신원 자체는 넓은 권한이라 이 제한은 코드가 지킨다.
 - 대표 주소의 실제 헬스 확인은 실제 라우터 연결 뒤에 더한다(지금은 환경별 주소만 확인). 트래픽 전환은 이전 계획(API 서버 8)이 한다.
 - 일꾼이 없으면 배포 요청은 `QUEUED` 에 남는다. `/readyz` 는 일꾼을 보지 않는다.
 - 비밀값은 `env:` 저장소만 실제로 읽는다. `k8s:`·`aws-sm:`·`gcp-sm:` 은 형식만 받고 접속 확인은 `SECRET_STORE_UNSUPPORTED` 로 실패한다.
