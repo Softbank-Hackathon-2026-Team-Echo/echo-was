@@ -136,6 +136,9 @@ data:
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
+  # 시연 조직 echo-demo 의 환경 접속 비밀 자리 표시(실제 비밀 아님). 배포 실행기가 가짜(fake)인 동안
+  # 환경 연결 확인은 비밀이 "있는지"만 본다. 실제 실행기(EXECUTOR_MODE=real)로 바꿀 때 지운다.
+  ECHO_SECRET_ECHO_DEMO__FAKE_KUBECONFIG: fake-executor-placeholder
   SOURCE_CLIENT_MODE: github
   GITHUB_APP_ID: "5574944"
   GITHUB_APP_PRIVATE_KEY_REF: env:ECHO_SECRET_GITHUB_APP_PRIVATE_KEY
