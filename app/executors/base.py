@@ -6,7 +6,8 @@
 - HealthChecker: 환경별 퍼블릭 주소 + 헬스 경로를 한 번 확인한다.
 - TeardownExecutor: 연결 하나를 클러스터에서 내린다.
 - TrafficExecutor: 대표 주소의 트래픽을 여러 연결에 비율로 나눠 보낸다(이전 계획, 실제는 Envoy).
-- MetricsProvider: 연결 하나의 구간 지표(오류율·p95·요청 수)를 읽는다(실제는 OpenTelemetry).
+- MetricsProvider: 연결 하나의 누적 요청·5xx 카운터(판정용)와 구간 지표(오류율·p95·요청 수,
+  p95 참고용)를 읽는다(실제는 고정 진입점 Envoy 의 GET /counters·GET /summary).
 - DataSyncChecker: 출발 → 도착 데이터 복제 지연을 읽는다(실제는 인프라 7).
 
 모든 시작 호출은 우리가 먼저 정한 멱등 키를 받는다(빌드 = builds.id, 배포·되돌리기 =
@@ -208,6 +209,31 @@ class MetricsUnavailable:
 type MetricsResult = Metrics | MetricsUnavailable
 
 
+@dataclass(frozen=True, slots=True)
+class RequestCounts:
+    """진입점이 켜진 뒤 그 환경으로 보낸 누적 요청 수와 그중 5xx 응답 수.
+
+    단조 증가가 원칙이다. 줄어들면(진입점 재시작) 부르는 쪽이 재시작으로 처리한다.
+    errors_5xx <= requests 는 보장하지 않는다.
+    """
+
+    requests: int
+    errors_5xx: int
+
+
+@dataclass(frozen=True, slots=True)
+class CountsUnavailable:
+    """카운터를 읽지 못했다(일시 오류).
+
+    code 는 실제 구현의 실패 코드(예: ENTRYPOINT_UNREACHABLE)다. 가짜는 None.
+    """
+
+    code: str | None = None
+
+
+type CountsResult = RequestCounts | CountsUnavailable
+
+
 @dataclass(frozen=True)
 class DataSyncLag:
     seconds: float
@@ -364,7 +390,18 @@ class MetricsProvider(Protocol):
     def simulated(self) -> bool: ...
 
     async def read(self, target: DeployTarget, since: datetime, until: datetime) -> MetricsResult:
-        """[since, until) 구간의 지표. 읽을 수 없으면 MetricsUnavailable(판단 불가)."""
+        """[since, until) 구간의 지표. 읽을 수 없으면 MetricsUnavailable.
+
+        이전 판정에는 쓰지 않고 단계 결과의 p95 참고 값으로만 쓴다.
+        """
+        ...
+
+    async def read_counts(self, target: DeployTarget) -> CountsResult:
+        """target 환경의 누적 요청·5xx 카운터. 상태를 바꾸지 않는 조회다.
+
+        값은 음수가 아니고 단조 증가가 원칙이다(재시작하면 0부터 다시 쌓인다). 읽지 못하면
+        CountsUnavailable 이고, 부르는 쪽은 일시 오류로 보고 다시 읽는다.
+        """
         ...
 
 

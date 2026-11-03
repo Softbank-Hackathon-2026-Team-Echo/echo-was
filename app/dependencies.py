@@ -234,7 +234,9 @@ def get_migration_plan_service(
         session=session,
         clock=clock,
         executor_mode=settings.executor_mode,
-        observe_seconds_default=settings.migration_observe_seconds_default,
+        required_requests_default=settings.migration_required_requests_default,
+        max_wait_seconds_default=settings.migration_max_wait_seconds_default,
+        expected_rps=settings.migration_expected_rps,
         step_overhead_seconds=settings.migration_step_overhead_seconds,
         approval_ttl_seconds=settings.migration_plan_approval_ttl_seconds,
     )

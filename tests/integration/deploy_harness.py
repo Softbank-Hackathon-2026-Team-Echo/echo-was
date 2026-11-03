@@ -119,7 +119,7 @@ def make_fake_executors(clock: FakeClock) -> FakeExecutors:
         health=ScriptedHealthChecker(),
         teardown=FakeTeardownExecutor(clock, 0),
         traffic=traffic,
-        metrics=FakeMetricsProvider(traffic.weight_of),
+        metrics=FakeMetricsProvider(clock, traffic.weight_of),
         data_sync=FakeDataSyncChecker(),
     )
 

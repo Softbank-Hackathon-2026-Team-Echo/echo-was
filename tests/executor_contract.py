@@ -8,6 +8,7 @@
   없음, 알아보지 못하는 cursor 는 InvalidLogCursor.
 - 트래픽(이전 계획): 같은 멱등 키면 같은 결과, 비율 합계가 100 이 아니면 ValueError.
 - 지표·데이터 확인: 같은 입력이면 같은 값(결정적), 값 범위(오류율 0~100, p95·요청 수·지연 ≥ 0).
+- 누적 카운터(read_counts): RequestCounts, 음수 없음, 시간이 지나도 줄지 않음.
 """
 
 import re
@@ -37,6 +38,7 @@ from app.executors.base import (
     MainRoute,
     Metrics,
     MetricsProvider,
+    RequestCounts,
     Reverted,
     SourceAccess,
     TeardownExecutor,
@@ -239,6 +241,26 @@ async def assert_metrics_provider_contract(provider: MetricsProvider) -> Metrics
     assert 0 <= first.error_rate_percent <= 100
     assert first.p95_ms >= 0 and first.request_count >= 0
     return first
+
+
+async def assert_counts_contract(
+    provider: MetricsProvider, advance: Advance
+) -> tuple[RequestCounts, RequestCounts]:
+    """누적 카운터: RequestCounts 이고 음수가 없으며, 시간이 지나도 줄지 않는다(단조 증가).
+
+    실제 구현(진입점 GET /counters)은 재시작하면 줄 수 있지만 계약 시험 동안은 재시작하지 않는다.
+    읽지 못하면 CountsUnavailable 이다(구현마다 만드는 방법이 달라 여기서 보지 않는다).
+    """
+    first = await provider.read_counts(STANDBY_TARGET)
+    advance()
+    second = await provider.read_counts(STANDBY_TARGET)
+
+    assert isinstance(first, RequestCounts) and isinstance(second, RequestCounts)
+    for counts in (first, second):
+        assert counts.requests >= 0 and counts.errors_5xx >= 0
+    assert second.requests >= first.requests
+    assert second.errors_5xx >= first.errors_5xx
+    return first, second
 
 
 async def assert_data_sync_checker_contract(checker: DataSyncChecker) -> DataSyncLag:

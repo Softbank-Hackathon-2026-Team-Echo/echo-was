@@ -362,6 +362,8 @@ class MigrationErrorCode(StrEnum):
     ABORTED = "ABORTED"
     WORKER_LOST = "WORKER_LOST"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # 도착에 갔어야 할 만큼 출발에 요청이 왔는데 도착이 거의 받지 못했다(진입점이 비율을 안 따름).
+    TARGET_NOT_RECEIVING = "TARGET_NOT_RECEIVING"
 
 
 class MigrationRollbackStatus(StrEnum):
@@ -373,13 +375,28 @@ class MigrationRollbackStatus(StrEnum):
 
 
 class MigrationSimulateReason(StrEnum):
-    """가짜 모드에서 단계 하나를 일부러 실패시킬 원인(simulate.reason)."""
+    """가짜 모드에서 단계 하나를 일부러 실패시킬(또는 트래픽 적음으로 넘길) 원인(simulate.reason).
+
+    LATENCY 는 저장된 옛 계획을 읽으려고 값만 남긴다. 요청으로는 받지 않고(422) 처리기는 아무
+    실패도 만들지 않는다(p95 는 판정에 쓰지 않는다).
+    """
 
     ERROR_RATE = "ERROR_RATE"
     LATENCY = "LATENCY"
     HEALTH = "HEALTH"
     DATA_LAG = "DATA_LAG"
     TRAFFIC = "TRAFFIC"
+    TARGET_NOT_RECEIVING = "TARGET_NOT_RECEIVING"
+    LOW_TRAFFIC = "LOW_TRAFFIC"
+
+
+class MigrationJudgeReason(StrEnum):
+    """비율 단계가 건수 세기를 끝내고 판정(JUDGE)으로 넘어간 이유(step_results[i].judgeReason)."""
+
+    # 도착이 필요 건수를 오류 허용 안에서 처리했다.
+    COUNT_REACHED = "COUNT_REACHED"
+    # 최대 대기가 끝날 때까지 건수를 못 채웠지만 서비스 전체가 조용했다(헬스체크로 통과).
+    LOW_TRAFFIC = "LOW_TRAFFIC"
 
 
 class MigrationLogCode(StrEnum):
@@ -408,4 +425,5 @@ class MigrationLogCode(StrEnum):
     ROLLBACK_APPLY_FAILED = "ROLLBACK_APPLY_FAILED"
     ROLLBACK_FAILED = "ROLLBACK_FAILED"
     FAILED = "FAILED"
+    COUNTERS_RESET = "COUNTERS_RESET"
     LOG_TRUNCATED = "LOG_TRUNCATED"

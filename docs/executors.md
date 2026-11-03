@@ -22,7 +22,7 @@
 | `TeardownExecutor` | `remove(target, idempotency_key) -> external_ref` | |
 | | `poll(external_ref)` | `TeardownPending` · `TeardownRemoved` · `TeardownFailed(code)` |
 | `TrafficExecutor` | `set_weights(route, weights: tuple[WeightedTarget(target, weight)], idempotency_key)` | `TrafficApplied(applied_at)` · `TrafficFailed(code)` (API 서버 8) |
-| `MetricsProvider` | `read(target, since, until)` | `Metrics(error_rate_percent, p95_ms, request_count)` · `MetricsUnavailable` (API 서버 8) |
+| `MetricsProvider` | `read_counts(target)` · `read(target, since, until)` | `RequestCounts(requests, errors_5xx)` · `CountsUnavailable(code)` (판정용 누적 카운터, API 서버 8-1) · `Metrics(error_rate_percent, p95_ms, request_count)` · `MetricsUnavailable` (p95 참고용) |
 | `DataSyncChecker` | `replication_lag(source, target)` | `DataSyncLag(seconds)` · `DataSyncUnavailable` (API 서버 8) |
 
 모든 실행기는 `simulated` 속성을 가진다(가짜면 true). 결과의 `simulated` 는 요청·빌드 행에 저장된다.
@@ -102,10 +102,54 @@
 - 같은 키면 같은 결과다. 다시 시작한 일꾼은 `traffic_requested_at`(또는 `rollback_requested_at`)만 있고 결과가 없으면 같은 키로 다시 부른다.
 - 연결안: Envoy 가중치 클러스터(인프라 6). 같은 키를 Envoy 설정 버전 이름에 넣어 두 번 적용하지 않는다.
 
-### 지표 (`MetricsProvider`, API 서버 8)
+### 지표·요청 카운터 (`MetricsProvider`, API 서버 8 · 8-1)
 
-- 연결 하나의 `[since, until)` 구간 오류율(%)·p95(ms)·요청 수. 일꾼은 지켜보기 구간(비율 적용 시각 ~ 판정 시각)을 넘긴다. 읽을 수 없으면 `MetricsUnavailable` 이고 판정은 실패(`METRICS_UNAVAILABLE`, 판단 불가 → 롤백)다.
-- 상태를 바꾸지 않는 조회다. 연결안: OpenTelemetry 수집기(인프라 9).
+메서드가 둘이다. 이전 판정은 **누적 카운터(`read_counts`)** 로 하고, 구간 지표(`read`)는 p95 참고 값으로만 쓴다(8-1). 둘 다 상태를 바꾸지 않는 조회이고 트랜잭션 밖에서 부른다. 실제 구현은 고정 진입점의 `EntrypointMetricsProvider`(#17, `app/executors/entrypoint.py`) 한 클래스가 두 메서드를 함께 구현한다. 지금 `read` 는 실제 구현(`GET /summary`), `read_counts` 는 자리값(`CountsUnavailable`)이다(아래 "고정 진입점 실행기").
+
+```python
+@dataclass(frozen=True, slots=True)
+class RequestCounts:
+    requests: int  # 진입점이 켜진 뒤 그 환경으로 보낸 누적 요청 수(≥ 0)
+    errors_5xx: int  # 그중 5xx 응답 수(≥ 0, ≤ requests 보장 안 함)
+
+
+@dataclass(frozen=True, slots=True)
+class CountsUnavailable:
+    code: str | None = None  # 실제 구현의 실패 코드(예: ENTRYPOINT_UNREACHABLE), 가짜는 None
+
+
+type CountsResult = RequestCounts | CountsUnavailable
+
+
+class MetricsProvider(Protocol):
+    async def read(
+        self, target: DeployTarget, since: datetime, until: datetime
+    ) -> MetricsResult: ...
+    async def read_counts(self, target: DeployTarget) -> CountsResult: ...
+```
+
+**`read_counts(target)` 계약**
+
+- `target` 연결이 올라간 **환경**의 누적 요청 수와 그중 5xx 수를 돌려준다(진입점의 환경 키 `aws`·`gcp` 를 `target` 의 값 — 예: `environment_kind` — 로 고르는 방법은 실제 구현이 정한다). 구간 값이 아니라 진입점이 켜진 뒤의 **누적값**이다. 일꾼이 두 번 읽은 차이로 센다.
+- 값은 음수가 아니고 **단조 증가**가 원칙이다. 진입점이 재시작하면 0부터 다시 쌓여 값이 줄 수 있다 — 그대로 돌려준다(줄어든 것을 재시작으로 처리하는 것은 일꾼 몫, 로그 `COUNTERS_RESET`). 실행기가 값을 보정하지 않는다.
+- 읽지 못하면(진입점에 닿지 못함·시간 초과·응답 모양이 다름·그 환경 키가 없음) 예외 대신 `CountsUnavailable(code)` 를 돌려준다. 일꾼은 일시 오류로 보고 다음 주기(`MIGRATION_COUNT_POLL_SECONDS`)에 다시 읽는다. 마감 때까지 도착을 한 번도 못 읽었거나 마지막 성공이 `MIGRATION_COUNTS_STALE_SECONDS` 보다 오래되면 판단 불가(`METRICS_UNAVAILABLE`)로 롤백한다.
+- 일꾼은 단계마다 출발·도착을 각각 부른다(1초마다 2번). 한 번의 호출은 짧은 제한 시간(1초 안쪽)을 권장한다.
+- `code` 에 비밀값·토큰·응답 원문을 넣지 않는다.
+
+**`GET /counters` 매핑(실제 구현, #17 의 `EntrypointMetricsProvider` 에 더할 몫 — 지금은 자리값)**
+
+진입점 응답 `{"ts": "...", "envs": {"aws": {"requests": 12345, "errors_5xx": 3}, "gcp": {...}}}` 를 이렇게 바꾼다.
+
+| 진입점 | `RequestCounts` | 비고 |
+|---|---|---|
+| `envs[<환경 키>].requests` | `requests` | 환경 키(`aws`·`gcp`)는 `target` 으로 고른다. 키가 없으면 `CountsUnavailable` |
+| `envs[<환경 키>].errors_5xx` | `errors_5xx` | |
+| `ts` | (쓰지 않음) | 오래된 읽기 판단은 일꾼이 자기 시계(마지막 성공 읽기 시각)로 한다 |
+| HTTP 실패·시간 초과·JSON 모양 다름 | `CountsUnavailable(code)` | 예: `ENTRYPOINT_UNREACHABLE` |
+
+**전제(환경당 고객 앱 1개)**: 카운터와 가중치가 진입점 전체·환경 단위라, 같은 환경에 고객 앱이 둘 이상이면 다른 앱의 요청이 섞여 판정이 틀린다. 시연은 고객 앱 1개라 코드로 막지 않는다(앱별 라우트·카운터는 진입점 후속).
+
+**`read(target, since, until)`**: 연결 하나의 `[since, until)` 구간 오류율(%)·p95(ms)·요청 수. 일꾼은 비율 단계를 끝낼 때(통과·실패 모두) `until = 지금`, `since = 지금 − MIGRATION_P95_REFERENCE_WINDOW_SECONDS`(30초)로 한 번 불러 `p95Ms` 를 참고로 남긴다. `MetricsUnavailable` 이어도 판정에 영향이 없다(`p95Ms = null`). 실제 구현: 진입점 `GET /summary?window=30s`(#17, 구간 초를 반올림해 넘긴다).
 
 ### 데이터 확인 (`DataSyncChecker`, API 서버 8)
 
@@ -131,7 +175,10 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 |---|---|---|
 | `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
 | `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
-| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable` |
+| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable`. 이전 처리기는 p95 참고용으로 `window=30s`(`MIGRATION_P95_REFERENCE_WINDOW_SECONDS`)를 부른다 |
+| `EntrypointMetricsProvider.read_counts` | (부르지 않음, 자리값) | 늘 `CountsUnavailable("ENTRYPOINT_COUNTS_NOT_IMPLEMENTED")`. 실제 구현은 `GET /counters`(위 `read_counts` 계약), 동옥 후속 |
+
+**`read_counts` 미구현: http 모드에서는 비율 단계가 `METRICS_UNAVAILABLE`로 롤백된다(이전 `/summary` 5초 판정과 같은 결과).** 카운터를 한 번도 읽지 못해 최대 대기(기본 30초) 끝에 판단 불가가 되기 때문이다. 가짜 모드(`ENTRYPOINT_EXECUTOR_MODE=fake`)는 영향이 없다.
 
 **제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
 
@@ -147,9 +194,10 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 | 대표 주소 | 늘 적용(`applied_at` = 그 시각) |
 | 헬스체크 | 늘 2xx(`HEALTH_CHECKER_MODE=fake`) |
 | 트래픽 | 바로 `TrafficApplied(지금 시각)`. 같은 키면 처음 결과. 연결마다 마지막으로 적용한 비율을 기억한다(가짜 지표가 읽는다) |
-| 지표 | 오류율 0.1% · p95 120ms · 요청 수 `max(1, round(10 × 비율/100 × 창 초))` (결정적) |
+| 지표 | 오류율 0.1% · p95 120ms · 요청 수 `max(1, round(rps × 비율/100 × 창 초))` (결정적, rps = `MIGRATION_EXPECTED_RPS` 기본 50) |
+| 요청 카운터 | 연결마다 처음 읽은 순간 0 에서 시작해, 읽을 때마다 "rps × 그 연결의 지금 비율/100 × 지난 초"를 더한다(주입 시계, 비율이 바뀌어도 줄지 않음). 5xx 는 0 |
 | 데이터 확인 | 복제 지연 0.3초 |
-| 이전 실패 주입 | 시험만: 트래픽 `fail_when(키 → 참이면 실패)`, 지표·데이터 확인 `unavailable = True`. 사용자 계획 단위 실패는 `simulate {failAtStep, reason}`(처리기가 실패 값을 만들고 실행기를 부르지 않는다) |
+| 이전 실패 주입 | 시험만: 트래픽 `fail_when(키 → 참이면 실패)`, 지표·데이터 확인 `unavailable = True`, 카운터 `freeze`(고정)·`add_errors`(5xx 더하기)·`set_counts`(값 바꾸기, 줄이면 재시작 흉내)·`fail_counts`(읽기 실패, 그동안에도 쌓임) — 연결 id 로 가리킨다. 사용자 계획 단위 실패는 `simulate {failAtStep, reason}`(처리기가 값을 만들고 실행기를 부르지 않는다) |
 | 실패 주입 | 시험만: 인스턴스를 만들 때 실패·멈춤 대상 커밋·연결을 넣는다(운영 설정에는 없다). 사용자 요청 단위 실패는 `simulate.failAt` |
 | 호출 기록 | `calls`(호출마다 멱등 키), `operation_keys`(만든 작업) — 시험이 "같은 키는 같은 작업"을 확인한다 |
 | 로그 | 빌드 5~7줄(저장소 받기·이미지 만들기·digest 기록 등), 실행 5줄(이미지 받기·서버 시작·헬스 경로 응답 등). 줄 시각은 `external_ref` 의 시작 시각부터 2초 간격(시계를 보지 않는다), cursor 는 줄 번호 문자열. 실패 주입 대상이면 마지막 줄이 `ERROR` |

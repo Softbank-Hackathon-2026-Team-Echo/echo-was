@@ -80,8 +80,10 @@ from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
     CONDITION_MAX_P95_MS,
     CONDITION_MAX_REPLICATION_LAG,
+    SHIFT_STEPS,
     SIMULATE_FAIL_AT_STEP,
     SIMULATE_REASON,
+    STEP_REQUIRED_REQUESTS,
     build_steps,
     expected_seconds,
     fingerprint_changes,
@@ -109,7 +111,9 @@ class _Outcome(StrEnum):
 @dataclass(frozen=True)
 class CreateMigrationPlanCommand:
     target_environment_id: uuid.UUID
-    observe_seconds: int | None
+    # 비율 단계(10·50·100%) 순 필요 건수 3개와 단계 최대 대기(초). None 이면 설정 기본값.
+    required_requests: Sequence[int] | None
+    max_wait_seconds: int | None
     max_error_rate_percent: float
     max_p95_ms: int
     max_replication_lag_seconds: float
@@ -162,14 +166,18 @@ class MigrationPlanService:
         session: AsyncSession,
         clock: Clock,
         executor_mode: ExecutorMode,
-        observe_seconds_default: int,
+        required_requests_default: Sequence[int],
+        max_wait_seconds_default: int,
+        expected_rps: int,
         step_overhead_seconds: int,
         approval_ttl_seconds: int,
     ) -> None:
         self._session = session
         self._clock = clock
         self._executor_mode = executor_mode
-        self._observe_seconds_default = observe_seconds_default
+        self._required_requests_default = tuple(required_requests_default)
+        self._max_wait_seconds_default = max_wait_seconds_default
+        self._expected_rps = expected_rps
         self._step_overhead_seconds = step_overhead_seconds
         self._approval_ttl = timedelta(seconds=approval_ttl_seconds)
         self._services = ServiceRepository(session)
@@ -243,7 +251,10 @@ class MigrationPlanService:
                 now,
                 data={
                     "expectedSeconds": plan.expected_seconds,
-                    "observeSeconds": plan.observe_seconds,
+                    "requiredRequests": [
+                        plan.steps[index][STEP_REQUIRED_REQUESTS] for index in SHIFT_STEPS
+                    ],
+                    "maxWaitSeconds": plan.observe_seconds,
                 },
             )
             view = (await self._views([plan]))[0]
@@ -259,8 +270,11 @@ class MigrationPlanService:
         command: CreateMigrationPlanCommand,
         now: datetime,
     ) -> MigrationPlan:
-        observe_seconds = command.observe_seconds or self._observe_seconds_default
-        steps = build_steps(observe_seconds, self._step_overhead_seconds)
+        required_requests = tuple(command.required_requests or self._required_requests_default)
+        max_wait_seconds = command.max_wait_seconds or self._max_wait_seconds_default
+        steps = build_steps(
+            required_requests, max_wait_seconds, self._expected_rps, self._step_overhead_seconds
+        )
         simulate = (
             {
                 SIMULATE_FAIL_AT_STEP: command.simulate_fail_at_step,
@@ -282,7 +296,8 @@ class MigrationPlanService:
                 CONDITION_MAX_P95_MS: command.max_p95_ms,
                 CONDITION_MAX_REPLICATION_LAG: command.max_replication_lag_seconds,
             },
-            observe_seconds=observe_seconds,
+            # 8-1 부터 이 칸에는 단계 최대 대기(maxWaitSeconds)를 적는다.
+            observe_seconds=max_wait_seconds,
             expected_seconds=expected_seconds(steps),
             fingerprint={},
             simulate=simulate,

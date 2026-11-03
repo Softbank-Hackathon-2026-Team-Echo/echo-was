@@ -5,11 +5,18 @@ JSON 이름은 camelCase, 모든 응답 칸은 항상 있고 값이 없으면 nu
 
 import uuid
 from datetime import datetime
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
+from app.core.config import (
+    MIGRATION_MAX_MAX_WAIT_SECONDS,
+    MIGRATION_MAX_REQUIRED_REQUESTS,
+    MIGRATION_MIN_MAX_WAIT_SECONDS,
+    MIGRATION_MIN_REQUIRED_REQUESTS,
+    MIGRATION_SHIFT_STEP_COUNT,
+)
 from app.enums import (
     LogLevel,
     MigrationErrorCode,
@@ -17,11 +24,13 @@ from app.enums import (
     MigrationRollbackStatus,
     MigrationSimulateReason,
     MigrationStepKind,
+    MigrationStepPhase,
     MigrationStepStatus,
 )
-from app.models import User
-from app.models.migration_plan import LAST_STEP_INDEX, MAX_OBSERVE_SECONDS, MIN_OBSERVE_SECONDS
+from app.models import MigrationPlan, User
+from app.models.migration_plan import LAST_STEP_INDEX
 from app.schemas.response import ApiModel, ApiRequestModel
+from app.services.migration_counting import StepCounting
 from app.services.migration_log_messages import MIGRATION_ERROR_MESSAGES
 from app.services.migration_plan_service import MigrationLogPageView, MigrationPlanView
 from app.services.migration_plan_support import (
@@ -32,20 +41,43 @@ from app.services.migration_plan_support import (
     DEFAULT_MAX_ERROR_RATE_PERCENT,
     DEFAULT_MAX_P95_MS,
     DEFAULT_MAX_REPLICATION_LAG_SECONDS,
+    RESULT_COUNTING,
     RESULT_FAILURE_CODE,
     RESULT_FINISHED_AT,
     RESULT_METRICS,
     RESULT_STARTED_AT,
     RESULT_STATUS,
+    SHIFT_STEPS,
     STEP_EXPECTED_SECONDS,
     STEP_INDEX,
     STEP_KIND,
-    STEP_OBSERVE_SECONDS,
+    STEP_REQUIRED_REQUESTS,
     STEP_SOURCE_WEIGHT,
     STEP_TARGET_WEIGHT,
+    step_kind,
 )
 
 SIMULATE_STEP_MISMATCH_REASON = "SIMULATE_REASON_STEP_MISMATCH"
+SIMULATE_REASON_NOT_SUPPORTED = "SIMULATE_REASON_NOT_SUPPORTED"
+# to_camel 은 errors_5xx 를 errors5Xx 로 만든다. 계약 이름(errors5xx)을 직접 준다.
+ERRORS_5XX_ALIAS = "errors5xx"
+ALLOWED_ERRORS_5XX_ALIAS = "allowedErrors5xx"
+
+# simulate 이유마다 고를 수 있는 단계. 단계 4 는 출발 비율이 0이라 도착 미수신을 만들 수 없다.
+_SIMULATE_STEPS: dict[MigrationSimulateReason, frozenset[int]] = {
+    MigrationSimulateReason.ERROR_RATE: frozenset(SHIFT_STEPS),
+    MigrationSimulateReason.HEALTH: frozenset(SHIFT_STEPS),
+    MigrationSimulateReason.TRAFFIC: frozenset(SHIFT_STEPS),
+    MigrationSimulateReason.LOW_TRAFFIC: frozenset(SHIFT_STEPS),
+    MigrationSimulateReason.TARGET_NOT_RECEIVING: frozenset(SHIFT_STEPS[:2]),
+    MigrationSimulateReason.DATA_LAG: frozenset({DATA_SYNC_STEP}),
+}
+# 저장된 옛 계획을 읽으려고 enum 값만 남긴 이유(요청으로는 받지 않는다).
+_REMOVED_SIMULATE_REASONS = frozenset({MigrationSimulateReason.LATENCY})
+
+type RequiredRequestsItem = Annotated[
+    int, Field(ge=MIGRATION_MIN_REQUIRED_REQUESTS, le=MIGRATION_MAX_REQUIRED_REQUESTS)
+]
 
 
 class RollbackConditionsRequest(ApiRequestModel):
@@ -59,28 +91,42 @@ class RollbackConditionsRequest(ApiRequestModel):
 
 
 class MigrationSimulateRequest(ApiRequestModel):
-    """가짜 실행기 모드에서만 받는다. failAtStep 단계를 reason 으로 일부러 실패시킨다.
+    """가짜 실행기 모드에서만 받는다. failAtStep 단계를 reason 대로 실패(또는 트래픽 적음)시킨다.
 
-    DATA_LAG 는 데이터 확인 단계(3)만, 그 밖의 reason 은 비율 단계(1·2·4)만 고를 수 있다.
+    DATA_LAG 는 데이터 확인 단계(3)만, TARGET_NOT_RECEIVING 은 비율 단계 1·2만, 그 밖의 reason 은
+    비율 단계(1·2·4)만 고를 수 있다. LATENCY 는 받지 않는다(p95 는 판정에 쓰지 않는다).
     """
 
     fail_at_step: int = Field(ge=1, le=LAST_STEP_INDEX)
     reason: MigrationSimulateReason
 
+    @field_validator("reason")
+    @classmethod
+    def _reject_removed_reason(cls, value: MigrationSimulateReason) -> MigrationSimulateReason:
+        if value in _REMOVED_SIMULATE_REASONS:
+            raise PydanticCustomError("simulate_reason_removed", SIMULATE_REASON_NOT_SUPPORTED)
+        return value
+
     @model_validator(mode="after")
     def _check_reason_matches_step(self) -> Self:
-        is_data_step = self.fail_at_step == DATA_SYNC_STEP
-        if is_data_step != (self.reason is MigrationSimulateReason.DATA_LAG):
+        if self.fail_at_step not in _SIMULATE_STEPS[self.reason]:
             raise PydanticCustomError("simulate_step_mismatch", SIMULATE_STEP_MISMATCH_REASON)
         return self
 
 
 class CreateMigrationPlanRequest(ApiRequestModel):
-    """이전 계획 만들기. observeSeconds 를 빼면 설정 기본값(5초)이다."""
+    """이전 계획 만들기.
+
+    requiredRequests(비율 10·50·100% 단계 순 필요 건수 3개)·maxWaitSeconds(단계 최대 대기)를
+    빼면 설정 기본값(20·50·50건, 30초)이다.
+    """
 
     target_environment_id: uuid.UUID
-    observe_seconds: int | None = Field(
-        default=None, ge=MIN_OBSERVE_SECONDS, le=MAX_OBSERVE_SECONDS
+    required_requests: list[RequiredRequestsItem] | None = Field(
+        default=None, min_length=MIGRATION_SHIFT_STEP_COUNT, max_length=MIGRATION_SHIFT_STEP_COUNT
+    )
+    max_wait_seconds: int | None = Field(
+        default=None, ge=MIGRATION_MIN_MAX_WAIT_SECONDS, le=MIGRATION_MAX_MAX_WAIT_SECONDS
     )
     rollback_conditions: RollbackConditionsRequest = Field(
         default_factory=RollbackConditionsRequest
@@ -98,13 +144,23 @@ class UserRefResponse(ApiModel):
 
 
 class StepMetricsResponse(ApiModel):
-    """단계 실제 결과의 지표. 그 단계가 재지 않은 값은 null."""
+    """단계 실제 결과의 지표. 그 단계가 재지 않은 값은 null.
 
-    health_status: str | None
-    error_rate_percent: float | None
-    p95_ms: float | None
-    request_count: int | None
-    replication_lag_seconds: float | None
+    비율 단계: requestCount·errors5xx = 도착이 센 요청·5xx, allowedErrors5xx = 허용 5xx,
+    errorRatePercent = 5xx ÷ 요청 × 100(요청 0이면 null), sourceRequestCount = 출발이 센 요청,
+    lowTraffic = 최대 대기 안에 건수를 못 채웠지만 서비스 전체가 조용해 헬스체크로 통과했는가,
+    p95Ms = 참고 값(판정에 쓰지 않음). 데이터 확인 단계는 replicationLagSeconds 만.
+    """
+
+    health_status: str | None = None
+    error_rate_percent: float | None = None
+    p95_ms: float | None = None
+    request_count: int | None = None
+    errors_5xx: int | None = Field(default=None, alias=ERRORS_5XX_ALIAS)
+    allowed_errors_5xx: int | None = Field(default=None, alias=ALLOWED_ERRORS_5XX_ALIAS)
+    source_request_count: int | None = None
+    low_traffic: bool | None = None
+    replication_lag_seconds: float | None = None
 
 
 class StepResultResponse(ApiModel):
@@ -116,13 +172,18 @@ class StepResultResponse(ApiModel):
 
 
 class MigrationStepResponse(ApiModel):
-    """계획 값(index·kind·비율·지켜보기·예상 시간)과 실제 결과(result)를 나란히 싣는다."""
+    """계획 값(index·kind·비율·필요 건수·최대 대기·예상 시간)과 실제 결과(result)를 나란히 싣는다.
+
+    requiredRequests·maxWaitSeconds 는 비율 단계만 값이 있다. 8-1 전에 만든 계획의
+    requiredRequests 는 null 이다.
+    """
 
     index: int
     kind: MigrationStepKind
     source_weight: int | None
     target_weight: int | None
-    observe_seconds: int | None
+    required_requests: int | None
+    max_wait_seconds: int | None
     expected_seconds: int
     result: StepResultResponse
 
@@ -133,6 +194,55 @@ class RollbackConditionsResponse(ApiModel):
     max_replication_lag_seconds: float
     # 헬스체크 실패는 늘 롤백 조건이다.
     health_check: bool = True
+    # maxP95Ms 는 참고용이다(판정에 쓰지 않는다).
+    p95_advisory: bool = True
+
+
+class MigrationProgressResponse(ApiModel):
+    """지금 비율 단계의 건수 세기 진행(예: 도착 처리 14/50건 · 5xx 0/허용 1).
+
+    requests·errors5xx = 도착이 센 요청·5xx, sourceRequests = 출발이 센 요청, startedAt = 비율을
+    적용해 세기 시작한 시각, deadlineAt = 최대 대기 끝, updatedAt = 마지막 카운터 읽기 시각.
+    """
+
+    step: int
+    target_weight: int
+    requests: int
+    required_requests: int
+    errors_5xx: int = Field(alias=ERRORS_5XX_ALIAS)
+    allowed_errors_5xx: int = Field(alias=ALLOWED_ERRORS_5XX_ALIAS)
+    source_requests: int
+    started_at: datetime
+    deadline_at: datetime | None
+    updated_at: datetime
+
+    @classmethod
+    def from_plan(cls, plan: MigrationPlan) -> Self | None:
+        """RUNNING 이고 지금 단계가 비율 단계의 OBSERVE·JUDGE 일 때만 값이 있다."""
+        index = plan.current_step
+        if (
+            plan.status != MigrationPlanStatus.RUNNING
+            or step_kind(plan.steps, index) is not MigrationStepKind.SHIFT
+            or plan.step_phase not in (MigrationStepPhase.OBSERVE, MigrationStepPhase.JUDGE)
+        ):
+            return None
+        stored = plan.step_results[index].get(RESULT_COUNTING)
+        if stored is None:
+            return None
+        counting = StepCounting.from_json(stored)
+        target = counting.target.counted
+        return cls(
+            step=index,
+            target_weight=int(plan.steps[index][STEP_TARGET_WEIGHT]),
+            requests=target.requests,
+            required_requests=counting.required_requests,
+            errors_5xx=target.errors_5xx,
+            allowed_errors_5xx=counting.allowed_errors_5xx,
+            source_requests=counting.source.counted.requests,
+            started_at=counting.started_at,
+            deadline_at=plan.observe_until,
+            updated_at=counting.updated_at,
+        )
 
 
 class MigrationPlanSummaryResponse(ApiModel):
@@ -165,9 +275,14 @@ class MigrationPlanSummaryResponse(ApiModel):
 
 
 class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
+    """단건 응답. maxWaitSeconds 는 계획 행의 observe_seconds 칸(새 계획은 단계 최대 대기, 8-1 전
+    계획은 그 계획의 지켜보기 초)이다. progress 는 비율 단계를 세는 동안만 값이 있다(1초 폴링용).
+    """
+
     rollback_conditions: RollbackConditionsResponse
-    observe_seconds: int
+    max_wait_seconds: int
     steps: list[MigrationStepResponse]
+    progress: MigrationProgressResponse | None
     rejected_by: UserRefResponse | None
     cancelled_by: UserRefResponse | None
     aborted_by: UserRefResponse | None
@@ -186,11 +301,12 @@ class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
                 max_p95_ms=int(conditions[CONDITION_MAX_P95_MS]),
                 max_replication_lag_seconds=float(conditions[CONDITION_MAX_REPLICATION_LAG]),
             ),
-            observe_seconds=plan.observe_seconds,
+            max_wait_seconds=plan.observe_seconds,
             steps=[
-                _step_response(step, result)
+                _step_response(step, result, plan.observe_seconds)
                 for step, result in zip(plan.steps, plan.step_results, strict=True)
             ],
+            progress=MigrationProgressResponse.from_plan(plan),
             rejected_by=UserRefResponse.from_model(view.user(plan.rejected_by_user_id)),
             cancelled_by=UserRefResponse.from_model(view.user(plan.cancelled_by_user_id)),
             aborted_by=UserRefResponse.from_model(view.user(plan.aborted_by_user_id)),
@@ -227,14 +343,19 @@ def _summary_fields(view: MigrationPlanView) -> dict[str, object]:
     }
 
 
-def _step_response(step: dict[str, Any], result: dict[str, Any]) -> MigrationStepResponse:
+def _step_response(
+    step: dict[str, Any], result: dict[str, Any], max_wait_seconds: int
+) -> MigrationStepResponse:
     metrics = result.get(RESULT_METRICS)
+    kind = MigrationStepKind(step[STEP_KIND])
+    is_shift = kind is MigrationStepKind.SHIFT
     return MigrationStepResponse(
         index=int(step[STEP_INDEX]),
-        kind=MigrationStepKind(step[STEP_KIND]),
+        kind=kind,
         source_weight=step[STEP_SOURCE_WEIGHT],
         target_weight=step[STEP_TARGET_WEIGHT],
-        observe_seconds=step[STEP_OBSERVE_SECONDS],
+        required_requests=step.get(STEP_REQUIRED_REQUESTS),
+        max_wait_seconds=max_wait_seconds if is_shift else None,
         expected_seconds=int(step[STEP_EXPECTED_SECONDS]),
         result=StepResultResponse(
             status=MigrationStepStatus(result[RESULT_STATUS]),

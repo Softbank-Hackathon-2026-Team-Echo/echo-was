@@ -21,6 +21,14 @@ _DOMAIN_PATTERN = re.compile(
 SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RESERVED_ORG_SLUGS = ("team-echo",)
 
+# 이전 계획 비율 단계(10·50·100%)마다 도착이 처리해야 할 요청 수와 단계 최대 대기 범위.
+DEFAULT_MIGRATION_REQUIRED_REQUESTS = (20, 50, 50)
+MIGRATION_SHIFT_STEP_COUNT = 3
+MIGRATION_MIN_REQUIRED_REQUESTS = 1
+MIGRATION_MAX_REQUIRED_REQUESTS = 10000
+MIGRATION_MIN_MAX_WAIT_SECONDS = 5
+MIGRATION_MAX_MAX_WAIT_SECONDS = 300
+
 
 def _split_comma_list(value: object) -> object:
     """환경변수의 쉼표 구분 문자열을 목록으로 바꾼다. 빈 칸은 버린다."""
@@ -128,9 +136,20 @@ class Settings(BaseSettings):
     worker_lease_seconds: float = Field(default=30.0, gt=0)
     worker_concurrency: int = Field(default=1, ge=1, le=32)
 
-    # 이전 계획(API 서버 8). 지켜보기 기본값(계획마다 1~600 으로 바꿀 수 있다), 단계마다 더하는
-    # 여유 시간(예상 시간 계산), 승인 대기 만료, 롤백 비율 적용 최대 시도 횟수.
-    migration_observe_seconds_default: int = Field(default=5, ge=1, le=600)
+    # 이전 계획(API 서버 8·8-1). 비율 단계는 도착이 요청 N건을 처리했는지 센다.
+    # 필요 건수(10·50·100% 단계 순, 계획마다 바꿀 수 있다)·단계 최대 대기(초)·예상 rps(예상 시간·
+    # 가짜 카운터·simulate 에 쓴다)·카운터 읽기 주기·마지막 성공 읽기가 이보다 오래되면 판단 불가·
+    # p95 참고 읽기 창, 단계마다 더하는 여유 시간(예상 시간 계산), 승인 대기 만료, 롤백 최대 시도.
+    migration_required_requests_default: Annotated[list[int], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_MIGRATION_REQUIRED_REQUESTS)
+    )
+    migration_max_wait_seconds_default: int = Field(
+        default=30, ge=MIGRATION_MIN_MAX_WAIT_SECONDS, le=MIGRATION_MAX_MAX_WAIT_SECONDS
+    )
+    migration_expected_rps: int = Field(default=50, ge=1, le=10000)
+    migration_count_poll_seconds: int = Field(default=1, ge=1, le=10)
+    migration_counts_stale_seconds: int = Field(default=5, ge=1, le=60)
+    migration_p95_reference_window_seconds: int = Field(default=30, ge=5, le=300)
     migration_step_overhead_seconds: int = Field(default=2, ge=0, le=60)
     migration_plan_approval_ttl_seconds: int = Field(default=24 * 60 * 60, gt=0)
     migration_rollback_max_attempts: int = Field(default=3, ge=1, le=10)
@@ -145,12 +164,25 @@ class Settings(BaseSettings):
     @field_validator(
         "frontend_allowed_origins",
         "reserved_org_slugs",
+        "migration_required_requests_default",
         "entrypoint_environment_map",
         mode="before",
     )
     @classmethod
     def _split_lists(cls, value: object) -> object:
         return _split_comma_list(value)
+
+    @field_validator("migration_required_requests_default")
+    @classmethod
+    def _check_required_requests(cls, value: list[int]) -> list[int]:
+        if len(value) != MIGRATION_SHIFT_STEP_COUNT or any(
+            not MIGRATION_MIN_REQUIRED_REQUESTS <= item <= MIGRATION_MAX_REQUIRED_REQUESTS
+            for item in value
+        ):
+            raise ValueError(
+                "migration_required_requests_default must be 3 integers between 1 and 10000"
+            )
+        return value
 
     @field_validator("entrypoint_environment_map")
     @classmethod

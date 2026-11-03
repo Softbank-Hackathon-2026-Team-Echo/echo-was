@@ -27,7 +27,6 @@ def _error(response: Any) -> tuple[int, str]:
 
 
 async def _approved(migration: Migration, **body: Any) -> dict[str, Any]:
-    body.setdefault("observeSeconds", 1)
     plan = await migration.create_plan(**body)
     await migration.approve(plan["id"])
     return plan
@@ -58,10 +57,12 @@ async def _lose_lease(migration: Migration, times: int = 3) -> None:
 @pytest.mark.parametrize(
     ("step", "reason", "error_code", "failure_line", "metric", "value"),
     [
-        (2, "ERROR_RATE", "THRESHOLD_EXCEEDED", "JUDGE_FAILED", "errorRatePercent", 5.0),
-        (1, "LATENCY", "THRESHOLD_EXCEEDED", "JUDGE_FAILED", "p95Ms", 5000.0),
+        # 필요 50건 · 기준 1% → 허용 1, 만든 5xx = 허용 + 1.
+        (2, "ERROR_RATE", "THRESHOLD_EXCEEDED", "JUDGE_FAILED", "errors5xx", 2),
         (4, "HEALTH", "HEALTH_CHECK_FAILED", "JUDGE_FAILED", "healthStatus", "HTTP_ERROR"),
         (3, "DATA_LAG", "DATA_LAG_EXCEEDED", "DATA_SYNC_FAILED", "replicationLagSeconds", 30.0),
+        (1, "TARGET_NOT_RECEIVING", "TARGET_NOT_RECEIVING", "JUDGE_FAILED", "requestCount", 0),
+        (2, "TARGET_NOT_RECEIVING", "TARGET_NOT_RECEIVING", "JUDGE_FAILED", "requestCount", 0),
     ],
 )
 async def test_simulated_judge_failure_rolls_back_to_source(
@@ -125,13 +126,14 @@ async def test_traffic_apply_failure_rolls_back_without_metrics(migration: Migra
     assert await migration.weights() == (100, 0)
 
 
-@pytest.mark.parametrize("unavailable", ["metrics", "data_sync"])
-async def test_unavailable_metrics_or_replication_lag_rolls_back(
+@pytest.mark.parametrize("unavailable", ["counts", "data_sync"])
+async def test_unavailable_counts_or_replication_lag_rolls_back(
     migration: Migration, unavailable: str
 ) -> None:
     executors = migration.harness.executors
-    if unavailable == "metrics":
-        executors.metrics.unavailable = True
+    if unavailable == "counts":
+        # 카운터를 단계 내내 읽지 못하면 최대 대기 끝에 판단 불가로 롤백한다.
+        executors.metrics.fail_counts()
     else:
         executors.data_sync.unavailable = True
     plan = await _approved(migration)
@@ -139,7 +141,7 @@ async def test_unavailable_metrics_or_replication_lag_rolls_back(
     await migration.harness.run_until_idle()
     final = await migration.get_plan(plan["id"])
 
-    failed_step = 1 if unavailable == "metrics" else 3
+    failed_step = 1 if unavailable == "counts" else 3
     assert (final["status"], final["errorCode"]) == ("ROLLED_BACK", "METRICS_UNAVAILABLE")
     assert final["steps"][failed_step]["result"]["failureCode"] == "METRICS_UNAVAILABLE"
     assert await migration.weights() == (100, 0)
@@ -154,20 +156,26 @@ def test_error_codes_have_distinct_fixed_messages() -> None:
 # --- AC-8: 중단 ---
 
 
-async def test_abort_during_observe_rolls_back_once(migration: Migration) -> None:
+async def test_abort_during_counting_rolls_back_on_next_run(migration: Migration) -> None:
     harness = migration.harness
-    plan = await _approved(migration, observeSeconds=5)
+    plan = await _approved(migration)
     assert await harness.worker().run_once()
     observing = await migration.weights()
+    counting = await migration.get_plan(plan["id"])
 
     first = await migration.act(plan["id"], "abort")
     job = await _job(migration, plan["id"])
     second = await migration.act(plan["id"], "abort")
+    # 시계를 움직이지 않은 다음 실행(카운터 읽기 주기 1초 안)에서 바로 롤백한다.
+    assert await harness.worker().run_once()
+    rolled_back_at_once = (await migration.plan_row(plan["id"])).status
     await harness.run_until_idle()
     final = await migration.get_plan(plan["id"])
     codes = await migration.log_codes(plan["id"])
 
     assert observing == (90, 10)
+    assert counting["progress"]["step"] == 1
+    assert rolled_back_at_once == "ROLLED_BACK"
     assert (first.status_code, second.status_code) == (202, 202)
     assert first.json()["data"]["abortRequestedAt"] is not None
     assert job.run_after == harness.clock.now()
@@ -222,7 +230,7 @@ async def test_abort_without_open_job_recovers(migration: Migration) -> None:
     await _close_jobs(migration)
     cancelled = await migration.act(approved["id"], "abort")
 
-    running = await _approved(migration, observeSeconds=5)
+    running = await _approved(migration)
     assert await harness.worker().run_once()
     await _close_jobs(migration)
     aborted = await migration.act(running["id"], "abort")
@@ -367,9 +375,10 @@ async def test_running_plan_rolls_back_when_lease_is_lost_three_times(
     migration: Migration,
 ) -> None:
     harness = migration.harness
-    plan = await _approved(migration, observeSeconds=5)
+    plan = await _approved(migration)
     worker = harness.worker()
     assert await worker.run_once()
+    # 5초면 10% 단계가 20건(5 rps)을 넘겨 50% 단계로 간다.
     harness.clock.advance(5)
     assert await worker.run_once()
     at_fifty = await migration.weights()

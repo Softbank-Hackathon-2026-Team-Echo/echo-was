@@ -5,7 +5,8 @@ echo-infra 의 고정 진입점 VM 이 여는 가중치 API 를 부른다(계약
 
 - TrafficExecutor: `PUT /weights` 로 대표 주소 트래픽 비율을 적용한다.
 - MainRouteExecutor: 한 연결에 100, 나머지 0 으로 같은 API 를 부른다.
-- MetricsProvider: `GET /summary` 로 연결 하나의 구간 지표(요청 수·오류율·p95)를 읽는다.
+- MetricsProvider: `GET /summary` 로 연결 하나의 구간 지표(요청 수·오류율·p95)를 읽는다. 누적
+  카운터(`read_counts`, `GET /counters`)는 아직 자리값이라 늘 CountsUnavailable 이다.
 
 진입점의 환경 이름(`aws`·`gcp`)은 환경 종류와 같다. 다르거나 한 종류에 환경이 여럿이면
 `entrypoint_environment_map`(`<환경 id>=<진입점 이름>`)으로 정한다. 진입점이 모르는 이름이나
@@ -28,6 +29,8 @@ from app.core.clock import Clock
 from app.core.config import Settings
 from app.core.secrets import SecretRef, parse_secret_ref
 from app.executors.base import (
+    CountsResult,
+    CountsUnavailable,
     DeployTarget,
     MainRoute,
     Metrics,
@@ -51,6 +54,7 @@ ENTRYPOINT_REJECTED = "ENTRYPOINT_REJECTED"
 ENTRYPOINT_UNREACHABLE = "ENTRYPOINT_UNREACHABLE"
 ENTRYPOINT_ERROR = "ENTRYPOINT_ERROR"
 ENTRYPOINT_ENV_UNMAPPED = "ENTRYPOINT_ENV_UNMAPPED"
+ENTRYPOINT_COUNTS_NOT_IMPLEMENTED = "ENTRYPOINT_COUNTS_NOT_IMPLEMENTED"
 
 # 진입점 /summary 의 window 는 1~9999 초다. 지켜보기 구간이 그보다 길어도 끝 쪽 9999초만 본다.
 SUMMARY_WINDOW_MAX_SECONDS = 9999
@@ -333,6 +337,14 @@ class EntrypointMetricsProvider:
             p95_ms=_as_float(p95_ms),
             request_count=max(0, math.floor(float(rps) * window_seconds + 0.5)),
         )
+
+    async def read_counts(self, target: DeployTarget) -> CountsResult:
+        """자리값: 늘 CountsUnavailable(ENTRYPOINT_COUNTS_NOT_IMPLEMENTED) 를 돌려준다.
+
+        실제 구현은 GET /counters (docs/executors.md 의 read_counts 계약), 동옥 후속. 그 전까지
+        http 모드의 이전 비율 단계는 최대 대기 끝에 METRICS_UNAVAILABLE 로 롤백된다.
+        """
+        return CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
 
 
 def _as_float(value: Any) -> float:

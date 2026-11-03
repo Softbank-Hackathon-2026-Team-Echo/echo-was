@@ -16,8 +16,10 @@ from app.core.secrets import SecretRef, SecretValue, parse_secret_ref
 from app.enums import ConnectionErrorCode
 from app.executors import build_executor_set
 from app.executors.base import (
+    CountsUnavailable,
     Metrics,
     MetricsUnavailable,
+    RequestCounts,
     RouteApplied,
     RouteFailed,
     TrafficApplied,
@@ -25,6 +27,7 @@ from app.executors.base import (
     WeightedTarget,
 )
 from app.executors.entrypoint import (
+    ENTRYPOINT_COUNTS_NOT_IMPLEMENTED,
     ENTRYPOINT_ENV_UNMAPPED,
     ENTRYPOINT_ERROR,
     ENTRYPOINT_REJECTED,
@@ -41,6 +44,7 @@ from tests.executor_contract import (
     ROUTE,
     STANDBY_TARGET,
     TARGET,
+    assert_counts_contract,
     assert_metrics_provider_contract,
     assert_traffic_executor_contract,
 )
@@ -179,6 +183,29 @@ async def test_entrypoint_metrics_provider_satisfies_contract() -> None:
     )
 
     assert metrics == Metrics(error_rate_percent=0.0, p95_ms=140.0, request_count=13)
+
+
+async def test_entrypoint_counts_follow_counter_contract_once_implemented() -> None:
+    """GET /counters 가 붙으면 카운터 계약을 보고, 그 전에는 자리값 형태만 본다(건너뛰지 않음)."""
+    provider = EntrypointMetricsProvider(_client(_Entrypoint()))
+    clock = _Clock()
+
+    first = await provider.read_counts(STANDBY_TARGET)
+
+    if isinstance(first, RequestCounts):
+        await assert_counts_contract(provider, clock.advance)
+    else:
+        assert first == CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
+
+
+async def test_entrypoint_read_counts_is_a_placeholder_without_calls() -> None:
+    entrypoint = _Entrypoint()
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    # 실제 GET /counters 구현 전 자리값: http 모드의 비율 단계는 판단 불가로 롤백된다.
+    assert result == CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
+    assert entrypoint.requests == []
 
 
 def test_entrypoint_executors_are_not_simulated() -> None:

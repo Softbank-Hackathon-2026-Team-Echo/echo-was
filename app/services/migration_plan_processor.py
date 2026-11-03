@@ -1,29 +1,40 @@
 """일꾼이 이전 계획 하나를 단계대로 진행한다.
 
 단계(고정): 0 사전 확인 → 1 비율 10% → 2 비율 50% → 3 데이터 확인 → 4 비율 100%.
-비율 단계는 APPLY(트래픽 실행기로 비율 적용) → OBSERVE(observe_seconds 지켜보기) → JUDGE(헬스체크 +
-지표 판정)이고, 사전 확인·데이터 확인은 JUDGE 만 있다. 판정을 통과하면 사람 개입 없이 다음 단계로
-간다. 판정 실패·판단 불가·적용 실패·사람의 중단·일꾼 상실은 출발 100% 로 되돌린다(ROLLING_BACK).
+비율 단계는 APPLY(트래픽 실행기로 비율 적용) → OBSERVE(건수 세기: 출발·도착 누적 카운터를 주기마다
+읽어 도착이 요청 N건을 5xx 허용 안에서 처리했는지 센다) → JUDGE(헬스체크)이고, 사전 확인·데이터
+확인은 JUDGE 만 있다. 세기 규칙은 migration_counting 에 있다. 판정을 통과하면 사람 개입 없이 다음
+단계로 간다. 판정 실패·판단 불가·적용 실패·사람의 중단·일꾼 상실은 출발 100% 로 되돌린다
+(ROLLING_BACK). p95 는 판정에 쓰지 않고 단계를 끝낼 때 한 번 읽어 참고 값으로만 남긴다.
 
 규칙
-- 한 번의 advance 는 "기다려야 하는 곳"(지켜보기 끝 시각, 롤백 재시도 시각)이나 끝 상태까지 이어서
-  진행한다. 동작마다 계획 행을 다시 읽고(populate_existing) 그 위치에서 한 가지만 한다.
+- 한 번의 advance 는 "기다려야 하는 곳"(다음 카운터 읽기 시각, 롤백 재시도 시각)이나 끝 상태까지
+  이어서 진행한다. 동작마다 계획 행을 다시 읽고(populate_existing) 그 위치에서 한 가지만 한다.
+- 건수 세기는 한 번 실행에 한 번 읽는다. 센 값(step_results[i].counting)은 조건부 UPDATE 로 적고,
+  진행 숫자 갱신은 로그 줄을 남기지 않는다(카운터 재시작으로 본 읽기만 COUNTERS_RESET). 필요 건수를
+  채우거나 마감 판정을 통과하면 세기를 끝낸 이유(judgeReason)를 같은 트랜잭션에 적고 JUDGE 로 간다.
+  JUDGE 는 카운터를 다시 읽지 않고 저장된 값으로 판정하므로, 다시 시작한 일꾼도 같은 경로를 밟는다.
+- 8-1 전에 만든 계획(SHIFT 의 OBSERVE·JUDGE 인데 센 값이 없음)은 그 자리에서 세기를 다시 시작한다.
 - 쓰기 트랜잭션은 잠금 순서(서비스 → 연결 → 계획 → 할 일)를 지키고 맨 끝에 할 일 임대를 확인한다.
 - 계획 상태와 위치는 조건부 UPDATE 로만 바꾼다(지금 상태·단계·위치가 기대와 같을 때만). 0행이면 다시
   읽는다. 실행 로그 줄은 반영됐을 때만 같은 트랜잭션에서 쓴다. 그래서 다시 시작해도 줄이 겹치지
   않는다.
-- 외부 호출(트래픽·헬스·지표·데이터 확인)은 트랜잭션 밖에서 한다. 트래픽은 "요청함 시각 저장·커밋
-  → 호출(멱등 키 `{계획}:{단계}`·`{계획}:rollback:{시도}`) → 결과 저장" 순서다. 다시 시작한 일꾼은
-  요청함 시각만 있고 결과가 없으면 같은 키로 다시 부른다.
+- 외부 호출(트래픽·헬스·카운터·지표·데이터 확인)은 트랜잭션 밖에서 한다. 트래픽은 "요청함
+  시각 저장·커밋 → 호출(멱등 키 `{계획}:{단계}`·`{계획}:rollback:{시도}`) → 결과 저장" 순서다.
+  다시 시작한 일꾼은 요청함 시각만 있고 결과가 없으면 같은 키로 다시 부른다.
 - 비율은 트래픽 실행기가 적용했다고 답했을 때만 두 연결에 함께 적는다(합계 100).
 - 매 동작 맨 앞(잠금 안)에서 중단 요청·임대 상실을 본다. 임대를 3번 잃었으면(한 번 참이면 계속 참)
   APPROVED 는 FAILED(WORKER_LOST), RUNNING 은 롤백을 시작하고, 롤백은 남은 시도 횟수만큼 계속한다.
   끝 상태가 되면 할 일을 FAILED(WORKER_LOST) 로 닫는다.
-- simulate(가짜 모드)는 그 단계 판정(또는 TRAFFIC 이면 그 단계 APPLY)에서 실행기를 부르지 않고
-  처리기가 실패 결과를 만든다. 로그·단계 결과에는 만든 값이 그대로 남는다.
+- simulate(가짜 모드)는 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계는
+  "설정 rps × 비율 × 지난 시간"으로 카운터를 만든다. ERROR_RATE 는 5xx 를 허용 + 1 로,
+  TARGET_NOT_RECEIVING 은 도착을 고정하고 출발을 100% 로, LOW_TRAFFIC 은 둘 다 고정한다. HEALTH
+  는 헬스 실패, TRAFFIC 은 그 단계 APPLY 실패, DATA_LAG 는 지연 30초다. 저장된 옛 LATENCY 는 아무
+  실패도 만들지 않는다. 로그·단계 결과에는 만든 값이 그대로 남는다.
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -35,6 +46,7 @@ from app.core.config import Settings
 from app.enums import (
     HealthCheckResult,
     MigrationErrorCode,
+    MigrationJudgeReason,
     MigrationLogCode,
     MigrationPlanStatus,
     MigrationRollbackStatus,
@@ -46,12 +58,13 @@ from app.enums import (
 )
 from app.executors import ExecutorSet
 from app.executors.base import (
+    CountsResult,
     DataSyncLag,
     HealthHttpError,
     HealthOk,
     HealthProbeResult,
     Metrics,
-    MetricsResult,
+    RequestCounts,
     TrafficApplied,
     TrafficResult,
     WeightedTarget,
@@ -63,14 +76,21 @@ from app.repositories.service_environment_repository import ServiceEnvironmentRe
 from app.repositories.service_repository import ServiceRepository
 from app.services.deploy_support import SNAPSHOT_HEALTH_CHECK_PATH, public_url
 from app.services.job_lease import JobLease, JobOutcome
+from app.services.migration_counting import (
+    CounterValue,
+    StepCounting,
+    error_rate_percent,
+    judge_counting,
+)
 from app.services.migration_plan_log import MigrationPlanLogWriter
 from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
-    CONDITION_MAX_P95_MS,
     CONDITION_MAX_REPLICATION_LAG,
     LAST_STEP,
+    RESULT_COUNTING,
     RESULT_FAILURE_CODE,
     RESULT_FINISHED_AT,
+    RESULT_JUDGE_REASON,
     RESULT_METRICS,
     RESULT_STARTED_AT,
     RESULT_STATUS,
@@ -84,6 +104,7 @@ from app.services.migration_plan_support import (
     read_fingerprint,
     skip_pending_steps,
     step_kind,
+    step_required_requests,
     with_step_result,
 )
 
@@ -92,13 +113,21 @@ logger = logging.getLogger(__name__)
 # 한 번의 advance 에서 이어 갈 동작 수 상한(정상 경로는 10개 안쪽이다).
 MAX_ACTIONS_PER_RUN = 32
 # simulate 가 만드는 판정 값(실행기를 부르지 않는다).
-SIMULATED_ERROR_RATE_PERCENT = 5.0
-SIMULATED_P95_MS = 5000.0
 SIMULATED_REPLICATION_LAG_SECONDS = 30.0
 SIMULATED_HEALTH_STATUS_CODE = 503
-_BASELINE_ERROR_RATE_PERCENT = 0.1
-_BASELINE_P95_MS = 120.0
-_BASELINE_REQUESTS_PER_SECOND = 10
+# 이 simulate 이유면 그 비율 단계의 카운터를 처리기가 만든다.
+_COUNT_SIMULATIONS = frozenset(
+    {
+        MigrationSimulateReason.ERROR_RATE,
+        MigrationSimulateReason.TARGET_NOT_RECEIVING,
+        MigrationSimulateReason.LOW_TRAFFIC,
+        MigrationSimulateReason.HEALTH,
+    }
+)
+# 저장된 옛 계획을 읽을 수 있게 값만 남긴 simulate 이유(아무 실패도 만들지 않는다).
+_IGNORED_SIMULATIONS = frozenset({MigrationSimulateReason.LATENCY})
+
+type _LogLine = tuple[MigrationLogCode, dict[str, Any]]
 
 _HEALTH_RESULTS = {
     HealthOk: HealthCheckResult.OK,
@@ -368,16 +397,10 @@ class MigrationPlanProcessor:
             plan = locked.plan
             if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.APPLY):
                 return None
-            observe_until = now + timedelta(seconds=plan.observe_seconds)
             if await self._plans.transition(
                 plan.id,
                 MigrationPlanStatus.RUNNING,
-                {
-                    "step_phase": MigrationStepPhase.OBSERVE,
-                    "phase_started_at": now,
-                    "observe_until": observe_until,
-                    "updated_at": now,
-                },
+                self._counting_start(plan, now),
                 _at_conditions(index, MigrationStepPhase.APPLY),
             ):
                 self._record_weights(locked, 100 - target_weight, target_weight, result)
@@ -386,7 +409,8 @@ class MigrationPlanProcessor:
                     plan, MigrationLogCode.WEIGHT_APPLIED, now, step=index, data=weights_data
                 )
         self._report("migration weights applied", plan, step=index)
-        return JobOutcome.again(observe_until)
+        # 같은 실행에서 OBSERVE 첫 읽기로 기준값을 잡는다.
+        return None
 
     async def _traffic_failed(
         self, plan: MigrationPlan, index: int, weights_data: dict[str, Any], now: datetime
@@ -417,73 +441,208 @@ class MigrationPlanProcessor:
         )
         return None
 
-    async def _observe(self, plan: MigrationPlan) -> JobOutcome | None:
+    def _counting_start(self, plan: MigrationPlan, now: datetime) -> dict[str, Any]:
+        """지금 비율 단계의 건수 세기를 now 부터 시작하는 계획 행 변경값(OBSERVE, 새 센 값).
+
+        최대 대기 끝(observe_until) = now + 계획 행의 observe_seconds(= maxWaitSeconds).
+        """
+        index = plan.current_step
+        counting = StepCounting.start(
+            step_required_requests(
+                plan.steps, index, self._settings.migration_required_requests_default
+            ),
+            float(plan.rollback_conditions[CONDITION_MAX_ERROR_RATE]),
+            now,
+        )
+        return {
+            "step_phase": MigrationStepPhase.OBSERVE,
+            "phase_started_at": now,
+            "observe_until": now + timedelta(seconds=plan.observe_seconds),
+            "step_results": with_step_result(
+                plan.step_results,
+                index,
+                **{RESULT_COUNTING: counting.to_json(), RESULT_JUDGE_REASON: None},
+            ),
+            "updated_at": now,
+        }
+
+    async def _restart_counting(
+        self, plan: MigrationPlan, phase: MigrationStepPhase
+    ) -> JobOutcome | None:
+        """센 값이 없는 비율 단계(8-1 전에 만든 계획)는 그 자리에서 세기를 다시 시작한다."""
+        index = plan.current_step
         now = self._clock.now()
-        if plan.observe_until is not None and now < plan.observe_until:
-            return JobOutcome.again(plan.observe_until)
         async with self._session.begin():
-            await self._lock()
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, phase):
+                return None
             await self._plans.transition(
                 plan.id,
                 MigrationPlanStatus.RUNNING,
-                {
-                    "step_phase": MigrationStepPhase.JUDGE,
-                    "phase_started_at": now,
-                    "updated_at": now,
-                },
-                _at_conditions(plan.current_step, MigrationStepPhase.OBSERVE),
+                self._counting_start(plan, now),
+                _at_conditions(index, phase),
             )
+        self._report("migration counting restarted", plan, step=index)
         return None
 
-    async def _judge_shift(self, plan: MigrationPlan) -> JobOutcome | None:
-        """지켜본 구간을 헬스체크 + 지표(오류율·p95)로 판정한다."""
+    async def _observe(self, plan: MigrationPlan) -> JobOutcome | None:
+        """건수 세기 한 번: 출발·도착 카운터를 읽어(트랜잭션 밖) 센 값을 쌓고 결론을 낸다.
+
+        5xx 가 허용을 넘으면 바로 롤백, 필요 건수를 채우면 JUDGE(COUNT_REACHED), 최대 대기가 끝나면
+        마감 판정(실패면 롤백, 통과면 JUDGE(LOW_TRAFFIC)), 아니면 다음 읽기 시각으로 돌려놓는다.
+        """
         index = plan.current_step
-        conditions = plan.rollback_conditions
-        targets = await self._targets(plan)
-        until = self._clock.now()
-        since = (
-            plan.observe_until - timedelta(seconds=plan.observe_seconds)
-            if plan.observe_until is not None
-            else until
+        stored = plan.step_results[index].get(RESULT_COUNTING)
+        if stored is None or plan.observe_until is None:
+            return await self._restart_counting(plan, MigrationStepPhase.OBSERVE)
+        counting = StepCounting.from_json(stored)
+        deadline = plan.observe_until
+        weight = int(plan.steps[index][STEP_TARGET_WEIGHT])
+        simulated = _simulated_failure(plan, index)
+        targets: MigrationTargets | None = None
+        source: CounterValue | None
+        target: CounterValue | None
+        if simulated is not None and simulated in _COUNT_SIMULATIONS:
+            source, target = _simulated_counts(
+                simulated,
+                weight,
+                counting,
+                self._clock.now(),
+                self._settings.migration_expected_rps,
+            )
+        else:
+            targets = await self._targets(plan)
+            await self._lease.extend()
+            source = _counter_value(await self._executors.metrics.read_counts(targets.source))
+            target = _counter_value(await self._executors.metrics.read_counts(targets.target))
+        now = self._clock.now()
+        counting, resets = counting.observe(source, target, now)
+        verdict = judge_counting(
+            counting,
+            now=now,
+            deadline=deadline,
+            target_weight=weight,
+            stale=timedelta(seconds=self._settings.migration_counts_stale_seconds),
         )
+        p95_ms = (
+            await self._read_p95(targets)
+            if verdict.failure is not None and targets is not None
+            else None
+        )
+        reset_lines: list[_LogLine] = [
+            (MigrationLogCode.COUNTERS_RESET, reset.log_data()) for reset in resets
+        ]
+        async with self._session.begin():
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.OBSERVE):
+                return None
+            results = with_step_result(
+                plan.step_results, index, **{RESULT_COUNTING: counting.to_json()}
+            )
+            if verdict.failure is not None:
+                metrics_json = _shift_metrics_json(counting, p95_ms=p95_ms)
+                await self._fail_step(
+                    plan,
+                    index,
+                    metrics_json,
+                    verdict.failure,
+                    MigrationLogCode.JUDGE_FAILED,
+                    now,
+                    base_results=results,
+                    log_data=_shift_log_data(metrics_json, counting),
+                    preceding_lines=reset_lines,
+                )
+            else:
+                changes: dict[str, Any] = {"step_results": results, "updated_at": now}
+                if verdict.judge_reason is not None:
+                    changes |= {
+                        "step_phase": MigrationStepPhase.JUDGE,
+                        "phase_started_at": now,
+                        "step_results": with_step_result(
+                            results, index, **{RESULT_JUDGE_REASON: verdict.judge_reason.value}
+                        ),
+                    }
+                if await self._plans.transition(
+                    plan.id,
+                    MigrationPlanStatus.RUNNING,
+                    changes,
+                    _at_conditions(index, MigrationStepPhase.OBSERVE),
+                ):
+                    await self._append_lines(plan, reset_lines, now, index)
+        if verdict.failure is not None:
+            self._report(
+                "migration step judged unhealthy", plan, step=index, error_code=verdict.failure
+            )
+            return None
+        if verdict.judge_reason is not None:
+            return None
+        poll = timedelta(seconds=self._settings.migration_count_poll_seconds)
+        return JobOutcome.again(min(now + poll, deadline))
+
+    async def _judge_shift(self, plan: MigrationPlan) -> JobOutcome | None:
+        """세기를 끝낸 비율 단계를 헬스체크로 판정한다. 카운터는 다시 읽지 않고 저장된 값을 쓴다."""
+        index = plan.current_step
+        result = plan.step_results[index]
+        stored = result.get(RESULT_COUNTING)
+        reason_value = result.get(RESULT_JUDGE_REASON)
+        if stored is None or reason_value is None:
+            return await self._restart_counting(plan, MigrationStepPhase.JUDGE)
+        counting = StepCounting.from_json(stored)
+        is_low_traffic = MigrationJudgeReason(reason_value) is MigrationJudgeReason.LOW_TRAFFIC
         simulated = _simulated_failure(plan, index)
         health: HealthProbeResult
-        metrics: MetricsResult
-        if simulated is None:
+        p95_ms: float | None = None
+        if simulated is MigrationSimulateReason.HEALTH:
+            health = HealthHttpError(status_code=SIMULATED_HEALTH_STATUS_CODE)
+        elif simulated is not None and simulated in _COUNT_SIMULATIONS:
+            health = HealthOk(status_code=200)
+        else:
+            targets = await self._targets(plan)
             await self._lease.extend()
             health = await self._probe(targets)
-            metrics = await self._executors.metrics.read(targets.target, since, until)
-        else:
-            weight = int(plan.steps[index][STEP_TARGET_WEIGHT])
-            health, metrics = _simulated_judgement(simulated, weight, since, until)
-        failure: MigrationErrorCode | None = None
-        if not isinstance(health, HealthOk):
-            failure = MigrationErrorCode.HEALTH_CHECK_FAILED
-        elif not isinstance(metrics, Metrics):
-            failure = MigrationErrorCode.METRICS_UNAVAILABLE
-        elif metrics.error_rate_percent > float(
-            conditions[CONDITION_MAX_ERROR_RATE]
-        ) or metrics.p95_ms > float(conditions[CONDITION_MAX_P95_MS]):
-            failure = MigrationErrorCode.THRESHOLD_EXCEEDED
-        metrics_json = _metrics_json(health=health, metrics=metrics)
+            p95_ms = await self._read_p95(targets)
+        metrics_json = _shift_metrics_json(
+            counting, health=health, p95_ms=p95_ms, is_low_traffic=is_low_traffic
+        )
+        log_data = _shift_log_data(metrics_json, counting)
         now = self._clock.now()
         async with self._session.begin():
             locked = await self._lock()
             plan = locked.plan
             if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.JUDGE):
                 return None
-            if failure is None:
+            if isinstance(health, HealthOk):
                 outcome = await self._pass_step(
-                    plan, metrics_json, MigrationLogCode.JUDGE_PASSED, now
+                    plan, metrics_json, MigrationLogCode.JUDGE_PASSED, now, log_data=log_data
                 )
                 if outcome is not None:
                     self._report("migration succeeded", plan)
                 return outcome
             await self._fail_step(
-                plan, index, metrics_json, failure, MigrationLogCode.JUDGE_FAILED, now
+                plan,
+                index,
+                metrics_json,
+                MigrationErrorCode.HEALTH_CHECK_FAILED,
+                MigrationLogCode.JUDGE_FAILED,
+                now,
+                log_data=log_data,
             )
-        self._report("migration step judged unhealthy", plan, step=index, error_code=failure)
+        self._report(
+            "migration step judged unhealthy",
+            plan,
+            step=index,
+            error_code=MigrationErrorCode.HEALTH_CHECK_FAILED,
+        )
         return None
+
+    async def _read_p95(self, targets: MigrationTargets) -> float | None:
+        """단계를 끝낼 때 도착의 최근 구간 p95 를 한 번 읽는다(참고 값, 판정에 쓰지 않는다)."""
+        until = self._clock.now()
+        since = until - timedelta(seconds=self._settings.migration_p95_reference_window_seconds)
+        result = await self._executors.metrics.read(targets.target, since, until)
+        return result.p95_ms if isinstance(result, Metrics) else None
 
     async def _check_data_sync(self, plan: MigrationPlan) -> JobOutcome | None:
         index = plan.current_step
@@ -521,9 +680,12 @@ class MigrationPlanProcessor:
         metrics_json: dict[str, Any],
         code: MigrationLogCode,
         now: datetime,
+        *,
+        log_data: dict[str, Any] | None = None,
     ) -> JobOutcome | None:
         """잠근 트랜잭션 안에서 지금 단계를 통과로 적고 다음 단계로(마지막이면 SUCCEEDED) 간다."""
         index = plan.current_step
+        line_data = log_data if log_data is not None else _numbers(metrics_json)
         results = with_step_result(
             plan.step_results,
             index,
@@ -548,7 +710,7 @@ class MigrationPlanProcessor:
                 },
                 conditions,
             ):
-                await self._log.append(plan, code, now, step=index, data=_numbers(metrics_json))
+                await self._log.append(plan, code, now, step=index, data=line_data)
                 await self._log.append(plan, MigrationLogCode.SUCCEEDED, now)
             return self._closed()
         following = index + 1
@@ -576,7 +738,7 @@ class MigrationPlanProcessor:
             },
             conditions,
         ):
-            await self._log.append(plan, code, now, step=index, data=_numbers(metrics_json))
+            await self._log.append(plan, code, now, step=index, data=line_data)
         return None
 
     async def _fail_step(
@@ -587,9 +749,13 @@ class MigrationPlanProcessor:
         failure: MigrationErrorCode,
         code: MigrationLogCode,
         now: datetime,
+        *,
+        base_results: list[dict[str, Any]] | None = None,
+        log_data: dict[str, Any] | None = None,
+        preceding_lines: Sequence[_LogLine] = (),
     ) -> None:
         results = with_step_result(
-            plan.step_results,
+            base_results if base_results is not None else plan.step_results,
             index,
             **{
                 RESULT_STATUS: MigrationStepStatus.FAILED.value,
@@ -604,8 +770,15 @@ class MigrationPlanProcessor:
             now,
             results=results,
             index=index,
-            failure_line=(code, _numbers(metrics_json)),
+            failure_line=(code, log_data if log_data is not None else _numbers(metrics_json)),
+            preceding_lines=preceding_lines,
         )
+
+    async def _append_lines(
+        self, plan: MigrationPlan, lines: Sequence[_LogLine], now: datetime, step: int
+    ) -> None:
+        for code, data in lines:
+            await self._log.append(plan, code, now, step=step, data=data)
 
     # --- 롤백 ---
 
@@ -618,11 +791,12 @@ class MigrationPlanProcessor:
         results: list[dict[str, Any]] | None = None,
         index: int | None = None,
         failure_line: tuple[MigrationLogCode, dict[str, Any]] | None = None,
+        preceding_lines: Sequence[_LogLine] = (),
     ) -> bool:
         """잠근 트랜잭션 안에서 RUNNING → ROLLING_BACK. 원인 줄(있으면)과 ROLLBACK_STARTED 를 쓴다.
 
         중단·일꾼 상실처럼 단계 결과가 정해지지 않은 채 멈추면 지금 단계를 그 원인으로 FAILED 로
-        적는다. 남은 단계는 SKIPPED 다.
+        적는다. 남은 단계는 SKIPPED 다. preceding_lines 는 원인 줄 앞에 쓸 줄(카운터 재시작)이다.
         """
         if results is None:
             current = plan.current_step
@@ -652,6 +826,8 @@ class MigrationPlanProcessor:
             [MigrationPlan.current_step == index] if index is not None else [],
         ):
             return False
+        if index is not None:
+            await self._append_lines(plan, preceding_lines, now, index)
         if failure_line is not None:
             failure_code, failure_data = failure_line
             await self._log.append(
@@ -889,23 +1065,37 @@ def _simulated_failure(plan: MigrationPlan, index: int) -> MigrationSimulateReas
     simulate = plan.simulate
     if not simulate or int(simulate.get(SIMULATE_FAIL_AT_STEP, -1)) != index:
         return None
-    return MigrationSimulateReason(simulate[SIMULATE_REASON])
+    reason = MigrationSimulateReason(simulate[SIMULATE_REASON])
+    return None if reason in _IGNORED_SIMULATIONS else reason
 
 
-def _simulated_judgement(
-    reason: MigrationSimulateReason, weight: int, since: datetime, until: datetime
-) -> tuple[HealthProbeResult, MetricsResult]:
-    window_seconds = max((until - since).total_seconds(), 0.0)
-    request_count = max(1, round(_BASELINE_REQUESTS_PER_SECOND * weight / 100 * window_seconds))
-    health: HealthProbeResult = HealthOk(status_code=200)
-    error_rate, p95 = _BASELINE_ERROR_RATE_PERCENT, _BASELINE_P95_MS
-    if reason is MigrationSimulateReason.ERROR_RATE:
-        error_rate = SIMULATED_ERROR_RATE_PERCENT
-    elif reason is MigrationSimulateReason.LATENCY:
-        p95 = SIMULATED_P95_MS
-    elif reason is MigrationSimulateReason.HEALTH:
-        health = HealthHttpError(status_code=SIMULATED_HEALTH_STATUS_CODE)
-    return health, Metrics(error_rate_percent=error_rate, p95_ms=p95, request_count=request_count)
+def _simulated_counts(
+    reason: MigrationSimulateReason,
+    target_weight: int,
+    counting: StepCounting,
+    now: datetime,
+    requests_per_second: int,
+) -> tuple[CounterValue, CounterValue]:
+    """simulate 단계의 (출발, 도착) 누적 카운터. 세기 시작 순간 0 에서 rps × 비율 × 지난 초다."""
+    elapsed = max((now - counting.started_at).total_seconds(), 0.0)
+    target_requests = int(requests_per_second * target_weight * elapsed / 100)
+    source_requests = int(requests_per_second * (100 - target_weight) * elapsed / 100)
+    target_errors = 0
+    if reason is MigrationSimulateReason.ERROR_RATE and elapsed > 0:
+        target_errors = counting.allowed_errors_5xx + 1
+    elif reason is MigrationSimulateReason.TARGET_NOT_RECEIVING:
+        # 진입점이 비율을 적용하지 않아 모든 요청이 출발로 가는 상황.
+        target_requests = 0
+        source_requests = int(requests_per_second * elapsed)
+    elif reason is MigrationSimulateReason.LOW_TRAFFIC:
+        target_requests = source_requests = 0
+    return CounterValue(source_requests, 0), CounterValue(target_requests, target_errors)
+
+
+def _counter_value(result: CountsResult) -> CounterValue | None:
+    if not isinstance(result, RequestCounts):
+        return None
+    return CounterValue(max(result.requests, 0), max(result.errors_5xx, 0))
 
 
 def _health_status(health: HealthProbeResult | None) -> str | None:
@@ -917,17 +1107,53 @@ def _health_status(health: HealthProbeResult | None) -> str | None:
 def _metrics_json(
     *,
     health: HealthProbeResult | None = None,
-    metrics: MetricsResult | None = None,
     replication_lag_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """단계 결과 metrics 칸. 없는 값은 null."""
-    measured = metrics if isinstance(metrics, Metrics) else None
+    """사전 확인·데이터 확인 단계 결과 metrics 칸. 재지 않은 값은 null."""
     return {
         "healthStatus": _health_status(health),
-        "errorRatePercent": measured.error_rate_percent if measured else None,
-        "p95Ms": measured.p95_ms if measured else None,
-        "requestCount": measured.request_count if measured else None,
+        "errorRatePercent": None,
+        "p95Ms": None,
+        "requestCount": None,
+        "errors5xx": None,
+        "allowedErrors5xx": None,
+        "sourceRequestCount": None,
+        "lowTraffic": None,
         "replicationLagSeconds": replication_lag_seconds,
+    }
+
+
+def _shift_metrics_json(
+    counting: StepCounting,
+    *,
+    health: HealthProbeResult | None = None,
+    p95_ms: float | None = None,
+    is_low_traffic: bool = False,
+) -> dict[str, Any]:
+    """비율 단계 결과 metrics 칸: 도착이 센 요청·5xx, 허용 5xx, 출발이 센 요청, p95(참고)."""
+    target = counting.target.counted
+    return {
+        "healthStatus": _health_status(health),
+        "errorRatePercent": error_rate_percent(target.errors_5xx, target.requests),
+        "p95Ms": p95_ms,
+        "requestCount": target.requests,
+        "errors5xx": target.errors_5xx,
+        "allowedErrors5xx": counting.allowed_errors_5xx,
+        "sourceRequestCount": counting.source.counted.requests,
+        "lowTraffic": is_low_traffic,
+        "replicationLagSeconds": None,
+    }
+
+
+def _shift_log_data(metrics_json: dict[str, Any], counting: StepCounting) -> dict[str, Any]:
+    """비율 단계 JUDGE_PASSED·JUDGE_FAILED 줄의 data(센 건수와 트래픽 적음 여부)."""
+    return {
+        "requestCount": metrics_json["requestCount"],
+        "requiredRequests": counting.required_requests,
+        "errors5xx": metrics_json["errors5xx"],
+        "allowedErrors5xx": metrics_json["allowedErrors5xx"],
+        "sourceRequestCount": metrics_json["sourceRequestCount"],
+        "lowTraffic": metrics_json["lowTraffic"],
     }
 
 

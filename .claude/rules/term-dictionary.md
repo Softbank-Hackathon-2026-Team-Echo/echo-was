@@ -93,17 +93,23 @@
 | 출발 · 도착 | Source · Target | `source_service_environment_id` · `target_service_environment_id` | 출발 = 계획을 만들 때 비율 100 인 연결 하나. 도착 = 출발과 같은 이미지가 올라간 예비 연결(따라가는 중이면 `TARGET_SYNCING`, 없거나 다른 버전이면 `TARGET_NOT_READY`) | F10, API 8 |
 | 이전 단계 | Migration step | `steps[i]` (`MigrationStepKind`) | 고정 5개: `0 PREFLIGHT`, `1 SHIFT(10)`, `2 SHIFT(50)`, `3 DATA_SYNC_CHECK`, `4 SHIFT(100)`. 만든 뒤 바꾸지 않는다. 실제 결과는 같은 번호의 `step_results[i]` | F10, API 8 |
 | 사전 확인 | Preflight | 단계 0 `PREFLIGHT` | 도착 환경별 주소 헬스체크 1번 + 도착 이미지가 출발과 같은가. 실패하면 트래픽을 바꾸지 않고 `FAILED(PREFLIGHT_FAILED)`. AI 에이전트의 사전 점검 체크리스트(F11)와 다르다 | API 8 |
-| 지켜보기 | Observe | `observe_seconds`·`observe_until`, `step_phase = OBSERVE` | 비율을 적용한 뒤 판정까지 기다리는 시간(기본 5초, 계획마다 1~600). 끝나기 전에는 판정하지 않는다 | F7, API 8 |
-| 판정 | Judge | `step_phase = JUDGE` | 지켜본 구간을 헬스체크 + 지표(오류율·p95)로, 데이터 확인 단계는 복제 지연으로 본다. 통과하면 사람 개입 없이 다음 단계 | F7, API 8 |
-| 롤백 조건 | Rollback conditions | `rollback_conditions` (`maxErrorRatePercent`·`maxP95Ms`·`maxReplicationLagSeconds`) | 판정 실패 기준(기본 1.0%·800ms·1.0초). 헬스체크 실패는 늘 실패 | F10, API 8 |
+| 건수 세기 | Request counting | `step_phase = OBSERVE`, `step_results[i].counting` (`StepCounting`, `app/services/migration_counting.py`) | 비율을 적용한 뒤 출발·도착 환경의 누적 카운터를 1초마다 읽어 "도착이 요청 N건을 5xx 허용 안에서 처리했는가"를 세는 것(API 서버 8-1, 옛 "지켜보기 N초"를 바꿈). 첫 읽기가 기준값, 센 값 = 지금 − 기준값 | F7, API 8-1 |
+| 필요 건수 · 최대 대기 | Required requests · Max wait | `steps[i].requiredRequests`, `maxWaitSeconds`(= `migration_plans.observe_seconds` 칸, `observe_until` = 적용 시각 + 최대 대기) | 비율 단계(10·50·100%)마다 도착이 처리해야 할 요청 수(기본 20·50·50)와 그만큼 기다리는 최대 시간(기본 30초). API 의 `observeSeconds` 는 없앴다 | API 8-1 |
+| 허용 5xx | Allowed 5xx | `allowedErrors5xx` | max(1, floor(필요 건수 × `maxErrorRatePercent` ÷ 100)), Decimal 로 계산하고 필요 건수 기준으로 고정. 도착 5xx 가 이를 넘는 순간 `THRESHOLD_EXCEEDED` | API 8-1 |
+| 트래픽 적음 | Low traffic | `metrics.lowTraffic`, `judgeReason = LOW_TRAFFIC` | 최대 대기 안에 필요 건수를 못 채웠지만 서비스 전체가 조용한 경우. 헬스체크로 통과(`PASSED`)한다 | API 8-1 |
+| 도착 미수신 | Target not receiving | `TARGET_NOT_RECEIVING` | 최대 대기 끝에, 도착에 갔어야 할 만큼(정수식) 출발에 요청이 왔는데 도착이 기대의 4분의 1도 못 받은 경우. 진입점이 비율을 적용하지 않은 상황이라 롤백한다 | API 8-1 |
+| 카운터 재시작 | Counters reset | 로그 `COUNTERS_RESET` | 읽은 누적값이 직전보다 작으면 진입점이 재시작해 0부터 다시 쌓였다고 보고 이미 센 건수를 이어 간다(화면 숫자는 줄지 않는다) | API 8-1 |
+| 진행 숫자 | Progress | 응답 `progress` (저장 안 함, 단건만) | 세는 중인 비율 단계의 도착 처리 건수·5xx·허용·출발 건수·시작·마감·마지막 읽기 시각. 일꾼이 1초마다 센 값을 적고 화면은 1초 폴링 | API 8-1 |
+| 판정 | Judge | `step_phase = JUDGE`, `step_results[i].judgeReason` (`MigrationJudgeReason`) | 비율 단계는 세기를 끝낸 뒤(건수 채움 `COUNT_REACHED` 또는 트래픽 적음 `LOW_TRAFFIC`) 헬스체크 한 번, 데이터 확인 단계는 복제 지연, 사전 확인은 헬스 + 같은 이미지. 통과하면 사람 개입 없이 다음 단계. p95 는 판정하지 않고 참고 값(`p95Ms`)만 남긴다 | F7, API 8·8-1 |
+| 롤백 조건 | Rollback conditions | `rollback_conditions` (`maxErrorRatePercent`·`maxP95Ms`·`maxReplicationLagSeconds`) | 판정 실패 기준(기본 1.0%·800ms·1.0초). 오류율은 허용 5xx 계산에 쓰고, `maxP95Ms` 는 참고용(응답 `p95Advisory: true`). 헬스체크 실패는 늘 실패 | F10, API 8·8-1 |
 | 이전 롤백 | Migration rollback | `status = ROLLING_BACK`, `rollback_status`, 키 `{plan}:rollback:{n}` | 판정 실패·판단 불가·적용 실패·중단·일꾼 상실 때 출발 100%·도착 0% 로 되돌리는 것. 배포 되돌리기(`rollback_of_id`)·실패한 새 버전 거두기(`revert_status`)와 다르다 | F10, API 8 |
 | 지문 | Fingerprint | `migration_plans.fingerprint` | 계획을 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경 설정 해시·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 낡은 계획(`STALE`) | API 8 |
 | 승인 | Approval | `approved_by_user_id`·`approved_at`, `POST …/approve` | 개발자 이상의 사람이 실행을 허락한 것. 승인이 곧 실행 시작이다. 에이전트는 할 수 없다 | F10, API 8 |
 | 자기 승인 | Self approval | `self_approved`, 조직 `allow_self_approval` | 계획을 만든 사람이 스스로 승인하는 것. 조직 스위치가 꺼져 있으면(기본) 403 `SELF_APPROVAL_FORBIDDEN`. 어드민만 켠다 | F10, API 8 |
 | 중단 | Abort | `abort_requested_at`·`aborted_by_user_id`, `POST …/abort` | 사람이 실행 중 계획을 멈추는 것. `RUNNING` 이면 롤백(`ABORTED`), 시작 전이면 `CANCELLED`. 멱등 | F10, API 8 |
 | 이전 실행 로그 | Migration log | `MigrationPlanLog` / `migration_plan_logs` | 계획 한 건의 진행 줄. 계획 단계 번호(`step`)를 달고 상태 변경과 같은 트랜잭션에서 쓴다. 계획마다 `seq` 1부터, 500줄 상한 | F10·F17, API 8 |
-| 트래픽 실행기 · 지표 공급자 · 데이터 확인기 | Traffic executor · Metrics provider · Data sync checker | `TrafficExecutor.set_weights` · `MetricsProvider.read` · `DataSyncChecker.replication_lag` | 비율 나눠 보내기(실제 Envoy, 인프라 6) · 구간 지표(인프라 9) · 복제 지연(인프라 7). 트래픽·지표는 고정 진입점 실행기(`ENTRYPOINT_EXECUTOR_MODE=http`)가 실제 구현, 데이터 확인은 가짜 | F7·F17, API 8 |
-| 고정 진입점 | Entrypoint | `app/executors/entrypoint.py`, 설정 `ENTRYPOINT_*` | echo-infra 인프라 5 의 Envoy + 가중치 API(`PUT /weights`·`GET /summary`). 진입점 환경 이름(`aws`·`gcp`)은 환경 종류와 같고, 다르면 `ENTRYPOINT_ENVIRONMENT_MAP` 으로 환경 id 를 잇는다 | F6·F7·F17 |
+| 트래픽 실행기 · 지표 공급자 · 데이터 확인기 | Traffic executor · Metrics provider · Data sync checker | `TrafficExecutor.set_weights` · `MetricsProvider.read_counts`·`read` · `DataSyncChecker.replication_lag` | 비율 나눠 보내기(실제 Envoy, 인프라 6) · 환경별 누적 요청·5xx 카운터(판정용, `RequestCounts`·`CountsUnavailable`)와 구간 지표(p95 참고용, 인프라 9) · 복제 지연(인프라 7). 트래픽·지표는 고정 진입점 실행기(`ENTRYPOINT_EXECUTOR_MODE=http`)가 실제 구현(카운터 `GET /counters` 는 아직 자리값, `CountsUnavailable`), 데이터 확인은 가짜 | F7·F17, API 8·8-1 |
+| 고정 진입점 | Entrypoint | `app/executors/entrypoint.py`, 설정 `ENTRYPOINT_*` | echo-infra 인프라 5 의 Envoy + 가중치 API(`PUT /weights`·`GET /summary`, 카운터 `GET /counters` 는 후속). 진입점 환경 이름(`aws`·`gcp`)은 환경 종류와 같고, 다르면 `ENTRYPOINT_ENVIRONMENT_MAP` 으로 환경 id 를 잇는다 | F6·F7·F17 |
 | 조직 열쇠 키 | Organization secret key | `organization_secret_key(slug)` | slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). `env:` 비밀 참조는 `ECHO_SECRET_{키}__` 로 시작해야 한다 | F16 |
 
 ---
@@ -177,12 +183,13 @@
 |---|---|---|
 | `PENDING_APPROVAL` → `APPROVED` → `RUNNING` → `SUCCEEDED` / `RUNNING` → `ROLLING_BACK` → `ROLLED_BACK`·`FAILED` / `PENDING_APPROVAL` → `REJECTED`·`CANCELLED`·`EXPIRED`·`STALE` / `APPROVED` → `STALE`·`CANCELLED`·`FAILED` | `migration_plans.status` (`MigrationPlanStatus`) | 끝나지 않은 4개(`PENDING_APPROVAL`·`APPROVED`·`RUNNING`·`ROLLING_BACK`)는 서비스당 하나(부분 unique). 실행 중 3개(`APPROVED`·`RUNNING`·`ROLLING_BACK`)면 그 서비스의 배포 요청·되돌리기·삭제가 409 `MIGRATION_IN_PROGRESS` |
 | `PREFLIGHT` · `SHIFT` · `DATA_SYNC_CHECK` | `steps[i].kind` (`MigrationStepKind`) | 사전 확인 · 비율 단계 · 데이터 확인 |
-| `APPLY` · `OBSERVE` · `JUDGE` | `migration_plans.step_phase` (`MigrationStepPhase`) | 비율 단계는 적용 → 지켜보기 → 판정, 사전 확인·데이터 확인은 판정만 |
+| `APPLY` · `OBSERVE` · `JUDGE` | `migration_plans.step_phase` (`MigrationStepPhase`) | 비율 단계는 적용 → 건수 세기 → 판정(헬스체크), 사전 확인·데이터 확인은 판정만 |
+| `COUNT_REACHED` · `LOW_TRAFFIC` | `step_results[i].judgeReason` (`MigrationJudgeReason`) | 비율 단계가 세기를 끝내고 판정으로 간 이유: 필요 건수 채움 · 최대 대기 끝 트래픽 적음 |
 | `PENDING` · `RUNNING` · `PASSED` · `FAILED` · `SKIPPED` | `step_results[i].status` (`MigrationStepStatus`) | 롤백·실패로 끝나면 남은 단계는 `SKIPPED` |
-| `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` | `migration_plans.error_code` (`MigrationErrorCode`) | 원인 코드. 판정 실패(`HEALTH_CHECK_FAILED`·`THRESHOLD_EXCEEDED`·`DATA_LAG_EXCEEDED`)와 판단 불가(`METRICS_UNAVAILABLE`)·적용 실패를 나눈다 |
+| `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `TARGET_NOT_RECEIVING` | `migration_plans.error_code` (`MigrationErrorCode`) | 원인 코드. 판정 실패(`HEALTH_CHECK_FAILED`·`THRESHOLD_EXCEEDED`(도착 5xx 허용 초과)·`TARGET_NOT_RECEIVING`(도착 미수신)·`DATA_LAG_EXCEEDED`)와 판단 불가(`METRICS_UNAVAILABLE`, 카운터를 읽지 못함·오래됨)·적용 실패를 나눈다 |
 | `SUCCEEDED` · `FAILED` · `NOT_NEEDED` | `migration_plans.rollback_status` (`MigrationRollbackStatus`) | 출발 100% 로 되돌린 결과. `NOT_NEEDED` 는 트래픽을 바꾼 적이 없었음 |
-| `ERROR_RATE` · `LATENCY` · `HEALTH` · `DATA_LAG` · `TRAFFIC` | `simulate.reason` (`MigrationSimulateReason`) | 가짜 모드에서 `failAtStep` 단계를 일부러 실패시킬 원인. `DATA_LAG` 는 단계 3 만 |
-| `PLAN_CREATED` · `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` · `STALE` · `ABORT_REQUESTED` · `STARTED` · `PREFLIGHT_OK` · `PREFLIGHT_FAILED` · `WEIGHT_APPLIED` · `WEIGHT_APPLY_FAILED` · `JUDGE_PASSED` · `JUDGE_FAILED` · `DATA_SYNC_OK` · `DATA_SYNC_FAILED` · `SUCCEEDED` · `ROLLBACK_STARTED` · `ROLLBACK_APPLIED` · `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` · `FAILED` · `LOG_TRUNCATED` | `migration_plan_logs.code` (`MigrationLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/migration_log_messages.py` |
+| `ERROR_RATE` · `HEALTH` · `DATA_LAG` · `TRAFFIC` · `TARGET_NOT_RECEIVING` · `LOW_TRAFFIC` (· `LATENCY`) | `simulate.reason` (`MigrationSimulateReason`) | 가짜 모드에서 `failAtStep` 단계를 일부러 실패(또는 트래픽 적음)시킬 원인. `DATA_LAG` 는 단계 3 만, `TARGET_NOT_RECEIVING` 은 1·2 만, 나머지는 1·2·4. `LATENCY` 는 저장된 옛 계획을 읽으려고 값만 남겼다(요청 422, 처리기는 무시) |
+| `PLAN_CREATED` · `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` · `STALE` · `ABORT_REQUESTED` · `STARTED` · `PREFLIGHT_OK` · `PREFLIGHT_FAILED` · `WEIGHT_APPLIED` · `WEIGHT_APPLY_FAILED` · `COUNTERS_RESET` · `JUDGE_PASSED` · `JUDGE_FAILED` · `DATA_SYNC_OK` · `DATA_SYNC_FAILED` · `SUCCEEDED` · `ROLLBACK_STARTED` · `ROLLBACK_APPLIED` · `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` · `FAILED` · `LOG_TRUNCATED` | `migration_plan_logs.code` (`MigrationLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/migration_log_messages.py` |
 | `serviceStatus` · `connections` · `sourceEnvironment` · `targetEnvironment` · `openDeployRequests` | 지문 항목(409 `PLAN_STALE` 의 `details[].field`) | 달라진 항목 이름 |
 
 ### 환경 종류 (`environments.kind`)
