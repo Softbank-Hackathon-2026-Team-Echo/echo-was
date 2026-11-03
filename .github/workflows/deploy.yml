@@ -19,12 +19,8 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-1
-  AWS_BUILD_ROLE_ARN: arn:aws:iam::706878591119:role/echo-dev-ci-build
-  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::706878591119:role/echo-was-deploy
+  ROLE_ARN: arn:aws:iam::706878591119:role/echo-was-deploy
   ECR_REPO: 706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo/app
-  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/573662116412/locations/global/workloadIdentityPools/echo-dev-github/providers/github
-  GCP_BUILD_SERVICE_ACCOUNT: echo-dev-ci-build@team-echo-final.iam.gserviceaccount.com
-  AR_REPO: asia-northeast3-docker.pkg.dev/team-echo-final/echo/app
   CLUSTER: echo-dev-eks
   NAMESPACE: echo-was
 
@@ -89,21 +85,10 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.AWS_BUILD_ROLE_ARN }}
+          role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: aws-actions/amazon-ecr-login@v2
-
-      - id: gcp-auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_BUILD_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Artifact Registry 로그인
-        run: gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
 
       - uses: docker/setup-buildx-action@v3
 
@@ -111,8 +96,7 @@ jobs:
         # ECR 태그는 바꿀 수 없다. 같은 커밋을 다시 돌려도 겹치지 않게 실행 번호를 붙인다.
         run: echo "IMAGE_TAG=was-${GITHUB_SHA::7}-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
 
-      # 애플리케이션은 AWS Primary / GCP Warm Standby 이다. 이미지만 장애 전에 양쪽에 준비한다.
-      - name: 이미지 한 번 빌드·양쪽 레지스트리에 푸시
+      - name: 이미지 빌드·푸시
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -120,36 +104,9 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: |
-            ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
-            ${{ env.AR_REPO }}:${{ env.IMAGE_TAG }}
+          tags: ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: 양쪽 이미지 digest 검증
-        env:
-          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          ecr_digest=$(docker buildx imagetools inspect "${ECR_REPO}:${IMAGE_TAG}" | awk '$1 == "Digest:" { print $2; exit }')
-          ar_digest=$(docker buildx imagetools inspect "${AR_REPO}:${IMAGE_TAG}" | awk '$1 == "Digest:" { print $2; exit }')
-          printf 'build=%s\necr=%s\nartifact-registry=%s\n' "$BUILD_DIGEST" "$ecr_digest" "$ar_digest"
-          if [ -z "$ecr_digest" ] || [ "$BUILD_DIGEST" != "$ecr_digest" ] || [ "$ecr_digest" != "$ar_digest" ]; then
-            echo "::error::ECR과 Artifact Registry의 이미지 digest가 일치하지 않는다."
-            exit 1
-          fi
-          {
-            echo "### 이미지 사전 배치 완료"
-            echo "- digest: \`${BUILD_DIGEST}\`"
-            echo "- AWS Primary: \`${ECR_REPO}:${IMAGE_TAG}\`"
-            echo "- GCP Warm Standby: \`${AR_REPO}:${IMAGE_TAG}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # 빌드 역할은 ECR push만 가능하다. EKS 배포 직전에 기존 제한 역할을 다시 받는다.
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
 
       - name: 클러스터 접속
         run: aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"

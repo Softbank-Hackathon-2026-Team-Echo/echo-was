@@ -12,6 +12,7 @@ spec:
     metadata:
       labels: {app: echo-was-api}
     spec:
+      serviceAccountName: echo-was
       containers:
         - name: api
           image: IMAGE_REF
@@ -19,7 +20,6 @@ spec:
           envFrom:
             - configMapRef: {name: echo-was-config}
             - secretRef: {name: echo-was-env}
-            - secretRef: {name: echo-was-github, optional: true}
           readinessProbe:
             httpGet: {path: /readyz, port: 8000}
             periodSeconds: 5
@@ -47,6 +47,7 @@ spec:
     metadata:
       labels: {app: echo-was-worker}
     spec:
+      serviceAccountName: echo-was
       terminationGracePeriodSeconds: 40
       containers:
         - name: worker
@@ -55,7 +56,6 @@ spec:
           envFrom:
             - configMapRef: {name: echo-was-config}
             - secretRef: {name: echo-was-env}
-            - secretRef: {name: echo-was-github, optional: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 384Mi}

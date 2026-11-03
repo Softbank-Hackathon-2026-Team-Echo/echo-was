@@ -1,4 +1,4 @@
-# API 서버 13: main push 자동 배포 (GitHub Actions → ECR·Artifact Registry → EKS)
+# API 서버 13: main push 자동 배포 (GitHub Actions → Artifact Registry·ECR → GKE)
 
 - 상태: 구현됨 (11/2)
 - GitHub 이슈: https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/14
@@ -11,9 +11,9 @@
 ## 흐름
 
 1. `test`: ruff·format 검사·mypy·pytest(PostgreSQL 17). PR 에서도 돈다.
-2. `deploy`: GitHub OIDC·GCP Workload Identity Federation으로 단기 권한을 받는다. 이미지를 한 번 빌드해 ECR과 Artifact Registry에 푸시하고 양쪽 digest가 같은지 확인한다.
-3. AWS EKS에는 ECR의 **digest**로만 배포한다. GCP는 Warm Standby이므로 Artifact Registry에 이미지를 사전 배치하되 이 워크플로에서 고객 트래픽을 보내지 않는다.
-4. `deploy/base.yaml` 적용 → 마이그레이션 Job 완료 대기 → `deploy/app.yaml` 적용 → 롤아웃 → `/readyz` 204 확인.
+2. `deploy`: GitHub OIDC 로 AWS 역할 `echo-dev-ci-build` 와 GCP 서비스 계정 `echo-dev-ci-build` 를 받는다(저장소에 키 없음, echo-infra Terraform). 이미지를 한 번 빌드해 Artifact Registry 와 ECR 에 `echo/app:was-<7자>-<실행 번호>` 로 푸시하고 양쪽 digest 가 같은지 확인한다.
+3. GCP 서울 GKE `echo-dev-gke` 에 Artifact Registry 의 **digest 로만** 배포한다. ECR 사본은 서울 장애 때 도쿄에서 관제탑을 다시 세우기 위한 사전 배치이고, 이 워크플로가 도쿄에 배포하지는 않는다.
+4. `deploy/base.yaml` 적용 → 마이그레이션 Job 완료 대기 → `deploy/app.yaml` 적용 → 롤아웃 → `deploy/lb.yaml` 적용 → `/readyz` 204 확인.
 
 ## 안전장치
 
@@ -24,9 +24,9 @@
 | 마이그레이션 실패 | 롤아웃하지 않는다. 기존 파드 그대로 |
 | 롤아웃 실패 | `rollout undo` 로 직전 버전 복귀(마이그레이션은 되돌리지 않음) |
 | 배포 겹침 | `concurrency` 로 한 번에 하나, 진행 중 배포는 취소하지 않음 |
-| 권한 | 빌드는 `echo-dev-ci-build` AWS 역할과 GCP 서비스 계정, 배포는 `echo-was-deploy` 역할로 분리. 신뢰 조건은 이 저장소 `main` 한 곳 |
+| 권한 | AWS 역할 `echo-dev-ci-build` 는 ECR `echo/app` push 만, GCP 서비스 계정 `echo-dev-ci-build` 는 Artifact Registry `echo` 쓰기 + `roles/container.developer`. 신뢰 조건은 이 저장소 `main` 한 곳 |
 
-이미지를 두 레지스트리에 두는 것은 Active-Active가 아니다. 실행 구조는 AWS Primary / GCP Warm Standby이며, 도쿄 장애 뒤 GKE가 ECR에 의존하지 않도록 동일 산출물을 미리 준비하는 것이다.
+이미지를 두 레지스트리에 두는 것은 Active-Active 가 아니다. 운영은 GCP 서울 GKE 하나이고, 동일 산출물을 미리 두어 서울 장애 뒤 도쿄가 Artifact Registry 에 의존하지 않게 하는 것이다.
 
 ## 손으로 만든 것
 

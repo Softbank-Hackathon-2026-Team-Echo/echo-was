@@ -67,6 +67,12 @@ async def check_health() -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.get("/livez")
+async def check_liveness_for_load_balancer() -> Response:
+    # GCP 부하 분산기 헬스체크는 200 만 성공으로 본다(/healthz 는 204). 의미는 /healthz 와 같다.
+    return Response(content="ok", media_type="text/plain")
+
+
 @app.get("/readyz", status_code=status.HTTP_204_NO_CONTENT)
 async def check_readiness(engine: Annotated[AsyncEngine, Depends(get_engine)]) -> Response:
     try:
