@@ -1,0 +1,13 @@
+# GKE Ingress 부하 분산기 설정. 헬스 경로가 새 이미지에 있어야 하므로 롤아웃 뒤에 적용한다(deploy.yml).
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata: {name: echo-was-api, namespace: echo-was}
+spec:
+  # GCP 부하 분산기 헬스체크는 200 만 성공으로 본다(/healthz·/readyz 는 204). 그래서 /livez(200)를 쓴다.
+  healthCheck: {type: HTTP, requestPath: /livez, port: 8000, checkIntervalSec: 15, timeoutSec: 5}
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata: {name: echo-was-api, namespace: echo-was}
+spec:
+  redirectToHttps: {enabled: true, responseCodeName: MOVED_PERMANENTLY_DEFAULT}

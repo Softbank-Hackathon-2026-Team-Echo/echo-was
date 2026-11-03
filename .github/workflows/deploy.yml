@@ -1,6 +1,6 @@
 name: deploy
 
-# PR 에서는 test 만 돌고, main 에 push 되면 test 통과 뒤 운영(echo-dev-eks)에 배포한다.
+# PR 에서는 test 만 돌고, main 에 push 되면 test 통과 뒤 운영(GCP 서울 echo-dev-gke)에 배포한다.
 # 설명: deploy/README.md
 
 on:
@@ -18,10 +18,14 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ap-northeast-1
-  ROLE_ARN: arn:aws:iam::706878591119:role/echo-was-deploy
-  ECR_REPO: 706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo/app
-  CLUSTER: echo-dev-eks
+  GCP_PROJECT: team-echo-final
+  # echo-was 저장소 main 만 받는 Workload Identity 연합(장기 키 없음). deploy/README.md
+  WIF_PROVIDER: projects/573662116412/locations/global/workloadIdentityPools/echo-was-github/providers/github
+  DEPLOY_SA: echo-was-deploy@team-echo-final.iam.gserviceaccount.com
+  REGISTRY: asia-northeast3-docker.pkg.dev
+  IMAGE_REPO: asia-northeast3-docker.pkg.dev/team-echo-final/echo/app
+  CLUSTER: echo-dev-gke
+  CLUSTER_LOCATION: asia-northeast3-a
   NAMESPACE: echo-was
 
 jobs:
@@ -61,7 +65,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read # PR 병합 커밋인지 확인
-      id-token: write # AWS OIDC
+      id-token: write # GCP Workload Identity 연합
     steps:
       # 무료 요금제 비공개 저장소는 보호 브랜치를 못 쓴다. 대신 PR 없이 main 에 들어온 커밋은 운영에 배포하지 않는다.
       - name: PR 병합 커밋인지 확인
@@ -83,17 +87,23 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - id: gcp
+        uses: google-github-actions/auth@v2
         with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: access_token
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.gcp.outputs.access_token }}
 
       - uses: docker/setup-buildx-action@v3
 
       - name: 이미지 태그 정하기
-        # ECR 태그는 바꿀 수 없다. 같은 커밋을 다시 돌려도 겹치지 않게 실행 번호를 붙인다.
+        # Artifact Registry 태그는 바꿀 수 없다. 같은 커밋을 다시 돌려도 겹치지 않게 실행 번호를 붙인다.
         run: echo "IMAGE_TAG=was-${GITHUB_SHA::7}-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
 
       - name: 이미지 빌드·푸시
@@ -104,26 +114,31 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+          tags: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: 클러스터 접속
-        run: aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.CLUSTER_LOCATION }}
+          project_id: ${{ env.GCP_PROJECT }}
 
       - name: 매니페스트 준비
         run: |
           set -euo pipefail
-          IMAGE_REF="${ECR_REPO}@${{ steps.build.outputs.digest }}"
+          IMAGE_REF="${IMAGE_REPO}@${{ steps.build.outputs.digest }}"
           SUFFIX="${GITHUB_SHA::7}"
           echo "배포 이미지: ${IMAGE_REF}"
           mkdir -p out
           cp deploy/base.yaml out/base.yaml
+          cp deploy/lb.yaml out/lb.yaml
           sed -e "s#IMAGE_REF#${IMAGE_REF}#g" -e "s#MIGRATE_SUFFIX#${SUFFIX}#g" deploy/migrate-job.yaml > out/migrate-job.yaml
           sed -e "s#IMAGE_REF#${IMAGE_REF}#g" deploy/app.yaml > out/app.yaml
           echo "MIGRATE_JOB=echo-was-migrate-${SUFFIX}" >> "$GITHUB_ENV"
 
-      - name: 설정·DB·Ingress 적용
+      - name: 설정·DB·비밀 연결·Ingress 적용
         run: kubectl apply -n "$NAMESPACE" -f out/base.yaml
 
       - name: 마이그레이션
@@ -149,6 +164,10 @@ jobs:
             kubectl -n "$NAMESPACE" rollout undo deploy/echo-was-api deploy/echo-was-worker || true
             exit 1
           fi
+
+      - name: 부하 분산기 설정 적용
+        # 헬스 경로(/livez)가 새 이미지에 있어야 하므로 롤아웃 뒤에 적용한다.
+        run: kubectl apply -n "$NAMESPACE" -f out/lb.yaml
 
       - name: 운영 확인
         run: |
