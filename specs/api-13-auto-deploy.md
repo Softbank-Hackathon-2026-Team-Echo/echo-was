@@ -30,7 +30,7 @@
 
 ## 손으로 만든 것
 
-IAM 정책·역할 `echo-was-deploy(-policy)`, EKS Access Entry(AmazonEKSEditPolicy, 네임스페이스 `echo-was`). 태그 `managed-by=jimin-manual`. echo-infra 에서 Terraform 으로 옮긴다.
+없음. 처음에 손으로 만든 AWS 역할 `echo-was-deploy(-policy)`·EKS Access Entry와 GCP pool `echo-was-github`·서비스 계정 `echo-was-deploy`·`deploy/rbac.yaml`은 CI 신원을 echo-infra Terraform의 `echo-dev-ci-build`로 바꾼 뒤(#18) 11/3에 지웠다.
 
 ## 되돌릴 때 주의
 

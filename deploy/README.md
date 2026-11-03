@@ -12,7 +12,6 @@
 | `migrate-job.yaml` | 배포마다 새 이름으로 한 번 도는 `alembic upgrade head` |
 | `app.yaml` | API·일꾼 Deployment (이미지는 digest) |
 | `lb.yaml` | 부하 분산기 헬스체크(BackendConfig, `/livez`)·HTTP→HTTPS(FrontendConfig). 롤아웃 뒤에 적용 |
-| `rbac.yaml` | 손으로 만든 배포 서비스 계정 `echo-was-deploy`용 클러스터 권한(네임스페이스 `echo-was` 한정). CI 신원을 echo-infra Terraform의 `echo-dev-ci-build`(`roles/container.developer`)로 바꾼 뒤에는 필요 없다 — 정리는 PR #18 논의 |
 
 ## 흐름
 
@@ -30,7 +29,7 @@
 ## 손으로 만들어 두는 것 (저장소에 넣지 않는다)
 
 - 네임스페이스 `echo-was`, Secret `echo-was-db`(DB 비밀번호, `DATABASE_URL`과 같은 값)
-- CI 신원은 echo-infra Terraform(`terraform/environments/gcp/dev/ci.tf`·`aws/dev/ci.tf`)이 만든다: Workload Identity pool `echo-dev-github`(이 저장소 `main`만 `echo-dev-ci-build`를 받는다), 서비스 계정 `echo-dev-ci-build`(Artifact Registry `echo` 쓰기·`roles/container.developer`), AWS 역할 `echo-dev-ci-build`(ECR `echo/app` push만). 손으로 만들었던 pool `echo-was-github`·서비스 계정 `echo-was-deploy`·`rbac.yaml`·AWS 역할 `echo-was-deploy`는 전환 뒤 지운다(PR #18 논의).
+- CI 신원은 echo-infra Terraform(`terraform/environments/gcp/dev/ci.tf`·`aws/dev/ci.tf`)이 만든다: Workload Identity pool `echo-dev-github`(이 저장소 `main`만 `echo-dev-ci-build`를 받는다), 서비스 계정 `echo-dev-ci-build`(Artifact Registry `echo` 쓰기·`roles/container.developer`), AWS 역할 `echo-dev-ci-build`(ECR `echo/app` push만). 손으로 만들었던 pool `echo-was-github`·서비스 계정 `echo-was-deploy`·`rbac.yaml`(Role·RoleBinding)·AWS 역할 `echo-was-deploy`(정책·EKS Access Entry 포함)는 #18 첫 배포 성공 뒤 11/3에 지웠다.
 - 고정 IP `echo-dev-echo-was`·관리형 인증서는 echo-infra가 만든다. Cloudflare `api` A 레코드(DNS only)가 그 IP를 가리킨다.
 
 ## GKE 에서 알아 둘 것
