@@ -104,7 +104,7 @@
 
 ### 지표·요청 카운터 (`MetricsProvider`, API 서버 8 · 8-1)
 
-메서드가 둘이다. 이전 판정은 **누적 카운터(`read_counts`)** 로 하고, 구간 지표(`read`)는 p95 참고 값으로만 쓴다(8-1). 둘 다 상태를 바꾸지 않는 조회이고 트랜잭션 밖에서 부른다. 실제 구현은 고정 진입점의 `EntrypointMetricsProvider`(#17, `app/executors/entrypoint.py`) 한 클래스가 두 메서드를 함께 구현한다. 지금 `read` 는 실제 구현(`GET /summary`), `read_counts` 는 자리값(`CountsUnavailable`)이다(아래 "고정 진입점 실행기").
+메서드가 둘이다. 이전 판정은 **누적 카운터(`read_counts`)** 로 하고, 구간 지표(`read`)는 p95 참고 값으로만 쓴다(8-1). 둘 다 상태를 바꾸지 않는 조회이고 트랜잭션 밖에서 부른다. 실제 구현은 고정 진입점의 `EntrypointMetricsProvider`(#17, `app/executors/entrypoint.py`) 한 클래스가 두 메서드를 함께 구현한다. `read` 는 `GET /summary`, `read_counts` 는 `GET /counters`(API 서버 8-2)를 부른다(아래 "고정 진입점 실행기").
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -136,16 +136,33 @@ class MetricsProvider(Protocol):
 - 일꾼은 단계마다 출발·도착을 각각 부른다(1초마다 2번). 한 번의 호출은 짧은 제한 시간(1초 안쪽)을 권장한다.
 - `code` 에 비밀값·토큰·응답 원문을 넣지 않는다.
 
-**`GET /counters` 매핑(실제 구현, #17 의 `EntrypointMetricsProvider` 에 더할 몫 — 지금은 자리값)**
+**`GET /counters` 매핑(`EntrypointMetricsProvider.read_counts`, API 서버 8-2)**
 
-진입점 응답 `{"ts": "...", "envs": {"aws": {"requests": 12345, "errors_5xx": 3}, "gcp": {...}}}` 를 이렇게 바꾼다.
+진입점 응답(Bearer, echo-infra `entrypoint/weights-api`):
 
-| 진입점 | `RequestCounts` | 비고 |
+```json
+{
+  "ts": "2026-11-03T06:17:00Z",
+  "envs": {
+    "aws": {"requests": 12345, "errors_5xx": 3, "hosts": 1},
+    "gcp": {"requests": 678, "errors_5xx": 0, "hosts": 1}
+  }
+}
+```
+
+값은 Envoy 가 켜진 뒤의 누적이다. 호스트 교체·재시작 때 줄 수 있고 그대로 돌려준다. 읽기 한 번에 `/counters` 한 번이다(출발·도착을 각각 부르면 두 번, 묶지 않는다). 아래 순서로 본다.
+
+| 순서 | 진입점 | 결과 |
 |---|---|---|
-| `envs[<환경 키>].requests` | `requests` | 환경 키(`aws`·`gcp`)는 `target` 으로 고른다. 키가 없으면 `CountsUnavailable` |
-| `envs[<환경 키>].errors_5xx` | `errors_5xx` | |
-| `ts` | (쓰지 않음) | 오래된 읽기 판단은 일꾼이 자기 시계(마지막 성공 읽기 시각)로 한다 |
-| HTTP 실패·시간 초과·JSON 모양 다름 | `CountsUnavailable(code)` | 예: `ENTRYPOINT_UNREACHABLE` |
+| 1 | 호출 실패, 응답이 객체가 아니거나 `envs` 가 객체가 아님 | `CountsUnavailable(code)`, 코드는 아래 실패 코드 표 |
+| 2 | `envs[<환경 이름>]` 이 없거나 객체가 아님(이름은 `environment_name(target)`: 환경 id 매핑 → 종류 매핑 → 종류) | `CountsUnavailable("ENTRYPOINT_ENV_UNMAPPED")` |
+| 3 | `requests`·`errors_5xx` 가 0 이상 정수가 아님(bool·실수·문자열·음수·없음) | `CountsUnavailable("ENTRYPOINT_ERROR")` |
+| 4 | `hosts` 가 있고 0 | `CountsUnavailable("ENTRYPOINT_NO_HOSTS")`. `hosts` 가 0 이상 정수가 아니면 `ENTRYPOINT_ERROR`, 키가 없으면 보지 않는다(옛 진입점 호환) |
+| 5 | 그 밖 | `RequestCounts(requests, errors_5xx)`. 값을 보정하지 않는다. `ts` 는 쓰지 않는다(오래된 읽기 판단은 일꾼이 자기 시계로 한다) |
+
+**`hosts` 가 0 이면 판단 불가로 돌려주는 이유**: 그 환경으로 갈 업스트림이 없으면 요청 0건은 "조용한 서비스"가 아니라 "길이 없음"이다. 0건을 그대로 주면 8-1 판정이 최대 대기 끝에 트래픽 적음(`LOW_TRAFFIC`)으로 통과시켜 버린다. `CountsUnavailable` 이면 마감에 `METRICS_UNAVAILABLE` 로 롤백한다.
+
+실패는 `logger.warning("entrypoint counts unavailable")` 에 코드와 진입점 환경 이름만 남긴다(토큰·응답 원문 없음).
 
 **전제(환경당 고객 앱 1개)**: 카운터와 가중치가 진입점 전체·환경 단위라, 같은 환경에 고객 앱이 둘 이상이면 다른 앱의 요청이 섞여 판정이 틀린다. 시연은 고객 앱 1개라 코드로 막지 않는다(앱별 라우트·카운터는 진입점 후속).
 
@@ -176,13 +193,21 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 | `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
 | `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
 | `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable`. 이전 처리기는 p95 참고용으로 `window=30s`(`MIGRATION_P95_REFERENCE_WINDOW_SECONDS`)를 부른다 |
-| `EntrypointMetricsProvider.read_counts` | (부르지 않음, 자리값) | 늘 `CountsUnavailable("ENTRYPOINT_COUNTS_NOT_IMPLEMENTED")`. 실제 구현은 `GET /counters`(위 `read_counts` 계약), 동옥 후속 |
-
-**`read_counts` 미구현: http 모드에서는 비율 단계가 `METRICS_UNAVAILABLE`로 롤백된다(이전 `/summary` 5초 판정과 같은 결과).** 카운터를 한 번도 읽지 못해 최대 대기(기본 30초) 끝에 판단 불가가 되기 때문이다. 가짜 모드(`ENTRYPOINT_EXECUTOR_MODE=fake`)는 영향이 없다.
+| `EntrypointMetricsProvider.read_counts` | `GET /counters` 의 `envs.<이름>` | `RequestCounts(requests, errors_5xx)` · `CountsUnavailable(code)`. 매핑·실패 순서는 위 "`GET /counters` 매핑". http 모드의 이전 비율 단계는 이 값으로 건수를 센다(8-1) |
 
 **제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
 
-실패 코드(권한 오류를 시간 초과로 뭉개지 않는다): `ENTRYPOINT_UNAUTHORIZED`(401, 토큰 불일치) · `ENTRYPOINT_TOKEN_MISSING`(503 또는 비밀값 조회 실패) · `ENTRYPOINT_REJECTED`(400, 본문 검증) · `ENTRYPOINT_UNREACHABLE`(연결 실패·시간 초과) · `ENTRYPOINT_ERROR`(그 밖의 응답) · `ENTRYPOINT_ENV_UNMAPPED`(진입점이 모르는 이름이거나 두 연결이 같은 이름). 토큰·응답 원문은 로그·코드에 넣지 않는다.
+실패 코드(권한 오류를 시간 초과로 뭉개지 않는다). 토큰·응답 원문은 로그·코드에 넣지 않는다.
+
+| 코드 | 언제 |
+|---|---|
+| `ENTRYPOINT_UNAUTHORIZED` | 401, 토큰 불일치 |
+| `ENTRYPOINT_TOKEN_MISSING` | 비밀값 조회 실패(호출 전), 또는 503. `/counters` 의 503 은 두 경우다: 진입점에 토큰이 설정되지 않음, 진입점이 Envoy admin 에 닿지 못함. 공통 응답 매핑(`_request`)이 503 을 하나로 보므로 둘을 가르지 않는다 |
+| `ENTRYPOINT_REJECTED` | 400, 본문 검증 |
+| `ENTRYPOINT_UNREACHABLE` | 연결 실패·시간 초과 |
+| `ENTRYPOINT_ERROR` | 그 밖의 응답, 응답 모양이 다름(카운터 값이 0 이상 정수가 아님 포함) |
+| `ENTRYPOINT_ENV_UNMAPPED` | 진입점이 모르는 이름이거나 두 연결이 같은 이름(카운터는 `envs` 에 그 이름 항목이 없음) |
+| `ENTRYPOINT_NO_HOSTS` | 카운터만: 그 환경 항목의 `hosts` 가 0(업스트림 없음) |
 
 ## 가짜 구현
 
