@@ -453,6 +453,73 @@ EXPECTED_CONSTRAINTS = {
     ("migration_plan_logs", "uq_migration_plan_logs_migration_plan_id_seq"): (
         "UNIQUE (migration_plan_id, seq)"
     ),
+    # 보안·거버넌스 2: 보안 증거 표
+    ("findings", "ck_findings_ai_confirmation_consistency"): (
+        "CHECK ((((source)::text = 'AI_REVIEW'::text) = (confirmation IS NOT NULL)))"
+    ),
+    ("findings", "ck_findings_ai_result_not_pass"): (
+        "CHECK ((((source)::text <> 'AI_REVIEW'::text) OR ((result)::text = ANY "
+        "((ARRAY['WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character "
+        "varying])::text[]))))"
+    ),
+    ("findings", "ck_findings_confirmation_valid"): (
+        "CHECK (((confirmation IS NULL) OR ((confirmation)::text = ANY "
+        "((ARRAY['UNCONFIRMED'::character varying, 'ESCALATED'::character varying, "
+        "'DISMISSED'::character varying])::text[]))))"
+    ),
+    ("findings", "ck_findings_control_id_valid"): (
+        "CHECK (((control_id)::text = ANY ((ARRAY['C-IMG-1'::character varying, "
+        "'C-IMG-2'::character varying, 'C-IMG-3'::character varying, 'C-CFG-1'::character "
+        "varying, 'C-TLS-1'::character varying, 'C-TLS-2'::character varying, "
+        "'C-NET-1'::character varying, 'C-NET-2'::character varying, 'C-IAM-1'::character "
+        "varying, 'C-IAM-2'::character varying, 'C-SEC-1'::character varying, "
+        "'C-AUD-1'::character varying, 'C-AUD-2'::character varying, 'C-CI-1'::character "
+        "varying, 'C-AI-1'::character varying, 'C-DB-1'::character varying, "
+        "'C-DST-1'::character varying, 'C-POST-1'::character varying])::text[])))"
+    ),
+    ("findings", "ck_findings_expires_after_collected"): "CHECK ((expires_at > collected_at))",
+    ("findings", "ck_findings_image_digest_format"): (
+        "CHECK (((image_digest IS NULL) OR ((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)))"
+    ),
+    ("findings", "ck_findings_items_is_array"): "CHECK ((jsonb_typeof(items) = 'array'::text))",
+    ("findings", "ck_findings_manual_review_has_basis"): (
+        "CHECK ((((source)::text <> 'MANUAL_REVIEW'::text) OR ((reviewer_user_id IS NOT NULL) "
+        "AND (basis_url IS NOT NULL))))"
+    ),
+    ("findings", "ck_findings_mode_valid"): (
+        "CHECK (((mode)::text = ANY ((ARRAY['REAL'::character varying, 'CACHE'::character "
+        "varying, 'SIMULATED'::character varying])::text[])))"
+    ),
+    ("findings", "ck_findings_result_valid"): (
+        "CHECK (((result)::text = ANY ((ARRAY['PASS'::character varying, 'WARN'::character "
+        "varying, 'FAIL'::character varying, 'UNKNOWN'::character varying, 'NA'::character "
+        "varying])::text[])))"
+    ),
+    ("findings", "ck_findings_source_valid"): (
+        "CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, "
+        "'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, "
+        "'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, "
+        "'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, "
+        "'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, "
+        "'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, "
+        "'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, "
+        "'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, "
+        "'AI_REVIEW'::character varying])::text[])))"
+    ),
+    ("findings", "ck_findings_total_items_non_negative"): "CHECK ((total_items >= 0))",
+    ("findings", "fk_findings_environment_id_environments"): (
+        "FOREIGN KEY (environment_id) REFERENCES environments(id) ON DELETE RESTRICT"
+    ),
+    ("findings", "fk_findings_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("findings", "fk_findings_reviewer_user_id_users"): (
+        "FOREIGN KEY (reviewer_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("findings", "fk_findings_service_id_services"): (
+        "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
+    ),
+    ("findings", "pk_findings"): "PRIMARY KEY (id)",
 }
 
 EXPECTED_INDEXES = {
@@ -612,6 +679,12 @@ EXPECTED_INDEXES = {
         "'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character "
         "varying])::text[]))"
     ),
+    # 보안·거버넌스 2: 보안 증거 표
+    "ix_findings_organization_id_control_id_collected_at": (
+        "CREATE INDEX ix_findings_organization_id_control_id_collected_at ON findings "
+        "USING btree (organization_id, control_id, collected_at)"
+    ),
+    "pk_findings": "CREATE UNIQUE INDEX pk_findings ON findings USING btree (id)",
 }
 
 EXPECTED_TRIGGERS = {
@@ -659,7 +732,7 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-HEAD_REVISION = "a83f2c1d9e47"
+HEAD_REVISION = "eee7a6c8229f"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -806,6 +879,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "deploy_requests",
         "deployments",
         "environments",
+        "findings",
         "invitations",
         "jobs",
         "migration_plan_logs",
@@ -1243,6 +1317,31 @@ async def test_plan_mode_revision_round_trip_fills_existing_plans_with_planned(
     assert down == (False, False)
     assert up == (True, True)
     assert mode == "PLANNED"
+
+
+# 보안 증거 표(보안·거버넌스 2) 직전 리비전.
+BEFORE_FINDINGS = "a83f2c1d9e47"
+
+
+def _has_findings_table(connection: Connection) -> bool:
+    return "findings" in inspect(connection).get_table_names()
+
+
+async def test_findings_revision_downgrade_removes_table_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_FINDINGS))
+        )
+        down = await connection.run_sync(_has_findings_table)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_has_findings_table)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert (down, up) == (False, True)
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

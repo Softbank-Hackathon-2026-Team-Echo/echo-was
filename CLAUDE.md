@@ -49,10 +49,11 @@ app/
 │                     #   migration_counting(비율 단계 요청 N건 세기 규칙, 순수 계산)
 │                     #   security_rules(공통 보안 규칙표·판정·매트릭스 칸 요약, 순수 계산, 보안 3)
 │                     #   security_normalizers(Trivy·gitleaks·TLS 시험 원문 → 공통 증거, 비밀값 원문 버림, 보안 2)
+│                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
-│                     #   MigrationPlan·MigrationPlanLog Repository
+│                     #   MigrationPlan·MigrationPlanLog Repository · Finding Repository(보안 증거, 조직 조건 필수)
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
 │                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만)
@@ -66,7 +67,7 @@ app/
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나
 ├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, deploy_request_logs, jobs
 │                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
-│                     #   migration_plans, migration_plan_logs
+│                     #   migration_plans, migration_plan_logs, findings(보안 증거, 보안 2)
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking

@@ -314,6 +314,27 @@ erDiagram
 - `organizations.allow_self_approval`(bool, 기본 false): 만든 사람의 자기 승인 허용 스위치(⑨).
 - revision `4cea1ec99f1b` downgrade 는 `MIGRATION_PLAN` 할 일 행이 있으면 분명한 메시지(`jobs has N MIGRATION_PLAN rows …`)로 실패한다.
 
+### `findings` — 보안 증거 (보안·거버넌스 2)
+
+검사 원문(Trivy·gitleaks·TLS 접속 시험)이나 사람 점검 기록을 공통 형태로 바꾼 한 건. 보안 규칙표(`app/services/security_rules.py`)가 판정에 쓴다. 결과는 고치지 않고, 다시 검사하면 새 행이다.
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `organization_id` | uuid | N | FK `organizations.id` | 조회는 늘 조직 조건을 건다 |
+| `service_id`·`environment_id` | uuid | Y | FK | 통제가 정한 범위만 채운다 |
+| `image_digest`·`config_commit`·`was_version` | varchar | Y | digest 형식 | 이미지·설정 커밋·WAS 버전 범위 |
+| `control_id`·`result`·`mode`·`source` | varchar | N | 값 CHECK | 통제 ID(`C-IMG-1` 등)·결과·모드·출처(용어 사전 §3 보안 판정 값) |
+| `reason` | varchar(64) | N | 값 CHECK 없음(`SecurityFindingReason`) | 정규화 이유 |
+| `policy_version`·`tool_version` | varchar | N·Y | | 결과를 만든 규칙표 버전 · 검사 도구 버전 |
+| `source_ref` | varchar(500) | Y | | 원문 위치(검사 워크플로 실행·산출물 등) |
+| `items`·`total_items` | jsonb·int | N | 배열, `>= 0` | 근거 줄(최대 50, 값 없는 칸은 키 없음)과 전체 개수. **비밀값 원문 없음** |
+| `reviewer_user_id`·`basis_url` | uuid·text | Y | `source = MANUAL_REVIEW` 면 둘 다 필수 | 사람 점검자·근거 링크 |
+| `confirmation` | varchar | Y | `source = AI_REVIEW` 일 때만 있음 | AI 결과의 사람 확인 상태 |
+| `collected_at`·`expires_at` | timestamptz | N | `expires_at > collected_at` | 수집 시각·만료(수집 + 통제 유효기간) |
+
+- `source = AI_REVIEW` 인 행은 `result` 가 `WARN`·`FAIL`·`UNKNOWN` 만 된다(`ck_findings_ai_result_not_pass`). AI 결과로 PASS 를 만들 수 없다.
+- 인덱스 `(organization_id, control_id, collected_at)`. 판정용 조회는 만료 전 증거를 최신순으로 최대 500건 읽는다.
+
 ### `deployments` — 배포 (지우지 않는 이력)
 
 | 칸 | 타입 | NULL | 제약 | 뜻 |
@@ -577,7 +598,7 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 |---|---|---|
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
 | `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
-| `policies`·`findings` | 공통 정책, 정규화한 보안 결과 | 보안 파트 |
+| (정책은 표 없음) · 기한부 예외·보안 판정 | 정책은 코드 규칙표(`security_rules.RULES`). `findings` 는 보안·거버넌스 2 에서 만들었다(②). 예외 `security_exceptions`·판정 `security_decisions`(가칭) | 보안 파트 |
 | 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
 
 삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스는 API 서버 3 에서 정했다 — `DELETING` 으로 바꾸고 대기 요청을 취소한 뒤, 진행 중 요청이 끝나면 일꾼이 연결마다 내리고 소프트 삭제한다(연결도 내린 즉시 소프트 삭제, 배포 기록·배포 요청은 남는다).

@@ -184,6 +184,45 @@ CREATE TABLE public.environments (
     CONSTRAINT ck_environments_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
 );
 
+CREATE TABLE public.findings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    service_id uuid,
+    environment_id uuid,
+    image_digest character varying(71),
+    config_commit character varying(40),
+    was_version character varying(64),
+    control_id character varying(16) NOT NULL,
+    result character varying(16) NOT NULL,
+    mode character varying(16) NOT NULL,
+    source character varying(32) NOT NULL,
+    reason character varying(64) NOT NULL,
+    policy_version character varying(32) NOT NULL,
+    tool_version character varying(32),
+    source_ref character varying(500),
+    items jsonb DEFAULT '[]'::jsonb NOT NULL,
+    total_items integer DEFAULT 0 NOT NULL,
+    reviewer_user_id uuid,
+    basis_url text,
+    confirmation character varying(16),
+    collected_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_findings_ai_confirmation_consistency CHECK ((((source)::text = 'AI_REVIEW'::text) = (confirmation IS NOT NULL))),
+    CONSTRAINT ck_findings_ai_result_not_pass CHECK ((((source)::text <> 'AI_REVIEW'::text) OR ((result)::text = ANY ((ARRAY['WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying])::text[])))),
+    CONSTRAINT ck_findings_confirmation_valid CHECK (((confirmation IS NULL) OR ((confirmation)::text = ANY ((ARRAY['UNCONFIRMED'::character varying, 'ESCALATED'::character varying, 'DISMISSED'::character varying])::text[])))),
+    CONSTRAINT ck_findings_control_id_valid CHECK (((control_id)::text = ANY ((ARRAY['C-IMG-1'::character varying, 'C-IMG-2'::character varying, 'C-IMG-3'::character varying, 'C-CFG-1'::character varying, 'C-TLS-1'::character varying, 'C-TLS-2'::character varying, 'C-NET-1'::character varying, 'C-NET-2'::character varying, 'C-IAM-1'::character varying, 'C-IAM-2'::character varying, 'C-SEC-1'::character varying, 'C-AUD-1'::character varying, 'C-AUD-2'::character varying, 'C-CI-1'::character varying, 'C-AI-1'::character varying, 'C-DB-1'::character varying, 'C-DST-1'::character varying, 'C-POST-1'::character varying])::text[]))),
+    CONSTRAINT ck_findings_expires_after_collected CHECK ((expires_at > collected_at)),
+    CONSTRAINT ck_findings_image_digest_format CHECK (((image_digest IS NULL) OR ((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text))),
+    CONSTRAINT ck_findings_items_is_array CHECK ((jsonb_typeof(items) = 'array'::text)),
+    CONSTRAINT ck_findings_manual_review_has_basis CHECK ((((source)::text <> 'MANUAL_REVIEW'::text) OR ((reviewer_user_id IS NOT NULL) AND (basis_url IS NOT NULL)))),
+    CONSTRAINT ck_findings_mode_valid CHECK (((mode)::text = ANY ((ARRAY['REAL'::character varying, 'CACHE'::character varying, 'SIMULATED'::character varying])::text[]))),
+    CONSTRAINT ck_findings_result_valid CHECK (((result)::text = ANY ((ARRAY['PASS'::character varying, 'WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying, 'NA'::character varying])::text[]))),
+    CONSTRAINT ck_findings_source_valid CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, 'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, 'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, 'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, 'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, 'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, 'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, 'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, 'AI_REVIEW'::character varying])::text[]))),
+    CONSTRAINT ck_findings_total_items_non_negative CHECK ((total_items >= 0))
+);
+
 CREATE TABLE public.invitations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     organization_id uuid NOT NULL,
@@ -407,6 +446,9 @@ ALTER TABLE ONLY public.deployments
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT pk_environments PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.findings
+    ADD CONSTRAINT pk_findings PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.invitations
     ADD CONSTRAINT pk_invitations PRIMARY KEY (id);
 
@@ -474,6 +516,8 @@ CREATE INDEX ix_deploy_requests_service_environment_id_created_at ON public.depl
 CREATE INDEX ix_deploy_requests_service_id_created_at ON public.deploy_requests USING btree (service_id, created_at);
 
 CREATE INDEX ix_deployments_service_environment_id_created_at ON public.deployments USING btree (service_environment_id, created_at);
+
+CREATE INDEX ix_findings_organization_id_control_id_collected_at ON public.findings USING btree (organization_id, control_id, collected_at);
 
 CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_id);
 
@@ -575,6 +619,18 @@ ALTER TABLE ONLY public.deployments
 
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT fk_environments_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.findings
+    ADD CONSTRAINT fk_findings_environment_id_environments FOREIGN KEY (environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.findings
+    ADD CONSTRAINT fk_findings_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.findings
+    ADD CONSTRAINT fk_findings_reviewer_user_id_users FOREIGN KEY (reviewer_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.findings
+    ADD CONSTRAINT fk_findings_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.invitations
     ADD CONSTRAINT fk_invitations_invited_by_user_id_users FOREIGN KEY (invited_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;

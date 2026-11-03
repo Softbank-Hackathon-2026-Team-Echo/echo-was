@@ -63,6 +63,8 @@ CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
 TABLES = (
     "jobs",
+    # --- 보안·거버넌스 2: 보안 증거 ---
+    "findings",
     # --- API 서버 8: 이전 계획 ---
     "migration_plan_logs",
     "migration_plans",
