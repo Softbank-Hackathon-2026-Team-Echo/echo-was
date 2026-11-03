@@ -294,7 +294,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | 이름 | 예 | 설명 |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo` | 앱·Alembic 이 쓰는 DB |
-| `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 없으면 테스트가 만든다 |
+| `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 실제로는 작업 폴더마다 `echo_<폴더 해시 8자>_test` 를 쓰고, 없으면 테스트가 만든다 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
 | `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
