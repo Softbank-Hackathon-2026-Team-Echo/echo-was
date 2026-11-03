@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 가짜 실행기), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -54,6 +54,8 @@ app/
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
+│                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
+│                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
@@ -124,6 +126,13 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 일꾼·배포 코드의 시각은 주입한 `Clock` 으로 정한다(DB `now()` 에 기대지 않는다).
 - 같은 연결은 실행 1 + 대기 1(부분 unique 2개). 새 대기 요청은 `enqueue_deploy_request` 로만 넣는다(밀어내기 포함).
 - 가짜 결과는 `simulated = true` 를 **행에 저장**하고, 응답 때 설정으로 다시 계산하지 않는다. 설치 토큰·App 개인키는 `SecretValue`/메모리로만 다루고 저장·로그·응답에 넣지 않는다.
+
+### 실제 실행기 (API 서버 3-2, 자주 어기는 것)
+- `EXECUTOR_MODE=real` 이 빌드(GitHub Actions)·배포·내리기(쿠버네티스 직접 apply)를 함께 바꾼다. **운영 기본값은 `fake`**(실환경 확인 전까지). real 은 GitHub App·`SOURCE_CLIENT_MODE=github`·`HEALTH_CHECKER_MODE=http` 가 필수(시작 때 설정 오류).
+- **실행기 생성은 부작용이 없다**(토큰·비밀값은 첫 호출 때). 묶음은 프로세스당 하나: 일꾼은 시작 때, API 는 `ExecutorSetHolder`(lifespan 종료 때 닫음). 요청마다 실제 실행기를 만들지 않는다.
+- 다시 불러도 소용없는 실패만 `BuildStartError`·`DeployApplyError(code)` 로 올린다. 시작 계열 일시 오류는 1·2·4초 재시도 뒤 `ExecutorUnavailableError`, **poll 계열은 예외 없이 진행 중 + 경고 로그**(예외 3번 = `WORKER_LOST`). 되돌리기는 예외 대신 `RevertFailed`.
+- 실행기는 앱 네임스페이스(`{서비스}-{suffix}`, 라벨 `app.kubernetes.io/managed-by=echo-was`) 밖을 쓰지 않는다. 라벨 없는 같은 이름 네임스페이스는 쓰지도 지우지도 않는다. 시험은 스텁 전송(`tests/real_executor_fakes.py`)만 쓴다.
+- 환경 config 새 칸은 모두 선택이고 **값이 없으면 키로 남기지 않는다**(`EnvironmentConfig` 직렬화기). 환경별 주소는 `ingressDomain` 이 있으면 `{서비스}-{suffix}.{ingressDomain}`, 이미 만든 연결 행은 바꾸지 않는다.
 
 ### 되돌리기·배포 작업 로그 (자주 어기는 것)
 - **되돌리기는 `trigger = ROLLBACK` 배포 요청**이다(`DeployRequestService.create_rollback`). 대상의 `build_id`(`build_reused = true`)·커밋·배포 기록 `config_snapshot` 사본을 쓰고, 접수 순간 현재 배포를 `rollback_base_deployment_id` 에 적는다. 일꾼 `_start` 가 현재 배포가 다르면 `CANCELLED(BASE_CHANGED)`. 새 배포 기록은 `rollback_of_id` = 대상의 배포 기록. 예비 따라가기는 `MANUAL`·`ROLLBACK` 성공(서비스 중 연결)일 때만.

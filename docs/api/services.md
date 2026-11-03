@@ -114,10 +114,10 @@
 | `environment` | `{id, name, kind}` | |
 | `role` | `SERVING`·`STANDBY`·`NONE` | 저장하지 않고 계산. `SERVING`: `trafficWeight > 0`. `STANDBY`: 0 이고 현재 배포 있음(재난 때 넘어갈 예비). `NONE`: 현재 배포 없음 |
 | `trafficWeight` | int | 앞단 프록시에 마지막으로 적용한 비율(0~100). 이번에는 가짜 대표 주소 라우터가 적용한 값 |
-| `url` | string | 환경별 주소 `https://{service}-{environment}-{서비스의 suffix}.{PUBLIC_BASE_DOMAIN}`(연결을 만들 때 정해 저장, 환경 이름이 바뀌어도 그대로) |
+| `url` | string | 환경별 주소. 환경 config 에 `ingressDomain`(클라우드 환경의 하위 도메인)이 있으면 `https://{service}-{서비스의 suffix}.{ingressDomain}`, 없으면 `https://{service}-{environment}-{서비스의 suffix}.{PUBLIC_BASE_DOMAIN}`(온프레·예전 환경, API 서버 3-2). 연결을 만들 때 정해 저장한다(환경 이름·`ingressDomain` 이 바뀌어도 그대로) |
 | `currentDeployment` | `{id, commitSha, imageDigest, finishedAt}` \| null | 지금 돌고 있는 배포 |
 | `versionStatus` | `IN_SYNC`·`OUT_OF_SYNC` \| null | `STANDBY` 만. 기준 연결(비율이 가장 큰 연결, 같으면 `traffic_applied_at` 이 늦은 쪽, 그다음 id)의 현재 이미지 digest 와 같은가. 서비스 중 연결이 없으면 null |
-| `lastSyncError` | 코드 \| null | 이 연결의 가장 최근 예비 따라가기(`STANDBY_SYNC`) 요청이 실패했으면 그 `errorCode` |
+| `lastSyncError` | 코드 \| null | 이 연결의 가장 최근 예비 따라가기(`STANDBY_SYNC`) 요청이 실패했으면 그 `errorCode`(실제 실행기의 `BUILD_DISPATCH_FAILED`·`CLUSTER_UNAUTHORIZED`·`IMAGE_PULL_FAILED`·`CONTAINER_START_FAILED` 포함, 뜻은 [deploy-requests.md](deploy-requests.md#실패-이유-코드-errorcode)) |
 | `activeRequestId`·`queuedRequestId` | uuid \| null | 실행 중·대기 중 배포 요청(예비가 따라가는 중이면 여기 `STANDBY_SYNC` 요청이 보인다) |
 | `lastSyncSeconds` | number \| null | 이 연결의 마지막 **성공** 예비 따라가기가 원본 요청이 끝난 뒤 끝나기까지 걸린 초(소수 1자리). 없으면 null(API 서버 8) |
 | `simulated` | boolean \| null | 현재 배포를 만든 요청의 값. 현재 배포가 없으면 null |

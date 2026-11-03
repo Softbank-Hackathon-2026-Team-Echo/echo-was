@@ -72,9 +72,13 @@
 | 예비 따라가기 | Standby sync | `deploy_requests.trigger = STANDBY_SYNC` | 서비스 중 연결이 성공하면 예비 연결이 같은 빌드·같은 설정으로 자동 배포되는 요청. `source_request_id` 로 원본을 가리킨다 | F1·D11 |
 | 버전 상태 | Version status | `VersionStatus` (응답 `versionStatus`) | 예비 연결의 현재 이미지가 서비스 중 연결과 같으면 `IN_SYNC`, 다르면 `OUT_OF_SYNC` | F1·P2 |
 | 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}-{suffix}.{public_base_domain}`(도메인 바로 아래 한 단계). 서비스 중 연결로 간다 | F1·D8, API 3-1 |
-| 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | `https://{서비스}-{환경}-{suffix}.{public_base_domain}`(서비스의 suffix). 연결을 만들 때 정해 저장한다(환경 이름이 바뀌어도 그대로). 헬스체크 대상 | F1·D8, API 3-1 |
+| 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | 환경 config 에 `ingressDomain` 이 있으면(클라우드) `https://{서비스}-{suffix}.{ingressDomain}`, 없으면(온프레·예전 환경) `https://{서비스}-{환경}-{suffix}.{public_base_domain}`(서비스의 suffix). 연결을 만들 때 정해 저장한다(환경 이름·`ingressDomain` 이 바뀌어도 그대로). 헬스체크 대상 | F1·D8, API 3-1·3-2 |
+| 환경 하위 도메인 | Environment ingress domain | `environments.config.ingress_domain` / API `ingressDomain`, `EnvironmentConfig.environment_host_domain()` | 클라우드 환경(aws·gcp)의 환경별 주소 도메인. `public_base_domain` 바로 아래 한 단계(`aws-tokyo.echoport.uk`)여야 하고, 그 아래 와일드카드 DNS·인증서가 덮는다 | API 3-2 |
+| 앱 네임스페이스 | App namespace | 대표 주소 첫 레이블 `{서비스}-{suffix}`, 라벨 `app.kubernetes.io/managed-by=echo-was` | 실제 배포 실행기가 고객 앱 한 연결을 올리는 쿠버네티스 네임스페이스. 실행기는 이 라벨이 붙은 네임스페이스 밖을 쓰지 않는다. 앱 비밀값은 환경 담당이 미리 둔 Secret `{네임스페이스}-env` 를 `envFrom`(optional)으로 읽기만 한다 | API 3-2 |
+| 클러스터 접속기 | Cluster access provider | `ClusterAccessProvider` (`app/executors/kubernetes/access.py`) | 환경 종류별로 쿠버네티스 창구 주소·CA·토큰을 얻는다: gcp 메타데이터 토큰 + GKE API, aws Google ID 토큰 → STS → presigned EKS 토큰, onprem `apiUrl`(터널) + `secret_ref` 서비스 계정 토큰 | API 3-2 |
+| 이미지 받기 자격 | Image pull secret | Secret `echo-pull`, 어노테이션 `echo.pull-expires-at` | 온프레 앱 네임스페이스에 두는 Artifact Registry 자격(메타데이터 액세스 토큰). 일꾼이 5분마다 보고 남은 수명이 30분 미만이면 갱신한다 | API 3-2 |
 | 주소 suffix | Host suffix | `services.host_suffix` | 대표·환경별 주소 끝의 소문자·숫자 무작위 8자. 서비스를 만들 때 한 번 정하고 바꾸지 않는다(지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게). 레이블이 63자를 넘으면 앞부분을 54자로 자르고 suffix 는 남긴다 | API 3-1 |
-| 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기와 빌드·실행 로그 읽기를 실제로 하는 쪽. 이번에는 가짜(`simulated`) | F1 |
+| 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기와 빌드·실행 로그 읽기를 실제로 하는 쪽. 기본은 가짜(`simulated`), `EXECUTOR_MODE=real` 이면 GitHub Actions 빌드(`GithubActionsBuildExecutor`) + 쿠버네티스 직접 반영(`KubernetesDeployExecutor`·`KubernetesTeardownExecutor`, API 서버 3-2) | F1 |
 | 멱등 키 | Idempotency key | 빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt` | 외부 작업을 두 번 만들지 않게 우리가 먼저 정해 넘기는 키. 같은 키 재호출은 같은 작업 | F1 |
 | 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다 | F1·D7 |
 | 소스 저장소 클라이언트 | Source repository client | `SourceRepositoryClient` (`app/clients/source_repository.py`) | 저장소 접근 확인·브랜치/커밋 → 40자 SHA·빌드용 읽기 토큰. 가짜와 GitHub App 구현 | F1·D9 |
@@ -153,7 +157,7 @@
 - 촉발(`trigger`): `MANUAL`(사람) · `STANDBY_SYNC`(예비 따라가기) · `ROLLBACK`(되돌리기, `rollback_of_request_id`·`rollback_base_deployment_id` 가 있다).
 - 취소 이유(`cancel_reason`, `CANCELLED` 일 때만): `SUPERSEDED`(새 요청이 밀어냄) · `SERVICE_DELETED` · `BASE_CHANGED`(되돌리기를 시작할 때 연결의 현재 배포가 접수 때와 달랐다).
 - 되돌리기의 가짜 실패 단계(`simulate.failAt`): `DEPLOYING` · `VERIFYING` 만(빌드 단계가 없다).
-- 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR`. 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
+- 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR` · 실제 실행기만(API 서버 3-2) `BUILD_DISPATCH_FAILED`(빌드 워크플로를 시작하지 못함) · `CLUSTER_UNAUTHORIZED`(클러스터·자격 거절) · `IMAGE_PULL_FAILED`(이미지 받기 실패) · `CONTAINER_START_FAILED`(컨테이너가 계속 죽음). 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
 - 되돌리기 결과(`revert_status`): `SUCCEEDED` · `FAILED` · NULL(필요 없었음).
 - 마지막 헬스 결과(`last_health_result`): `OK` · `HTTP_ERROR` · `UNREACHABLE`.
 - 가짜 실패 단계(`simulate.failAt`): `BUILDING` · `DEPLOYING` · `VERIFYING`.
