@@ -17,8 +17,8 @@ dependencies = [
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-# 규칙 문서의 예시 코드는 포맷 대상이 아니다.
-extend-exclude = [".claude"]
+# 규칙 문서·확정 SPEC(해시로 고정)의 예시 코드는 포맷 대상이 아니다.
+extend-exclude = [".claude", "specs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
