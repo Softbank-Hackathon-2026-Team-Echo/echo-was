@@ -22,6 +22,9 @@ spec:
         path: "github-app-private-key"
       - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-github-app-client-secret/versions/latest"
         path: "github-app-client-secret"
+      # 고정 진입점 가중치 API 토큰. 진입점 VM 이 만든 비밀이고 읽기 권한은 echo-infra control-plane.tf.
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-entry-weights-token/versions/latest"
+        path: "entrypoint-token"
 ---
 apiVersion: secret-sync.gke.io/v1
 kind: SecretSync
@@ -35,6 +38,7 @@ spec:
       - {sourcePath: "database-url", targetKey: "DATABASE_URL"}
       - {sourcePath: "github-app-private-key", targetKey: "ECHO_SECRET_GITHUB_APP_PRIVATE_KEY"}
       - {sourcePath: "github-app-client-secret", targetKey: "ECHO_SECRET_GITHUB_APP_CLIENT_SECRET"}
+      - {sourcePath: "entrypoint-token", targetKey: "ECHO_SECRET_ENTRYPOINT_TOKEN"}
 ---
 # echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
 # 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
@@ -128,6 +132,10 @@ data:
   PUBLIC_BASE_DOMAIN: echoport.uk
   EXECUTOR_MODE: fake
   HEALTH_CHECKER_MODE: fake
+  # 트래픽 비율·대표 주소·지표는 고정 진입점(Envoy 가중치 API, 진입점 VM 내부 주소)을 부른다.
+  ENTRYPOINT_EXECUTOR_MODE: http
+  ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
+  ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
   SOURCE_CLIENT_MODE: github
   GITHUB_APP_ID: "5574944"
   GITHUB_APP_PRIVATE_KEY_REF: env:ECHO_SECRET_GITHUB_APP_PRIVATE_KEY
