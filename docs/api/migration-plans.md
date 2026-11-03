@@ -41,7 +41,7 @@
 | `rollbackConditions` | 선택. `maxErrorRatePercent` 0~100(기본 1.0, 허용 5xx 계산에 쓴다), `maxP95Ms` 1~60000(기본 800, **참고용** — 판정에 쓰지 않는다), `maxReplicationLagSeconds` 0~600(기본 1.0). 헬스체크 실패는 늘 롤백 조건 |
 | `simulate` | 가짜 실행기 모드에서만(아니면 422 `SIMULATE_NOT_ALLOWED`). `failAtStep` 1~4, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
 
-8-1 에서 `observeSeconds` 를 뺐다. 보내면 422 `VALIDATION_ERROR`(모르는 칸).
+8-1 에서 `observeSeconds` 를 뺐다. 보내면 422 `VALIDATION_ERROR`(모르는 칸). 계획 종류 `mode` 도 요청 칸이 아니다(서버가 정한다). 보내면 422 `VALIDATION_ERROR`(`details[0].field = "mode"`, 모르는 칸 — `observeSeconds` 와 같은 규칙)이고 계획은 만들어지지 않는다.
 
 거절 순서: 권한 → 바디(422) → 서비스·환경(404, 서비스 `DELETING` 409 `SERVICE_DELETING`, 환경 마지막 접속 확인 `FAILED` 409 `ENVIRONMENT_UNHEALTHY`) → 아래 상태 검사(409). 상태 검사는 환경 `FOR SHARE` → 서비스 → 연결 전체를 잠근 한 트랜잭션에서 한다.
 
@@ -51,7 +51,23 @@
 4. 도착 환경이 출발과 같으면 422 `VALIDATION_ERROR`(`{field: "targetEnvironmentId", reason: "SAME_ENVIRONMENT"}`).
 5. 서비스의 **어느 연결이든** 열린(대기·실행 중) 배포 요청이 있으면: 도착 연결의 `STANDBY_SYNC` 면 409 `TARGET_SYNCING`(`{field: "deployRequestId", reason: "TARGET_SYNCING", value}` — 예비가 아직 새 버전을 따라가는 중, 끝나면 다시), 그 밖은 409 `DEPLOY_IN_PROGRESS`(`{field: "deployRequestId", reason: "DEPLOY_IN_PROGRESS", value}`). 그래서 계획을 만든 순간 열린 요청은 늘 0개다.
 6. 도착 연결이 없거나 현재 배포가 없으면 409 `TARGET_NOT_READY`(`{field: "targetEnvironmentId", reason: "NO_DEPLOYMENT"}`). 도착의 현재 이미지 digest 가 출발과 다르면 409 `TARGET_NOT_READY`(`reason: "VERSION_MISMATCH"`, 그 연결의 마지막 `STANDBY_SYNC` 가 실패했으면 `{field: "lastSyncError", reason: "LAST_SYNC_FAILED", value: <에러 코드>}` 를 더함).
-7. 지문·단계를 계산해 `PENDING_APPROVAL` 로 저장하고(`expiresAt = 지금 + 24시간`, `simulated` = 가짜 모드인가) 로그 `PLAN_CREATED` → 201.
+7. 지문·단계·종류(`mode`, 아래)를 계산해 `PENDING_APPROVAL` 로 저장하고(`expiresAt = 지금 + 24시간`, `simulated` = 가짜 모드인가) 로그 `PLAN_CREATED` → 201.
+
+### 계획 종류 `mode` (8-3)
+
+서버가 만들 때 위 잠금 트랜잭션 안에서 한 번 판정해 저장한다. 응답 때 다시 계산하지 않는다(서비스당 열린 계획은 하나라 만든 뒤 실행 전에 기준이 바뀌지 않는다). 클라이언트는 정할 수 없다. 근거: [specs/api-8-3-plan-mode.md](../../specs/api-8-3-plan-mode.md).
+
+| 값 | 뜻 |
+|---|---|
+| `PLANNED` | 사람이 만든 보통 이전(기본값). 이 칸이 생기기 전 계획도 `PLANNED` |
+| `FAILBACK` | 앞선 성공 이전을 거꾸로 하는 복귀 |
+| `EMERGENCY` | 재난 자동 이전. 값만 정해 두었고 API 서버 9(재난 자동 이전)가 계획을 만들 때부터 쓴다. 지금 API 로는 만들어지지 않는다 |
+
+판정: 같은 서비스의 `SUCCEEDED` 계획 중 `finishedAt` 이 가장 늦은 것(같으면 `createdAt`, 그다음 `id` 가 큰 것) 하나를 기준으로 삼는다. 그 계획의 출발 연결 = 새 계획의 도착 연결이고, 그 계획의 도착 연결 = 새 계획의 출발 연결이고, 그 계획이 `FAILBACK` 이 아니면 `FAILBACK`, 그 밖은 `PLANNED`.
+
+- 성공한 계획만 본다. 롤백·실패·취소·거절·만료된 계획은 트래픽을 옮기지 않았다.
+- 복귀의 복귀(aws→gcp 성공, gcp→aws 복귀 성공, 다시 aws→gcp)는 새 이전이라 `PLANNED` 다.
+- 성공 이력이 여럿이면 가장 늦게 끝난 것만 본다(aws→gcp 성공 뒤 aws→onprem 성공이면 gcp→aws 는 `PLANNED`, onprem→aws 는 `FAILBACK`).
 
 ### 단계와 예상 시간 (고정)
 
@@ -175,7 +191,7 @@
 
 ## 응답
 
-`MigrationPlanSummary`: `id`, `serviceId`, `sourceEnvironmentId`·`targetEnvironmentId`(환경 id), `sourceServiceEnvironmentId`·`targetServiceEnvironmentId`(연결 id), `status`, `currentStep`, `expectedSeconds`, `createdBy{id, login}`, `approvedBy`, `selfApproved`, `errorCode`, `rollbackStatus`, `simulated`, `createdAt`·`approvedAt`·`startedAt`·`finishedAt`·`expiresAt`.
+`MigrationPlanSummary`: `id`, `serviceId`, `sourceEnvironmentId`·`targetEnvironmentId`(환경 id), `sourceServiceEnvironmentId`·`targetServiceEnvironmentId`(연결 id), `status`, `currentStep`, `expectedSeconds`, `createdBy{id, login}`, `approvedBy`, `selfApproved`, `errorCode`, `rollbackStatus`, `simulated`, `mode`(`PLANNED`·`EMERGENCY`·`FAILBACK`, 위 "계획 종류"), `createdAt`·`approvedAt`·`startedAt`·`finishedAt`·`expiresAt`.
 
 `MigrationPlanDetail` = Summary + `rollbackConditions{…, healthCheck: true, p95Advisory: true}`, `maxWaitSeconds`, `steps[]`(계획 값과 실제 결과를 나란히), `progress`, `rejectedBy`·`cancelledBy`·`abortedBy`, `abortRequestedAt`, `errorMessage`.
 
@@ -194,6 +210,7 @@
     "sourceServiceEnvironmentId": "a1…",
     "targetServiceEnvironmentId": "b2…",
     "status": "RUNNING",
+    "mode": "PLANNED",
     "currentStep": 2,
     "expectedSeconds": 17,
     "createdBy": {"id": "u1…", "login": "dev-a"},
@@ -244,7 +261,7 @@
 
 | code | level | step | data |
 |---|---|---|---|
-| `PLAN_CREATED` | INFO | — | `expectedSeconds`, `requiredRequests`(3개), `maxWaitSeconds` |
+| `PLAN_CREATED` | INFO | — | `expectedSeconds`, `requiredRequests`(3개), `maxWaitSeconds`, `mode`(8-3 부터) |
 | `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` | INFO | — | |
 | `STALE` | WARN | — | `changed`(항목 이름 목록) |
 | `ABORT_REQUESTED` | WARN | — | |

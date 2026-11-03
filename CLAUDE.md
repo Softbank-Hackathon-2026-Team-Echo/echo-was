@@ -66,7 +66,7 @@ app/
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
 ├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기·로그용 실행기 묶음 get_executor_set)
-└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·단계·원인 (용어 사전 §3)
+└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·종류·단계·원인 (용어 사전 §3)
 alembic/              # 마이그레이션
 scripts/              # dump_schema.sh
 tests/                # 단위 테스트 · adapter_contract.py·executor_contract.py(공통 계약) · github_fake.py·github_user_fake.py(가짜 GitHub)
@@ -137,6 +137,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **비율은 트래픽 실행기가 적용했다고 답했을 때만** 두 연결에 한 트랜잭션에서 함께 적는다(합계 100). 외부 호출은 "요청함 시각(`traffic_requested_at`·`rollback_requested_at`) 저장·커밋 → 호출(키 `{plan}:{step}`·`{plan}:rollback:{n}`) → 결과 저장".
 - 실행 중(`APPROVED`·`RUNNING`·`ROLLING_BACK`) 그 서비스의 배포 요청·되돌리기·서비스 삭제는 서비스 행을 잠근 뒤 `check_no_migration_in_progress` 로 409 `MIGRATION_IN_PROGRESS`. 승인 대기 계획은 막지 않는다.
 - 임대 상실(`lease.is_exhausted`, 한 번 참이면 계속 참)이어도 롤백 시도는 남은 횟수만큼 한다. `simulate` 는 처리기가 실패 값을 만들고 실행기를 부르지 않는다.
+- **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 API 서버 9 부터.
 - **비율 단계 판정은 "도착이 요청 N건을 5xx 허용 안에서 처리했나"**(API 서버 8-1, `migration_counting`). `OBSERVE` 한 번 실행 = 카운터(`MetricsProvider.read_counts`, 트랜잭션 밖) 한 번 읽기, 센 값은 `step_results[i].counting` 에 조건부 UPDATE 로 적고 진행 갱신은 로그 줄을 남기지 않는다. 세기를 끝내면 `judgeReason` 을 같은 트랜잭션에 적고 `JUDGE` 는 저장값으로만 판정한다(카운터 재읽기 금지). p95 는 판정에 쓰지 않는다(참고 값만). API 에 `observeSeconds` 는 없고 DB `observe_seconds` 칸 = 최대 대기다.
 
 ### 공통 안전 규칙

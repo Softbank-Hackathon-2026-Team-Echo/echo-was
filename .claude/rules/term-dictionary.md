@@ -103,6 +103,7 @@
 | 판정 | Judge | `step_phase = JUDGE`, `step_results[i].judgeReason` (`MigrationJudgeReason`) | 비율 단계는 세기를 끝낸 뒤(건수 채움 `COUNT_REACHED` 또는 트래픽 적음 `LOW_TRAFFIC`) 헬스체크 한 번, 데이터 확인 단계는 복제 지연, 사전 확인은 헬스 + 같은 이미지. 통과하면 사람 개입 없이 다음 단계. p95 는 판정하지 않고 참고 값(`p95Ms`)만 남긴다 | F7, API 8·8-1 |
 | 롤백 조건 | Rollback conditions | `rollback_conditions` (`maxErrorRatePercent`·`maxP95Ms`·`maxReplicationLagSeconds`) | 판정 실패 기준(기본 1.0%·800ms·1.0초). 오류율은 허용 5xx 계산에 쓰고, `maxP95Ms` 는 참고용(응답 `p95Advisory: true`). 헬스체크 실패는 늘 실패 | F10, API 8·8-1 |
 | 이전 롤백 | Migration rollback | `status = ROLLING_BACK`, `rollback_status`, 키 `{plan}:rollback:{n}` | 판정 실패·판단 불가·적용 실패·중단·일꾼 상실 때 출발 100%·도착 0% 로 되돌리는 것. 배포 되돌리기(`rollback_of_id`)·실패한 새 버전 거두기(`revert_status`)와 다르다 | F10, API 8 |
+| 계획 종류 | Migration plan mode | `migration_plans.mode` (`MigrationPlanMode`), 응답 `mode` | 계획을 만들 때 서버가 한 번 판정해 저장하는 종류. 같은 서비스의 가장 늦게 끝난 `SUCCEEDED` 계획을 출발·도착만 바꿔 거꾸로 하면 복귀(`FAILBACK`, 그 계획이 이미 복귀면 아님), 그 밖은 `PLANNED`. `EMERGENCY` 는 재난 자동 이전(API 서버 9)부터. 클라이언트는 정할 수 없다 | F10, API 8-3 |
 | 지문 | Fingerprint | `migration_plans.fingerprint` | 계획을 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경 설정 해시·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 낡은 계획(`STALE`) | API 8 |
 | 승인 | Approval | `approved_by_user_id`·`approved_at`, `POST …/approve` | 개발자 이상의 사람이 실행을 허락한 것. 승인이 곧 실행 시작이다. 에이전트는 할 수 없다 | F10, API 8 |
 | 자기 승인 | Self approval | `self_approved`, 조직 `allow_self_approval` | 계획을 만든 사람이 스스로 승인하는 것. 조직 스위치가 꺼져 있으면(기본) 403 `SELF_APPROVAL_FORBIDDEN`. 어드민만 켠다 | F10, API 8 |
@@ -183,6 +184,7 @@
 | 값 목록 | 표·칸 | 뜻 |
 |---|---|---|
 | `PENDING_APPROVAL` → `APPROVED` → `RUNNING` → `SUCCEEDED` / `RUNNING` → `ROLLING_BACK` → `ROLLED_BACK`·`FAILED` / `PENDING_APPROVAL` → `REJECTED`·`CANCELLED`·`EXPIRED`·`STALE` / `APPROVED` → `STALE`·`CANCELLED`·`FAILED` | `migration_plans.status` (`MigrationPlanStatus`) | 끝나지 않은 4개(`PENDING_APPROVAL`·`APPROVED`·`RUNNING`·`ROLLING_BACK`)는 서비스당 하나(부분 unique). 실행 중 3개(`APPROVED`·`RUNNING`·`ROLLING_BACK`)면 그 서비스의 배포 요청·되돌리기·삭제가 409 `MIGRATION_IN_PROGRESS` |
+| `PLANNED` · `EMERGENCY` · `FAILBACK` | `migration_plans.mode` (`MigrationPlanMode`, 기본 `PLANNED`) | 보통 이전 · 재난 자동 이전(API 서버 9 부터, 지금 API 로는 안 만들어짐) · 앞선 성공 이전을 거꾸로 하는 복귀. 만들 때 판정해 저장하고 바꾸지 않는다(API 서버 8-3) |
 | `PREFLIGHT` · `SHIFT` · `DATA_SYNC_CHECK` | `steps[i].kind` (`MigrationStepKind`) | 사전 확인 · 비율 단계 · 데이터 확인 |
 | `APPLY` · `OBSERVE` · `JUDGE` | `migration_plans.step_phase` (`MigrationStepPhase`) | 비율 단계는 적용 → 건수 세기 → 판정(헬스체크), 사전 확인·데이터 확인은 판정만 |
 | `COUNT_REACHED` · `LOW_TRAFFIC` | `step_results[i].judgeReason` (`MigrationJudgeReason`) | 비율 단계가 세기를 끝내고 판정으로 간 이유: 필요 건수 채움 · 최대 대기 끝 트래픽 적음 |
