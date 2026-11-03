@@ -25,7 +25,8 @@
 
 - DB 접속 주소·GitHub App 개인키·client secret은 Secret Manager(`echo-dev-echo-was-database-url`·`-github-app-private-key`·`-github-app-client-secret`)에 있다. 비밀 껍데기와 파드 서비스 계정(GSA `echo-dev-echo-was`, 이 세 비밀과 아래 진입점 토큰만 읽기)은 echo-infra `terraform/environments/gcp/dev/control-plane.tf`가 만든다.
 - 고정 진입점 토큰은 진입점 VM이 만든 비밀 `echo-dev-entry-weights-token`에 있다. GSA `echo-dev-echo-was`의 읽기 권한은 echo-infra `control-plane.tf`가 준다(이 권한이 없으면 SecretSync가 실패한다).
-- `SecretSync`가 이 값을 Kubernetes Secret `echo-was-env`(`DATABASE_URL`·`ECHO_SECRET_GITHUB_APP_PRIVATE_KEY`·`ECHO_SECRET_GITHUB_APP_CLIENT_SECRET`·`ECHO_SECRET_ENTRYPOINT_TOKEN`)로 옮기고 API·일꾼·마이그레이션이 `envFrom`으로 읽는다. 값을 바꾸면 새 version을 추가한다(`gcloud secrets versions add <id> --data-file=-`). 동기화는 약 2분 간격이다.
+- Cloudflare DNS 토큰은 `echo-dev-echo-was-cloudflare-dns-token`에 있다(echoport.uk 영역의 DNS 편집·영역 읽기만, 온프레 앱 주소 레코드용). 비밀과 GSA `echo-dev-echo-was` 읽기 권한(이 비밀 하나에만)은 11/3 gcloud로 손으로 만들었다 — echo-infra `control-plane.tf`에는 아직 없다.
+- `SecretSync`가 이 값을 Kubernetes Secret `echo-was-env`(`DATABASE_URL`·`ECHO_SECRET_GITHUB_APP_PRIVATE_KEY`·`ECHO_SECRET_GITHUB_APP_CLIENT_SECRET`·`ECHO_SECRET_ENTRYPOINT_TOKEN`·`ECHO_SECRET_CLOUDFLARE_DNS_TOKEN`)로 옮기고 API·일꾼·마이그레이션이 `envFrom`으로 읽는다. 값을 바꾸면 새 version을 추가한다(`gcloud secrets versions add <id> --data-file=-`). 동기화는 약 2분 간격이다.
 
 ## 손으로 만들어 두는 것 (저장소에 넣지 않는다)
 

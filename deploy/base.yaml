@@ -25,6 +25,9 @@ spec:
       # 고정 진입점 가중치 API 토큰. 진입점 VM 이 만든 비밀이고 읽기 권한은 echo-infra control-plane.tf.
       - resourceName: "projects/team-echo-final/secrets/echo-dev-entry-weights-token/versions/latest"
         path: "entrypoint-token"
+      # 온프레 앱 주소 DNS 레코드용 Cloudflare API 토큰(echoport.uk 영역의 DNS 편집·영역 읽기만, API 서버 3-2 P8).
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-cloudflare-dns-token/versions/latest"
+        path: "cloudflare-dns-token"
 ---
 apiVersion: secret-sync.gke.io/v1
 kind: SecretSync
@@ -39,6 +42,7 @@ spec:
       - {sourcePath: "github-app-private-key", targetKey: "ECHO_SECRET_GITHUB_APP_PRIVATE_KEY"}
       - {sourcePath: "github-app-client-secret", targetKey: "ECHO_SECRET_GITHUB_APP_CLIENT_SECRET"}
       - {sourcePath: "entrypoint-token", targetKey: "ECHO_SECRET_ENTRYPOINT_TOKEN"}
+      - {sourcePath: "cloudflare-dns-token", targetKey: "ECHO_SECRET_CLOUDFLARE_DNS_TOKEN"}
 ---
 # echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
 # 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
@@ -145,6 +149,9 @@ data:
   GITHUB_APP_INSTALL_URL: https://github.com/apps/echoport-deploy/installations/new
   GITHUB_APP_CLIENT_ID: Iv23lipNlpKaIxNuvR17
   GITHUB_APP_CLIENT_SECRET_REF: env:ECHO_SECRET_GITHUB_APP_CLIENT_SECRET
+  # 온프레 앱 주소 DNS 레코드(실제 실행기에서만 쓴다). 영역 = echoport.uk.
+  CLOUDFLARE_API_TOKEN_REF: env:ECHO_SECRET_CLOUDFLARE_DNS_TOKEN
+  CLOUDFLARE_ZONE_ID: e1448a089e52eab3624a7de24d7495b4
   SESSION_COOKIE_NAME: __Host-echo_session
   FRONTEND_BASE_URL: https://app.echoport.uk
   LOGIN_ALLOWED_GITHUB_ORG: softbank-hackathon-2026-team-echo
