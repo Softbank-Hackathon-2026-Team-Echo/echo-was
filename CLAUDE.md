@@ -47,6 +47,7 @@ app/
 │                     #   deploy_job_log(배포 작업 로그 기록기) · deploy_log_messages(로그·오류 고정 문장)
 │                     #   MigrationPlanService(이전 계획 API) · MigrationPlanProcessor(이전 일꾼 단계) · migration_plan_support(단계·지문·대상)
 │                     #   migration_counting(비율 단계 요청 N건 세기 규칙, 순수 계산)
+│                     #   security_rules(공통 보안 규칙표·판정·매트릭스 칸 요약, 순수 계산, 보안 3)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
@@ -68,7 +69,7 @@ app/
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
 ├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기·로그용 실행기 묶음 get_executor_set)
-└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·종류·단계·원인 (용어 사전 §3)
+└─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·종류·단계·원인, 보안 판정 값 (용어 사전 §3)
 alembic/              # 마이그레이션
 scripts/              # dump_schema.sh
 tests/                # 단위 테스트 · adapter_contract.py·executor_contract.py(공통 계약) · github_fake.py·github_user_fake.py(가짜 GitHub)

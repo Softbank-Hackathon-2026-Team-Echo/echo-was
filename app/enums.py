@@ -444,3 +444,119 @@ class MigrationLogCode(StrEnum):
     FAILED = "FAILED"
     COUNTERS_RESET = "COUNTERS_RESET"
     LOG_TRUNCATED = "LOG_TRUNCATED"
+
+
+# --- 보안 판정 (보안·거버넌스 3) ---
+
+
+class SecurityControlId(StrEnum):
+    """보안 통제 ID(보안·거버넌스 1 SPEC §5.1). 문서·화면과 같은 표기로 저장한다."""
+
+    IMG_1 = "C-IMG-1"
+    IMG_2 = "C-IMG-2"
+    IMG_3 = "C-IMG-3"
+    CFG_1 = "C-CFG-1"
+    TLS_1 = "C-TLS-1"
+    TLS_2 = "C-TLS-2"
+    NET_1 = "C-NET-1"
+    NET_2 = "C-NET-2"
+    IAM_1 = "C-IAM-1"
+    IAM_2 = "C-IAM-2"
+    SEC_1 = "C-SEC-1"
+    AUD_1 = "C-AUD-1"
+    AUD_2 = "C-AUD-2"
+    CI_1 = "C-CI-1"
+    AI_1 = "C-AI-1"
+    DB_1 = "C-DB-1"
+    DST_1 = "C-DST-1"
+    POST_1 = "C-POST-1"
+
+
+class SecurityResult(StrEnum):
+    """증거·통제·매트릭스 칸의 결과. 확인하지 못한 것(UNKNOWN)과 목업은 PASS 가 아니다."""
+
+    PASS = "PASS"
+    WARN = "WARN"
+    FAIL = "FAIL"
+    UNKNOWN = "UNKNOWN"
+    # 그 환경에 해당하지 않는 통제(예: 온프레의 클라우드 감사 로그).
+    NA = "NA"
+
+
+class SecurityFindingMode(StrEnum):
+    """증거를 어떻게 얻었나. SIMULATED(가짜 실행기·목업) 증거는 판정에 쓰지 않는다."""
+
+    REAL = "REAL"
+    CACHE = "CACHE"
+    SIMULATED = "SIMULATED"
+
+
+class SecurityFindingSource(StrEnum):
+    """증거를 만든 도구·경로. 통제마다 받을 수 있는 출처가 규칙표에 정해져 있다."""
+
+    TRIVY_IMAGE = "TRIVY_IMAGE"
+    TRIVY_CONFIG = "TRIVY_CONFIG"
+    TRIVY_SECRET = "TRIVY_SECRET"
+    GITLEAKS = "GITLEAKS"
+    TLS_PROBE = "TLS_PROBE"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+    WAS_TEST = "WAS_TEST"
+    WAS_STATE = "WAS_STATE"
+    AUDIT_LOG = "AUDIT_LOG"
+    PRECHECK = "PRECHECK"
+    ENTRYPOINT = "ENTRYPOINT"
+    DATA_ENGINE = "DATA_ENGINE"
+    CLOUD_API = "CLOUD_API"
+    KUBERNETES_API = "KUBERNETES_API"
+    GITHUB_API = "GITHUB_API"
+    # AI 에이전트가 낸 결과. PASS 를 만들 수 없고, 사람이 확인하기 전에는 WARN 으로만 쓴다.
+    AI_REVIEW = "AI_REVIEW"
+
+
+class AiFindingConfirmation(StrEnum):
+    """AI 결과를 사람이 확인한 상태. ESCALATED 여야 차단 사유가 된다."""
+
+    UNCONFIRMED = "UNCONFIRMED"
+    ESCALATED = "ESCALATED"
+    DISMISSED = "DISMISSED"
+
+
+class SecurityCheckPhase(StrEnum):
+    """판정 시점. 준비(배포·설정 변경·주기 수집) · 실행(이전 승인·일꾼 시작) · 전환 직후."""
+
+    PREPARATION = "PREPARATION"
+    EXECUTION = "EXECUTION"
+    POST_SWITCH = "POST_SWITCH"
+
+
+class SecurityMatrixCell(StrEnum):
+    """보안 매트릭스 4칸(API 키 iam·encryption·auditLog·policy)."""
+
+    IAM = "IAM"
+    ENCRYPTION = "ENCRYPTION"
+    AUDIT_LOG = "AUDIT_LOG"
+    POLICY = "POLICY"
+
+
+class SecurityReasonCode(StrEnum):
+    """통제 판정 사유(기계 판독용). 게이트가 막으면 이 값을 통제 ID 와 함께 돌려준다."""
+
+    CONTROL_FAILED = "CONTROL_FAILED"
+    CONTROL_WARNING = "CONTROL_WARNING"
+    # 수집기가 확인하지 못했다고 적은 증거(시간 초과·권한 부족 등).
+    EVIDENCE_UNKNOWN = "EVIDENCE_UNKNOWN"
+    EVIDENCE_MISSING = "EVIDENCE_MISSING"
+    EVIDENCE_EXPIRED = "EVIDENCE_EXPIRED"
+    EVIDENCE_SIMULATED = "EVIDENCE_SIMULATED"
+    # 사람 점검 기록에 점검자·근거 링크가 없다.
+    EVIDENCE_INCOMPLETE = "EVIDENCE_INCOMPLETE"
+    SOURCE_NOT_ALLOWED = "SOURCE_NOT_ALLOWED"
+    SCOPE_MISMATCH = "SCOPE_MISMATCH"
+    # 증거를 결과로 바꾼 규칙표 버전이 지금과 다르다(다시 정규화해야 한다).
+    POLICY_VERSION_MISMATCH = "POLICY_VERSION_MISMATCH"
+    PRECHECK_MISSING = "PRECHECK_MISSING"
+    AI_UNCONFIRMED = "AI_UNCONFIRMED"
+    AI_ESCALATED = "AI_ESCALATED"
+    EXCEPTION_APPLIED = "EXCEPTION_APPLIED"
+    EXCEPTION_EXPIRED = "EXCEPTION_EXPIRED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
