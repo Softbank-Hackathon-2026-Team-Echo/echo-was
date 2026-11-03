@@ -48,12 +48,14 @@ app/
 │                     #   MigrationPlanService(이전 계획 API) · MigrationPlanProcessor(이전 일꾼 단계) · migration_plan_support(단계·지문·대상)
 │                     #   migration_counting(비율 단계 요청 N건 세기 규칙, 순수 계산)
 │                     #   security_rules(공통 보안 규칙표·판정·매트릭스 칸 요약, 순수 계산, 보안 3)
+│                     #   security_normalizers(Trivy·gitleaks·TLS 시험 원문 → 공통 증거, 비밀값 원문 버림, 보안 2)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
+│                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만)
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
