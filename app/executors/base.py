@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
+from app.adapters.base import EnvironmentConfig
 from app.core.secrets import SecretValue
 from app.enums import DeployRequestErrorCode, LogLevel, TeardownErrorCode
 
@@ -45,16 +46,30 @@ class SourceAccess:
 
 @dataclass(frozen=True)
 class BuildSpec:
+    """빌드 하나.
+
+    resumed_after 는 일꾼이 다시 시작해 같은 빌드를 다시 부를 때(요청함 시각은 있고 external_ref 는
+    없음) 그 요청함 시각이다. 실제 빌드 실행기는 이 값이 있으면 새로 시작하기 전에 같은 키의 작업을
+    더 오래 찾는다(직전 시작이 성공했는데 번호를 저장하지 못한 경우).
+    """
+
     build_id: uuid.UUID
     service_id: uuid.UUID
     service_name: str
     repo_url: str
     commit_sha: str
+    repo_private: bool = False
+    resumed_after: datetime | None = None
 
 
 @dataclass(frozen=True)
 class DeployTarget:
-    """배포·되돌리기·내리기 대상 연결 하나."""
+    """배포·되돌리기·내리기 대상 연결 하나.
+
+    public_host 는 환경별 주소, main_public_host 는 서비스 대표 주소다. 실제 실행기는 환경 접속
+    정보(environment_config·environment_secret_ref)로 클러스터에 붙고, 앱 네임스페이스는 대표 주소의
+    첫 레이블(`{서비스}-{suffix}`)이다. 비밀값은 담지 않는다(위치만).
+    """
 
     service_id: uuid.UUID
     service_name: str
@@ -63,6 +78,37 @@ class DeployTarget:
     environment_kind: str
     public_host: str
     container_port: int
+    environment_name: str = ""
+    environment_config: EnvironmentConfig | None = None
+    environment_secret_ref: str | None = None
+    main_public_host: str = ""
+
+
+@dataclass(frozen=True)
+class ClusterEnvironment:
+    """실제 실행기가 클러스터에 붙을 때 쓰는 환경 값. config 를 읽지 못하면 None(설정 오류)."""
+
+    environment_id: uuid.UUID
+    kind: str
+    name: str
+    config: EnvironmentConfig | None
+    secret_ref: str | None
+
+
+def cluster_environment(target: DeployTarget) -> ClusterEnvironment:
+    return ClusterEnvironment(
+        environment_id=target.environment_id,
+        kind=target.environment_kind,
+        name=target.environment_name,
+        config=target.environment_config,
+        secret_ref=target.environment_secret_ref,
+    )
+
+
+class EnvironmentLookup(Protocol):
+    """poll 처럼 external_ref 만 받는 호출에서 환경 접속 정보를 다시 읽는다(지운 환경 포함)."""
+
+    async def find_environment(self, environment_id: uuid.UUID) -> ClusterEnvironment | None: ...
 
 
 @dataclass(frozen=True)
@@ -294,6 +340,43 @@ class LogChunk:
 
 class InvalidLogCursor(Exception):
     """실행기가 알아보지 못하는 cursor."""
+
+
+# --- 실행기가 알리는 실패 ---
+
+
+class BuildStartError(Exception):
+    """빌드를 시작하지 못했고 다시 불러도 소용없다(권한·워크플로 없음 등).
+
+    처리기가 빌드를 그 코드로 닫는다.
+    """
+
+    def __init__(self, code: DeployRequestErrorCode) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class DeployApplyError(Exception):
+    """배포를 반영하지 못했고 다시 불러도 소용없다(권한·환경 설정 누락 등).
+
+    처리기가 요청을 그 코드로 실패시킨다(배포 기록이 있으므로 되돌리기를 부른다).
+    """
+
+    def __init__(self, code: DeployRequestErrorCode) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ExecutorUnavailableError(Exception):
+    """외부 시스템에 닿지 못했다(연결 실패·5xx·429). 실행기 안 재시도 뒤에만 올린다.
+
+    처리기는 잡지 않는다. 일꾼이 임대 만료 뒤 같은 키로 다시 부르고, 3번이면 WORKER_LOST 로 끝난다.
+    code 는 고정 코드(예: BUILD_UNREACHABLE)이고 응답 원문·비밀값을 담지 않는다.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 # --- 인터페이스 ---

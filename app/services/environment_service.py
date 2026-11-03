@@ -24,12 +24,13 @@ from app.adapters.base import (
     InvalidEnvironmentConfigError,
     UnknownEnvironmentKindError,
 )
-from app.adapters.registry import validate_environment_config
+from app.adapters.registry import REASON_INVALID_FORMAT, validate_environment_config
 from app.core.exceptions import (
     EnvironmentInUseError,
     EnvironmentKindImmutableError,
     EnvironmentNameConflictError,
     EnvironmentNotFoundError,
+    ErrorField,
     SecretRefNotInOrganizationError,
 )
 from app.core.secrets import (
@@ -86,10 +87,29 @@ class EnvironmentService:
         session: AsyncSession,
         environment_repository: EnvironmentRepository,
         connection_service: EnvironmentConnectionService,
+        public_base_domain: str,
     ) -> None:
         self._session = session
         self._environment_repository = environment_repository
         self._connection_service = connection_service
+        self._public_base_domain = public_base_domain
+
+    def _check_ingress_domain(self, config: EnvironmentConfig) -> None:
+        """환경별 하위 도메인은 대표 주소 도메인 바로 아래 한 단계여야 한다.
+
+        와일드카드 인증서·DNS(`*.{하위 도메인}`)가 환경별 주소 한 단계만 덮기 때문이다. 양식은
+        도메인 모양만 보고(설정에 닿지 않는다) 여기서 설정값과 비교한다.
+        """
+        domain = config.environment_host_domain()
+        if domain is None:
+            return
+        label, _, parent = domain.partition(".")
+        if parent != self._public_base_domain or not label:
+            raise InvalidEnvironmentConfigError(
+                config.kind,
+                ["ingress_domain"],
+                [ErrorField(field="config.ingressDomain", reason=REASON_INVALID_FORMAT)],
+            )
 
     async def create_environment(
         self,
@@ -104,12 +124,13 @@ class EnvironmentService:
         config 는 API 표기(camelCase)다. 접속 확인이 실패해도 등록은 된다.
         """
         parsed_config = validate_environment_config(kind, config, by_alias=True)
+        self._check_ingress_domain(parsed_config)
         _check_secret_ref_in_organization(secret_ref, organization)
         environment = Environment(
             organization_id=organization.id,
             name=name,
             kind=kind,
-            config=parsed_config.model_dump(mode="json"),
+            config=parsed_config.model_dump(mode="json", exclude_none=True),
             secret_ref=secret_ref,
         )
         async with self._session.begin():
@@ -162,9 +183,11 @@ class EnvironmentService:
                 )
             needs_check = False
             if changes.config is not None:
-                new_config = validate_environment_config(
+                parsed_config = validate_environment_config(
                     environment.kind, changes.config, by_alias=True
-                ).model_dump(mode="json")
+                )
+                self._check_ingress_domain(parsed_config)
+                new_config = parsed_config.model_dump(mode="json", exclude_none=True)
                 if new_config != environment.config:
                     environment.config = new_config
                     needs_check = True

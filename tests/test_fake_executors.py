@@ -4,8 +4,6 @@ import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from app.core.config import ExecutorMode, HealthCheckerMode, Settings
 from app.executors import build_executor_set
 from app.executors.base import (
@@ -151,9 +149,13 @@ def test_build_executor_set_uses_http_health_checker_when_configured() -> None:
     )
 
 
-def test_build_executor_set_rejects_real_mode_until_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_executor_set(_settings(executor_mode=ExecutorMode.REAL), _Clock())
+def test_build_executor_set_real_mode_builds_real_executors_without_side_effects() -> None:
+    # real 모드는 이제 허용된다. 만들 때 네트워크·비밀값 조회가 없어 설정만으로 만들어진다.
+    executors = build_executor_set(_settings(executor_mode=ExecutorMode.REAL), _Clock())
+
+    assert not any(
+        executor.simulated for executor in (executors.build, executors.deploy, executors.teardown)
+    )
 
 
 # --- 로그 읽기 계약(SPEC api-4 AC-14) ---

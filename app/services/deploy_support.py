@@ -12,6 +12,11 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.base import (
+    EnvironmentConfig,
+    InvalidEnvironmentConfigError,
+    UnknownEnvironmentKindError,
+)
 from app.enums import (
     DeployLogCode,
     DeployRequestCancelReason,
@@ -63,9 +68,20 @@ def service_public_host(service_name: str, host_suffix: str, public_base_domain:
 
 
 def connection_public_host(
-    service_name: str, environment_name: str, host_suffix: str, public_base_domain: str
+    service_name: str,
+    environment_name: str,
+    host_suffix: str,
+    public_base_domain: str,
+    environment_host_domain: str | None = None,
 ) -> str:
-    """환경별 주소 `{서비스}-{환경}-{suffix}.{도메인}`. 서비스의 suffix 를 그대로 쓴다."""
+    """환경별 주소. 서비스의 suffix 를 그대로 쓴다.
+
+    - 환경에 하위 도메인(config ingressDomain)이 있으면 `{서비스}-{suffix}.{하위 도메인}`
+      (클라우드: 그 환경의 와일드카드 DNS·인증서가 덮는다).
+    - 없으면 `{서비스}-{환경}-{suffix}.{도메인}`(온프레·예전 환경).
+    """
+    if environment_host_domain is not None:
+        return f"{public_host_label(service_name, host_suffix)}.{environment_host_domain}"
     label = public_host_label(f"{service_name}-{environment_name}", host_suffix)
     return f"{label}.{public_base_domain}"
 
@@ -142,6 +158,10 @@ async def enqueue_deploy_request(
 def deploy_target(
     service: Service, service_environment: ServiceEnvironment, environment: Environment
 ) -> DeployTarget:
+    """실행기에 넘길 대상.
+
+    환경 config 를 지금 양식으로 읽지 못하면 None 이다(실제 실행기가 설정 오류로 본다).
+    """
     return DeployTarget(
         service_id=service.id,
         service_name=service.name,
@@ -150,7 +170,18 @@ def deploy_target(
         environment_kind=environment.kind,
         public_host=service_environment.public_host,
         container_port=service.container_port,
+        environment_name=environment.name,
+        environment_config=read_environment_config(environment),
+        environment_secret_ref=environment.secret_ref,
+        main_public_host=service.public_host,
     )
+
+
+def read_environment_config(environment: Environment) -> EnvironmentConfig | None:
+    try:
+        return environment.parsed_config()
+    except (InvalidEnvironmentConfigError, UnknownEnvironmentKindError):
+        return None
 
 
 def deployment_spec(deployment: Deployment) -> DeploymentSpec:

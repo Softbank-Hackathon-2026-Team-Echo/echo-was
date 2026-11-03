@@ -1,4 +1,5 @@
-"""실행기 공통 계약 시험. 실제 실행기(인프라 3·5 이후)도 같은 검사를 통과해야 한다.
+"""실행기 공통 계약 시험. 실제 실행기(API 서버 3-2 빌드·배포·내리기, 고정 진입점)도 같은 검사를
+스텁 전송으로 통과해야 한다.
 
 - 같은 멱등 키로 다시 부르면 같은 작업(external_ref)을 돌려준다.
 - 끝나기 전 poll 은 진행 중, 끝나면 성공 결과를 준다.
@@ -19,6 +20,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.adapters.aws import AwsEnvironmentConfig
+from app.adapters.gcp import GcpEnvironmentConfig
 from app.core.secrets import SecretValue
 from app.executors.base import (
     BuildExecutor,
@@ -53,20 +56,32 @@ DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 READ_TOKEN = "ghs_contract_read_token"
 COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
+# 실제 실행기(API 서버 3-2)가 클러스터에 붙는 데 필요한 칸까지 채운다. 가짜 실행기는 무시한다.
 TARGET = DeployTarget(
     service_id=uuid.uuid4(),
     service_name="shop-api",
     service_environment_id=uuid.uuid4(),
     environment_id=uuid.uuid4(),
     environment_kind="aws",
-    public_host="shop-api.aws-seoul.apps.echo.test",
+    public_host="shop-api-ab12cd34.aws-tokyo.apps.echo.test",
     container_port=8080,
+    environment_name="aws-tokyo",
+    environment_config=AwsEnvironmentConfig(
+        region="ap-northeast-1",
+        cluster_name="echo-dev-eks",
+        role_arn="arn:aws:iam::123456789012:role/echo-dev-executor",
+        ingress_domain="aws-tokyo.apps.echo.test",
+        ingress_group="echo-apps",
+        certificate_arn="arn:aws:acm:ap-northeast-1:123456789012:certificate/abc-123",
+    ),
+    environment_secret_ref=None,
+    main_public_host="shop-api-ab12cd34.apps.echo.test",
 )
 DEPLOYMENT = DeploymentSpec(
     deployment_id=uuid.uuid4(),
     image_repository="registry.echo.test/shop-api",
     image_digest="sha256:" + "a" * 64,
-    config_snapshot={"containerPort": 8080},
+    config_snapshot={"containerPort": 8080, "healthCheckPath": "/healthz"},
 )
 
 Advance = Callable[[], None]
@@ -198,7 +213,15 @@ STANDBY_TARGET = replace(
     service_environment_id=uuid.uuid4(),
     environment_id=uuid.uuid4(),
     environment_kind="gcp",
-    public_host="shop-api-gcp-seoul.apps.echo.test",
+    public_host="shop-api-ab12cd34.gcp-seoul.apps.echo.test",
+    environment_name="gcp-seoul",
+    environment_config=GcpEnvironmentConfig(
+        project_id="team-echo-final",
+        region="asia-northeast3",
+        cluster_name="echo-dev-gke",
+        cluster_location="asia-northeast3-a",
+        ingress_domain="gcp-seoul.apps.echo.test",
+    ),
 )
 ROUTE = MainRoute(
     service_id=TARGET.service_id, service_name="shop-api", public_host="shop-api.apps.echo.test"

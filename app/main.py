@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Response, status
@@ -15,6 +17,7 @@ from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.dependencies import executor_set_holder
 from app.routers import (
     agent_token_router,
     auth_router,
@@ -35,8 +38,17 @@ READINESS_TIMEOUT_SECONDS = 2.0
 # 환경 종류 파일을 모두 불러온다. 동작 클래스가 빠진 종류가 있으면 첫 요청 전에 여기서 실패한다.
 discover()
 
-# 마이그레이션은 여기서 실행하지 않는다(lifespan·startup 금지). README 의 빠른 시작·배포 절을 본다.
-app = FastAPI(title="Echo Control API")
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """실제 실행기 묶음(로그 읽기용, 처음 쓸 때 만든다)의 HTTP 클라이언트를 종료 때 닫는다."""
+    yield
+    await executor_set_holder(application.state).aclose()
+
+
+# 마이그레이션은 여기서 실행하지 않는다(lifespan 은 실행기 정리만 한다). README 의 빠른 시작·배포
+# 절을 본다.
+app = FastAPI(title="Echo Control API", lifespan=lifespan)
 # 프론트(다른 출처)가 쿠키를 실어 부를 수 있게 허용 목록 + credentials. 쓰기 요청의 Origin 은
 # 검사기가 한 번 더 확인한다.
 app.add_middleware(

@@ -49,8 +49,10 @@ from app.executors.base import (
     BuildFailed,
     BuildRunning,
     BuildSpec,
+    BuildStartError,
     BuildSucceeded,
     DeployApplied,
+    DeployApplyError,
     DeployFailed,
     DeployPending,
     HealthHttpError,
@@ -325,6 +327,8 @@ class DeployRequestProcessor:
 
     async def _start_build(self, build: Build) -> JobOutcome:
         now = self._clock.now()
+        # 요청함 시각이 이미 있으면 다시 시작한 일꾼이다(직전 시작 결과를 못 저장했을 수 있다).
+        resumed_after = build.start_requested_at
         if build.start_requested_at is None:
             async with self._session.begin():
                 await self._lock(lock_build=True)
@@ -336,6 +340,8 @@ class DeployRequestProcessor:
         assert service is not None
         await self._lease.extend()
         try:
+            # 비공개 저장소 접근(App 설치)을 여기서 확인한다. 실제 빌드 실행기는 이 토큰을 쓰지 않고
+            # 워크플로가 직접 받는다. 토큰은 메모리로만 넘기고 저장·로그하지 않는다.
             read_token = await self._source_client.issue_read_token(parse_repo_url(build.repo_url))
             external_ref = await self._executors.build.start(
                 BuildSpec(
@@ -344,6 +350,8 @@ class DeployRequestProcessor:
                     service_name=service.name,
                     repo_url=build.repo_url,
                     commit_sha=build.commit_sha,
+                    repo_private=service.repo_private,
+                    resumed_after=resumed_after,
                 ),
                 SourceAccess(
                     repo_url=build.repo_url, commit_sha=build.commit_sha, read_token=read_token
@@ -352,6 +360,11 @@ class DeployRequestProcessor:
             )
         except (RepoNotAccessibleError, SourceProviderUnavailableError) as exc:
             await self._close_build(build.id, DeployRequestErrorCode(exc.code))
+            return self._next_run_now()
+        except BuildStartError as exc:
+            # 다시 불러도 소용없는 시작 실패(워크플로·권한 없음).
+            # 다음 실행에서 요청이 이 코드로 끝난다.
+            await self._close_build(build.id, exc.code)
             return self._next_run_now()
         async with self._session.begin():
             await self._lock(lock_build=True)
@@ -500,11 +513,16 @@ class DeployRequestProcessor:
                 service, connection, environment = await self._target_rows(request)
             assert deployment is not None
             await self._lease.extend()
-            external_ref = await self._executors.deploy.apply(
-                deployment_spec(deployment),
-                deploy_target(service, connection, environment),
-                idempotency_key=str(deployment.id),
-            )
+            try:
+                external_ref = await self._executors.deploy.apply(
+                    deployment_spec(deployment),
+                    deploy_target(service, connection, environment),
+                    idempotency_key=str(deployment.id),
+                )
+            except DeployApplyError as exc:
+                # 권한·환경 설정 누락처럼 다시 불러도 소용없는 실패.
+                # 배포 기록이 있어 되돌리기도 부른다.
+                return await self._fail(exc.code)
             async with self._session.begin():
                 await self._lock()
                 await self._requests.update_if(

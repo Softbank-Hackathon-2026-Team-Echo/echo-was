@@ -12,6 +12,7 @@ DEFAULT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS = 5.0
 # 퍼블릭 주소가 DNS 이름 최대 길이(253)를 넘지 않게 한다. 지금 주소는 레이블 하나(63자 이하)
 # + 도메인이라 여유가 있고, 예전 두 단계 형식(63 + 1 + 63 + 1 + 125) 때 정한 값을 그대로 둔다.
 PUBLIC_BASE_DOMAIN_MAX_LENGTH = 125
+_GITHUB_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _DOMAIN_PATTERN = re.compile(
     r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$"
 )
@@ -38,10 +39,12 @@ def _split_comma_list(value: object) -> object:
 
 
 class ExecutorMode(StrEnum):
-    """빌드·배포·대표 주소 라우터·내리기 실행기. 지금은 가짜(fake)만 쓸 수 있다."""
+    """빌드·배포·내리기 실행기.
+
+    real 이면 GitHub Actions 빌드 + 쿠버네티스 직접 반영(API 서버 3-2).
+    """
 
     FAKE = "fake"
-    # 실제 실행기(인프라 3·5 이후). 값만 정해 두고 설정에서는 아직 받지 않는다.
     REAL = "real"
 
 
@@ -87,6 +90,28 @@ class Settings(BaseSettings):
     # 환경 id(또는 환경 종류) → 진입점 환경 이름. 비면 환경 종류(aws·gcp)를 그대로 쓴다.
     entrypoint_environment_map: Annotated[list[str], NoDecode] = Field(default_factory=list)
     entrypoint_request_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
+    # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
+    executor_aws_role_arn: str | None = None
+    # 고객 앱 빌드 워크플로(workflow_dispatch). 저장소는 owner/name.
+    build_github_repository: str = "Softbank-Hackathon-2026-Team-Echo/echo-was"
+    build_github_workflow: str = "customer-build.yml"
+    build_github_ref: str = "main"
+    # 이미지 정본(Artifact Registry) 접두 → aws 환경에서 쓸 ECR 접두. `<AR 접두>=<ECR 접두>,…`
+    image_registry_mirrors: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # 온프레 앱 주소 DNS 레코드(Cloudflare). 토큰은 값이 아니라 비밀 저장소 위치다.
+    cloudflare_api_token_ref: str | None = None
+    cloudflare_zone_id: str | None = None
+    cloudflare_api_base_url: str = "https://api.cloudflare.com/client/v4"
+    # 온프레 이미지 받기 자격(Secret echo-pull) 확인 주기와 갱신 기준 남은 수명(초).
+    onprem_pull_check_seconds: int = Field(default=300, ge=10)
+    onprem_pull_min_remaining_seconds: int = Field(default=1800, ge=60)
+    # ErrImagePull 이 이 시간보다 오래 이어지면 IMAGE_PULL_FAILED.
+    deploy_image_pull_grace_seconds: float = Field(default=30.0, ge=0)
+    kube_request_timeout_seconds: float = Field(default=15.0, gt=0)
+    # GCE·GKE 메타데이터 서버(워크로드 신원 토큰). 시험에서 바꾼다.
+    google_metadata_base_url: str = "http://metadata.google.internal"
 
     # GitHub App(비공개 저장소). 서버에 두는 비밀값은 개인키 참조 하나다(값은 비밀 저장소에).
     github_app_id: str | None = None
@@ -166,6 +191,7 @@ class Settings(BaseSettings):
         "reserved_org_slugs",
         "migration_required_requests_default",
         "entrypoint_environment_map",
+        "image_registry_mirrors",
         mode="before",
     )
     @classmethod
@@ -192,6 +218,58 @@ class Settings(BaseSettings):
             if not separator or not key.strip() or not name.strip():
                 raise ValueError("entrypoint_environment_map items must be <environment>=<name>")
         return value
+
+    @field_validator("image_registry_mirrors")
+    @classmethod
+    def _check_image_registry_mirrors(cls, value: list[str]) -> list[str]:
+        for item in value:
+            source, separator, mirror = item.partition("=")
+            if not separator or not source.strip() or not mirror.strip():
+                raise ValueError("image_registry_mirrors items must be <source>=<mirror>")
+        return value
+
+    @field_validator("build_github_repository")
+    @classmethod
+    def _check_build_github_repository(cls, value: str) -> str:
+        if not _GITHUB_REPOSITORY_PATTERN.fullmatch(value):
+            raise ValueError("build_github_repository must be owner/name")
+        return value
+
+    @field_validator("cloudflare_api_token_ref")
+    @classmethod
+    def _check_cloudflare_api_token_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError("cloudflare_api_token_ref must be a secret reference") from None
+        return value
+
+    @model_validator(mode="after")
+    def _check_real_executor_settings(self) -> "Settings":
+        """실제 실행기는 GitHub App·실제 소스 클라이언트·실제 헬스체커가 있어야 한다.
+
+        시작 때 설정 오류로 막는다. 값(비밀값)은 읽지 않고 설정이 있는지만 본다.
+        """
+        if self.executor_mode is not ExecutorMode.REAL:
+            return self
+        missing = [
+            name
+            for name, is_set in (
+                ("github_app_id", bool(self.github_app_id)),
+                ("github_app_private_key_ref", bool(self.github_app_private_key_ref)),
+                ("source_client_mode", self.source_client_mode is SourceClientMode.GITHUB),
+                ("health_checker_mode", self.health_checker_mode is HealthCheckerMode.HTTP),
+            )
+            if not is_set
+        ]
+        if missing:
+            raise ValueError(
+                "executor_mode real requires github app, source_client_mode github and "
+                "health_checker_mode http: " + ", ".join(missing)
+            )
+        return self
 
     @field_validator("entrypoint_base_url")
     @classmethod
@@ -250,13 +328,6 @@ class Settings(BaseSettings):
                 self.frontend_base_url,
             )
         )
-
-    @field_validator("executor_mode")
-    @classmethod
-    def _check_executor_mode(cls, value: ExecutorMode) -> ExecutorMode:
-        if value is not ExecutorMode.FAKE:
-            raise ValueError("only the fake executor is available until the real one is built")
-        return value
 
     @field_validator("github_app_private_key_ref")
     @classmethod
