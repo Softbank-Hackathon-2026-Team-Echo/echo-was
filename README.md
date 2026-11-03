@@ -90,7 +90,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
    │          └ 출발 = 비율 100 연결 하나, 도착 = 같은 digest 의 예비. 열린 배포 요청이 있으면 409. 지문 저장
 승인          POST /orgs/{orgId}/migration-plans/{id}/approve (다른 개발자, 202 APPROVED = 실행 시작. 지문 다르면 STALE)
    │
-일꾼          0 사전 확인 → 1 비율 10% → 2 50% → 3 데이터 확인 → 4 100% (단계마다 적용 → 5초 지켜보기 → 판정)
+일꾼          0 사전 확인 → 1 비율 10% → 2 50% → 3 데이터 확인 → 4 100% (단계마다 적용 → 도착 요청 N건 세기(최대 30초) → 헬스체크 판정)
    │          └ 판정 실패·판단 불가·적용 실패·중단·일꾼 상실 → 출발 100% 로 롤백(ROLLED_BACK)
 성공          도착이 서비스 중(100), 출발은 예비(0). 실행 로그 = 계획 단계 번호와 같은 번호
 ```
@@ -196,18 +196,20 @@ curl -s 'localhost:8000/api/v1/orgs/<조직 id>/deploy-requests/<요청 id>/logs
 
 ```bash
 # 0) aws-seoul 에 배포(서비스 중 100%) → gcp-seoul 에 같은 브랜치 배포(예비 0%, versionStatus=IN_SYNC)
-# 1) 계획 만들기 (개발자 A). 201 PENDING_APPROVAL, steps 5개, expectedSeconds=25
+# 1) 계획 만들기 (개발자 A). 201 PENDING_APPROVAL, steps 5개, expectedSeconds=17(합성 트래픽 50 rps 기준)
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/migration-plans \
   -H 'Origin: http://localhost:3000' -H 'Content-Type: application/json' -b 'echo_session=<A 의 쿠키>' \
   -d '{"targetEnvironmentId": "<gcp 환경 id>"}'
 # 2) 승인 (개발자 B. A 가 승인하면 403 SELF_APPROVAL_FORBIDDEN — 어드민이 PATCH /settings {"allowSelfApproval": true} 로 허용 가능)
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id>/approve \
   -H 'Origin: http://localhost:3000' -b 'echo_session=<B 의 쿠키>'
-# 3) 약 25초 동안 단건을 폴링: currentStep 0→4, 비율 (90,10) → (50,50) → (0,100), SUCCEEDED
+# 3) 약 17초(합성 트래픽 50 rps 기준) 동안 단건을 1초 간격으로 폴링: currentStep 0→4, 비율 (90,10) → (50,50) → (0,100), SUCCEEDED
+#    비율 단계마다 progress 에 "도착 처리 14/50건 · 5xx 0/허용 1" 이 보인다. 트래픽이 없으면 단계마다 30초 뒤 트래픽 적음으로 넘어간다
 curl -s localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id> -b 'echo_session=<쿠키>'
 curl -s localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id>/logs -b 'echo_session=<쿠키>'
 # 4) 서비스 상세: gcp SERVING(100) · aws STANDBY(0, IN_SYNC), activeMigrationPlanId=null
-# 자동 롤백 시연: 1) 에 "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"} → 단계 2 판정 실패 → ROLLED_BACK, 비율 (100,0)
+# 자동 롤백 시연: 1) 에 "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"} → 단계 2 첫 읽기에서 5xx 허용 초과 → ROLLED_BACK, 비율 (100,0)
+#   (진입점이 비율을 안 따르는 상황은 "TARGET_NOT_RECEIVING", 트래픽 적음 통과는 "LOW_TRAFFIC")
 # 중단 시연: 실행 중 POST …/migration-plans/<계획 id>/abort → ROLLED_BACK(errorCode=ABORTED)
 ```
 
@@ -311,7 +313,9 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `5` | 헬스체크 재확인 간격(요청 하나 제한 5초) |
 | `FAKE_EXECUTOR_STEP_SECONDS` | `2.0` | 가짜 실행기가 한 작업을 끝내는 시간 |
 | `WORKER_POLL_INTERVAL_SECONDS`·`WORKER_LEASE_SECONDS`·`WORKER_CONCURRENCY` | `1.0`·`30`·`1` | 일꾼 폴링 간격·임대 시간·동시 루프 수. 일꾼은 여러 개 띄워도 된다 |
-| `MIGRATION_OBSERVE_SECONDS_DEFAULT`·`MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `5`·`2`·`86400`·`3` | 이전 지켜보기 기본(1~600)·단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
+| `MIGRATION_REQUIRED_REQUESTS_DEFAULT`·`MIGRATION_MAX_WAIT_SECONDS_DEFAULT`·`MIGRATION_EXPECTED_RPS` | `20,50,50`·`30`·`50` | 이전 비율 단계 필요 건수(10·50·100%)·단계 최대 대기(5~300)·예상 rps(예상 시간·가짜 카운터) |
+| `MIGRATION_COUNT_POLL_SECONDS`·`MIGRATION_COUNTS_STALE_SECONDS`·`MIGRATION_P95_REFERENCE_WINDOW_SECONDS` | `1`·`5`·`30` | 카운터 읽기 주기·마감 때 오래된 읽기 기준·p95 참고 창 |
+| `MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `2`·`86400`·`3` | 단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
 
 `echo`/`echo` 는 로컬 compose 용 더미 계정이다. 실제 비밀값은 커밋하지 않는다.
 

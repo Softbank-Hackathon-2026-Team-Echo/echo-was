@@ -284,10 +284,10 @@ erDiagram
 | `service_id` | uuid | N | FK `services.id`, 인덱스 `(service_id, created_at)`, **부분 unique** `uq_migration_plans_service_id_open`(`WHERE status IN ('PENDING_APPROVAL','APPROVED','RUNNING','ROLLING_BACK')`) | 서비스당 끝나지 않은 계획은 하나 |
 | `source_service_environment_id`·`target_service_environment_id` | uuid | N | FK `service_environments.id`, `target <> source` | 출발(지금 100%)·도착(같은 이미지의 예비) 연결 |
 | `status` | varchar(16) | N | 11개 값 CHECK | ④-5 |
-| `steps` | jsonb | N | 배열 | 고정 5단계 `[{index, kind, sourceWeight, targetWeight, observeSeconds, expectedSeconds}]`. 만든 뒤 바꾸지 않는다 |
-| `step_results` | jsonb | N | 배열 | 같은 길이 `[{index, status, startedAt, finishedAt, metrics, failureCode}]`. 바꿀 때 통째로 다시 넣는다 |
+| `steps` | jsonb | N | 배열 | 고정 5단계 `[{index, kind, sourceWeight, targetWeight, requiredRequests, maxWaitSeconds, observeSeconds, expectedSeconds}]`. 만든 뒤 바꾸지 않는다. `observeSeconds` 는 롤링 배포 중 옛 파드용으로 `maxWaitSeconds` 와 같은 값을 적는다(응답에 없음, 8-1 전 계획은 `requiredRequests`·`maxWaitSeconds` 가 없다) |
+| `step_results` | jsonb | N | 배열 | 같은 길이 `[{index, status, startedAt, finishedAt, metrics, failureCode, counting?, judgeReason?}]`. 바꿀 때 통째로 다시 넣는다. 비율 단계의 `counting` 은 건수 세기 상태(`requiredRequests`·`allowedErrors5xx`·`startedAt`·`updatedAt`, 출발·도착마다 `baseline`·`last`·`carried`·`lastReadAt`), `judgeReason` 은 세기를 끝낸 이유(`COUNT_REACHED`·`LOW_TRAFFIC`) |
 | `rollback_conditions` | jsonb | N | 객체 | `{maxErrorRatePercent, maxP95Ms, maxReplicationLagSeconds}` |
-| `observe_seconds`·`expected_seconds` | int | N | 1~600 · `>= 0` | 지켜보기 시간 · 계획 전체 예상 시간 |
+| `observe_seconds`·`expected_seconds` | int | N | 1~600 · `>= 0` | 비율 단계 최대 대기(API `maxWaitSeconds`, 8-1 전 계획은 지켜보기 시간) · 계획 전체 예상 시간 |
 | `fingerprint` | jsonb | N | 객체 | 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경의 config·secret_ref **해시**와 접속 상태·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 `STALE` |
 | `simulate`·`simulated` | jsonb NULL · bool | | 객체 | 가짜 실패 지정 `{failAtStep, reason}` · 가짜 실행기로 만든 계획 |
 | `current_step`·`step_phase`·`phase_started_at`·`observe_until` | smallint · varchar(8) NULL · timestamptz NULL | | 0~4 · `APPLY`·`OBSERVE`·`JUDGE` | 일꾼이 어디까지 했는지 |
