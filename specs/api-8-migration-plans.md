@@ -1,5 +1,7 @@
 # API 서버 8: 이전 계획 생성 · 승인 · 실행 API SPEC
 
+> 비율 단계의 판정 방식(지켜보기 시간 → 요청 N건 처리 확인)은 [api-8-1](api-8-1-request-count-judgement.md)로 바뀌었다. 둘이 다르면 api-8-1 이 우선한다.
+
 - 상태: Confirmed (fresh-eyes 검토 10건 반영, 검토 전 초안 `~/archive/softbank-hackathon-2026/api-8/api-8-migration-plans.draft-v1.md`)
 - 확인일: 2026-11-02
 - Depth: Deep
