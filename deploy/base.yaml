@@ -28,6 +28,9 @@ spec:
       # 온프레 앱 주소 DNS 레코드용 Cloudflare API 토큰(echoport.uk 영역의 DNS 편집·영역 읽기만, API 서버 3-2 P8).
       - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-cloudflare-dns-token/versions/latest"
         path: "cloudflare-dns-token"
+      # 시연 조직 echo-demo 의 온프레 환경(k3s) 실행기 SA 토큰. echo-infra onprem/manifests/echo-executor.yaml 이 만든다.
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-onprem-executor-token/versions/latest"
+        path: "onprem-executor-token"
 ---
 apiVersion: secret-sync.gke.io/v1
 kind: SecretSync
@@ -43,6 +46,7 @@ spec:
       - {sourcePath: "github-app-client-secret", targetKey: "ECHO_SECRET_GITHUB_APP_CLIENT_SECRET"}
       - {sourcePath: "entrypoint-token", targetKey: "ECHO_SECRET_ENTRYPOINT_TOKEN"}
       - {sourcePath: "cloudflare-dns-token", targetKey: "ECHO_SECRET_CLOUDFLARE_DNS_TOKEN"}
+      - {sourcePath: "onprem-executor-token", targetKey: "ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN"}
 ---
 # echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
 # 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
