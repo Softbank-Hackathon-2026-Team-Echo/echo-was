@@ -122,16 +122,18 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 | 설정 | 값 | 뜻 |
 |---|---|---|
 | `ENTRYPOINT_EXECUTOR_MODE` | `fake`(기본) · `http` | `http` 면 아래 세 실행기가 진입점을 부른다 |
-| `ENTRYPOINT_BASE_URL` | `http://<진입점 IP>:8080` | 가중치 API 주소(echo-infra 출력값 `entrypoint_weights_url`) |
+| `ENTRYPOINT_BASE_URL` | `http://<진입점 내부 IP>:8080` | 가중치 API 주소. echo-was 는 진입점과 같은 VPC(GKE)에 있으니 **내부 주소**(echo-infra 출력값 `entrypoint_weights_internal_url`, 11/3 기준 `http://10.60.0.6:8080`)를 쓴다 — 토큰이 인터넷을 거치지 않는다. 공인 주소 `entrypoint_weights_url` 은 허용 CIDR 에서만 열린다 |
 | `ENTRYPOINT_TOKEN_REF` | `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | Bearer 토큰의 비밀 참조. 값은 Secret Manager `echo-dev-entry-weights-token` 에서 받아 프로세스 환경변수로 넣는다 |
 | `ENTRYPOINT_ENVIRONMENT_MAP` | `<환경 id>=<이름>,…` | 진입점 환경 이름 매핑. 비면 환경 종류(`aws`·`gcp`)를 그대로 쓴다. 한 종류에 환경이 여럿이면 환경 id 로 정한다 |
 | `ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | `5` | 요청 하나 제한 시간 |
 
 | 실행기 | 호출 | 결과 |
 |---|---|---|
-| `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 결과를 다시 준다(PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
+| `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
 | `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
 | `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable` |
+
+**제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
 
 실패 코드(권한 오류를 시간 초과로 뭉개지 않는다): `ENTRYPOINT_UNAUTHORIZED`(401, 토큰 불일치) · `ENTRYPOINT_TOKEN_MISSING`(503 또는 비밀값 조회 실패) · `ENTRYPOINT_REJECTED`(400, 본문 검증) · `ENTRYPOINT_UNREACHABLE`(연결 실패·시간 초과) · `ENTRYPOINT_ERROR`(그 밖의 응답) · `ENTRYPOINT_ENV_UNMAPPED`(진입점이 모르는 이름이거나 두 연결이 같은 이름). 토큰·응답 원문은 로그·코드에 넣지 않는다.
 

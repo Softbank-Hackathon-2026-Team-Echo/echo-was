@@ -299,7 +299,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 8자}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
-| `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
+| `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 내부 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
 | `ENTRYPOINT_ENVIRONMENT_MAP`·`ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | (비움) · `5` | 환경 id → 진입점 환경 이름(비면 환경 종류 그대로), 요청 제한 시간 |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
 | `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`·`GITHUB_APP_INSTALL_URL`·`GITHUB_API_BASE_URL` | | GitHub App 설정. 개인키는 `env:ECHO_SECRET_…` 참조만 |

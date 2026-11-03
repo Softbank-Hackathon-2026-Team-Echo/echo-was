@@ -196,9 +196,22 @@ def _requested_weights(
     return requested
 
 
+_RESULT_CACHE_LIMIT = 256
+
+
+def _remember[R](cache: dict[str, R], key: str, result: R) -> None:
+    """성공 결과만 기억한다(실패는 다음 호출이 다시 시도). 오래된 것부터 버려 상한을 지킨다."""
+    while len(cache) >= _RESULT_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = result
+
+
 class EntrypointTrafficExecutor:
-    """`PUT /weights`. 같은 멱등 키는 이 프로세스에서 처음 결과를 다시 준다(진입점 호출은 멱등이라
-    다른 프로세스가 같은 키로 다시 불러도 같은 상태가 된다)."""
+    """`PUT /weights`. 같은 멱등 키는 이 프로세스에서 처음 성공 결과를 다시 준다.
+
+    진입점 호출은 멱등이라 다른 프로세스가 같은 키로 다시 불러도 같은 상태가 된다.
+    실패는 기억하지 않는다(다음 호출이 다시 시도). 최근 256 개만 기억한다.
+    """
 
     def __init__(self, client: EntrypointClient, clock: Clock) -> None:
         self._client = client
@@ -225,6 +238,7 @@ class EntrypointTrafficExecutor:
         result: TrafficResult
         if code is None:
             result = TrafficApplied(applied_at=self._clock.now())
+            _remember(self._results, idempotency_key, result)
         else:
             result = TrafficFailed(code=code)
             logger.warning(
@@ -236,7 +250,6 @@ class EntrypointTrafficExecutor:
                     "error_code": code,
                 },
             )
-        self._results[idempotency_key] = result
         return result
 
 
@@ -262,6 +275,7 @@ class EntrypointMainRouteExecutor:
         result: RouteResult
         if code is None:
             result = RouteApplied(applied_at=self._clock.now())
+            _remember(self._results, idempotency_key, result)
         else:
             result = RouteFailed(code=code)
             logger.warning(
@@ -273,7 +287,6 @@ class EntrypointMainRouteExecutor:
                     "error_code": code,
                 },
             )
-        self._results[idempotency_key] = result
         return result
 
 

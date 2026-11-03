@@ -232,6 +232,35 @@ async def test_set_weights_same_key_calls_entrypoint_once() -> None:
     assert entrypoint.puts() == [{"aws": 90, "gcp": 10}, {"aws": 50, "gcp": 50}]
 
 
+async def test_set_weights_failed_result_is_not_remembered() -> None:
+    """실패를 기억하면 진입점이 돌아와도 같은 키는 계속 실패한다. 실패는 다시 시도한다."""
+    entrypoint = _Entrypoint()
+    entrypoint.fail_status = 503
+    executor = EntrypointTrafficExecutor(_client(entrypoint), _Clock())
+
+    failed = await executor.set_weights(ROUTE, _weights(90, 10), "plan:1")
+    entrypoint.fail_status = None
+    retried = await executor.set_weights(ROUTE, _weights(90, 10), "plan:1")
+
+    assert isinstance(failed, TrafficFailed)
+    assert isinstance(retried, TrafficApplied)
+    assert entrypoint.puts() == [{"aws": 90, "gcp": 10}]
+
+
+async def test_set_weights_remembers_only_recent_results() -> None:
+    """기억은 상한(256)이 있어 오래 돌아도 메모리가 늘지 않는다. 오래된 키는 다시 호출된다."""
+    entrypoint = _Entrypoint()
+    executor = EntrypointTrafficExecutor(_client(entrypoint), _Clock())
+
+    for index in range(257):
+        await executor.set_weights(ROUTE, _weights(90, 10), f"plan:{index}")
+    await executor.set_weights(ROUTE, _weights(90, 10), "plan:0")
+    await executor.set_weights(ROUTE, _weights(90, 10), "plan:256")
+
+    assert len(executor._results) == 256
+    assert len(entrypoint.puts()) == 258
+
+
 async def test_set_weights_uses_environment_id_mapping_over_kind() -> None:
     entrypoint = _Entrypoint(("aws", "gcp"))
     aws_osaka = replace(STANDBY_TARGET, environment_kind="aws")
