@@ -83,6 +83,22 @@ class MigrationPlanRepository:
             .execution_options(populate_existing=True)
         )
 
+    async def find_last_succeeded_for_service(self, service_id: uuid.UUID) -> MigrationPlan | None:
+        """가장 늦게 끝난 SUCCEEDED 계획. finished_at 이 같으면 created_at, 그다음 id 가 큰 것."""
+        return await self._session.scalar(
+            select(MigrationPlan)
+            .where(
+                MigrationPlan.service_id == service_id,
+                MigrationPlan.status == MigrationPlanStatus.SUCCEEDED,
+            )
+            .order_by(
+                MigrationPlan.finished_at.desc(),
+                MigrationPlan.created_at.desc(),
+                MigrationPlan.id.desc(),
+            )
+            .limit(1)
+        )
+
     async def search_by_service(
         self,
         organization_id: uuid.UUID,

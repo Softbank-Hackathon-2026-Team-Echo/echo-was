@@ -305,6 +305,18 @@ class MigrationPlanStatus(StrEnum):
         return self not in OPEN_MIGRATION_PLAN_STATUSES
 
 
+class MigrationPlanMode(StrEnum):
+    """이전 계획 종류. 서버가 만들 때 한 번 판정해 저장한다(클라이언트가 정하지 않는다).
+
+    FAILBACK 은 같은 서비스의 가장 늦게 끝난 성공 계획을 출발·도착만 바꿔 거꾸로 하는 계획이다(그
+    계획이 FAILBACK 이면 아니다). EMERGENCY 는 재난 자동 이전(API 서버 9)이 만들 때부터 쓴다.
+    """
+
+    PLANNED = "PLANNED"
+    EMERGENCY = "EMERGENCY"
+    FAILBACK = "FAILBACK"
+
+
 # 서비스당 하나만 있을 수 있는 끝나지 않은 상태(부분 unique).
 OPEN_MIGRATION_PLAN_STATUSES = frozenset(
     {

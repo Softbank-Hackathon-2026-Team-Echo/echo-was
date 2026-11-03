@@ -49,6 +49,7 @@ from app.enums import (
     JobKind,
     JobStatus,
     MigrationLogCode,
+    MigrationPlanMode,
     MigrationPlanStatus,
     MigrationSimulateReason,
     ServiceStatus,
@@ -241,6 +242,10 @@ class MigrationPlanService:
             await self._check_no_open_deploy_requests(service.id, target)
             target = await self._check_target_ready(source, target)
             plan = self._new_plan(service, source, target, actor_user_id, command, now)
+            # 서비스 행을 잠근 뒤라 판정 사이에 다른 계획이 끝나거나 생기지 않는다.
+            plan.mode = decide_plan_mode(
+                await self._plans.find_last_succeeded_for_service(service.id), source, target
+            )
             plan.fingerprint = await read_fingerprint(
                 self._session, service, connections, source.id, target.id
             )
@@ -255,6 +260,7 @@ class MigrationPlanService:
                         plan.steps[index][STEP_REQUIRED_REQUESTS] for index in SHIFT_STEPS
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
+                    "mode": plan.mode,
                 },
             )
             view = (await self._views([plan]))[0]
@@ -744,6 +750,26 @@ class MigrationPlanService:
             )
             for plan in plans
         ]
+
+
+def decide_plan_mode(
+    last_succeeded: MigrationPlan | None,
+    source: ServiceEnvironment,
+    target: ServiceEnvironment,
+) -> MigrationPlanMode:
+    """새 계획이 가장 늦게 끝난 성공 계획을 거꾸로 하는 복귀(FAILBACK)인지 판정한다.
+
+    성공한 계획만 본다(롤백·실패·취소된 계획은 트래픽을 옮기지 않았다). 그 계획이 이미 복귀였으면
+    다시 거꾸로 하는 계획은 복귀가 아니라 새 이전(PLANNED)이다.
+    """
+    if (
+        last_succeeded is not None
+        and last_succeeded.source_service_environment_id == target.id
+        and last_succeeded.target_service_environment_id == source.id
+        and last_succeeded.mode != MigrationPlanMode.FAILBACK
+    ):
+        return MigrationPlanMode.FAILBACK
+    return MigrationPlanMode.PLANNED
 
 
 def _single_source(connections: list[ServiceEnvironment]) -> ServiceEnvironment:

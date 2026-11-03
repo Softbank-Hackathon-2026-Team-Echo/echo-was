@@ -368,6 +368,10 @@ EXPECTED_CONSTRAINTS = {
         "varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, "
         "'STALE'::character varying])::text[])) = (finished_at IS NOT NULL)))"
     ),
+    ("migration_plans", "ck_migration_plans_mode_valid"): (
+        "CHECK (((mode)::text = ANY ((ARRAY['PLANNED'::character varying, "
+        "'EMERGENCY'::character varying, 'FAILBACK'::character varying])::text[])))"
+    ),
     ("migration_plans", "ck_migration_plans_observe_seconds_range"): (
         "CHECK (((observe_seconds >= 1) AND (observe_seconds <= 600)))"
     ),
@@ -651,10 +655,12 @@ BEFORE_HOST_SUFFIX = "ce35cab9b2e9"
 BEFORE_ROLLBACK = "1d1601c0111a"
 ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 # 이전 계획을 더하기 전(API 서버 4 head) 시점, 원인 코드 TARGET_NOT_RECEIVING 을 더하기 전
-# (API 서버 8 head) 시점과 지금 head.
+# (API 서버 8 head) 시점, 계획 종류 mode 를 더하기 전(API 서버 8-2 head) 시점과 지금 head.
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
-HEAD_REVISION = "6d89c52e39a4"
+BEFORE_PLAN_MODE = "6d89c52e39a4"
+HEAD_REVISION = "a83f2c1d9e47"
+MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
 MIGRATION_PLAN_TRIGGERS = {
@@ -1201,6 +1207,42 @@ async def test_target_not_receiving_revision_downgrade_with_such_plans_fails_cle
     assert (stored.status, stored.error_code) == ("ROLLED_BACK", "TARGET_NOT_RECEIVING")
     assert "does not rewrite migration plan history" in str(raised.value)
     assert version == HEAD_REVISION
+
+
+def _mode_column_and_check(connection: Connection) -> tuple[bool, bool]:
+    inspector = inspect(connection)
+    has_column = any(
+        column["name"] == "mode" for column in inspector.get_columns("migration_plans")
+    )
+    has_check = any(
+        check["name"] == MODE_CHECK for check in inspector.get_check_constraints("migration_plans")
+    )
+    return has_column, has_check
+
+
+async def test_plan_mode_revision_round_trip_fills_existing_plans_with_planned(
+    engine: AsyncEngine, migration: Migration
+) -> None:
+    # 칸이 생기기 전부터 있던 계획 한 건(downgrade 로 칸을 지운 뒤 다시 더한다).
+    plan = await migration.create_plan()
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_PLAN_MODE))
+        )
+        down = await connection.run_sync(_mode_column_and_check)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_mode_column_and_check)
+        mode = await connection.scalar(
+            text("SELECT mode FROM migration_plans WHERE id = :id"), {"id": plan["id"]}
+        )
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down == (False, False)
+    assert up == (True, True)
+    assert mode == "PLANNED"
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

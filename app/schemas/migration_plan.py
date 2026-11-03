@@ -20,6 +20,7 @@ from app.core.config import (
 from app.enums import (
     LogLevel,
     MigrationErrorCode,
+    MigrationPlanMode,
     MigrationPlanStatus,
     MigrationRollbackStatus,
     MigrationSimulateReason,
@@ -246,7 +247,11 @@ class MigrationProgressResponse(ApiModel):
 
 
 class MigrationPlanSummaryResponse(ApiModel):
-    """이전 계획 목록 한 항목. simulated=true 면 가짜 실행기로 진행하는 계획이다."""
+    """이전 계획 목록 한 항목. simulated=true 면 가짜 실행기로 진행하는 계획이다.
+
+    mode 는 서버가 만들 때 판정해 저장한 계획 종류다(PLANNED·FAILBACK. EMERGENCY 는 API 서버 9
+    부터 쓴다).
+    """
 
     id: uuid.UUID
     service_id: uuid.UUID
@@ -255,6 +260,7 @@ class MigrationPlanSummaryResponse(ApiModel):
     source_service_environment_id: uuid.UUID
     target_service_environment_id: uuid.UUID
     status: MigrationPlanStatus
+    mode: MigrationPlanMode
     current_step: int
     expected_seconds: int
     created_by: UserRefResponse
@@ -327,6 +333,7 @@ def _summary_fields(view: MigrationPlanView) -> dict[str, object]:
         "source_service_environment_id": plan.source_service_environment_id,
         "target_service_environment_id": plan.target_service_environment_id,
         "status": plan.status,
+        "mode": plan.mode,
         "current_step": plan.current_step,
         "expected_seconds": plan.expected_seconds,
         "created_by": created_by,
