@@ -139,14 +139,21 @@ metadata:
 data:
   LOG_LEVEL: INFO
   PUBLIC_BASE_DOMAIN: echoport.uk
-  EXECUTOR_MODE: fake
-  HEALTH_CHECKER_MODE: fake
+  # 실제 빌드(GitHub Actions customer-build.yml)·배포·내리기(EKS·GKE·온프레 k3s 직접 반영) 실행기(API 서버 3-2).
+  EXECUTOR_MODE: real
+  # 배포 뒤 환경별 주소(https)와 대표 주소로 헬스체크한다.
+  HEALTH_CHECKER_MODE: http
+  # aws 환경이 config.roleArn 을 비우면 넘겨받는 역할(신뢰 = 이 파드 GSA 의 Google ID 토큰, EKS Access Entry).
+  EXECUTOR_AWS_ROLE_ARN: arn:aws:iam::706878591119:role/echo-dev-executor
+  # 이미지 정본(AR) → aws 환경에서 받을 ECR. customer-build.yml 이 두 곳에 같은 digest 로 올린다.
+  IMAGE_REGISTRY_MIRRORS: asia-northeast3-docker.pkg.dev/team-echo-final/echo=706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo
   # 트래픽 비율·대표 주소·지표는 고정 진입점(Envoy 가중치 API, 진입점 VM 내부 주소)을 부른다.
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
-  # 시연 조직 echo-demo 의 환경 접속 비밀 자리 표시(실제 비밀 아님). 배포 실행기가 가짜(fake)인 동안
-  # 환경 연결 확인은 비밀이 "있는지"만 본다. 실제 실행기(EXECUTOR_MODE=real)로 바꿀 때 지운다.
+  # 시연 조직 echo-demo 의 aws·gcp 환경 secretRef 자리 표시(실제 비밀 아님). aws·gcp 실제 실행기는 워크로드
+  # 신원으로 붙어 이 값을 읽지 않는다. 환경 등록은 secretRef 가 필수이고 연결 확인 어댑터가 아직 가짜라
+  # 비밀이 "있는지"만 보므로 둔다. 접속 확인 어댑터를 실제로 바꿀 때 지운다.
   ECHO_SECRET_ECHO_DEMO__FAKE_KUBECONFIG: fake-executor-placeholder
   SOURCE_CLIENT_MODE: github
   GITHUB_APP_ID: "5574944"
