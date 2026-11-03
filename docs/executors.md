@@ -2,7 +2,7 @@
 
 원터치 배포의 흐름·상태·DB 기록은 echo-was 일꾼이 맡고, 외부 시스템을 실제로 움직이는 일은 **실행기**가 맡는다. 이번에는 모두 가짜 구현(`EXECUTOR_MODE=fake`)이고, 인프라 3(Argo CD + 빌드·배포 파이프라인)·인프라 5(고정 진입점 프록시)가 준비되면 **실행기 구현만** 바꾼다. 이전 계획(API 서버 8)의 트래픽 나눠 보내기·지표·데이터 복제 확인도 같은 방식이다(실제 연결은 인프라 6 Envoy·인프라 9 OpenTelemetry·인프라 7 복제). 표·API 계약은 바꾸지 않는 것이 목표다.
 
-- 인터페이스: `app/executors/base.py`(Protocol + 값 객체). 가짜 구현: `app/executors/fake.py`. 실제 HTTP 헬스체커: `app/executors/http_health_checker.py`. 고르는 곳: `app/executors/__init__.py::build_executor_set`.
+- 인터페이스: `app/executors/base.py`(Protocol + 값 객체). 가짜 구현: `app/executors/fake.py`. 실제 HTTP 헬스체커: `app/executors/http_health_checker.py`. 실제 고정 진입점 실행기(트래픽·대표 주소·지표): `app/executors/entrypoint.py`. 고르는 곳: `app/executors/__init__.py::build_executor_set`.
 - 공통 계약 시험: `tests/executor_contract.py`. 실제 구현도 같은 검사를 스텁 전송으로 통과해야 한다.
 - 실행기 패키지는 `app.models` 를 import 하지 않는다. 일꾼이 값 객체(`BuildSpec`·`DeploymentSpec`·`DeployTarget`·`MainRoute`·`SourceAccess`)로 바꿔 넘긴다.
 
@@ -158,6 +158,28 @@ class MetricsProvider(Protocol):
 ### 내리기 (`TeardownExecutor`)
 
 - 서비스 삭제 때 연결 하나를 클러스터에서 내린다(그 서비스의 Deployment·Service·Ingress 등). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.
+
+## 고정 진입점 실행기 (`ENTRYPOINT_EXECUTOR_MODE=http`)
+
+echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheus)을 부르는 실제 구현이다. 계약은 echo-infra `contracts/executor-credentials.md` §3. 트래픽·대표 주소·지표 세 실행기만 바꾸고 빌드·배포·내리기·데이터 확인은 그대로 가짜다.
+
+| 설정 | 값 | 뜻 |
+|---|---|---|
+| `ENTRYPOINT_EXECUTOR_MODE` | `fake`(기본) · `http` | `http` 면 아래 세 실행기가 진입점을 부른다 |
+| `ENTRYPOINT_BASE_URL` | `http://<진입점 내부 IP>:8080` | 가중치 API 주소. echo-was 는 진입점과 같은 VPC(GKE)에 있으니 **내부 주소**(echo-infra 출력값 `entrypoint_weights_internal_url`, 11/3 기준 `http://10.60.0.6:8080`)를 쓴다 — 토큰이 인터넷을 거치지 않는다. 공인 주소 `entrypoint_weights_url` 은 허용 CIDR 에서만 열린다 |
+| `ENTRYPOINT_TOKEN_REF` | `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | Bearer 토큰의 비밀 참조. 값은 Secret Manager `echo-dev-entry-weights-token` 에서 받아 프로세스 환경변수로 넣는다 |
+| `ENTRYPOINT_ENVIRONMENT_MAP` | `<환경 id>=<이름>,…` | 진입점 환경 이름 매핑. 비면 환경 종류(`aws`·`gcp`)를 그대로 쓴다. 한 종류에 환경이 여럿이면 환경 id 로 정한다 |
+| `ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | `5` | 요청 하나 제한 시간 |
+
+| 실행기 | 호출 | 결과 |
+|---|---|---|
+| `EntrypointTrafficExecutor` | `GET /weights` 로 진입점이 아는 환경을 읽고, 계획에 없는 환경은 0 으로 채워 `PUT /weights {"aws": 90, "gcp": 10}` | 2xx → `TrafficApplied(지금 시각)`. 같은 멱등 키는 이 프로세스에서 처음 **성공** 결과를 다시 준다(최근 256 개, 실패는 기억하지 않고 다시 시도. PUT 자체가 멱등이라 다른 프로세스가 다시 불러도 같은 상태) |
+| `EntrypointMainRouteExecutor` | 대상 연결 100·나머지 0 으로 같은 PUT | `RouteApplied` · `RouteFailed(code)`. 지금은 가짜와 같은 자리(성공 처리 트랜잭션 안)에서 불린다 — 요청 하나(5초) 동안 서비스 행 잠금을 쥔다. 트랜잭션 밖으로 옮기는 일은 처리기 쪽 후속 작업이다 |
+| `EntrypointMetricsProvider` | `GET /summary?window=<until-since 초>s` 의 `envs.<이름>` | `rps`·`error_ratio`(×100 = 오류율 %)·`p95_ms`, 요청 수 = `rps × 구간 초`. `prometheus != ok` 이거나 값이 `null`(전환 직후·그 환경에 요청 없음)이면 `MetricsUnavailable` |
+
+**제약 — 진입점 하나 = 서비스 하나.** 진입점 가중치는 모든 호스트(`domains: ["*"]`)에 하나라 `PUT /weights` 는 진입점 뒤 **모든 앱**의 비율을 함께 바꾼다. `route_main` 이 서비스 첫 배포마다 불리므로 앱이 둘 이상이면 다른 서비스 트래픽까지 움직인다. 시연(앱 1 개)은 괜찮다. 앱이 늘면 echo-infra 쪽 후속(Host 별 라우트 + `PUT /services/{public_host}/weights`, 실행기는 `MainRoute.public_host` 를 넘기면 된다)이 필요하다.
+
+실패 코드(권한 오류를 시간 초과로 뭉개지 않는다): `ENTRYPOINT_UNAUTHORIZED`(401, 토큰 불일치) · `ENTRYPOINT_TOKEN_MISSING`(503 또는 비밀값 조회 실패) · `ENTRYPOINT_REJECTED`(400, 본문 검증) · `ENTRYPOINT_UNREACHABLE`(연결 실패·시간 초과) · `ENTRYPOINT_ERROR`(그 밖의 응답) · `ENTRYPOINT_ENV_UNMAPPED`(진입점이 모르는 이름이거나 두 연결이 같은 이름). 토큰·응답 원문은 로그·코드에 넣지 않는다.
 
 ## 가짜 구현
 

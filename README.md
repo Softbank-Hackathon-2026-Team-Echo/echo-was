@@ -36,7 +36,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 원터치 배포 API | 있음 | 접수·목록·단건. 서비스 중·예비, 예비 자동 따라가기, 실행 1 + 대기 1 ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 배포 이력·되돌리기·로그 | 있음 | 이력 필터·`isCurrent`·`rollbackable`, 이력에서 고른 성공 버전으로 되돌리기(`trigger = ROLLBACK`, 예비 따라가기), 배포 작업 로그(DB)·빌드·실행 로그(실행기, 가짜) ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 일꾼 | 있음 | `python -m app.worker`. 할 일 표 + 임대 + 멱등 키로 복구 |
-| 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜) | 실제 빌드·배포·라우터·내리기는 인프라 3·5, 트래픽(Envoy)·지표(OpenTelemetry)·복제는 인프라 6·9·7 이후 실행기만 교체 ([docs/executors.md](docs/executors.md)). HTTP 헬스체커는 실제 구현 있음 |
+| 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜 + 실제 일부) | 실제 빌드·배포·내리기는 인프라 3, 복제는 인프라 7 이후 실행기만 교체 ([docs/executors.md](docs/executors.md)). 실제 구현: HTTP 헬스체커, 고정 진입점 실행기(트래픽 비율·대표 주소·지표, `ENTRYPOINT_EXECUTOR_MODE=http`) |
 | 소스 저장소 클라이언트 | 있음 | 가짜(기본) + 실제 GitHub App(공개·비공개 저장소). 실제 App 생성·설치는 별도 승인 |
 | GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
 | 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 고정 5단계·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
@@ -113,7 +113,7 @@ app/
 │                  #   migration_plan_log · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/   # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job·MigrationPlan·MigrationPlanLog Repository
 ├─ clients/        # secret_client · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App) · github_user(로그인·초대)
-├─ executors/      # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HTTP 헬스체커
+├─ executors/      # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HTTP 헬스체커 · 고정 진입점(entrypoint)
 ├─ worker/         # 일꾼 (python -m app.worker): 할 일 폴링·임대·종료 신호
 ├─ adapters/       # 환경 종류별 설정 양식 + 동작 클래스 (aws.py · gcp.py · onprem.py) + 레지스트리
 ├─ models/         # SQLAlchemy 모델 (표 17개)
@@ -301,6 +301,8 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 8자}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·대표 주소·내리기 실행기. 지금은 `fake` 만 받는다(`real` 은 인프라 3·5 이후) |
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
+| `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 내부 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
+| `ENTRYPOINT_ENVIRONMENT_MAP`·`ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | (비움) · `5` | 환경 id → 진입점 환경 이름(비면 환경 종류 그대로), 요청 제한 시간 |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
 | `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`·`GITHUB_APP_INSTALL_URL`·`GITHUB_API_BASE_URL` | | GitHub App 설정. 개인키는 `env:ECHO_SECRET_…` 참조만 |
 | `GITHUB_APP_CLIENT_ID`·`GITHUB_APP_CLIENT_SECRET_REF`·`GITHUB_OAUTH_REDIRECT_URI`·`FRONTEND_BASE_URL` | | GitHub 로그인 설정. 하나라도 비면 로그인·콜백만 503 |

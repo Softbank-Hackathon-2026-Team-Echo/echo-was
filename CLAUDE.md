@@ -53,7 +53,7 @@ app/
 │                     #   MigrationPlan·MigrationPlanLog Repository
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
-├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker. 고르는 곳 build_executor_set
+├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
