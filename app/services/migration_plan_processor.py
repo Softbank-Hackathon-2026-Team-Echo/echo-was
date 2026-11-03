@@ -27,7 +27,7 @@
   APPROVED 는 FAILED(WORKER_LOST), RUNNING 은 롤백을 시작하고, 롤백은 남은 시도 횟수만큼 계속한다.
   끝 상태가 되면 할 일을 FAILED(WORKER_LOST) 로 닫는다.
 - simulate(가짜 모드)는 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계는
-  "설정 rps × 비율 × 지난 시간"으로 카운터를 만든다. ERROR_RATE 는 5xx 를 허용 + 1 로,
+  "설정 rps × 비율 × 지난 시간"으로 카운터를 만든다. ERROR_RATE 는 기준값 뒤 5xx 를 허용 + 1 로,
   TARGET_NOT_RECEIVING 은 도착을 고정하고 출발을 100% 로, LOW_TRAFFIC 은 둘 다 고정한다. HEALTH
   는 헬스 실패, TRAFFIC 은 그 단계 APPLY 실패, DATA_LAG 는 지연 30초다. 저장된 옛 LATENCY 는 아무
   실패도 만들지 않는다. 로그·단계 결과에는 만든 값이 그대로 남는다.
@@ -1076,12 +1076,16 @@ def _simulated_counts(
     now: datetime,
     requests_per_second: int,
 ) -> tuple[CounterValue, CounterValue]:
-    """simulate 단계의 (출발, 도착) 누적 카운터. 세기 시작 순간 0 에서 rps × 비율 × 지난 초다."""
+    """simulate 단계의 (출발, 도착) 누적 카운터. 세기 시작 순간 0 에서 rps × 비율 × 지난 초다.
+
+    ERROR_RATE 의 5xx 는 도착 기준값을 잡은 뒤의 읽기부터 허용 + 1 이다. 첫 읽기는 기준값이 되므로
+    거기서 5xx 를 주면 센 5xx 가 늘 0 이다(첫 읽기가 세기 시작보다 조금이라도 늦은 실제 시계에서).
+    """
     elapsed = max((now - counting.started_at).total_seconds(), 0.0)
     target_requests = int(requests_per_second * target_weight * elapsed / 100)
     source_requests = int(requests_per_second * (100 - target_weight) * elapsed / 100)
     target_errors = 0
-    if reason is MigrationSimulateReason.ERROR_RATE and elapsed > 0:
+    if reason is MigrationSimulateReason.ERROR_RATE and counting.target.baseline is not None:
         target_errors = counting.allowed_errors_5xx + 1
     elif reason is MigrationSimulateReason.TARGET_NOT_RECEIVING:
         # 진입점이 비율을 적용하지 않아 모든 요청이 출발로 가는 상황.
