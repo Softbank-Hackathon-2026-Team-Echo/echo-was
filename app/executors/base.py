@@ -194,10 +194,10 @@ type TrafficResult = TrafficApplied | TrafficFailed
 
 @dataclass(frozen=True)
 class Metrics:
-    """연결 하나의 구간 지표. 오류율은 퍼센트(0~100), p95 는 밀리초."""
+    """연결 하나의 구간 지표. 오류율은 퍼센트(0~100), p95 는 밀리초(못 읽었으면 None)."""
 
     error_rate_percent: float
-    p95_ms: float
+    p95_ms: float | None
     request_count: int
 
 
