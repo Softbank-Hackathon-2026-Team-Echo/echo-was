@@ -20,6 +20,10 @@ spec:
           envFrom:
             - configMapRef: {name: echo-was-config}
             - secretRef: {name: echo-was-env}
+          env:
+            # 시연 조직 echo-demo 온프레 환경 secretRef(env:ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN). base.yaml SecretSync 참고.
+            - name: ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN
+              valueFrom: {secretKeyRef: {name: echo-was-env, key: ECHO_DEMO_ONPREM_EXECUTOR_TOKEN, optional: true}}
           readinessProbe:
             httpGet: {path: /readyz, port: 8000}
             periodSeconds: 5
@@ -56,6 +60,10 @@ spec:
           envFrom:
             - configMapRef: {name: echo-was-config}
             - secretRef: {name: echo-was-env}
+          env:
+            # 시연 조직 echo-demo 온프레 환경 secretRef(env:ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN). base.yaml SecretSync 참고.
+            - name: ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN
+              valueFrom: {secretKeyRef: {name: echo-was-env, key: ECHO_DEMO_ONPREM_EXECUTOR_TOKEN, optional: true}}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 384Mi}
