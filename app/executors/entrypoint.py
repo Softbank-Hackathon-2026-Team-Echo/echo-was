@@ -5,8 +5,10 @@ echo-infra 의 고정 진입점 VM 이 여는 가중치 API 를 부른다(계약
 
 - TrafficExecutor: `PUT /weights` 로 대표 주소 트래픽 비율을 적용한다.
 - MainRouteExecutor: 한 연결에 100, 나머지 0 으로 같은 API 를 부른다.
-- MetricsProvider: `GET /summary` 로 연결 하나의 구간 지표(요청 수·오류율·p95)를 읽는다. 누적
-  카운터(`read_counts`, `GET /counters`)는 아직 자리값이라 늘 CountsUnavailable 이다.
+- MetricsProvider: `GET /counters` 로 환경별 누적 요청·5xx 카운터(`read_counts`, 이전 판정용)를,
+  `GET /summary` 로 연결 하나의 구간 지표(요청 수·오류율·p95, 참고용)를 읽는다. 카운터 항목의
+  `hosts` 가 0 이면(그 환경으로 갈 업스트림이 없음) 0건을 조용한 서비스로 보지 않도록
+  ENTRYPOINT_NO_HOSTS 로 판단 불가를 돌려준다.
 
 진입점의 환경 이름(`aws`·`gcp`)은 환경 종류와 같다. 다르거나 한 종류에 환경이 여럿이면
 `entrypoint_environment_map`(`<환경 id>=<진입점 이름>`)으로 정한다. 진입점이 모르는 이름이나
@@ -20,7 +22,7 @@ import logging
 import math
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeGuard
 
 import httpx
 
@@ -36,6 +38,7 @@ from app.executors.base import (
     Metrics,
     MetricsResult,
     MetricsUnavailable,
+    RequestCounts,
     RouteApplied,
     RouteFailed,
     RouteResult,
@@ -54,7 +57,7 @@ ENTRYPOINT_REJECTED = "ENTRYPOINT_REJECTED"
 ENTRYPOINT_UNREACHABLE = "ENTRYPOINT_UNREACHABLE"
 ENTRYPOINT_ERROR = "ENTRYPOINT_ERROR"
 ENTRYPOINT_ENV_UNMAPPED = "ENTRYPOINT_ENV_UNMAPPED"
-ENTRYPOINT_COUNTS_NOT_IMPLEMENTED = "ENTRYPOINT_COUNTS_NOT_IMPLEMENTED"
+ENTRYPOINT_NO_HOSTS = "ENTRYPOINT_NO_HOSTS"
 
 # 진입점 /summary 의 window 는 1~9999 초다. 지켜보기 구간이 그보다 길어도 끝 쪽 9999초만 본다.
 SUMMARY_WINDOW_MAX_SECONDS = 9999
@@ -122,6 +125,13 @@ class EntrypointClient:
     async def get_summary(self, window_seconds: int) -> dict[str, Any]:
         data = await self._request("GET", "/summary", params={"window": f"{window_seconds}s"})
         if not isinstance(data, dict):
+            raise EntrypointCallError(ENTRYPOINT_ERROR)
+        return data
+
+    async def get_counters(self) -> dict[str, Any]:
+        """`GET /counters` 의 환경별 누적 카운터(`envs`). 형식이 다르면 ENTRYPOINT_ERROR."""
+        data = await self._request("GET", "/counters")
+        if not isinstance(data, dict) or not isinstance(data.get("envs"), dict):
             raise EntrypointCallError(ENTRYPOINT_ERROR)
         return data
 
@@ -339,12 +349,45 @@ class EntrypointMetricsProvider:
         )
 
     async def read_counts(self, target: DeployTarget) -> CountsResult:
-        """자리값: 늘 CountsUnavailable(ENTRYPOINT_COUNTS_NOT_IMPLEMENTED) 를 돌려준다.
+        """`GET /counters` 의 그 연결 환경 항목을 RequestCounts 로. 예외를 밖으로 내지 않는다.
 
-        실제 구현은 GET /counters (docs/executors.md 의 read_counts 계약), 동옥 후속. 그 전까지
-        http 모드의 이전 비율 단계는 최대 대기 끝에 METRICS_UNAVAILABLE 로 롤백된다.
+        값은 진입점(Envoy) 시작 이후 누적이라 재시작하면 줄 수 있다. 그대로 돌려주고 줄어든 것은
+        일꾼이 카운터 재시작으로 처리한다. 출발·도착을 읽을 때마다 한 번씩 부른다.
         """
-        return CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
+        name = self._client.environment_name(target)
+        try:
+            envs = (await self._client.get_counters())["envs"]
+        except EntrypointCallError as error:
+            return _counts_unavailable(name, error.code)
+        entry = envs.get(name)
+        if not isinstance(entry, dict):
+            return _counts_unavailable(name, ENTRYPOINT_ENV_UNMAPPED)
+        requests = entry.get("requests")
+        errors_5xx = entry.get("errors_5xx")
+        if not _is_count(requests) or not _is_count(errors_5xx):
+            return _counts_unavailable(name, ENTRYPOINT_ERROR)
+        if "hosts" in entry:
+            hosts = entry["hosts"]
+            if not _is_count(hosts):
+                return _counts_unavailable(name, ENTRYPOINT_ERROR)
+            # 업스트림이 없으면 0건은 조용한 서비스가 아니라 길이 없는 것이다. 트래픽 적음으로
+            # 통과하지 않고 판단 불가(마감에 METRICS_UNAVAILABLE 롤백)가 되게 한다.
+            if hosts == 0:
+                return _counts_unavailable(name, ENTRYPOINT_NO_HOSTS)
+        return RequestCounts(requests=requests, errors_5xx=errors_5xx)
+
+
+def _is_count(value: Any) -> TypeGuard[int]:
+    """0 이상 정수(bool 제외)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _counts_unavailable(name: str, code: str) -> CountsUnavailable:
+    logger.warning(
+        "entrypoint counts unavailable",
+        extra={"action": "read_counts", "entrypoint_environment": name, "error_code": code},
+    )
+    return CountsUnavailable(code=code)
 
 
 def _as_float(value: Any) -> float:

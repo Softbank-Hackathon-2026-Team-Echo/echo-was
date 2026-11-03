@@ -1,6 +1,7 @@
 """고정 진입점 실행기 시험(인프라 5·6·9 계약). httpx.MockTransport 로 가중치 API 를 흉내 낸다."""
 
 import json
+import logging
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -27,9 +28,9 @@ from app.executors.base import (
     WeightedTarget,
 )
 from app.executors.entrypoint import (
-    ENTRYPOINT_COUNTS_NOT_IMPLEMENTED,
     ENTRYPOINT_ENV_UNMAPPED,
     ENTRYPOINT_ERROR,
+    ENTRYPOINT_NO_HOSTS,
     ENTRYPOINT_REJECTED,
     ENTRYPOINT_TOKEN_MISSING,
     ENTRYPOINT_UNAUTHORIZED,
@@ -104,13 +105,26 @@ def _summary(window: str, weights: dict[str, int]) -> dict[str, Any]:
     }
 
 
+def _counters() -> dict[str, dict[str, int]]:
+    return {
+        "aws": {"requests": 120, "errors_5xx": 2, "hosts": 1},
+        "gcp": {"requests": 40, "errors_5xx": 0, "hosts": 1},
+    }
+
+
 class _Entrypoint:
-    """가중치 API 대본. 상태(weights)와 받은 요청을 기억한다."""
+    """가중치 API 대본. 상태(weights·counters)와 받은 요청을 기억한다.
+
+    counters_step 을 주면 GET /counters 를 부를 때마다 모든 환경의 누적 요청 수가 그만큼 는다.
+    """
 
     def __init__(self, envs: tuple[str, ...] = ("aws", "gcp")) -> None:
         self.weights = {name: (100 if index == 0 else 0) for index, name in enumerate(envs)}
         self.requests: list[httpx.Request] = []
         self.summary_override: dict[str, Any] | None = None
+        self.counters: dict[str, dict[str, int]] = _counters()
+        self.counters_step = 0
+        self.counters_override: Any = None
         self.fail_status: int | None = None
         self.fail_error: Exception | None = None
 
@@ -133,7 +147,16 @@ class _Entrypoint:
         if request.url.path == "/summary":
             window = request.url.params.get("window", "30s")
             return httpx.Response(200, json=self.summary_override or _summary(window, self.weights))
+        if request.url.path == "/counters" and request.method == "GET":
+            return httpx.Response(200, json=self._counters_body())
         return httpx.Response(404, json={"error": "없는 경로"})
+
+    def _counters_body(self) -> Any:
+        if self.counters_override is not None:
+            return self.counters_override
+        for entry in self.counters.values():
+            entry["requests"] += self.counters_step
+        return {"ts": "2026-11-02T03:00:05Z", "envs": self.counters}
 
     def puts(self) -> list[dict[str, int]]:
         return [
@@ -185,27 +208,17 @@ async def test_entrypoint_metrics_provider_satisfies_contract() -> None:
     assert metrics == Metrics(error_rate_percent=0.0, p95_ms=140.0, request_count=13)
 
 
-async def test_entrypoint_counts_follow_counter_contract_once_implemented() -> None:
-    """GET /counters 가 붙으면 카운터 계약을 보고, 그 전에는 자리값 형태만 본다(건너뛰지 않음)."""
-    provider = EntrypointMetricsProvider(_client(_Entrypoint()))
+async def test_entrypoint_counts_satisfy_counter_contract() -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters_step = 7
     clock = _Clock()
 
-    first = await provider.read_counts(STANDBY_TARGET)
+    first, second = await assert_counts_contract(
+        EntrypointMetricsProvider(_client(entrypoint)), clock.advance
+    )
 
-    if isinstance(first, RequestCounts):
-        await assert_counts_contract(provider, clock.advance)
-    else:
-        assert first == CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
-
-
-async def test_entrypoint_read_counts_is_a_placeholder_without_calls() -> None:
-    entrypoint = _Entrypoint()
-
-    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
-
-    # 실제 GET /counters 구현 전 자리값: http 모드의 비율 단계는 판단 불가로 롤백된다.
-    assert result == CountsUnavailable(code=ENTRYPOINT_COUNTS_NOT_IMPLEMENTED)
-    assert entrypoint.requests == []
+    assert (first, second) == (RequestCounts(47, 0), RequestCounts(54, 0))
+    assert [item.url.path for item in entrypoint.requests] == ["/counters", "/counters"]
 
 
 def test_entrypoint_executors_are_not_simulated() -> None:
@@ -473,6 +486,163 @@ async def test_read_metrics_http_error_is_unavailable(status: int) -> None:
     result = await EntrypointMetricsProvider(_client(entrypoint)).read(TARGET, SINCE, UNTIL)
 
     assert result == MetricsUnavailable()
+
+
+# --- 누적 카운터 ---
+
+
+async def test_read_counts_returns_environment_counters_with_bearer_token() -> None:
+    entrypoint = _Entrypoint()
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == RequestCounts(requests=120, errors_5xx=2)
+    assert len(entrypoint.requests) == 1
+    request = entrypoint.requests[0]
+    assert (request.method, request.url.path) == ("GET", "/counters")
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+async def test_read_counts_uses_environment_id_mapping() -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters["gcp-tokyo"] = {"requests": 9, "errors_5xx": 1, "hosts": 2}
+    client = _client(entrypoint, environment_map={str(STANDBY_TARGET.environment_id): "gcp-tokyo"})
+
+    result = await EntrypointMetricsProvider(client).read_counts(STANDBY_TARGET)
+
+    assert result == RequestCounts(requests=9, errors_5xx=1)
+
+
+async def test_read_counts_unknown_environment_name_is_unmapped() -> None:
+    entrypoint = _Entrypoint()
+    client = _client(entrypoint, environment_map={str(STANDBY_TARGET.environment_id): "onprem"})
+
+    result = await EntrypointMetricsProvider(client).read_counts(STANDBY_TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_ENV_UNMAPPED)
+
+
+async def test_read_counts_non_object_environment_entry_is_unmapped() -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters_override = {"envs": {"aws": [120, 2, 1]}}
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_ENV_UNMAPPED)
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (401, ENTRYPOINT_UNAUTHORIZED),
+        # /counters 의 503 은 진입점 토큰 미설정·Envoy admin 접속 실패 두 경우다. 공통 매핑 그대로.
+        (503, ENTRYPOINT_TOKEN_MISSING),
+        (500, ENTRYPOINT_ERROR),
+        (404, ENTRYPOINT_ERROR),
+    ],
+)
+async def test_read_counts_http_error_is_unavailable_with_code(status: int, code: str) -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.fail_status = status
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=code)
+
+
+async def test_read_counts_wrong_token_is_unauthorized() -> None:
+    entrypoint = _Entrypoint()
+
+    result = await EntrypointMetricsProvider(
+        _client(entrypoint, secrets=_Secrets("wrong"))
+    ).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_UNAUTHORIZED)
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), httpx.ConnectTimeout("x")]
+)
+async def test_read_counts_transport_failure_is_unreachable(error: httpx.TransportError) -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.fail_error = error
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_UNREACHABLE)
+
+
+async def test_read_counts_missing_secret_is_token_missing_without_calls() -> None:
+    entrypoint = _Entrypoint()
+
+    result = await EntrypointMetricsProvider(
+        _client(entrypoint, secrets=_Secrets(None))
+    ).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_TOKEN_MISSING)
+    assert entrypoint.requests == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {"ts": "2026-11-02T03:00:05Z"},
+        {"envs": [{"aws": {"requests": 1, "errors_5xx": 0, "hosts": 1}}]},
+        {"envs": {"aws": {"requests": -1, "errors_5xx": 0, "hosts": 1}}},
+        {"envs": {"aws": {"requests": 1, "errors_5xx": -1, "hosts": 1}}},
+        {"envs": {"aws": {"requests": "120", "errors_5xx": 0, "hosts": 1}}},
+        {"envs": {"aws": {"requests": 1.5, "errors_5xx": 0, "hosts": 1}}},
+        {"envs": {"aws": {"requests": True, "errors_5xx": 0, "hosts": 1}}},
+        {"envs": {"aws": {"requests": 1, "errors_5xx": False, "hosts": 1}}},
+        {"envs": {"aws": {"errors_5xx": 0, "hosts": 1}}},
+        {"envs": {"aws": {"requests": 1, "errors_5xx": 0, "hosts": "1"}}},
+        {"envs": {"aws": {"requests": 1, "errors_5xx": 0, "hosts": -1}}},
+        {"envs": {"aws": {"requests": 1, "errors_5xx": 0, "hosts": True}}},
+    ],
+)
+async def test_read_counts_malformed_body_is_entrypoint_error(body: Any) -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters_override = body
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_ERROR)
+
+
+async def test_read_counts_zero_hosts_is_no_hosts() -> None:
+    """업스트림이 없으면 0건은 조용한 서비스가 아니라 길이 없는 것이다(트래픽 적음 통과 방지)."""
+    entrypoint = _Entrypoint()
+    entrypoint.counters["aws"] = {"requests": 0, "errors_5xx": 0, "hosts": 0}
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == CountsUnavailable(code=ENTRYPOINT_NO_HOSTS)
+
+
+async def test_read_counts_without_hosts_key_returns_values_as_is() -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters_override = {"envs": {"aws": {"requests": 0, "errors_5xx": 0}}}
+
+    result = await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    assert result == RequestCounts(requests=0, errors_5xx=0)
+
+
+async def test_read_counts_failure_log_has_code_and_name_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entrypoint = _Entrypoint()
+    entrypoint.counters["aws"]["hosts"] = 0
+
+    with caplog.at_level(logging.WARNING, logger="app.executors.entrypoint"):
+        await EntrypointMetricsProvider(_client(entrypoint)).read_counts(TARGET)
+
+    message = "entrypoint counts unavailable"
+    record = next(item for item in caplog.records if item.message == message)
+    assert record.__dict__["error_code"] == ENTRYPOINT_NO_HOSTS
+    assert record.__dict__["entrypoint_environment"] == "aws"
+    assert TOKEN not in caplog.text
 
 
 # --- 고르기·설정 ---
