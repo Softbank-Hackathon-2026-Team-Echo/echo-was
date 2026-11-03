@@ -1,8 +1,10 @@
 # 운영 배포
 
-`main`에 push하면 `.github/workflows/deploy.yml`이 테스트 → 이미지 빌드 → 마이그레이션 → 롤아웃을 자동으로 한다.
+`main`에 push하면 `.github/workflows/deploy.yml`이 테스트 → 이미지 빌드·양쪽 레지스트리 사전 배치 → 마이그레이션 → 롤아웃을 자동으로 한다.
 대상은 해커톤 GCP 서울(`asia-northeast3`)의 GKE `echo-dev-gke`, 네임스페이스 `echo-was`이고 주소는 `https://api.echoport.uk`다.
 관제탑을 고객 앱 출발지(AWS 도쿄)와 다른 클라우드에 두어, 도쿄 재난 장면에서도 관리 API가 살아 있게 한다(2026-11-03 AWS 도쿄 EKS에서 옮김).
+
+이미지는 한 번 빌드해 같은 digest를 Artifact Registry(운영)와 ECR(사본)에 넣는다. ECR 사본은 서울 장애 때 도쿄에서 관제탑을 다시 세우기 위한 사전 배치이지 Active-Active가 아니다. 운영 트래픽과 자동 롤아웃 대상은 GKE 하나다.
 
 | 파일 | 내용 |
 |---|---|
@@ -10,14 +12,14 @@
 | `migrate-job.yaml` | 배포마다 새 이름으로 한 번 도는 `alembic upgrade head` |
 | `app.yaml` | API·일꾼 Deployment (이미지는 digest) |
 | `lb.yaml` | 부하 분산기 헬스체크(BackendConfig, `/livez`)·HTTP→HTTPS(FrontendConfig). 롤아웃 뒤에 적용 |
-| `rbac.yaml` | 배포 서비스 계정의 클러스터 권한(네임스페이스 `echo-was` 한정). 워크플로가 아니라 관리자가 손으로 적용 |
+| `rbac.yaml` | 손으로 만든 배포 서비스 계정 `echo-was-deploy`용 클러스터 권한(네임스페이스 `echo-was` 한정). CI 신원을 echo-infra Terraform의 `echo-dev-ci-build`(`roles/container.developer`)로 바꾼 뒤에는 필요 없다 — 정리는 PR #18 논의 |
 
 ## 흐름
 
 1. `test`: ruff·mypy·pytest(PostgreSQL 17 서비스 컨테이너). PR에서도 돈다.
-2. `deploy`(main push만): GitHub OIDC → Workload Identity 연합 → 서비스 계정 `echo-was-deploy`로 GCP에 접근 → 이미지 `echo/app:was-<커밋 7자>-<실행 번호>`를 Artifact Registry에 빌드·푸시(digest 기록) → `base.yaml` 적용 → 마이그레이션 Job 완료 대기 → `app.yaml` 적용 → 롤아웃 → `lb.yaml` 적용 → `/readyz` 확인.
+2. `deploy`(main push만): GitHub OIDC → AWS 역할 `echo-dev-ci-build`(ECR push만) + GCP Workload Identity 연합 → 서비스 계정 `echo-dev-ci-build` → 이미지 `echo/app:was-<커밋 7자>-<실행 번호>`를 한 번 빌드해 Artifact Registry와 ECR에 푸시하고 두 digest가 같은지 확인(다르면 배포하지 않는다) → `base.yaml` 적용 → 마이그레이션 Job 완료 대기 → `app.yaml` 적용(Artifact Registry digest) → 롤아웃 → `lb.yaml` 적용 → `/readyz` 확인.
 3. 마이그레이션이 실패하면 롤아웃하지 않고 기존 파드를 그대로 둔다. 롤아웃이 실패하면 `rollout undo`로 직전 버전으로 되돌린다(마이그레이션은 앞으로만 가므로 되돌리지 않는다).
-4. 배포는 한 번에 하나만 돈다(`concurrency`). 저장소에 클라우드 키·비밀값은 없다.
+4. 배포는 한 번에 하나만 돈다(`concurrency`). 저장소에 클라우드 키·비밀값은 없다(AWS OIDC·GCP Workload Identity 연합).
 5. **PR 없이 main 에 들어온 커밋은 배포하지 않는다.** 배포 job 첫 단계가 커밋이 병합된 PR 과 연결되어 있는지 보고, 아니면 GCP 에 접근하기 전에 실패한다. (이 조직은 무료 요금제라 비공개 저장소에 보호 브랜치·ruleset 을 걸 수 없어 대신 둔 장치다. 직접 push 자체를 막지는 못한다.)
 
 ## 비밀값
@@ -28,10 +30,7 @@
 ## 손으로 만들어 두는 것 (저장소에 넣지 않는다)
 
 - 네임스페이스 `echo-was`, Secret `echo-was-db`(DB 비밀번호, `DATABASE_URL`과 같은 값)
-- 배포 권한(설명에 `managed-by=jimin-manual`, echo-infra Terraform으로 옮길 대상):
-  - Workload Identity pool `echo-was-github` / provider `github`: `Softbank-Hackathon-2026-Team-Echo/echo-was`의 `refs/heads/main`만 받는다.
-  - 서비스 계정 `echo-was-deploy`: Artifact Registry `echo` 저장소 쓰기, 프로젝트 `roles/container.clusterViewer`(kubeconfig 받기).
-  - 클러스터 RBAC: 네임스페이스 `echo-was`에서 ClusterRole `admin` + Role `echo-was-deploy-gke-crds`(BackendConfig·FrontendConfig·SecretProviderClass·SecretSync).
+- CI 신원은 echo-infra Terraform(`terraform/environments/gcp/dev/ci.tf`·`aws/dev/ci.tf`)이 만든다: Workload Identity pool `echo-dev-github`(이 저장소 `main`만 `echo-dev-ci-build`를 받는다), 서비스 계정 `echo-dev-ci-build`(Artifact Registry `echo` 쓰기·`roles/container.developer`), AWS 역할 `echo-dev-ci-build`(ECR `echo/app` push만). 손으로 만들었던 pool `echo-was-github`·서비스 계정 `echo-was-deploy`·`rbac.yaml`·AWS 역할 `echo-was-deploy`는 전환 뒤 지운다(PR #18 논의).
 - 고정 IP `echo-dev-echo-was`·관리형 인증서는 echo-infra가 만든다. Cloudflare `api` A 레코드(DNS only)가 그 IP를 가리킨다.
 
 ## GKE 에서 알아 둘 것
