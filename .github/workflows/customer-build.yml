@@ -1,0 +1,161 @@
+# 고객 저장소를 echo-was 일꾼의 요청(workflow_dispatch)으로 빌드해 ECR 과 Artifact Registry 에 같은 digest 로 올린다.
+# 계약: specs/api-3-2-real-executors.md §5.3 · docs/executors.md "GitHub Actions 빌드". 본문은 인프라 담당(echo-infra 인프라 3).
+# - 실행 이름 `build <build_id>` 가 일꾼이 같은 빌드를 다시 찾는 열쇠다(run-name 을 바꾸지 않는다).
+# - 자격은 echo-infra Terraform 의 echo-dev-ci-build(AWS OIDC 역할 · GCP Workload Identity 연합). 장기 키 없음.
+# - 비공개 고객 저장소는 Echoport Deploy App 의 설치 토큰으로 받는다(Actions secret ECHOPORT_DEPLOY_APP_ID · ECHOPORT_DEPLOY_APP_PRIVATE_KEY).
+#   토큰은 입력값으로 받지 않는다(실행 화면에 보이므로).
+name: customer-build
+run-name: build ${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 빌드 id (uuid). 실행 이름·이미지 태그(b-앞 12자)에 쓴다
+        required: true
+        type: string
+      repo:
+        description: 고객 저장소 owner/name
+        required: true
+        type: string
+      commit_sha:
+        description: 빌드할 커밋 (40자)
+        required: true
+        type: string
+      private:
+        description: 비공개 저장소면 "true"
+        required: true
+        type: string
+
+concurrency: customer-build-${{ inputs.build_id }}
+
+permissions:
+  contents: read
+  id-token: write # AWS OIDC · GCP Workload Identity 연합
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_BUILD_ROLE_ARN: arn:aws:iam::706878591119:role/echo-dev-ci-build
+  WIF_PROVIDER: projects/573662116412/locations/global/workloadIdentityPools/echo-dev-github/providers/github
+  CI_SA: echo-dev-ci-build@team-echo-final.iam.gserviceaccount.com
+  REGISTRY: asia-northeast3-docker.pkg.dev
+  AR_REPO: asia-northeast3-docker.pkg.dev/team-echo-final/echo/app
+  ECR_REPO: 706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo/app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 입력 확인
+        id: inputs
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          REPO: ${{ inputs.repo }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          PRIVATE: ${{ inputs.private }}
+        run: |
+          [[ "$BUILD_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::build_id 는 uuid 여야 한다"; exit 1; }
+          [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::repo 는 owner/name 이어야 한다"; exit 1; }
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit_sha 는 40자 16진수여야 한다"; exit 1; }
+          [[ "$PRIVATE" == "true" || "$PRIVATE" == "false" ]] || { echo "::error::private 는 true 또는 false"; exit 1; }
+          {
+            echo "owner=${REPO%%/*}"
+            echo "name=${REPO##*/}"
+          } >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=b-${BUILD_ID:0:12}" >> "$GITHUB_ENV"
+
+      - name: 비공개 저장소 읽기 토큰 (App 설치 토큰, 1시간)
+        if: inputs.private == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.ECHOPORT_DEPLOY_APP_ID }}
+          private-key: ${{ secrets.ECHOPORT_DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ steps.inputs.outputs.owner }}
+          repositories: ${{ steps.inputs.outputs.name }}
+          permission-contents: read
+
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.commit_sha }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          persist-credentials: false
+
+      - name: Dockerfile 확인
+        run: test -f Dockerfile || { echo "::error::저장소 루트에 Dockerfile 이 없다"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.CI_SA }}
+          token_format: access_token
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.gcp-auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.AR_REPO }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+
+      - name: 양쪽 digest 검증 · 결과 파일
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          PUSH_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          ar_digest=$(docker buildx imagetools inspect "${AR_REPO}:${IMAGE_TAG}" | awk '$1 == "Digest:" { print $2; exit }')
+          ecr_digest=$(docker buildx imagetools inspect "${ECR_REPO}:${IMAGE_TAG}" | awk '$1 == "Digest:" { print $2; exit }')
+          printf 'push=%s\nartifact-registry=%s\necr=%s\n' "$PUSH_DIGEST" "$ar_digest" "$ecr_digest"
+          if [ -z "$ar_digest" ] || [ "$PUSH_DIGEST" != "$ar_digest" ] || [ "$ar_digest" != "$ecr_digest" ]; then
+            echo "::error::Artifact Registry 와 ECR 의 이미지 digest 가 일치하지 않는다."
+            exit 1
+          fi
+          printf '{"build_id":"%s","image_digest":"%s","ar_repository":"%s","ecr_repository":"%s"}\n' \
+            "$BUILD_ID" "$ar_digest" "$AR_REPO" "$ECR_REPO" > build-result.json
+          cat build-result.json
+          {
+            echo "## customer-build"
+            echo "- build_id: \`${BUILD_ID}\`"
+            echo "- image: \`${AR_REPO}@${ar_digest}\` (ECR 동일 digest, 태그 \`${IMAGE_TAG}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-result
+          path: build-result.json
+          if-no-files-found: error
+          retention-days: 7
