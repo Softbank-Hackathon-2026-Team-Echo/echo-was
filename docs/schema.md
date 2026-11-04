@@ -28,6 +28,7 @@ erDiagram
     deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청·되돌리기 대상"
     deploy_requests ||--o{ deploy_request_logs : "배포 작업 로그"
     services ||--o{ migration_plans : "이전 계획(끝나지 않은 것 하나)"
+    service_environments ||--o{ service_environment_variables : "앱 환경 변수(값 없음)"
     service_environments ||--o{ migration_plans : "출발·도착"
     migration_plans ||--o{ migration_plan_logs : "이전 실행 로그"
 
@@ -195,6 +196,25 @@ erDiagram
 - **연결을 만드는 쪽(API 서버 3 배포 요청 접수)은 대상 환경 행을 `SELECT ... FOR SHARE` 로 잠근 뒤 연결을 만든다.** 환경 삭제는 같은 행을 `FOR UPDATE` 로 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 둘은 서로 기다려 "지운 환경에 새 연결"이 생기지 않는다. `FOR UPDATE` 가 아니라 `FOR SHARE` 인 이유: 일꾼이 서비스 행을 잡은 채 이 환경을 FK 로 가리키는 행을 쓰면 `FOR KEY SHARE` 를 잡는데, 접수가 `FOR UPDATE` 를 쥐고 서비스 행을 기다리면 교착이 생긴다(`FOR SHARE` 는 `FOR KEY SHARE` 와 부딪히지 않는다). API 서버 2 SPEC 의 "FOR UPDATE" 를 이렇게 바꿨다. 연결은 그 환경의 첫 배포 요청 때 자동으로 만든다(`traffic_weight = 0`).
 - **역할은 저장하지 않고 계산한다**: `traffic_weight > 0` 이면 서비스 중(SERVING), 0 이고 현재 배포가 있으면 예비(STANDBY), 현재 배포가 없으면 NONE. 첫 성공 연결은 가짜 대표 주소 라우터가 "적용했다"고 답한 뒤 `traffic_weight = 100` 이 된다.
 
+### `service_environment_variables` — 고객 앱 환경 변수 (API 서버 10)
+
+**값 칸이 없다.** 값은 비밀 보관함(GCP Secret Manager)에만 있고 여기에는 위치와 최신 버전 번호만 둔다(NFR-17). API 는 [api/variables.md](api/variables.md), 주입 규칙은 [executors.md](executors.md#앱-환경-변수-ns-env-api-서버-10).
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `service_environment_id` | uuid | N | FK `service_environments.id` RESTRICT | 어느 연결(서비스 × 환경)의 변수인가 |
+| `key` | varchar(64) | N | `^[A-Z][A-Z0-9_]{0,63}$` | 이름 |
+| `secret_name` | varchar(255) | N | | 보관함 비밀 id(프로젝트 제외) |
+| `latest_version` | integer | N | `> 0` | 보관함의 최신 버전 번호 |
+| `updated_by_user_id` | uuid | N | FK `users.id` RESTRICT | 마지막으로 넣은 사람 |
+| (유일성) | | | `uq_service_environment_variables_connection_key_live` | 같은 연결·키의 살아 있는 행은 하나 |
+| (조회) | | | `ix_service_environment_variables_connection_key` | 지운 행까지 찾기(이전 `secret_name`) |
+
+- 소프트 삭제 칸이 있다. 키 삭제·서비스 삭제는 행만 삭제 표시하고 보관함 비밀은 남긴다.
+- 같은 키를 지운 뒤 다시 넣으면 새 행이 **이전 행의 `secret_name` 을 그대로 쓰고** 보관함 버전이 이어진다. 그래서 옛 배포 기록의 `versions/<n>` 이 다른 값을 가리키지 않는다.
+- 배포 기록은 이 표를 다시 읽지 않는다. 배포 때 고른 버전을 `deployments.config_snapshot.envVars` 에 참조로 고정한다.
+
 ### `builds` — 빌드
 
 | 칸 | 타입 | NULL | 제약 | 뜻 |
@@ -335,6 +355,54 @@ erDiagram
 - `source = AI_REVIEW` 인 행은 `result` 가 `WARN`·`FAIL`·`UNKNOWN` 만 된다(`ck_findings_ai_result_not_pass`). AI 결과로 PASS 를 만들 수 없다.
 - 인덱스 `(organization_id, control_id, collected_at)`. 판정용 조회는 만료 전 증거를 최신순으로 최대 500건 읽는다.
 
+### `security_exceptions` — 기한부 예외 (보안·거버넌스 3)
+
+통제 하나를 범위 안에서 최대 7일 막지 않게 하는 기록. 걸린 통제는 PASS 가 아니라 WARN 으로 보인다. 판정 규칙(`security_rules._is_valid_exception`)이 승인·자기 승인·기간·범위를 다시 본다.
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `organization_id` | uuid | N | FK | 조직 |
+| `control_id` | varchar(16) | N | 값 CHECK | 막지 않을 통제(`C-DB-1` 등) |
+| `service_id`·`environment_id`·`image_digest`·`config_commit`·`was_version` | | Y | FK·digest 형식 | 범위(통제가 정한 것만, `findings` 와 같은 방식) |
+| `reason` | text | N | 공백 아님, 1000자 이하 | 사유 |
+| `requested_by_user_id` | uuid | N | FK `users` | 요청한 사람(에이전트는 못 함) |
+| `approved_by_user_id`·`approved_at` | | Y | 둘이 함께 | 승인한 사람. 승인 전에는 판정에 쓰지 않는다 |
+| `expires_at` | timestamptz | N | `created_at` 뒤, 7일 안 | 만료 |
+| `revoked_by_user_id`·`revoked_at` | | Y | 둘이 함께 | 철회 |
+
+### `agent_runners` — AI 러너 신원 (WAS ↔ 러너 계약 v1)
+
+샌드박스 VM 의 러너 하나. 조직에 묶이지 않는다. 러너 토큰(`echo_rnr_…`)은 어드민 명령으로만 발급하고 `token_hash`(SHA-256 16진 64자, unique)만 둔다. `name` 은 RFC 1123 label, `revoked_at` 이 있으면 쓰지 않는다.
+
+### `agent_runs` — AI 실행 (WAS ↔ 러너 계약 v1)
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `organization_id`·`service_id` | uuid | N | FK | 실행 대상 |
+| `kind` | varchar(16) | N | `PRECHECK`·`APPLY_PATCH`·`CHANGE_PROPOSAL` | 사전 점검 · 승인한 패치 반영 · (P1) 수정안만 |
+| `status` | varchar(16) | N | 값 CHECK, 기본 `QUEUED` | ④-6 흐름 |
+| `source_environment_id`·`target_environment_id` | uuid | Y | FK. `PRECHECK` 은 도착 필수 | 출발·도착 환경 |
+| `parent_run_id` | uuid | Y | FK `agent_runs`. `APPLY_PATCH` 은 필수 | 패치를 낸 사전 점검 |
+| `scenario_ref` | varchar(200) | Y | | 점검·수정할 사본(시나리오) 위치 |
+| `input_snapshot`·`input_hash` | jsonb·varchar(71) | N | 객체 · `sha256:` 64자 | 만들 때 고정한 입력(비밀 참조만)과 그 해시 |
+| `requested_by_user_id` | uuid | N | FK `users` | 요청한 사람(반영 실행은 승인한 사람) |
+| `claimed_by_runner_id`·`run_token_hash`·`lease_until`·`claimed_at` | | Y | `CLAIMED`·`RUNNING` 이면 러너·토큰 해시·임대 필수, 토큰 해시 unique | 가져간 러너와 실행 토큰(실행 하나만, 해시만) |
+| `deadline_at` | timestamptz | N | `created_at` 뒤 | 마감(기본 15분) |
+| `started_at`·`finished_at` | timestamptz | Y | 끝 상태 ⇔ `finished_at` 있음 | |
+| `failure_code` | varchar(32) | Y | `FAILED`·`TIMED_OUT` 일 때만 | 실패 이유 |
+| `result` | jsonb | Y | `SUCCEEDED`·`FAILED` 일 때만, 객체 | 러너 결과(WAS 가 스키마·크기·AI PASS 금지를 검증한 뒤) |
+| `model_id`·`prompt_version`·`simulated` | | | | 쓴 모델·프롬프트 버전·가짜 여부 |
+
+- 같은 서비스에 열린 실행(`QUEUED`·`CLAIMED`·`RUNNING`)은 하나(`uq_agent_runs_service_id_open`). 가져가기는 `QUEUED` 를 오래된 순으로(`ix_agent_runs_queued_created_at`).
+
+### `agent_run_events` — AI 실행 이벤트
+
+러너가 낸 진행 줄. `(run_id, seq)` unique 라 같은 seq 를 다시 보내면 무시한다. `step`(러너 단계)·`level`(INFO·WARN·ERROR)은 값 CHECK, `message` 는 고정 영어 문장(200자), `data` 는 객체(비밀 가리기를 거친 값만).
+
+### `agent_patch_approvals` — AI 패치 결정
+
+패치 하나에 대한 사람의 결정(`APPROVED`·`REJECTED`). `(run_id, patch_id)` unique. 지문 = `patch_hash`·`checks_digest`(둘 다 `sha256:` 64자) + `policy_version`. 승인했을 때만 반영 실행 `apply_run_id` 가 있다.
+
 ### `deployments` — 배포 (지우지 않는 이력)
 
 | 칸 | 타입 | NULL | 제약 | 뜻 |
@@ -343,7 +411,7 @@ erDiagram
 | `service_environment_id` | uuid | N | FK, 인덱스 `(service_environment_id, created_at)` | 어느 연결에 올렸나 |
 | `image_repository` | varchar(512) | N | | 저장소 URI(tag 없음) |
 | `image_digest` | varchar(71) | N | `^sha256:[0-9a-f]{64}$` | 배포 기준 이미지 |
-| `config_snapshot` | jsonb | N | 기본 `{}`, object CHECK | 배포 때 쓴 설정. 비밀값 없이 참조만 |
+| `config_snapshot` | jsonb | N | 기본 `{}`, object CHECK | 배포 때 쓴 설정. 비밀값 없이 참조만. `envVars` = 앱 환경 변수 `{KEY: "<참조>/versions/<n>"}`(API 서버 10, 키가 없으면 이 기능 이전 기록) |
 | `status` | varchar(16) | N | 기본 `PENDING`, 5개 값 CHECK | ④ 상태 흐름 |
 | `rollback_of_id` | uuid | Y | FK `deployments.id`, `rollback_of_id <> id` | 되돌리기라면 원본 배포 |
 | `started_at`·`finished_at` | timestamptz | Y | | 시작·끝 시각 |
@@ -489,6 +557,17 @@ stateDiagram-v2
     ROLLING_BACK --> FAILED : 롤백 3번 실패(rollbackStatus FAILED)
 ```
 
+### ④-6 AI 실행 상태 흐름 (`agent_runs.status`, WAS ↔ 러너 계약 v1)
+
+```text
+QUEUED ──(러너가 가져감: 러너·실행 토큰 해시·임대)──▶ CLAIMED ──(시작)──▶ RUNNING ──▶ SUCCEEDED | FAILED
+   │                                                    │                       │
+   └──(사람이 취소)──▶ CANCELLED ◀──────────────────────┴───────────────────────┤
+                                       임대·마감이 지나면 ──────────────────────▶ TIMED_OUT
+```
+
+- 상태는 조건부 UPDATE 로만 바꾼다. 끝 상태에는 `finished_at` 이 있고 실행 토큰은 무효다. 자동 재시도는 없다(사람이 새 실행을 만든다).
+
 ### ④-2 환경 접속 상태 흐름 (`environments.connection_status`)
 
 ```mermaid
@@ -598,8 +677,7 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 |---|---|---|
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
 | `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
-| (정책은 표 없음) · 기한부 예외·보안 판정 | 정책은 코드 규칙표(`security_rules.RULES`). `findings` 는 보안·거버넌스 2 에서 만들었다(②). 예외 `security_exceptions`·판정 `security_decisions`(가칭) | 보안 파트 |
-| 샌드박스·에이전트 실행 기록 | 에이전트 점검·수정 기록 | AI 파트 |
+| (정책은 표 없음) · 보안 판정 | 정책은 코드 규칙표(`security_rules.RULES`). `findings`(보안 2)·`security_exceptions`(보안·AI 기반 스키마)는 만들었다(②). 판정 기록 `security_decisions`(가칭) | 보안 파트 |
 
 삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스는 API 서버 3 에서 정했다 — `DELETING` 으로 바꾸고 대기 요청을 취소한 뒤, 진행 중 요청이 끝나면 일꾼이 연결마다 내리고 소프트 삭제한다(연결도 내린 즉시 소프트 삭제, 배포 기록·배포 요청은 남는다).
 

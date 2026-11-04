@@ -33,10 +33,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.clients.app_secret_store import FakeAppSecretStore
 from app.clients.source_repository import FakeSourceRepositoryClient
 from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.dependencies import (
+    get_app_secret_store,
     get_clock,
     get_executor_set,
     get_github_user_client,
@@ -63,8 +65,16 @@ CONNECT_RETRY_SECONDS = 10.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.5
 TABLES = (
     "jobs",
+    # --- API 서버 10: 고객 앱 환경 변수(이름·버전만) ---
+    "service_environment_variables",
     # --- 보안·거버넌스 2: 보안 증거 ---
     "findings",
+    # --- 보안·AI 기반 스키마: 기한부 예외·AI 실행 ---
+    "security_exceptions",
+    "agent_patch_approvals",
+    "agent_run_events",
+    "agent_runs",
+    "agent_runners",
     # --- API 서버 8: 이전 계획 ---
     "migration_plan_logs",
     "migration_plans",
@@ -273,6 +283,7 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
             organization=team,
             admin=admin,
             github_users=github_users,
+            app_secret_store=FakeAppSecretStore(),
         )
         app.dependency_overrides[get_session_factory] = lambda: session_factory
         app.dependency_overrides[get_settings] = lambda: harness.settings
@@ -280,6 +291,7 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
         app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
         app.dependency_overrides[get_github_user_client] = lambda: harness.github_users
         app.dependency_overrides[get_host_suffix_generator] = lambda: harness.host_suffixes
+        app.dependency_overrides[get_app_secret_store] = lambda: harness.app_secret_store
         # 로그 API 가 시험이 바꿔 끼운 가짜 실행기(토큰 주입 훅 포함)를 쓰게 한다(요청마다 읽는다).
         app.dependency_overrides[get_executor_set] = lambda: harness.executors.as_set()
         try:

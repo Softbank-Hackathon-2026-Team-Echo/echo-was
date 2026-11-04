@@ -29,6 +29,9 @@ from app.models import Service, ServiceEnvironment
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_environment_variable_repository import (
+    ServiceEnvironmentVariableRepository,
+)
 from app.repositories.service_repository import ServiceRepository
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import deploy_target
@@ -55,6 +58,7 @@ class ServiceTeardownProcessor:
         self._connections = ServiceEnvironmentRepository(session)
         self._requests = DeployRequestRepository(session)
         self._jobs = JobRepository(session)
+        self._variables = ServiceEnvironmentVariableRepository(session)
         self._job_log = DeployJobLog(session)
         self._service_id = lease.job.subject_id
 
@@ -143,7 +147,14 @@ class ServiceTeardownProcessor:
                 async with self._session.begin():
                     connection = await self._lock_connection(snapshot.id, attempt)
                     if connection is not None:
-                        connection.mark_as_deleted(self._clock.now())
+                        removed_at = self._clock.now()
+                        connection.mark_as_deleted(removed_at)
+                        # 앱 환경 변수는 행만 지운다. 보관함 비밀은 남긴다(정리는 후속 일).
+                        for variable in await self._variables.search_live_by_connection(
+                            connection.id
+                        ):
+                            variable.mark_as_deleted(removed_at)
+                            variable.updated_at = removed_at
                 logger.info(
                     "service environment removed",
                     extra={

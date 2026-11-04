@@ -1,10 +1,12 @@
 import asyncio
 from pathlib import Path
 
+from fastapi.middleware.cors import CORSMiddleware
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters import registry
+from app.clients.app_secret_store import FakeAppSecretStore
 from app.core.clock import SystemClock
 from app.core.config import get_settings
 from app.core.database import get_engine, get_session_factory
@@ -97,6 +99,12 @@ def test_app_registers_auth_and_organization_routes() -> None:
     assert set(paths["/api/v1/orgs/{org_id}/agent-tokens/{token_id}"]) == {"delete"}
 
 
+def test_cors_allows_put_for_service_variables() -> None:
+    cors = next(item for item in app.user_middleware if item.cls is CORSMiddleware)
+
+    assert "PUT" in cors.kwargs["allow_methods"]
+
+
 async def test_worker_run_returns_when_stop_is_already_set() -> None:
     settings = get_settings().model_copy(update={"worker_concurrency": 2})
     clock = SystemClock()
@@ -106,6 +114,7 @@ async def test_worker_run_returns_when_stop_is_already_set() -> None:
         clock=clock,
         executors=build_executor_set(settings, clock),
         source_client=build_source_repository_client(settings, clock),
+        app_secret_store=FakeAppSecretStore(),
         owner="test",
     )
     stop = asyncio.Event()

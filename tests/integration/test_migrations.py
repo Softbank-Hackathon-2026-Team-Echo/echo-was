@@ -9,11 +9,13 @@ from typing import Any
 
 import pytest
 from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.models import Base
-from tests.integration.conftest import run_alembic
+from tests.integration.conftest import PROJECT_ROOT, run_alembic
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import create_rollback_fixture
@@ -520,6 +522,196 @@ EXPECTED_CONSTRAINTS = {
         "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
     ),
     ("findings", "pk_findings"): "PRIMARY KEY (id)",
+    # --- 보안·AI 기반 스키마(201cf5419f4d) ---
+    ("agent_patch_approvals", "ck_agent_patch_approvals_apply_run_only_when_approved"): (
+        "CHECK ((((decision)::text = 'APPROVED'::text) OR (apply_run_id IS NULL)))"
+    ),
+    ("agent_patch_approvals", "ck_agent_patch_approvals_checks_digest_format"): (
+        "CHECK (((checks_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text))"
+    ),
+    ("agent_patch_approvals", "ck_agent_patch_approvals_decision_valid"): (
+        "CHECK (((decision)::text = ANY ((ARRAY['APPROVED'::character varying, "
+        "'REJECTED'::character varying])::text[])))"
+    ),
+    ("agent_patch_approvals", "ck_agent_patch_approvals_patch_hash_format"): (
+        "CHECK (((patch_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text))"
+    ),
+    ("agent_patch_approvals", "fk_agent_patch_approvals_apply_run_id_agent_runs"): (
+        "FOREIGN KEY (apply_run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT"
+    ),
+    ("agent_patch_approvals", "fk_agent_patch_approvals_decided_by_user_id_users"): (
+        "FOREIGN KEY (decided_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("agent_patch_approvals", "fk_agent_patch_approvals_run_id_agent_runs"): (
+        "FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT"
+    ),
+    ("agent_patch_approvals", "pk_agent_patch_approvals"): "PRIMARY KEY (id)",
+    ("agent_patch_approvals", "uq_agent_patch_approvals_run_id_patch_id"): (
+        "UNIQUE (run_id, patch_id)"
+    ),
+    ("agent_run_events", "ck_agent_run_events_data_is_object"): (
+        "CHECK (((data IS NULL) OR (jsonb_typeof(data) = 'object'::text)))"
+    ),
+    ("agent_run_events", "ck_agent_run_events_level_valid"): (
+        "CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character "
+        "varying, 'ERROR'::character varying])::text[])))"
+    ),
+    ("agent_run_events", "ck_agent_run_events_seq_positive"): "CHECK ((seq >= 1))",
+    ("agent_run_events", "ck_agent_run_events_step_valid"): (
+        "CHECK (((step)::text = ANY ((ARRAY['SANDBOX_CREATE'::character varying, "
+        "'INPUT_LOAD'::character varying, 'CONFIG_DIFF'::character varying, "
+        "'ANALYZE'::character varying, 'PATCH_PROPOSE'::character varying, "
+        "'PATCH_VERIFY'::character varying, 'SANDBOX_DELETE'::character "
+        "varying])::text[])))"
+    ),
+    ("agent_run_events", "fk_agent_run_events_run_id_agent_runs"): (
+        "FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT"
+    ),
+    ("agent_run_events", "pk_agent_run_events"): "PRIMARY KEY (id)",
+    ("agent_run_events", "uq_agent_run_events_run_id_seq"): "UNIQUE (run_id, seq)",
+    ("agent_runners", "ck_agent_runners_name_format"): (
+        "CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'::text))"
+    ),
+    ("agent_runners", "ck_agent_runners_token_hash_format"): (
+        "CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))"
+    ),
+    ("agent_runners", "pk_agent_runners"): "PRIMARY KEY (id)",
+    ("agent_runners", "uq_agent_runners_name"): "UNIQUE (name)",
+    ("agent_runners", "uq_agent_runners_token_hash"): "UNIQUE (token_hash)",
+    ("agent_runs", "ck_agent_runs_apply_patch_has_parent"): (
+        "CHECK ((((kind)::text <> 'APPLY_PATCH'::text) OR (parent_run_id IS NOT NULL)))"
+    ),
+    ("agent_runs", "ck_agent_runs_claim_consistency"): (
+        "CHECK ((((status)::text <> ALL ((ARRAY['CLAIMED'::character varying, "
+        "'RUNNING'::character varying])::text[])) OR ((claimed_by_runner_id IS NOT NULL) "
+        "AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL))))"
+    ),
+    ("agent_runs", "ck_agent_runs_deadline_after_created"): "CHECK ((deadline_at > created_at))",
+    ("agent_runs", "ck_agent_runs_failure_code_only_when_failed"): (
+        "CHECK (((failure_code IS NULL) OR ((status)::text = ANY "
+        "((ARRAY['FAILED'::character varying, 'TIMED_OUT'::character varying])::text[]))))"
+    ),
+    ("agent_runs", "ck_agent_runs_finished_consistency"): (
+        "CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, "
+        "'FAILED'::character varying, 'TIMED_OUT'::character varying, "
+        "'CANCELLED'::character varying])::text[])) = (finished_at IS NOT NULL)))"
+    ),
+    ("agent_runs", "ck_agent_runs_input_hash_format"): (
+        "CHECK (((input_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text))"
+    ),
+    ("agent_runs", "ck_agent_runs_input_is_object"): (
+        "CHECK ((jsonb_typeof(input_snapshot) = 'object'::text))"
+    ),
+    ("agent_runs", "ck_agent_runs_kind_valid"): (
+        "CHECK (((kind)::text = ANY ((ARRAY['PRECHECK'::character varying, "
+        "'APPLY_PATCH'::character varying, 'CHANGE_PROPOSAL'::character "
+        "varying])::text[])))"
+    ),
+    ("agent_runs", "ck_agent_runs_precheck_has_target"): (
+        "CHECK ((((kind)::text <> 'PRECHECK'::text) OR (target_environment_id IS NOT NULL)))"
+    ),
+    ("agent_runs", "ck_agent_runs_result_only_when_reported"): (
+        "CHECK (((result IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character "
+        "varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(result) = "
+        "'object'::text))))"
+    ),
+    ("agent_runs", "ck_agent_runs_run_token_hash_format"): (
+        "CHECK (((run_token_hash IS NULL) OR (run_token_hash ~ '^[0-9a-f]{64}$'::text)))"
+    ),
+    ("agent_runs", "ck_agent_runs_status_valid"): (
+        "CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, "
+        "'CLAIMED'::character varying, 'RUNNING'::character varying, "
+        "'SUCCEEDED'::character varying, 'FAILED'::character varying, "
+        "'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])))"
+    ),
+    ("agent_runs", "fk_agent_runs_claimed_by_runner_id_agent_runners"): (
+        "FOREIGN KEY (claimed_by_runner_id) REFERENCES agent_runners(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_parent_run_id_agent_runs"): (
+        "FOREIGN KEY (parent_run_id) REFERENCES agent_runs(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_requested_by_user_id_users"): (
+        "FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_service_id_services"): (
+        "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_source_environment_id_environments"): (
+        "FOREIGN KEY (source_environment_id) REFERENCES environments(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_target_environment_id_environments"): (
+        "FOREIGN KEY (target_environment_id) REFERENCES environments(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "pk_agent_runs"): "PRIMARY KEY (id)",
+    ("security_exceptions", "ck_security_exceptions_approval_consistency"): (
+        "CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL)))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_control_id_valid"): (
+        "CHECK (((control_id)::text = ANY ((ARRAY['C-IMG-1'::character varying, "
+        "'C-IMG-2'::character varying, 'C-IMG-3'::character varying, 'C-CFG-1'::character "
+        "varying, 'C-TLS-1'::character varying, 'C-TLS-2'::character varying, "
+        "'C-NET-1'::character varying, 'C-NET-2'::character varying, 'C-IAM-1'::character "
+        "varying, 'C-IAM-2'::character varying, 'C-SEC-1'::character varying, "
+        "'C-AUD-1'::character varying, 'C-AUD-2'::character varying, 'C-CI-1'::character "
+        "varying, 'C-AI-1'::character varying, 'C-DB-1'::character varying, "
+        "'C-DST-1'::character varying, 'C-POST-1'::character varying])::text[])))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_expires_after_created"): (
+        "CHECK ((expires_at > created_at))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_image_digest_format"): (
+        "CHECK (((image_digest IS NULL) OR ((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_max_duration"): (
+        "CHECK ((expires_at <= (created_at + '7 days'::interval)))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_reason_present"): (
+        "CHECK (((char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 1000)))"
+    ),
+    ("security_exceptions", "ck_security_exceptions_revocation_consistency"): (
+        "CHECK (((revoked_by_user_id IS NULL) = (revoked_at IS NULL)))"
+    ),
+    ("security_exceptions", "fk_security_exceptions_approved_by_user_id_users"): (
+        "FOREIGN KEY (approved_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "fk_security_exceptions_environment_id_environments"): (
+        "FOREIGN KEY (environment_id) REFERENCES environments(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "fk_security_exceptions_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "fk_security_exceptions_requested_by_user_id_users"): (
+        "FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "fk_security_exceptions_revoked_by_user_id_users"): (
+        "FOREIGN KEY (revoked_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "fk_security_exceptions_service_id_services"): (
+        "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
+    ),
+    ("security_exceptions", "pk_security_exceptions"): "PRIMARY KEY (id)",
+    # API 서버 10: 고객 앱 환경 변수(값 칸 없음)
+    ("service_environment_variables", "ck_service_environment_variables_key_format"): (
+        "CHECK (((key)::text ~ '^[A-Z][A-Z0-9_]{0,63}$'::text))"
+    ),
+    ("service_environment_variables", "ck_service_environment_variables_latest_version_positive"): (
+        "CHECK ((latest_version > 0))"
+    ),
+    ("service_environment_variables", "ck_service_environment_variables_soft_delete_consistency"): (
+        "CHECK ((is_deleted = (deleted_at IS NOT NULL)))"
+    ),
+    ("service_environment_variables", "fk_service_environment_variables_connection"): (
+        "FOREIGN KEY (service_environment_id) REFERENCES service_environments(id) "
+        "ON DELETE RESTRICT"
+    ),
+    (
+        "service_environment_variables",
+        "fk_service_environment_variables_updated_by_user_id_users",
+    ): ("FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"),
+    ("service_environment_variables", "pk_service_environment_variables"): "PRIMARY KEY (id)",
 }
 
 EXPECTED_INDEXES = {
@@ -685,6 +877,67 @@ EXPECTED_INDEXES = {
         "USING btree (organization_id, control_id, collected_at)"
     ),
     "pk_findings": "CREATE UNIQUE INDEX pk_findings ON findings USING btree (id)",
+    # --- 보안·AI 기반 스키마(201cf5419f4d) ---
+    "ix_agent_runs_organization_id_created_at": (
+        "CREATE INDEX ix_agent_runs_organization_id_created_at ON agent_runs USING btree "
+        "(organization_id, created_at)"
+    ),
+    "ix_agent_runs_queued_created_at": (
+        "CREATE INDEX ix_agent_runs_queued_created_at ON agent_runs USING btree "
+        "(created_at) WHERE ((status)::text = 'QUEUED'::text)"
+    ),
+    "ix_security_exceptions_organization_id_control_id_expires_at": (
+        "CREATE INDEX ix_security_exceptions_organization_id_control_id_expires_at ON "
+        "security_exceptions USING btree (organization_id, control_id, expires_at)"
+    ),
+    "pk_agent_patch_approvals": (
+        "CREATE UNIQUE INDEX pk_agent_patch_approvals ON agent_patch_approvals USING btree (id)"
+    ),
+    "pk_agent_run_events": (
+        "CREATE UNIQUE INDEX pk_agent_run_events ON agent_run_events USING btree (id)"
+    ),
+    "pk_agent_runners": "CREATE UNIQUE INDEX pk_agent_runners ON agent_runners USING btree (id)",
+    "pk_agent_runs": "CREATE UNIQUE INDEX pk_agent_runs ON agent_runs USING btree (id)",
+    "pk_security_exceptions": (
+        "CREATE UNIQUE INDEX pk_security_exceptions ON security_exceptions USING btree (id)"
+    ),
+    "uq_agent_patch_approvals_run_id_patch_id": (
+        "CREATE UNIQUE INDEX uq_agent_patch_approvals_run_id_patch_id ON "
+        "agent_patch_approvals USING btree (run_id, patch_id)"
+    ),
+    "uq_agent_run_events_run_id_seq": (
+        "CREATE UNIQUE INDEX uq_agent_run_events_run_id_seq ON agent_run_events USING "
+        "btree (run_id, seq)"
+    ),
+    "uq_agent_runners_name": (
+        "CREATE UNIQUE INDEX uq_agent_runners_name ON agent_runners USING btree (name)"
+    ),
+    "uq_agent_runners_token_hash": (
+        "CREATE UNIQUE INDEX uq_agent_runners_token_hash ON agent_runners USING btree (token_hash)"
+    ),
+    "uq_agent_runs_run_token_hash": (
+        "CREATE UNIQUE INDEX uq_agent_runs_run_token_hash ON agent_runs USING btree "
+        "(run_token_hash) WHERE (run_token_hash IS NOT NULL)"
+    ),
+    "uq_agent_runs_service_id_open": (
+        "CREATE UNIQUE INDEX uq_agent_runs_service_id_open ON agent_runs USING btree "
+        "(service_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, "
+        "'CLAIMED'::character varying, 'RUNNING'::character varying])::text[]))"
+    ),
+    # API 서버 10: 고객 앱 환경 변수
+    "ix_service_environment_variables_connection_key": (
+        "CREATE INDEX ix_service_environment_variables_connection_key ON "
+        "service_environment_variables USING btree (service_environment_id, key)"
+    ),
+    "pk_service_environment_variables": (
+        "CREATE UNIQUE INDEX pk_service_environment_variables ON service_environment_variables "
+        "USING btree (id)"
+    ),
+    "uq_service_environment_variables_connection_key_live": (
+        "CREATE UNIQUE INDEX uq_service_environment_variables_connection_key_live ON "
+        "service_environment_variables USING btree (service_environment_id, key) "
+        "WHERE (is_deleted = false)"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -732,7 +985,7 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-HEAD_REVISION = "eee7a6c8229f"
+HEAD_REVISION = "48b2126a9c37"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -871,6 +1124,10 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
     assert tables_after_downgrade == ["alembic_version"]
     assert functions_after_downgrade == 0
     assert sorted(tables_after_upgrade) == [
+        "agent_patch_approvals",
+        "agent_run_events",
+        "agent_runners",
+        "agent_runs",
         "agent_tokens",
         "alembic_version",
         "audit_logs",
@@ -886,6 +1143,8 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "migration_plans",
         "organization_members",
         "organizations",
+        "security_exceptions",
+        "service_environment_variables",
         "service_environments",
         "services",
         "sessions",
@@ -1344,6 +1603,58 @@ async def test_findings_revision_downgrade_removes_table_and_upgrade_restores(
     assert (down, up) == (False, True)
 
 
+# 고객 앱 환경 변수 표(API 서버 10) 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
+BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
+SERVICE_VARIABLES_TABLE = "service_environment_variables"
+
+
+def _table_names(connection: Connection) -> set[str]:
+    return set(inspect(connection).get_table_names())
+
+
+def test_service_variables_revision_is_single_head_after_security_ai_schema() -> None:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    scripts = ScriptDirectory.from_config(config)
+
+    assert scripts.get_heads() == [HEAD_REVISION]
+    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_SERVICE_VARIABLES
+
+
+async def test_service_variables_revision_only_adds_a_table_and_has_no_value_column(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        up = await connection.run_sync(_table_names)
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_SERVICE_VARIABLES))
+        )
+        down = await connection.run_sync(_table_names)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        columns = await connection.run_sync(
+            lambda sync: {
+                column["name"] for column in inspect(sync).get_columns(SERVICE_VARIABLES_TABLE)
+            }
+        )
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert up - down == {SERVICE_VARIABLES_TABLE}
+    assert down - up == set()
+    assert columns == {
+        "id",
+        "service_environment_id",
+        "key",
+        "secret_name",
+        "latest_version",
+        "updated_by_user_id",
+        "created_at",
+        "updated_at",
+        "is_deleted",
+        "deleted_at",
+    }
+
+
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:
     async with engine.connect() as connection:
         # 차이가 있으면 AutogenerateDiffsDetected 가 난다.
@@ -1379,3 +1690,32 @@ async def test_model_metadata_matches_migrated_schema(engine: AsyncEngine) -> No
     assert from_models["indexes"] == from_migration["indexes"]
     # 트리거는 모델 메타데이터에 없고 마이그레이션에만 있다.
     assert from_models["triggers"] == {}
+
+
+BEFORE_AGENT_RUNS = "eee7a6c8229f"
+AGENT_TABLES = {
+    "security_exceptions",
+    "agent_runners",
+    "agent_runs",
+    "agent_run_events",
+    "agent_patch_approvals",
+}
+
+
+def _agent_tables(connection: Connection) -> set[str]:
+    return AGENT_TABLES & set(inspect(connection).get_table_names())
+
+
+async def test_agent_runs_revision_downgrade_removes_tables_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_AGENT_RUNS))
+        )
+        down = await connection.run_sync(_agent_tables)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_agent_tables)
+
+    assert down == set()
+    assert up == AGENT_TABLES

@@ -21,6 +21,93 @@ CREATE FUNCTION public.prevent_deployment_delete() RETURNS trigger
         END;
         $$;
 
+CREATE TABLE public.agent_patch_approvals (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid NOT NULL,
+    patch_id character varying(64) NOT NULL,
+    patch_hash character varying(71) NOT NULL,
+    checks_digest character varying(71) NOT NULL,
+    policy_version character varying(32) NOT NULL,
+    decision character varying(16) NOT NULL,
+    decided_by_user_id uuid NOT NULL,
+    reason text,
+    decided_at timestamp with time zone NOT NULL,
+    apply_run_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_agent_patch_approvals_apply_run_only_when_approved CHECK ((((decision)::text = 'APPROVED'::text) OR (apply_run_id IS NULL))),
+    CONSTRAINT ck_agent_patch_approvals_checks_digest_format CHECK (((checks_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT ck_agent_patch_approvals_decision_valid CHECK (((decision)::text = ANY ((ARRAY['APPROVED'::character varying, 'REJECTED'::character varying])::text[]))),
+    CONSTRAINT ck_agent_patch_approvals_patch_hash_format CHECK (((patch_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text))
+);
+
+CREATE TABLE public.agent_run_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid NOT NULL,
+    seq integer NOT NULL,
+    at timestamp with time zone NOT NULL,
+    step character varying(16) NOT NULL,
+    level character varying(8) NOT NULL,
+    message character varying(200) NOT NULL,
+    data jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_agent_run_events_data_is_object CHECK (((data IS NULL) OR (jsonb_typeof(data) = 'object'::text))),
+    CONSTRAINT ck_agent_run_events_level_valid CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character varying, 'ERROR'::character varying])::text[]))),
+    CONSTRAINT ck_agent_run_events_seq_positive CHECK ((seq >= 1)),
+    CONSTRAINT ck_agent_run_events_step_valid CHECK (((step)::text = ANY ((ARRAY['SANDBOX_CREATE'::character varying, 'INPUT_LOAD'::character varying, 'CONFIG_DIFF'::character varying, 'ANALYZE'::character varying, 'PATCH_PROPOSE'::character varying, 'PATCH_VERIFY'::character varying, 'SANDBOX_DELETE'::character varying])::text[])))
+);
+
+CREATE TABLE public.agent_runners (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(63) NOT NULL,
+    token_hash character(64) NOT NULL,
+    last_seen_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_agent_runners_name_format CHECK (((name)::text ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'::text)),
+    CONSTRAINT ck_agent_runners_token_hash_format CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+CREATE TABLE public.agent_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    kind character varying(16) NOT NULL,
+    status character varying(16) DEFAULT 'QUEUED'::character varying NOT NULL,
+    source_environment_id uuid,
+    target_environment_id uuid,
+    parent_run_id uuid,
+    scenario_ref character varying(200),
+    input_snapshot jsonb DEFAULT '{}'::jsonb NOT NULL,
+    input_hash character varying(71) NOT NULL,
+    requested_by_user_id uuid NOT NULL,
+    claimed_by_runner_id uuid,
+    run_token_hash character(64),
+    lease_until timestamp with time zone,
+    deadline_at timestamp with time zone NOT NULL,
+    claimed_at timestamp with time zone,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    failure_code character varying(32),
+    result jsonb,
+    model_id character varying(64),
+    prompt_version character varying(32),
+    simulated boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_agent_runs_apply_patch_has_parent CHECK ((((kind)::text <> 'APPLY_PATCH'::text) OR (parent_run_id IS NOT NULL))),
+    CONSTRAINT ck_agent_runs_claim_consistency CHECK ((((status)::text <> ALL ((ARRAY['CLAIMED'::character varying, 'RUNNING'::character varying])::text[])) OR ((claimed_by_runner_id IS NOT NULL) AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL)))),
+    CONSTRAINT ck_agent_runs_deadline_after_created CHECK ((deadline_at > created_at)),
+    CONSTRAINT ck_agent_runs_failure_code_only_when_failed CHECK (((failure_code IS NULL) OR ((status)::text = ANY ((ARRAY['FAILED'::character varying, 'TIMED_OUT'::character varying])::text[])))),
+    CONSTRAINT ck_agent_runs_finished_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])) = (finished_at IS NOT NULL))),
+    CONSTRAINT ck_agent_runs_input_hash_format CHECK (((input_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT ck_agent_runs_input_is_object CHECK ((jsonb_typeof(input_snapshot) = 'object'::text)),
+    CONSTRAINT ck_agent_runs_kind_valid CHECK (((kind)::text = ANY ((ARRAY['PRECHECK'::character varying, 'APPLY_PATCH'::character varying, 'CHANGE_PROPOSAL'::character varying])::text[]))),
+    CONSTRAINT ck_agent_runs_precheck_has_target CHECK ((((kind)::text <> 'PRECHECK'::text) OR (target_environment_id IS NOT NULL))),
+    CONSTRAINT ck_agent_runs_result_only_when_reported CHECK (((result IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(result) = 'object'::text)))),
+    CONSTRAINT ck_agent_runs_run_token_hash_format CHECK (((run_token_hash IS NULL) OR (run_token_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT ck_agent_runs_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'CLAIMED'::character varying, 'RUNNING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])))
+);
+
 CREATE TABLE public.agent_tokens (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     organization_id uuid NOT NULL,
@@ -357,6 +444,49 @@ CREATE TABLE public.organizations (
     CONSTRAINT ck_organizations_slug_format CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))
 );
 
+CREATE TABLE public.security_exceptions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    control_id character varying(16) NOT NULL,
+    service_id uuid,
+    environment_id uuid,
+    image_digest character varying(71),
+    config_commit character varying(40),
+    was_version character varying(64),
+    reason text NOT NULL,
+    requested_by_user_id uuid NOT NULL,
+    approved_by_user_id uuid,
+    approved_at timestamp with time zone,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_by_user_id uuid,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_security_exceptions_approval_consistency CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL))),
+    CONSTRAINT ck_security_exceptions_control_id_valid CHECK (((control_id)::text = ANY ((ARRAY['C-IMG-1'::character varying, 'C-IMG-2'::character varying, 'C-IMG-3'::character varying, 'C-CFG-1'::character varying, 'C-TLS-1'::character varying, 'C-TLS-2'::character varying, 'C-NET-1'::character varying, 'C-NET-2'::character varying, 'C-IAM-1'::character varying, 'C-IAM-2'::character varying, 'C-SEC-1'::character varying, 'C-AUD-1'::character varying, 'C-AUD-2'::character varying, 'C-CI-1'::character varying, 'C-AI-1'::character varying, 'C-DB-1'::character varying, 'C-DST-1'::character varying, 'C-POST-1'::character varying])::text[]))),
+    CONSTRAINT ck_security_exceptions_expires_after_created CHECK ((expires_at > created_at)),
+    CONSTRAINT ck_security_exceptions_image_digest_format CHECK (((image_digest IS NULL) OR ((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text))),
+    CONSTRAINT ck_security_exceptions_max_duration CHECK ((expires_at <= (created_at + '7 days'::interval))),
+    CONSTRAINT ck_security_exceptions_reason_present CHECK (((char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 1000))),
+    CONSTRAINT ck_security_exceptions_revocation_consistency CHECK (((revoked_by_user_id IS NULL) = (revoked_at IS NULL)))
+);
+
+CREATE TABLE public.service_environment_variables (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_environment_id uuid NOT NULL,
+    key character varying(64) NOT NULL,
+    secret_name character varying(255) NOT NULL,
+    latest_version integer NOT NULL,
+    updated_by_user_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    is_deleted boolean DEFAULT false NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT ck_service_environment_variables_key_format CHECK (((key)::text ~ '^[A-Z][A-Z0-9_]{0,63}$'::text)),
+    CONSTRAINT ck_service_environment_variables_latest_version_positive CHECK ((latest_version > 0)),
+    CONSTRAINT ck_service_environment_variables_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
+);
+
 CREATE TABLE public.service_environments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_id uuid NOT NULL,
@@ -425,6 +555,18 @@ CREATE TABLE public.users (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE ONLY public.agent_patch_approvals
+    ADD CONSTRAINT pk_agent_patch_approvals PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.agent_run_events
+    ADD CONSTRAINT pk_agent_run_events PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.agent_runners
+    ADD CONSTRAINT pk_agent_runners PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT pk_agent_runs PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.agent_tokens
     ADD CONSTRAINT pk_agent_tokens PRIMARY KEY (id);
 
@@ -467,6 +609,12 @@ ALTER TABLE ONLY public.organization_members
 ALTER TABLE ONLY public.organizations
     ADD CONSTRAINT pk_organizations PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT pk_security_exceptions PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT pk_service_environment_variables PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT pk_service_environments PRIMARY KEY (id);
 
@@ -478,6 +626,18 @@ ALTER TABLE ONLY public.sessions
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT pk_users PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.agent_patch_approvals
+    ADD CONSTRAINT uq_agent_patch_approvals_run_id_patch_id UNIQUE (run_id, patch_id);
+
+ALTER TABLE ONLY public.agent_run_events
+    ADD CONSTRAINT uq_agent_run_events_run_id_seq UNIQUE (run_id, seq);
+
+ALTER TABLE ONLY public.agent_runners
+    ADD CONSTRAINT uq_agent_runners_name UNIQUE (name);
+
+ALTER TABLE ONLY public.agent_runners
+    ADD CONSTRAINT uq_agent_runners_token_hash UNIQUE (token_hash);
 
 ALTER TABLE ONLY public.agent_tokens
     ADD CONSTRAINT uq_agent_tokens_token_hash UNIQUE (token_hash);
@@ -503,6 +663,10 @@ ALTER TABLE ONLY public.sessions
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT uq_users_github_id UNIQUE (github_id);
 
+CREATE INDEX ix_agent_runs_organization_id_created_at ON public.agent_runs USING btree (organization_id, created_at);
+
+CREATE INDEX ix_agent_runs_queued_created_at ON public.agent_runs USING btree (created_at) WHERE ((status)::text = 'QUEUED'::text);
+
 CREATE INDEX ix_agent_tokens_organization_id_created_at ON public.agent_tokens USING btree (organization_id, created_at);
 
 CREATE INDEX ix_audit_logs_organization_id_created_at ON public.audit_logs USING btree (organization_id, created_at);
@@ -527,7 +691,15 @@ CREATE INDEX ix_migration_plans_service_id_created_at ON public.migration_plans 
 
 CREATE INDEX ix_organization_members_user_id ON public.organization_members USING btree (user_id);
 
+CREATE INDEX ix_security_exceptions_organization_id_control_id_expires_at ON public.security_exceptions USING btree (organization_id, control_id, expires_at);
+
+CREATE INDEX ix_service_environment_variables_connection_key ON public.service_environment_variables USING btree (service_environment_id, key);
+
 CREATE INDEX ix_services_organization_id ON public.services USING btree (organization_id);
+
+CREATE UNIQUE INDEX uq_agent_runs_run_token_hash ON public.agent_runs USING btree (run_token_hash) WHERE (run_token_hash IS NOT NULL);
+
+CREATE UNIQUE INDEX uq_agent_runs_service_id_open ON public.agent_runs USING btree (service_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'CLAIMED'::character varying, 'RUNNING'::character varying])::text[]));
 
 CREATE UNIQUE INDEX uq_builds_service_id_repo_url_commit_sha_not_failed ON public.builds USING btree (service_id, repo_url, commit_sha) WHERE ((status)::text <> 'FAILED'::text);
 
@@ -542,6 +714,8 @@ CREATE UNIQUE INDEX uq_invitations_organization_id_github_id_pending ON public.i
 CREATE UNIQUE INDEX uq_jobs_subject_id_open ON public.jobs USING btree (subject_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying])::text[]));
 
 CREATE UNIQUE INDEX uq_migration_plans_service_id_open ON public.migration_plans USING btree (service_id) WHERE ((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying])::text[]));
+
+CREATE UNIQUE INDEX uq_service_environment_variables_connection_key_live ON public.service_environment_variables USING btree (service_environment_id, key) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_service_environments_public_host_live ON public.service_environments USING btree (public_host) WHERE (is_deleted = false);
 
@@ -562,6 +736,39 @@ CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployment
 CREATE TRIGGER trg_migration_plan_logs_prevent_delete BEFORE DELETE ON public.migration_plan_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_migration_plans_prevent_delete BEFORE DELETE ON public.migration_plans FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
+
+ALTER TABLE ONLY public.agent_patch_approvals
+    ADD CONSTRAINT fk_agent_patch_approvals_apply_run_id_agent_runs FOREIGN KEY (apply_run_id) REFERENCES public.agent_runs(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_patch_approvals
+    ADD CONSTRAINT fk_agent_patch_approvals_decided_by_user_id_users FOREIGN KEY (decided_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_patch_approvals
+    ADD CONSTRAINT fk_agent_patch_approvals_run_id_agent_runs FOREIGN KEY (run_id) REFERENCES public.agent_runs(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_run_events
+    ADD CONSTRAINT fk_agent_run_events_run_id_agent_runs FOREIGN KEY (run_id) REFERENCES public.agent_runs(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_claimed_by_runner_id_agent_runners FOREIGN KEY (claimed_by_runner_id) REFERENCES public.agent_runners(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_parent_run_id_agent_runs FOREIGN KEY (parent_run_id) REFERENCES public.agent_runs(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_requested_by_user_id_users FOREIGN KEY (requested_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_source_environment_id_environments FOREIGN KEY (source_environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_target_environment_id_environments FOREIGN KEY (target_environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.agent_tokens
     ADD CONSTRAINT fk_agent_tokens_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
@@ -673,6 +880,30 @@ ALTER TABLE ONLY public.organization_members
 
 ALTER TABLE ONLY public.organizations
     ADD CONSTRAINT fk_organizations_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_approved_by_user_id_users FOREIGN KEY (approved_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_environment_id_environments FOREIGN KEY (environment_id) REFERENCES public.environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_requested_by_user_id_users FOREIGN KEY (requested_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_revoked_by_user_id_users FOREIGN KEY (revoked_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.security_exceptions
+    ADD CONSTRAINT fk_security_exceptions_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT fk_service_environment_variables_connection FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT fk_service_environment_variables_updated_by_user_id_users FOREIGN KEY (updated_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT fk_service_environments_current_deployment_id_id_deployments FOREIGN KEY (current_deployment_id, id) REFERENCES public.deployments(id, service_environment_id) ON DELETE RESTRICT;

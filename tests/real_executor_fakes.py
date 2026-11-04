@@ -277,6 +277,7 @@ class FakeActions:
                         "id": artifact_id,
                         "name": name,
                         "expired": False,
+                        "size_in_bytes": len(content),
                         "archive_download_url": (
                             f"{API_BASE}/repos/{BUILD_REPOSITORY}/actions/artifacts/"
                             f"{artifact_id}/zip"
@@ -424,6 +425,7 @@ class FakeCluster:
     fail: dict[tuple[str, str], tuple[int, int]] = field(default_factory=dict)
     requests: list[httpx.Request] = field(default_factory=list)
     tokens: list[str] = field(default_factory=list)
+    _resource_version: int = 100
 
     def factory(self) -> KubeHttpFactory:
         def build(server: str, ca_pem: str | None, timeout: float) -> httpx.AsyncClient:
@@ -493,6 +495,25 @@ class FakeCluster:
                 return httpx.Response(404)
             assert request.url.params["timestamps"] == "true"
             return httpx.Response(200, text=pod.log)
+        if path.endswith("/secrets") and request.method == "POST":
+            body = json.loads(request.content)
+            target = f"{path}/{body['metadata']['name']}"
+            if target in self.objects:
+                return httpx.Response(409, json={"kind": "Status", "code": 409})
+            self.objects[target] = self._versioned(body)
+            return httpx.Response(201, json=self.objects[target])
+        if request.method == "PUT":
+            body = json.loads(request.content)
+            existing = self.objects.get(path)
+            if existing is None:
+                return httpx.Response(404)
+            sent_version = body["metadata"].get("resourceVersion")
+            if sent_version is not None and sent_version != existing["metadata"].get(
+                "resourceVersion"
+            ):
+                return httpx.Response(409, json={"kind": "Status", "code": 409})
+            self.objects[path] = self._versioned(body)
+            return httpx.Response(200, json=self.objects[path])
         if request.method == "PATCH":
             assert request.headers["content-type"] == "application/apply-patch+yaml"
             assert request.url.params["fieldManager"] == "echo-was"
@@ -515,6 +536,16 @@ class FakeCluster:
                 return httpx.Response(404)
             return httpx.Response(200, json=self._with_status(path, body))
         return httpx.Response(404)
+
+    def _versioned(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._resource_version += 1
+        stored = json.loads(json.dumps(body))
+        stored["metadata"]["resourceVersion"] = str(self._resource_version)
+        return stored
+
+    def add_secret(self, path: str, body: dict[str, Any]) -> None:
+        """손으로 만든 Secret 처럼 창구를 거치지 않고 넣는다."""
+        self.objects[path] = self._versioned(body)
 
     def _with_status(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         result = json.loads(json.dumps(body))
@@ -558,6 +589,61 @@ class FakeCluster:
         )
         self.pods.append(pod)
         return pod
+
+
+SECRET_MANAGER_PROJECT_NUMBER = "573662116412"
+
+
+@dataclass
+class FakeSecretManager:
+    """GCP Secret Manager REST 흉내. script 에 넣은 응답·예외를 요청마다 먼저 하나씩 쓴다."""
+
+    secrets: dict[str, list[str]] = field(default_factory=dict)
+    labels: dict[str, dict[str, str]] = field(default_factory=dict)
+    requests: list[httpx.Request] = field(default_factory=list)
+    script: list[httpx.Response | Exception] = field(default_factory=list)
+
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.script:
+            scripted = self.script.pop(0)
+            if isinstance(scripted, Exception):
+                raise scripted
+            return scripted
+        tail = request.url.path.split("/secrets", 1)[1]
+        if request.method == "POST" and tail == "":
+            name = request.url.params["secretId"]
+            if name in self.secrets:
+                return httpx.Response(409, json={"error": {"status": "ALREADY_EXISTS"}})
+            self.secrets[name] = []
+            self.labels[name] = json.loads(request.content)["labels"]
+            return httpx.Response(200, json={"name": f"projects/x/secrets/{name}"})
+        if request.method == "POST" and tail.endswith(":addVersion"):
+            name = tail.strip("/").removesuffix(":addVersion")
+            if name not in self.secrets:
+                return httpx.Response(404, json={"error": {"status": "NOT_FOUND"}})
+            self.secrets[name].append(json.loads(request.content)["payload"]["data"])
+            version = len(self.secrets[name])
+            return httpx.Response(
+                200,
+                json={
+                    "name": (
+                        f"projects/{SECRET_MANAGER_PROJECT_NUMBER}/secrets/{name}"
+                        f"/versions/{version}"
+                    ),
+                    "state": "ENABLED",
+                },
+            )
+        if request.method == "GET" and tail.endswith(":access"):
+            name, _, number = tail.strip("/").removesuffix(":access").partition("/versions/")
+            versions = self.secrets.get(name, [])
+            if not 1 <= int(number) <= len(versions):
+                return httpx.Response(404, json={"error": {"status": "NOT_FOUND"}})
+            return httpx.Response(200, json={"payload": {"data": versions[int(number) - 1]}})
+        return httpx.Response(404)
 
 
 @dataclass

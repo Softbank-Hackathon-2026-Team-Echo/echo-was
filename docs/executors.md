@@ -67,7 +67,7 @@
 
 ### 배포 (`DeployExecutor`)
 
-- 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot)`, `DeployTarget(service, service_environment, environment kind·이름·config·secret_ref, public_host(환경별), main_public_host(대표), container_port)`.
+- 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot, env_values)`(`env_values` 는 아래 "앱 환경 변수"), `DeployTarget(service, service_environment, environment kind·이름·config·secret_ref, public_host(환경별), main_public_host(대표), container_port)`.
 - `apply` 는 그 연결(클러스터의 그 서비스)에 digest 이미지를 반영한다. `DeployApplied` 는 "클러스터가 새 버전을 받아들였다"이다. 사용자 트래픽 확인은 일꾼의 헬스체크가 환경별 퍼블릭 주소로 한다.
 - `revert(target, previous, key)` 는 실패한 새 버전을 거두고 `previous`(연결의 현재 배포, 없으면 아무것도 없는 상태)를 유지한다. 실패해도 일꾼은 요청의 `errorCode` 를 바꾸지 않고 `revertStatus = FAILED` 만 적는다.
 - 실제 구현(API 서버 3-2): 쿠버네티스 직접 서버 측 apply(아래 "쿠버네티스 직접 반영"). GitOps(Argo CD)는 2단계.
@@ -240,8 +240,8 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
   - 재시작 경로(`BuildSpec.resumed_after` = 이미 있던 `start_requested_at`): ①을 5초 간격 3번(만든 시각 ≥ 요청함 시각 − 60초) 해 본 뒤에만 dispatch 한다. 그래도 중복이 생기면 ref 가 가리키는 실행만 쓴다(같은 커밋·같은 태그).
   - `SourceAccess.read_token` 은 쓰지 않는다. 처리기는 비공개 저장소 접근 확인을 위해 지금처럼 `issue_read_token` 을 부른다.
 - `poll`: `GET …/actions/runs/{id}` — `queued|in_progress|waiting|pending|requested` → `BuildRunning`, `completed`+`success` → 아티팩트를 내려받아(302 로 넘겨받은 저장소 주소에는 우리 토큰을 싣지 않는다) `BuildSucceeded(ar_repository, image_digest)`, 그 밖 → `BuildFailed(BUILD_FAILED)`. 아티팩트가 없거나, zip·JSON 모양이 다르거나, digest 가 `^sha256:[0-9a-f]{64}$` 가 아니거나, 저장소에 tag(`:`)가 있거나, `build_id` 가 실행 이름의 키와 다르면 `BuildFailed` + 경고 `BUILD_RESULT_INVALID`.
-- `read_security_scan`(보안·거버넌스 2-3): 같은 실행의 `security-scan` 아티팩트를 `build-result` 와 같은 방법으로 받는다. `meta.json` 이 없거나 `schema_version` 이 1 이 아니거나 `build_id`·digest 모양이 틀리면 `None` + 경고 `SECURITY_SCAN_INVALID`, 아티팩트가 없으면 `None` + `SECURITY_SCAN_MISSING`. 보고서 파일은 없거나 JSON 이 아니거나 풀린 크기가 32MB 를 넘으면 그 칸만 `None`. 일시 오류·인증 실패도 `None`(예외 없음). `source_ref` = `github-actions:{빌드 저장소}/actions/runs/{run id}`.
-  - 배포 처리기가 빌드를 `SUCCEEDED` 로 바꾼 직후 한 번 부른다(`BuildSecurityScanCollector`, 재사용 빌드는 다시 부르지 않음). 원문의 `build_id`·digest 가 그 빌드와 다르면 버리고, 맞으면 C-IMG-1·C-IMG-2 증거 3건을 `findings` 에 남긴다. 보고서가 `None` 이면 그 증거는 UNKNOWN. 실패해도 배포는 계속한다.
+- `read_security_scan`(보안·거버넌스 2-3): 같은 실행의 `security-scan` 아티팩트를 `build-result` 와 같은 방법으로 받는다. `meta.json` 이 없거나 `schema_version` 이 1 이 아니거나 `build_id`·digest 모양이 틀리면 `None` + 경고 `SECURITY_SCAN_INVALID`, 아티팩트가 없으면 `None` + `SECURITY_SCAN_MISSING`. 아티팩트 zip 이 8MB(목록의 `size_in_bytes` 또는 받은 크기)를 넘으면 받지 않고 `None` + `SECURITY_SCAN_TOO_LARGE`. 보고서 파일은 없거나 JSON 이 아니거나 깨졌거나(zlib·EOF·지원하지 않는 압축·암호) 풀린 크기가 8MB 를 넘으면 그 칸만 `None`. 일시 오류·인증 실패도 `None`(예외 없음). `source_ref` = `github-actions:{빌드 저장소}/actions/runs/{run id}`.
+  - 배포 처리기가 빌드를 `SUCCEEDED` 로 바꾼 직후 한 번 부른다(`BuildSecurityScanCollector`, 재사용 빌드는 다시 부르지 않음). 원문의 `build_id`·digest 가 그 빌드와 다르면 버리고, 맞으면 C-IMG-1·C-IMG-2 증거 3건을 `findings` 에 남긴다. 보고서가 `None` 이면 그 증거는 UNKNOWN. 원문 읽기부터 정규화까지의 어떤 예외도 경고(예외 종류만) + 0건이고 배포는 계속한다. 반영과 수집 사이에 일꾼이 죽은 빌드는 다시 모으지 않는다.
 - `read_logs`: 실행의 잡 로그(`GET …/actions/jobs/{job}/logs`)를 잡 순서(시작 시각·id)·줄 순서로 잇는다. cursor = `"{잡 순번}:{줄 번호}"`(다음에 읽을 줄). 실행이 끝나기 전에는 빈 청크(`has_more=true`, 같은 cursor). `##[error]`·`##[warning]` 줄은 `ERROR`·`WARN`. Actions 가 이미 가린 값 위에 `mask_secrets` 를 한 번 더 거친다. 끝난 실행의 로그는 프로세스에 최근 32개 기억한다.
 
 ### 쿠버네티스 직접 반영 (`KubernetesDeployExecutor`)
@@ -251,12 +251,13 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
 | 객체 | 이름 | 내용 |
 |---|---|---|
 | Namespace | `{서비스}-{suffix}` | 없으면 `POST` 로 만든다(apply 권한 없이). 같은 이름이 있는데 echo-was 라벨이 없으면 쓰지 않는다(`DEPLOY_FAILED`, `NAMESPACE_NOT_MANAGED`) |
-| Deployment | `app` | replicas 1, 이미지 `{환경별 저장소}@{digest}`, 포트 `containerPort`, env `PORT`·`ECHO_ENVIRONMENT`(env 가 envFrom 보다 우선 — 고객 Secret 이 덮지 못함), `envFrom: secretRef {ns}-env optional`, readinessProbe `GET {healthCheckPath}`, 어노테이션·파드 라벨 `echo.deployment-id`, 온프레만 `imagePullSecrets: echo-pull`, 요청 100m/128Mi·제한 512Mi |
+| Secret | `{ns}-env` | 앱 환경 변수. `env_values` 가 None 이 아닐 때만 다룬다(아래 "앱 환경 변수"). 서버 측 apply 가 아니라 GET → PUT·POST 로 통째로 쓴다 |
+| Deployment | `app` | replicas 1, 이미지 `{환경별 저장소}@{digest}`, 포트 `containerPort`, env `PORT`·`ECHO_ENVIRONMENT`(env 가 envFrom 보다 우선 — 고객 Secret 이 덮지 못함), `envFrom: secretRef {ns}-env optional`, readinessProbe `GET {healthCheckPath}`, 어노테이션·파드 라벨 `echo.deployment-id`, 앱 환경 변수가 있으면 파드 템플릿 어노테이션 `echo.env-revision`, 온프레만 `imagePullSecrets: echo-pull`, 요청 100m/128Mi·제한 512Mi |
 | Service | `app` | ClusterIP 80 → containerPort |
 | Ingress | `app` | 규칙 = 환경별 주소 + 대표 주소(→ `app:80`). class = config `ingressClass`(비면 aws `alb`, gcp `nginx`, onprem `traefik`). aws 는 `group.name`=`ingressGroup`, `scheme: internet-facing`, `listen-ports [{"HTTP":80},{"HTTPS":443}]`, `certificate-arn`=`certificateArn`(명시 — 자동 찾기는 대표 주소용 인증서까지 찾다가 그룹 전체가 실패), `target-type: ip`, `healthcheck-path`. 80→443 강제 이동 없음(진입점이 HTTP 로 대표 주소를 보낸다) |
 
 - 이미지 주소: 배포 기록의 `image_repository`(Artifact Registry 정본). aws 환경이면 `IMAGE_REGISTRY_MIRRORS`(`<AR 접두>=<ECR 접두>`)로 바꾼다(같은 digest). 표에 없으면 그대로.
-- `apply(deployment, target, key)`: (온프레) DNS 레코드 → 네임스페이스 → (온프레) RoleBinding `echo-app-deployer`(자기 서비스 계정, 토큰 JWT 의 `sub` 에서 읽음)·이미지 받기 자격 `echo-pull` → Deployment·Service·Ingress. external_ref = `k8s:{환경 id}:{네임스페이스}:{배포 기록 id}`. 같은 키 다시 → 같은 내용(멱등). RoleBinding 을 막 만든 직후의 403 은 2초 간격 5번(10초) 다시 시도한다(권한 캐시 반영 지연).
+- `apply(deployment, target, key)`: (온프레) DNS 레코드 → 네임스페이스 → (온프레) RoleBinding `echo-app-deployer`(자기 서비스 계정, 토큰 JWT 의 `sub` 에서 읽음) → 앱 Secret `{ns}-env`(`env_values` 가 None 이 아닐 때) → (온프레) 이미지 받기 자격 `echo-pull` → Deployment·Service·Ingress. external_ref = `k8s:{환경 id}:{네임스페이스}:{배포 기록 id}`. 같은 키 다시 → 같은 내용(멱등). RoleBinding 을 막 만든 직후의 403 은 2초 간격 5번(10초) 다시 시도한다(권한 캐시 반영 지연).
   - 필수 칸이 비면(onprem `apiUrl`·`secret_ref`·`tunnelTarget`·Cloudflare 설정, aws `certificateArn`·`ingressGroup`·역할, config 를 읽지 못함, 대표 주소 없음) 창구를 부르지 않고 `DeployApplyError(DEPLOY_FAILED)` + 경고 `ENVIRONMENT_NOT_CONFIGURED`. 접수 단계에서는 막지 않는다(가짜 모드 시험 유지).
 - `poll(ref)`: Deployment `app` 을 읽어
   - 없거나 어노테이션 배포 번호가 ref 와 다르면 `DeployFailed(DEPLOY_FAILED)`(그사이 다른 반영이 덮음)
@@ -265,6 +266,44 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
   - 401·403(토큰을 한 번 새로 받아 다시 불러도) → `DeployFailed(CLUSTER_UNAUTHORIZED)`, 닿지 못함 → `DeployPending` + 경고 `CLUSTER_UNREACHABLE`, 그 밖 → `DeployPending`
 - `revert(target, previous, key)`: previous 가 있으면 그 배포 기록으로 같은 apply(어노테이션 = previous 번호) → `Reverted("k8s-revert:{환경}:{ns}:{previous id}")`. 없으면 Ingress·Service·Deployment 를 지운다(네임스페이스·Secret 은 남긴다).
 - `read_runtime_logs`: 네임스페이스에서 라벨 `echo.deployment-id=<배포 기록 id>` 파드(가장 최근)의 `app` 컨테이너 로그(`timestamps=true`, 최대 1MB). cursor = `"{파드 이름}|{마지막 줄 시각}|{그 시각 줄 수}"`. 파드가 없으면 빈 청크, 창구 오류도 빈 청크 + 경고.
+
+### 앱 환경 변수 (`{ns}-env`, API 서버 10)
+
+값의 원본은 GCP Secret Manager 한 곳이다(`app/clients/app_secret_store.py`, `AppSecretStore`). DB 에는 이름·참조·버전만 있다(`service_environment_variables`). API 계약은 [api/variables.md](api/variables.md).
+
+**배포 기록에 고정**: `DeployRequestProcessor._deployment_snapshot` 이 배포 기록을 만들 때 `config_snapshot.envVars = {KEY: "<참조>"}` 를 넣는다. 참조는 gcp `gcp-sm:projects/<APP_SECRET_PROJECT_ID>/secrets/<이름>/versions/<n>`(응답의 프로젝트 번호를 쓰지 않는다), 가짜 `fake-sm:<이름>/versions/<n>`.
+
+| 요청 | `envVars` |
+|---|---|
+| `MANUAL`·`STANDBY_SYNC` | 그 배포의 연결에 살아 있는 변수의 지금 최신 버전. 0개면 `{}`. 예비 따라가기는 원본 환경 값을 복사하지 않는다 |
+| `ROLLBACK` | 대상 기록의 사본 그대로(키가 없으면 없는 채로) |
+| 실제 실행기 + 가짜 보관함 | 키를 두지 않는다(그동안 Secret 을 맡지 않았으므로, 보관함을 켠 뒤 그 기록으로 되돌려도 Secret 을 건드리지 않게) |
+| 재실행(임대 만료 뒤 다른 일꾼) | 이미 만든 기록의 값 그대로 |
+
+**값으로 바꾸기**: 처리기(`AppEnvResolver`)가 실행기 `apply`·`revert` **직전에**, 트랜잭션 밖에서 꺼내 `DeploymentSpec.env_values` 로 넘긴다. 메모리로만 다루고 저장·로그하지 않는다.
+
+| 배포 기록 | `env_values` | 실행기의 `{ns}-env` |
+|---|---|---|
+| `envVars` 키 없음(이 기능 이전 기록) | None | 읽지도 쓰지도 않음 |
+| 참조가 `fake-sm:` 인데 gcp 보관함 | None | 읽지도 쓰지도 않음 |
+| 가짜 보관함 + `EXECUTOR_MODE=real` | None | 읽지도 쓰지도 않음 |
+| `envVars: {}` | `{}` | 있는 Secret 이 echo-was 소유(라벨 `app.kubernetes.io/managed-by=echo-was`)일 때만 빈 데이터로 교체. 없으면 만들지 않고, 손으로 만든 것은 그대로 |
+| `envVars` 1개 이상 | 값 사전 | 통째로 교체 + 파드 템플릿 어노테이션 `echo.env-revision`(정렬한 `KEY=version` 목록의 SHA-256 앞 16자, 값 아님) |
+
+- **통째로 교체**: `GET` → 있으면 `PUT`(`resourceVersion` 을 실어서, `type` 은 있던 값), 없으면 `POST`. 라벨은 `managed-by=echo-was`·`echo.service-id`. 서버 측 apply 는 다른 manager 가 가진 키를 지우지 않아 쓰지 않는다. 그사이 바뀌어 409(또는 사라져 404)면 GET 부터 3번까지 다시 하고, 그래도 안 되면 `DeployApplyError(DEPLOY_FAILED)` 다. 권한·일시 오류는 다른 객체와 같은 규칙이다.
+- **손으로 만든 Secret**: 변수가 하나도 없는 연결에서는 절대 건드리지 않는다. 값을 넣고 배포하면 그때 echo-was 소유로 바뀐다(손으로 넣은 키는 남지 않는다).
+- **못 꺼낼 때(새 배포)**: 고정 버전을 영구히 못 꺼내면(404·403·`FAILED_PRECONDITION`, 형식이 틀린 참조, 다른 프로젝트 참조) 실행기 `apply` 를 부르지 않고 `ENV_SECRET_UNAVAILABLE` 로 실패한다(배포 기록이 있으므로 기존 규칙대로 `revert` 는 부른다). 5xx·429·연결 실패·메타데이터 일시 오류는 보관함 클라이언트 안에서 1·2·4초 재시도 뒤 `ExecutorUnavailableError`(일꾼이 다시 집고, 임대를 3번 잃으면 `WORKER_LOST`). 로그에는 키 이름만 남긴다.
+- **못 꺼낼 때(revert)**: `env_values = None` 으로 `revert` 를 부른다. 직전 Deployment 는 되돌리고 Secret 은 그대로 두며 경고 로그(`ENV_SECRET_UNAVAILABLE`, 키 이름만)를 남긴다.
+- **가짜 모드**: 가짜 보관함은 프로세스 메모리라 일꾼이 API 가 넣은 값을 볼 수 없다. `EXECUTOR_MODE=fake` 일 때만 못 찾은 값을 `SecretValue("simulated")` 로 대신한다. 가짜 실행기는 키 이름만 로그로 남긴다.
+- **배포 작업 로그**: `apply` 가 돌아온 뒤 `ENV_VARS_APPLIED` 줄에 키 개수와 이름만 쓴다(값 없음, 500자를 넘으면 나머지는 개수로). 변수가 없으면 줄을 쓰지 않는다.
+
+**잠근 채 외부를 부르는 예외**: 트랜잭션 밖에서 외부를 부르는 것이 규칙이지만, 값 넣기 API 는 같은 키의 동시 PUT 순서를 보관함 버전 순서와 맞추려고 **서비스 → 연결 행을 잠근 채** `add_version` 을 부른다. 그래서 호출 전체(재시도 포함)를 `STORE_CALL_TIMEOUT_SECONDS`(10초)로 묶고, 넘으면 502 `SECRET_STORE_UNAVAILABLE` 로 끝낸다. 요청 하나의 제한은 5초다. 호출 뒤 커밋이 실패해도 안 쓰는 버전이 하나 남을 뿐이다(행이 가리키는 버전이 기준).
+
+**보관함**: 비밀 이름은 `{APP_SECRET_NAME_PREFIX}{조직 slug}-{서비스 id 앞 8자}-{환경 id 앞 8자}-{키 소문자, _ → -}`(255자가 넘으면 slug 를 자른다), 라벨 `echo-org`·`echo-service`·`echo-environment`(id 앞 8자)·`managed-by=echo-was`, 복제 automatic. 만들기(409 `ALREADY_EXISTS` 는 성공으로 봄) → `:addVersion`. 토큰은 메타데이터 토큰이고 401 이면 새로 받아 한 번 다시 부른다. 프로세스마다 하나다(API 는 lifespan 보관소, 일꾼은 시작 때).
+
+**보관함 비밀은 echo-was 가 지우지 않는다.** 키 삭제·서비스 삭제 모두 행만 삭제 표시한다(옛 배포 기록·되돌리기가 그 버전을 읽어야 한다). 정리는 라벨로 찾는 후속 일이다. IAM 은 이름 접두어 `echo-app-` 조건으로 좁히고, 접두어를 바꾸면 조건도 같이 바꾼다.
+
+**롤링 배포**: 옛 파드는 새 표와 `envVars` 키를 읽지 않는다(`config_snapshot` 을 읽는 곳은 `healthCheckPath`·`containerPort`·`environmentUrl`·`mainUrl` 키를 골라 읽는다). 새 일꾼이 옛 기록을 집으면 표 첫 줄(None)이다.
 
 ### 내리기 (`KubernetesTeardownExecutor`)
 
@@ -307,6 +346,9 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
 | `DEPLOY_IMAGE_PULL_GRACE_SECONDS` | 30 | `ErrImagePull` 유예 |
 | `KUBE_REQUEST_TIMEOUT_SECONDS` | 15 | 창구·클라우드 API 요청 하나 |
 | `GOOGLE_METADATA_BASE_URL` | `http://metadata.google.internal` | 시험에서 바꾼다 |
+| `APP_SECRET_STORE_MODE` | `fake` | 앱 환경 변수 보관함. `gcp` 면 GCP Secret Manager. `fake` + `EXECUTOR_MODE=real` 이면 쓰기 API 가 409 이고 실행기는 `{ns}-env` 를 건드리지 않는다 |
+| `APP_SECRET_PROJECT_ID` | 없음 | 보관함 프로젝트 id. `gcp` 면 필수(없으면 시작 때 설정 오류) |
+| `APP_SECRET_NAME_PREFIX` | `echo-app-` | 보관함 비밀 이름 접두어. IAM 조건과 같아야 한다 |
 
 - 가짜 모드의 `simulate` 는 `EXECUTOR_MODE=fake` 일 때만 받는다(실제 모드 422 그대로). 실제 모드 기록은 `simulated = false` 로 저장된다.
 - **모드 전환 순서**: 이 코드 배포(모드 fake) → 저장소 밖 준비 → 환경 등록 → `EXECUTOR_MODE=real` → 실환경 확인. 진행 중 요청이 있을 때 모드를 바꾸지 않는다(가짜 ref 는 실제 실행기가 실패로 본다). 새 실패 코드는 실제 모드에서만 생기므로 옛 파드가 남아 있는 롤링 중에는 바꾸지 않는다.
@@ -363,6 +405,6 @@ echo-infra 고정 진입점(인프라 5·6·9, Envoy + 가중치 API + Prometheu
 | 데이터 확인 | 복제 지연 0.3초 |
 | 이전 실패 주입 | 시험만: 트래픽 `fail_when(키 → 참이면 실패)`, 지표·데이터 확인 `unavailable = True`, 카운터 `freeze`(고정)·`add_errors`(5xx 더하기)·`set_counts`(값 바꾸기, 줄이면 재시작 흉내)·`fail_counts`(읽기 실패, 그동안에도 쌓임) — 연결 id 로 가리킨다. 사용자 계획 단위 실패는 `simulate {failAtStep, reason}`(처리기가 값을 만들고 실행기를 부르지 않는다) |
 | 실패 주입 | 시험만: 인스턴스를 만들 때 실패·멈춤 대상 커밋·연결을 넣는다(운영 설정에는 없다). 사용자 요청 단위 실패는 `simulate.failAt` |
-| 호출 기록 | `calls`(호출마다 멱등 키), `operation_keys`(만든 작업) — 시험이 "같은 키는 같은 작업"을 확인한다 |
+| 호출 기록 | `calls`(호출마다 멱등 키), `operation_keys`(만든 작업) — 시험이 "같은 키는 같은 작업"을 확인한다. 배포는 받은 앱 환경 변수의 키 이름만 `applied_env_keys`·`reverted_env_keys` 와 로그에 남긴다 |
 | 로그 | 빌드 5~7줄(저장소 받기·이미지 만들기·digest 기록 등), 실행 5줄(이미지 받기·서버 시작·헬스 경로 응답 등). 줄 시각은 `external_ref` 의 시작 시각부터 2초 간격(시계를 보지 않는다), cursor 는 줄 번호 문자열. 실패 주입 대상이면 마지막 줄이 `ERROR` |
 | 로그 주입 | 시험만: `log_injections` 로 "토큰처럼 보이는 줄"을 첫 줄 뒤에 **가리지 않고** 끼워 서버 마스킹을 시험한다(운영 설정에는 없다) |

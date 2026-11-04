@@ -150,6 +150,7 @@ stateDiagram-v2
 | `BUILD_ATTACHED` · `BUILD_REUSED` | INFO | BUILDING | 새 빌드를 만들었다 · 있는 빌드를 쓴다(되돌리기·따라가기는 시작 직후) |
 | `DEPLOYMENT_CREATED` | INFO | DEPLOYING | 배포 기록 생성(`BUILDING → DEPLOYING`) |
 | `DEPLOY_REQUESTED` · `DEPLOY_APPLIED` | INFO | DEPLOYING | 배포 실행기 요청 · 반영(`DEPLOYING → VERIFYING`) |
+| `ENV_VARS_APPLIED` | INFO | DEPLOYING | 앱 환경 변수 적용. 키 개수·이름만(값 없음). 변수가 있을 때만 `DEPLOY_REQUESTED` 와 `DEPLOY_APPLIED` 사이에 온다 |
 | `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` | WARN | VERIFYING | 헬스 결과 종류가 **바뀔 때만**(같은 실패가 이어지면 한 줄) |
 | `HEALTH_PROBE_OK` · `SUCCEEDED` | INFO | VERIFYING · SUCCEEDED | 성공 처리 |
 | `STANDBY_SYNC_REQUESTED` | INFO | SUCCEEDED | 원본 요청에, 예비 연결마다 한 줄 |
@@ -250,6 +251,7 @@ stateDiagram-v2
 | `CLUSTER_UNAUTHORIZED` | 배포 | 실제 실행기만: 환경 클러스터(또는 클라우드 자격 발급)가 실행기를 거절함(401·403) |
 | `IMAGE_PULL_FAILED` | 배포 | 실제 실행기만: 환경이 빌드한 이미지를 받지 못함(`ImagePullBackOff`, 30초 넘은 `ErrImagePull`) |
 | `CONTAINER_START_FAILED` | 배포 | 실제 실행기만: 컨테이너가 시작 뒤 계속 죽음(`CrashLoopBackOff`) |
+| `ENV_SECRET_UNAVAILABLE` | 배포 | 배포 기록에 고정한 앱 환경 변수 버전을 보관함에서 영구히 꺼내지 못함(없음·권한·사용 중지). 앱을 반영하지 않는다([variables.md](variables.md)) |
 
 실제 실행기에서 환경 설정이 비어 반영할 수 없을 때(온프레 `apiUrl`·`tunnelTarget`·`secretRef`, aws `certificateArn`·`ingressGroup`)는 `DEPLOY_FAILED` 다(서버 경고 로그 `ENVIRONMENT_NOT_CONFIGURED`). 새 코드 4개는 `errorMessage` 가 코드별 고정 영어 문장이다.
 
