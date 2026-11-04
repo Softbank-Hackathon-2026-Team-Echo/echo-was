@@ -12,11 +12,19 @@ from alembic import command
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.enums import SecurityControlId
 from app.models import Base
 from tests.integration.conftest import run_alembic
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import create_rollback_fixture
+from tests.integration.security_gate_support import (
+    add_exception,
+    add_precheck,
+    enable_gate,
+    record_passing_evidence,
+    revoke_exception,
+)
 
 MODEL_SCHEMA = "model_check"
 
@@ -354,7 +362,8 @@ EXPECTED_CONSTRAINTS = {
         "'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, "
         "'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, "
         "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, "
-        "'TARGET_NOT_RECEIVING'::character varying])::text[])))"
+        "'TARGET_NOT_RECEIVING'::character varying, "
+        "'SECURITY_GATE_BLOCKED'::character varying])::text[])))"
     ),
     ("migration_plans", "ck_migration_plans_expected_seconds_non_negative"): (
         "CHECK ((expected_seconds >= 0))"
@@ -950,7 +959,9 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-HEAD_REVISION = "201cf5419f4d"
+# 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(보안·AI 기반 스키마 head) 시점.
+BEFORE_SECURITY_GATE_BLOCKED = "201cf5419f4d"
+HEAD_REVISION = "286d9ea982d6"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1502,6 +1513,57 @@ async def test_target_not_receiving_revision_downgrade_with_such_plans_fails_cle
         version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
 
     assert (stored.status, stored.error_code) == ("ROLLED_BACK", "TARGET_NOT_RECEIVING")
+    assert "does not rewrite migration plan history" in str(raised.value)
+    assert version == HEAD_REVISION
+
+
+async def test_security_gate_revision_downgrade_narrows_check_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_SECURITY_GATE_BLOCKED))
+        )
+        down = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert "SECURITY_GATE_BLOCKED" not in down
+    assert "TARGET_NOT_RECEIVING" in down
+    assert "SECURITY_GATE_BLOCKED" in up
+
+
+async def test_security_gate_revision_downgrade_with_blocked_plans_fails_clearly(
+    engine: AsyncEngine, migration: Migration
+) -> None:
+    # 실행 시작 때 게이트가 막아 FAILED(SECURITY_GATE_BLOCKED)로 끝난 계획 한 건.
+    enable_gate(migration)
+    await record_passing_evidence(migration)
+    await add_exception(migration, SecurityControlId.DB_1)
+    dst_exception = await add_exception(migration, SecurityControlId.DST_1)
+    await add_precheck(migration)
+    plan = await migration.create_plan()
+    await migration.approve(plan["id"])
+    await revoke_exception(migration, dst_exception)
+    await migration.harness.run_until_idle()
+    stored = await migration.plan_row(plan["id"])
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(
+            RuntimeError, match="migration_plans has 1 SECURITY_GATE_BLOCKED rows"
+        ) as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_SECURITY_GATE_BLOCKED))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert (stored.status, stored.error_code) == ("FAILED", "SECURITY_GATE_BLOCKED")
     assert "does not rewrite migration plan history" in str(raised.value)
     assert version == HEAD_REVISION
 

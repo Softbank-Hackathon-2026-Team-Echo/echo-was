@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.source_repository import SourceRepositoryClient
+from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.config import Settings
 from app.enums import ConnectionErrorCode, DeployRequestStatus, JobStatus
 from app.executors import ExecutorSet
@@ -144,6 +145,8 @@ class DeployHarness:
     github_users: FakeGithubUserClient
     responses: list[str] = field(default_factory=list)
     host_suffixes: ScriptedHostSuffixGenerator = field(default_factory=ScriptedHostSuffixGenerator)
+    # 보안 게이트를 켠 시험만 넣는다(API·일꾼이 함께 쓴다). None 이면 게이트 없음.
+    tls_checker: PublicHostTlsChecker | None = None
 
     @property
     def services(self) -> str:
@@ -166,6 +169,7 @@ class DeployHarness:
             executors=self.executors.as_set(),
             source_client=self.source_client,
             owner=owner,
+            tls_checker=self.tls_checker,
         )
 
     def use_settings(self, **changes: Any) -> None:

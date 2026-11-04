@@ -8,6 +8,10 @@
 
 만료(EXPIRED)·낡음(STALE) 전환은 트랜잭션 안에서 적고 커밋한 뒤 트랜잭션 밖에서 409 를 올린다
 (안에서 올리면 전환과 로그가 되돌려진다). 자기 승인 403 은 상태를 바꾸지 않으므로 안에서 올린다.
+
+보안 게이트(설정으로 켤 때만 주입)는 승인 잠금 전에 판정하고(TLS 시험은 트랜잭션 밖), 잠금 안에서
+지문이 같을 때 판정 줄을 남긴다. 막혔으면 계획은 승인 대기 그대로 두고 커밋한 뒤 409
+SECURITY_GATE_BLOCKED 를 올린다.
 """
 
 import logging
@@ -35,6 +39,7 @@ from app.core.exceptions import (
     PlanNotRunningError,
     PlanStaleError,
     RequestFieldInvalidError,
+    SecurityGateBlockedError,
     SelfApprovalForbiddenError,
     ServiceDeletingError,
     SimulateNotAllowedError,
@@ -92,6 +97,7 @@ from app.services.migration_plan_support import (
     read_fingerprint,
     skip_pending_steps,
 )
+from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
 
 logger = logging.getLogger(__name__)
 
@@ -172,8 +178,10 @@ class MigrationPlanService:
         expected_rps: int,
         step_overhead_seconds: int,
         approval_ttl_seconds: int,
+        security_gate: SecurityGate | None = None,
     ) -> None:
         self._session = session
+        self._security_gate = security_gate
         self._clock = clock
         self._executor_mode = executor_mode
         self._required_requests_default = tuple(required_requests_default)
@@ -440,11 +448,20 @@ class MigrationPlanService:
     async def approve_plan(
         self, organization_id: uuid.UUID, plan_id: uuid.UUID, actor_user_id: uuid.UUID
     ) -> MigrationPlanView:
-        """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다."""
+        """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다.
+
+        보안 게이트가 있으면 지문이 같을 때 판정을 남기고, 막혔으면 승인하지 않고 409 를 올린다.
+        """
         async with self._session.begin():
             await self._get_in_organization(organization_id, plan_id)
+        decision = (
+            await self._security_gate.evaluate_plan(plan_id)
+            if self._security_gate is not None
+            else None
+        )
         now = self._clock.now()
         rejection: tuple[_Outcome, list[str]] | None = None
+        gate_rejection: SecurityGateBlockedError | None = None
         async with self._session.begin():
             organization = await self._organizations.find_by_id(organization_id)
             if organization is None:
@@ -469,10 +486,27 @@ class MigrationPlanService:
                 if changed:
                     await self._mark_stale(plan, changed, now)
                     rejection = (_Outcome.STALE, changed)
+                elif decision is not None and decision.is_blocked:
+                    await self._log.append(
+                        plan,
+                        MigrationLogCode.SECURITY_GATE_BLOCKED,
+                        now,
+                        data=gate_log_data(decision),
+                    )
+                    gate_rejection = blocked_error(decision)
                 else:
+                    if decision is not None:
+                        await self._log.append(
+                            plan,
+                            MigrationLogCode.SECURITY_GATE_PASSED,
+                            now,
+                            data=gate_log_data(decision),
+                        )
                     await self._approve(plan, actor_user_id, is_self, now)
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
+        if gate_rejection is not None:
+            raise gate_rejection
         _log_plan("migration plan approved", "approve_migration_plan", view.plan)
         return view
 

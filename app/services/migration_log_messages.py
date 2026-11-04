@@ -36,6 +36,10 @@ MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
         "The target environment did not receive its share of requests (check the entrypoint "
         "weights)."
     ),
+    MigrationErrorCode.SECURITY_GATE_BLOCKED: (
+        "The security gate blocked the migration: a required security control failed or could "
+        "not be confirmed. Traffic was not changed."
+    ),
 }
 
 # 트래픽 적음으로 통과한 JUDGE_PASSED 줄(data.lowTraffic = true)에 붙이는 문장.
@@ -109,6 +113,16 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
     ),
     _C.LOG_TRUNCATED: MigrationLogEntry(
         _INFO, "Log line limit reached. Further lines for this plan are not recorded."
+    ),
+    _C.SECURITY_GATE_PASSED: MigrationLogEntry(
+        _INFO,
+        "Security gate passed: required security controls passed or have an approved "
+        "time-limited exception.",
+    ),
+    _C.SECURITY_GATE_BLOCKED: MigrationLogEntry(
+        _WARN,
+        "Security gate blocked this step: a required security control failed or could not be "
+        "confirmed.",
     ),
 }
 

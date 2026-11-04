@@ -52,12 +52,15 @@ app/
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
 │                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings, 실패해도 배포 계속, 보안 2·11)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
+│                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository · Finding Repository(보안 증거, 조직 조건 필수)
+│                     #   SecurityException Repository(판정용: 승인·미철회만) · AgentRun Repository(최근 성공한 AI 사전 점검)
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
-│                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만)
+│                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만.
+│                     #     PublicHostTlsChecker = Echo 공개 도메인 주소만, 443, DNS 로 확인한 공인 IP 로만 접속)
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
@@ -155,6 +158,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 임대 상실(`lease.is_exhausted`, 한 번 참이면 계속 참)이어도 롤백 시도는 남은 횟수만큼 한다. `simulate` 는 처리기가 실패 값을 만들고 실행기를 부르지 않는다.
 - **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 API 서버 9 부터.
 - **비율 단계 판정은 "도착이 요청 N건을 5xx 허용 안에서 처리했나"**(API 서버 8-1, `migration_counting`). `OBSERVE` 한 번 실행 = 카운터(`MetricsProvider.read_counts`, 트랜잭션 밖) 한 번 읽기, 센 값은 `step_results[i].counting` 에 조건부 UPDATE 로 적고 진행 갱신은 로그 줄을 남기지 않는다. 세기를 끝내면 `judgeReason` 을 같은 트랜잭션에 적고 `JUDGE` 는 저장값으로만 판정한다(카운터 재읽기 금지). p95 는 판정에 쓰지 않는다(참고 값만). API 에 `observeSeconds` 는 없고 DB `observe_seconds` 칸 = 최대 대기다.
+- **보안 게이트는 `SECURITY_GATE_ENABLED` 일 때만 주입한다**(보안 5, `SecurityGate`, API 는 `get_public_tls_checker`, 일꾼은 `Worker(tls_checker=)`). 승인·일꾼 시작 모두 **잠금 전·트랜잭션 밖에서 판정**(TLS 시험은 네트워크)하고, 잠금 안에서 지문이 같을 때 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 줄을 남긴다. 막힌 승인은 계획을 그대로 두고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`, 막힌 시작은 `FAILED(SECURITY_GATE_BLOCKED)`(트래픽 그대로). TLS 시험은 `PublicHostTlsChecker` 로만 한다(공개 도메인 주소·443·확인한 공인 IP). 기한부 예외는 승인·미철회만 읽는다.
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

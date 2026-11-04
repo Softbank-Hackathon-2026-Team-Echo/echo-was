@@ -119,7 +119,9 @@
 | 조직 열쇠 키 | Organization secret key | `organization_secret_key(slug)` | slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). `env:` 비밀 참조는 `ECHO_SECRET_{키}__` 로 시작해야 한다 | F16 |
 | 기한부 예외 | Security exception | `SecurityException` / `security_exceptions` — 판정 입력 `security_rules.SecurityException` | 통제 하나를 범위 안에서 최대 7일 막지 않게 하는 기록. 사람이 요청·승인(둘 다 `users` FK)하고, 사유·만료가 있어야 하며 철회할 수 있다. 걸린 통제는 PASS 가 아니라 WARN. 자기 승인은 조직 스위치를 따른다 | F13, 보안 3 |
 | AI 러너 | Agent runner | `AgentRunner` / `agent_runners` | 샌드박스 VM 의 AI 러너 신원(조직에 묶이지 않음). 러너 토큰 `echo_rnr_…` 은 어드민 명령으로만 발급하고 SHA-256 만 둔다. 실행 가져가기만 한다 | F14, 러너 계약 v1 |
-| AI 실행 | Agent run | `AgentRun` / `agent_runs` | AI 가 샌드박스에서 하는 일 한 번(사전 점검 `PRECHECK`·승인한 패치 반영 `APPLY_PATCH`). 만들 때 입력(`input_snapshot`, 비밀 참조만)과 해시를 고정한다. 서비스당 열린 실행 하나, 마감 15분·임대 60초, 자동 재시도 없음. 실행 토큰(`echo_run_…`)은 그 실행 하나만 제출한다 | F14·F15, 러너 계약 v1 |
+| AI 실행 | Agent run | `AgentRun` / `agent_runs` | AI 가 샌드박스에서 하는 일 한 번(AI 사전 점검 `PRECHECK`·승인한 패치 반영 `APPLY_PATCH`). 만들 때 입력(`input_snapshot`, 비밀 참조만)과 해시를 고정한다. 서비스당 열린 실행 하나, 마감 15분·임대 60초, 자동 재시도 없음. 실행 토큰(`echo_run_…`)은 그 실행 하나만 제출한다 | F14·F15, 러너 계약 v1 |
+| AI 사전 점검 | AI precheck | `agent_runs.kind = PRECHECK` | 이전 대상(서비스 → 도착 환경)에 대해 AI 가 샌드박스에서 차이 분석·점검·수정안 생성·검증을 하는 실행. 24시간 안에 성공한 것이 C-AI-1 의 증거다(가짜 실행은 쓰지 않는다). "이전 사전 점검"(F11, API 서버 8)과 다르다 | F14, 러너 계약 v1, 보안 5 (AI 파트) |
+| 보안 게이트 | Security gate | `app/services/security_gate.py`, 설정 `SECURITY_GATE_ENABLED`(기본 꺼짐) | 이전 승인 때와 일꾼 시작 때 같은 규칙표로 실행 판정을 하고, 필수 통제가 FAIL·UNKNOWN 이고 유효한 예외가 없으면 막는 곳(승인 409 `SECURITY_GATE_BLOCKED`, 시작 `FAILED(SECURITY_GATE_BLOCKED)`). 판정 직전에 C-IMG-3·C-TLS-1 을 새로 확인한다 | F13·F7, 보안 5 |
 | AI 실행 이벤트 | Agent run event | `AgentRunEvent` / `agent_run_events` | 러너가 낸 진행 줄(seq·단계·수준·고정 문장·data). 같은 seq 는 무시(멱등) | F14·F17, 러너 계약 v1 |
 | AI 패치 결정 | Agent patch approval | `AgentPatchApproval` / `agent_patch_approvals` | AI 수정안 하나에 대한 사람의 결정(승인·거절). 지문 = 패치 해시 + 검사 요약 + 정책 버전. 승인하면 반영 실행이 생긴다. 개발자 이상의 사람만 | F15, 러너 계약 v1 |
 
@@ -198,10 +200,10 @@
 | `APPLY` · `OBSERVE` · `JUDGE` | `migration_plans.step_phase` (`MigrationStepPhase`) | 비율 단계는 적용 → 건수 세기 → 판정(헬스체크), 사전 확인·데이터 확인은 판정만 |
 | `COUNT_REACHED` · `LOW_TRAFFIC` | `step_results[i].judgeReason` (`MigrationJudgeReason`) | 비율 단계가 세기를 끝내고 판정으로 간 이유: 필요 건수 채움 · 최대 대기 끝 트래픽 적음 |
 | `PENDING` · `RUNNING` · `PASSED` · `FAILED` · `SKIPPED` | `step_results[i].status` (`MigrationStepStatus`) | 롤백·실패로 끝나면 남은 단계는 `SKIPPED` |
-| `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `TARGET_NOT_RECEIVING` | `migration_plans.error_code` (`MigrationErrorCode`) | 원인 코드. 판정 실패(`HEALTH_CHECK_FAILED`·`THRESHOLD_EXCEEDED`(도착 5xx 허용 초과)·`TARGET_NOT_RECEIVING`(도착 미수신)·`DATA_LAG_EXCEEDED`)와 판단 불가(`METRICS_UNAVAILABLE`, 카운터를 읽지 못함·오래됨)·적용 실패를 나눈다 |
+| `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `TARGET_NOT_RECEIVING` · `SECURITY_GATE_BLOCKED` | `migration_plans.error_code` (`MigrationErrorCode`) | 원인 코드. `SECURITY_GATE_BLOCKED` 는 일꾼 시작 때 보안 게이트가 막아 트래픽을 바꾸지 않고 끝낸 것(보안 5). 판정 실패(`HEALTH_CHECK_FAILED`·`THRESHOLD_EXCEEDED`(도착 5xx 허용 초과)·`TARGET_NOT_RECEIVING`(도착 미수신)·`DATA_LAG_EXCEEDED`)와 판단 불가(`METRICS_UNAVAILABLE`, 카운터를 읽지 못함·오래됨)·적용 실패를 나눈다 |
 | `SUCCEEDED` · `FAILED` · `NOT_NEEDED` | `migration_plans.rollback_status` (`MigrationRollbackStatus`) | 출발 100% 로 되돌린 결과. `NOT_NEEDED` 는 트래픽을 바꾼 적이 없었음 |
 | `ERROR_RATE` · `HEALTH` · `DATA_LAG` · `TRAFFIC` · `TARGET_NOT_RECEIVING` · `LOW_TRAFFIC` (· `LATENCY`) | `simulate.reason` (`MigrationSimulateReason`) | 가짜 모드에서 `failAtStep` 단계를 일부러 실패(또는 트래픽 적음)시킬 원인. `DATA_LAG` 는 단계 3 만, `TARGET_NOT_RECEIVING` 은 1·2 만, 나머지는 1·2·4. `LATENCY` 는 저장된 옛 계획을 읽으려고 값만 남겼다(요청 422, 처리기는 무시) |
-| `PLAN_CREATED` · `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` · `STALE` · `ABORT_REQUESTED` · `STARTED` · `PREFLIGHT_OK` · `PREFLIGHT_FAILED` · `WEIGHT_APPLIED` · `WEIGHT_APPLY_FAILED` · `COUNTERS_RESET` · `JUDGE_PASSED` · `JUDGE_FAILED` · `DATA_SYNC_OK` · `DATA_SYNC_FAILED` · `SUCCEEDED` · `ROLLBACK_STARTED` · `ROLLBACK_APPLIED` · `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` · `FAILED` · `LOG_TRUNCATED` | `migration_plan_logs.code` (`MigrationLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/migration_log_messages.py` |
+| `PLAN_CREATED` · `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` · `STALE` · `ABORT_REQUESTED` · `STARTED` · `PREFLIGHT_OK` · `PREFLIGHT_FAILED` · `WEIGHT_APPLIED` · `WEIGHT_APPLY_FAILED` · `COUNTERS_RESET` · `JUDGE_PASSED` · `JUDGE_FAILED` · `DATA_SYNC_OK` · `DATA_SYNC_FAILED` · `SUCCEEDED` · `ROLLBACK_STARTED` · `ROLLBACK_APPLIED` · `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` · `FAILED` · `LOG_TRUNCATED` · `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | `migration_plan_logs.code` (`MigrationLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/migration_log_messages.py`. 보안 게이트 두 줄은 게이트를 켰을 때만 승인·일꾼 시작에서 쓴다(`data` = 정책 버전·막은 통제·증거·예외 ID) |
 | `serviceStatus` · `connections` · `sourceEnvironment` · `targetEnvironment` · `openDeployRequests` | 지문 항목(409 `PLAN_STALE` 의 `details[].field`) | 달라진 항목 이름 |
 
 ### 보안 판정 값 (보안·거버넌스 3)
@@ -216,13 +218,13 @@
 | `PREPARATION` · `EXECUTION` · `POST_SWITCH` | 판정 시점 (`SecurityCheckPhase`) | 준비(배포·설정 변경·주기 수집) · 실행(이전 승인·일꾼 시작, 준비 통제도 함께 본다) · 전환 직후 |
 | `IAM` · `ENCRYPTION` · `AUDIT_LOG` · `POLICY` | 매트릭스 칸 (`SecurityMatrixCell`, API `iam`·`encryption`·`auditLog`·`policy`) | 칸 결과는 그 칸 통제의 가장 나쁜 값: FAIL > 필수 UNKNOWN > WARN(예외 포함) > 선택 UNKNOWN > PASS |
 | `CONTROL_FAILED` · `CONTROL_WARNING` · `EVIDENCE_UNKNOWN` · `EVIDENCE_MISSING` · `EVIDENCE_EXPIRED` · `EVIDENCE_SIMULATED` · `EVIDENCE_INCOMPLETE` · `SOURCE_NOT_ALLOWED` · `SCOPE_MISMATCH` · `POLICY_VERSION_MISMATCH` · `PRECHECK_MISSING` · `AI_UNCONFIRMED` · `AI_ESCALATED` · `EXCEPTION_APPLIED` · `EXCEPTION_EXPIRED` · `NOT_APPLICABLE` | 판정 사유 (`SecurityReasonCode`) | 게이트가 막으면 통제 ID 와 함께 돌려준다(기계 판독용) |
-| `NO_ISSUES` · `FIXABLE_HIGH_VULNERABILITY` · `VULNERABILITY_WARNING` · `SECRET_FOUND` · `MISCONFIGURATION_HIGH` · `MISCONFIGURATION_WARNING` · `ARTIFACT_MISMATCH` · `REPORT_INVALID` · `TLS_OK` · `TLS_CERT_INVALID` · `TLS_HOSTNAME_MISMATCH` · `TLS_EXPIRES_SOON` · `TLS_VERSION_TOO_LOW` · `TLS_HANDSHAKE_FAILED` · `TLS_TIMEOUT` · `TLS_UNREACHABLE` · `MANUAL_REVIEW_RECORDED` | 정규화 이유 (`findings.reason`, `SecurityFindingReason`, 보안 2, DB CHECK 없음) | 검사 원문을 증거로 바꾸며 정한 이유. 증거 한 건에 하나. 원문이 다른 대상 것이거나(`ARTIFACT_MISMATCH`) 모양이 틀리면(`REPORT_INVALID`) UNKNOWN, TLS 시간 초과·연결 불가도 UNKNOWN |
+| `NO_ISSUES` · `FIXABLE_HIGH_VULNERABILITY` · `VULNERABILITY_WARNING` · `SECRET_FOUND` · `MISCONFIGURATION_HIGH` · `MISCONFIGURATION_WARNING` · `ARTIFACT_MISMATCH` · `REPORT_INVALID` · `TLS_OK` · `TLS_CERT_INVALID` · `TLS_HOSTNAME_MISMATCH` · `TLS_EXPIRES_SOON` · `TLS_VERSION_TOO_LOW` · `TLS_HANDSHAKE_FAILED` · `TLS_TIMEOUT` · `TLS_UNREACHABLE` · `TLS_HOST_NOT_PUBLIC` · `TLS_HOST_SUSPICIOUS` · `TLS_HOST_NOT_ALLOWED` · `IMAGE_MATCH` · `IMAGE_MISMATCH` · `MANUAL_REVIEW_RECORDED` | 정규화 이유 (`findings.reason`, `SecurityFindingReason`, 보안 2, DB CHECK 없음) | 검사 원문을 증거로 바꾸며 정한 이유. 증거 한 건에 하나. 원문이 다른 대상 것이거나(`ARTIFACT_MISMATCH`) 모양이 틀리면(`REPORT_INVALID`) UNKNOWN, TLS 시간 초과·연결 불가도 UNKNOWN. TLS 시험기가 접속하지 않은 주소: 사설 대역만 → `TLS_HOST_NOT_PUBLIC`(NA), 루프백·링크 로컬·예약·섞임 → `TLS_HOST_SUSPICIOUS`(UNKNOWN), 공개 도메인 밖 → `TLS_HOST_NOT_ALLOWED`(UNKNOWN). 출발·도착 이미지 일치(C-IMG-3, WAS 상태)는 `IMAGE_MATCH`(PASS)·`IMAGE_MISMATCH`(FAIL) |
 
 ### AI 실행 값 (러너 계약 v1)
 
 | 값 목록 | 표·칸 | 뜻 |
 |---|---|---|
-| `PRECHECK` · `APPLY_PATCH` · `CHANGE_PROPOSAL` | `agent_runs.kind` (`AgentRunKind`) | 사전 점검(차이 분석·점검·수정안 생성·검증) · 승인한 패치를 시나리오 사본에 반영 · (P1) 수정안만 |
+| `PRECHECK` · `APPLY_PATCH` · `CHANGE_PROPOSAL` | `agent_runs.kind` (`AgentRunKind`) | AI 사전 점검(차이 분석·점검·수정안 생성·검증) · 승인한 패치를 시나리오 사본에 반영 · (P1) 수정안만 |
 | `QUEUED` → `CLAIMED` → `RUNNING` → `SUCCEEDED`·`FAILED`·`TIMED_OUT`·`CANCELLED` | `agent_runs.status` (`AgentRunStatus`) | `CLAIMED`·`RUNNING` 은 러너·실행 토큰 해시·임대가 있다. 끝 상태는 `finished_at` 이 있다 |
 | `SANDBOX_CREATE` · `INPUT_LOAD` · `CONFIG_DIFF` · `ANALYZE` · `PATCH_PROPOSE` · `PATCH_VERIFY` · `SANDBOX_DELETE` | `agent_run_events.step` (`AgentRunStep`) | 러너 진행 단계(러너 `RunStep` 과 같은 값) |
 | `APPROVED` · `REJECTED` | `agent_patch_approvals.decision` (`AgentPatchDecision`) | 사람의 결정. `BLOCKED` 패치는 승인할 수 없다 |
@@ -298,7 +300,7 @@
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
 | 감사 로그\* | Audit log | `audit_logs` (거부 기록만 API 서버 6 이 만듦) | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다. 거부 밖의 행위 기록·조회 API 가 후속 | F5, NFR-08 | API 서버 7 |
-| 사전 점검\* | Preflight check | (미정) | 이전 전 점검 | F11 | API 서버 8 |
+| 이전 사전 점검\* | Preflight check | (미정) | 이전 전 점검(체크리스트). 단계 0 "사전 확인"(`PREFLIGHT`)과도, AI 사전 점검과도 다르다 | F11 | API 서버 8 |
 | 정책 | Policy | 표 없음 — 코드 `app/services/security_rules.py::RULES`, 버전 `POLICY_VERSION`(`sec-rules-YYYY.MM.DD`) | 모든 환경에 같이 적용하는 **버전이 붙은 보안 규칙표**(통제마다 필수 여부·판정 시점·범위·받는 출처·유효기간). 저장소 안 코드 + 시험으로 관리하고 통제를 끄는 설정이 없다. 규칙을 바꾸면 버전을 올린다 | F13, 보안 3 | 보안 파트 |
 | finding\* | Finding | `findings` (보안 2) — 판정 입력 `SecurityFinding` | 클라우드별 보안 결과를 공통 스키마로 정규화한 한 건(통제·결과·모드·출처·범위·수집 시각·만료·정책 버전). 판정에서는 증거로 쓰여 사유 코드는 `EVIDENCE_*` 로 부른다 | F12, 보안 2·3 | 보안 파트 |
 | 보안 판정\* | Security decision | `security_decisions` (가칭) — `SecurityDecision` | 판정 한 번의 결과(정책 버전·시점·계획 종류·통제별 결과·사유·증거·예외 ID). 사람 승인 이전과 사전 승인 자동 DR 이 같은 함수·같은 표를 쓴다 | F13, 보안 3·5 | 보안 파트 |

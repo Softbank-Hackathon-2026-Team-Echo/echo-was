@@ -41,6 +41,7 @@ from app.dependencies import (
     get_executor_set,
     get_github_user_client,
     get_host_suffix_generator,
+    get_public_tls_checker,
     get_source_repository_client,
 )
 from app.enums import OrganizationRole
@@ -286,6 +287,8 @@ async def harness(engine: AsyncEngine, test_database_url: str) -> AsyncIterator[
         app.dependency_overrides[get_source_repository_client] = lambda: harness.source_client
         app.dependency_overrides[get_github_user_client] = lambda: harness.github_users
         app.dependency_overrides[get_host_suffix_generator] = lambda: harness.host_suffixes
+        # 보안 게이트는 시험이 harness.tls_checker 를 넣었을 때만 켜진다(요청마다 읽는다).
+        app.dependency_overrides[get_public_tls_checker] = lambda: harness.tls_checker
         # 로그 API 가 시험이 바꿔 끼운 가짜 실행기(토큰 주입 훅 포함)를 쓰게 한다(요청마다 읽는다).
         app.dependency_overrides[get_executor_set] = lambda: harness.executors.as_set()
         try:

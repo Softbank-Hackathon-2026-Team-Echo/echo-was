@@ -19,6 +19,7 @@ from app.executors import build_executor_set
 from app.executors.kubernetes.executors import KubernetesDeployExecutor
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.onprem_pull_refresher import OnpremPullSecretRefresher
+from app.services.security_gate import build_public_tls_checker
 from app.worker.runner import Worker
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ async def main() -> None:
         executors=executors,
         source_client=build_source_repository_client(settings, clock),
         owner=owner,
+        tls_checker=build_public_tls_checker(settings),
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

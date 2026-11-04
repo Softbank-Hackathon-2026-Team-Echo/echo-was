@@ -15,6 +15,7 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.source_repository import SourceRepositoryClient
+from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.core.logging import log_context
@@ -24,6 +25,7 @@ from app.repositories.job_repository import ClaimedJob, JobRepository
 from app.services.deploy_request_processor import DeployRequestProcessor
 from app.services.job_lease import JobLease, JobOutcome, LeaseLostError
 from app.services.migration_plan_processor import MigrationPlanProcessor
+from app.services.security_gate import SecurityGate
 from app.services.service_teardown_processor import ServiceTeardownProcessor
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class Worker:
         executors: ExecutorSet,
         source_client: SourceRepositoryClient,
         owner: str,
+        tls_checker: PublicHostTlsChecker | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
@@ -49,6 +52,8 @@ class Worker:
         self._executors = executors
         self._source_client = source_client
         self._owner = owner
+        # 보안 게이트가 켜져 있을 때만 있다(build_public_tls_checker). None 이면 게이트 없음.
+        self._tls_checker = tls_checker
         self._lease = timedelta(seconds=settings.worker_lease_seconds)
 
     async def claim_next_job(self) -> ClaimedJob | None:
@@ -131,8 +136,20 @@ class Worker:
                     session, lease, self._settings, self._clock, self._executors
                 ).advance()
             case JobKind.MIGRATION_PLAN:
+                security_gate = (
+                    SecurityGate(
+                        session, self._clock, self._tls_checker, self._settings.was_version
+                    )
+                    if self._tls_checker is not None
+                    else None
+                )
                 return await MigrationPlanProcessor(
-                    session, lease, self._settings, self._clock, self._executors
+                    session,
+                    lease,
+                    self._settings,
+                    self._clock,
+                    self._executors,
+                    security_gate=security_gate,
                 ).advance()
             case _:
                 raise UnknownJobKindError(str(lease.job.kind))
