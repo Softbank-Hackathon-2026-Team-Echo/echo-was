@@ -656,7 +656,6 @@ class AzureEnvironmentAdapter(SimulatedEnvironmentAdapter):
 | 표(예정) | 내용 | 담당 태스크 |
 |---|---|---|
 | (상태 조회 결과) | 환경별 상태 | API 서버 5 (환경별 상태 조회) |
-| `audit_logs` 확장 | 거부(403) 밖의 행위 기록·조회 API. 표는 API 서버 6 이 최소로 만들었다(⑨) | API 서버 7 (감사 로그) |
 | (정책은 표 없음) · 보안 판정 | 정책은 코드 규칙표(`security_rules.RULES`). `findings`(보안 2)·`security_exceptions`(보안·AI 기반 스키마)는 만들었다(②). 판정 기록 `security_decisions`(가칭) | 보안 파트 |
 
 삭제 규칙(살아 있는 연결이 있는 서비스·환경을 지울 때): 환경은 API 서버 2 에서 정했다 — 살아 있는 연결이 있으면 409 `ENVIRONMENT_IN_USE`, 없으면 소프트 삭제(② `service_environments` 의 잠금 규칙). 서비스는 API 서버 3 에서 정했다 — `DELETING` 으로 바꾸고 대기 요청을 취소한 뒤, 진행 중 요청이 끝나면 일꾼이 연결마다 내리고 소프트 삭제한다(연결도 내린 즉시 소프트 삭제, 배포 기록·배포 요청은 남는다).
@@ -674,7 +673,9 @@ erDiagram
     organizations ||--o{ agent_tokens : "에이전트 출입증"
     organizations ||--o{ services : "소유"
     organizations ||--o{ environments : "소유"
-    organizations |o--o{ audit_logs : "거부 기록"
+    organizations |o--o{ audit_logs : "행동 기록"
+    users |o--o{ audit_logs : "사람이 한 행동"
+    agent_tokens |o--o{ audit_logs : "에이전트가 한 행동"
 ```
 
 | 표 | 칸(요약) | 제약 | 뜻 |
@@ -685,10 +686,11 @@ erDiagram
 | `invitations` | `organization_id` FK, `github_id` bigint, `github_login`, `role`, `status`, `invited_by_user_id` FK, `expires_at`, `accepted_at` NULL | `ck_…_status_valid`, `ck_…_role_valid`, `ck_…_accepted_at_consistency`(`ACCEPTED ⇔ accepted_at`), **부분 unique** `uq_invitations_organization_id_github_id_pending`(`WHERE status = 'PENDING'`), `ix_invitations_github_id` | GitHub 번호 × 역할 대기. 상태 `PENDING` → `ACCEPTED`·`EXPIRED`·`REVOKED` |
 | `sessions` | `user_id` FK, `token_hash` char(64), `expires_at`, `revoked_at` NULL, `created_at` | `uq_sessions_token_hash` | 쿠키 값의 SHA-256 만. 7일 고정 |
 | `agent_tokens` | `organization_id`·`created_by_user_id` FK, `name`, `token_hash` char(64), `last4` char(4), `expires_at`, `revoked_at`·`last_used_at` NULL, `created_at` | `uq_agent_tokens_token_hash`, `ix_agent_tokens_organization_id_created_at` | 원문 없이 해시와 끝 4자리. 만든 사람이 떠나도 남는다 |
-| `audit_logs` | `organization_id` FK NULL, `actor_type`, `actor_user_id`·`actor_agent_token_id` FK NULL, `action`(메서드 + 경로 틀), `path`, `reason`, `result`, `request_id`, `created_at` | `ck_…_actor_type_valid`, `ck_…_result_valid`(`DENIED`), `ck_…_actor_consistency`(사람·토큰 중 하나), `ix_audit_logs_organization_id_created_at`, **DELETE 금지 트리거** `trg_audit_logs_prevent_delete`(공용 함수 `prevent_append_only_delete()`) | 막힌 요청 한 건(이번에는 403 만). 요청과 따로 커밋 |
+| `audit_logs` | `organization_id` FK NULL, `actor_type`, `actor_user_id`·`actor_agent_token_id` FK NULL, `component` NULL, `action`(행동 이름, 옛 줄은 메서드 + 경로 틀), `route`·`path` NULL, `target_type`·`target_id`·`target_label` NULL(FK 없음), `result`, `reason` NULL, `details` jsonb, `request_id`, `seq` identity, `created_at` | `ck_…_actor_type_valid`(`USER`·`AGENT`·`SYSTEM`), `ck_…_result_valid`(`SUCCEEDED`·`FAILED`·`DENIED`), `ck_…_actor_consistency`(사람·토큰·서버 중 하나), `ck_…_target_consistency`(종류 ⇔ id, 이름은 종류가 있을 때만), `ix_audit_logs_organization_id_created_at`, `ix_audit_logs_organization_id_target_id`, **DELETE 금지 트리거** `trg_audit_logs_prevent_delete`(공용 함수 `prevent_append_only_delete()`), **UPDATE 금지 트리거** `trg_audit_logs_prevent_update`(함수 `prevent_append_only_update()`) | 행동 한 건(성공·실패·거부·에이전트 읽기). 쓰기·끝 상태는 그 작업과 같은 트랜잭션, 거부·에이전트 읽기는 따로 커밋. 계약: [api/audit-logs.md](api/audit-logs.md) |
 
 - 이 revision(`ce35cab9b2e9`)은 `services`·`environments` 에 `organization_id NOT NULL` 을 기본값 없이 더하므로 두 표가 비어 있다고 가정한다. 행이 있으면 분명한 메시지(`services has N rows …`)로 실패한다.
 - downgrade 는 새 표·칸을 지우고 전역 `uq_environments_name_live` 를 다시 만든다(조직끼리 같은 환경 이름이 있으면 실패). 공용 함수는 API 서버 3 소유라 지우지 않는다.
 - 잠금: 멤버 변경·초대는 조직 행을 `FOR NO KEY UPDATE` 로 잠근 뒤 행위자 역할을 다시 읽는다. 이 잠금은 서비스·환경·멤버 행을 넣을 때의 FK 확인(`FOR KEY SHARE`)과 부딪히지 않는다. 그래서 잠금 순서 맨 앞에 조직을 더해도 배포 접수·일꾼과 교착이 없다.
 - 초대 적용·첫 로그인·개인 조직 slug 는 `ON CONFLICT DO NOTHING` 이라 동시에 와도 중복 키 오류로 트랜잭션이 멈추지 않는다.
+- `audit_logs` 확장(revision `b7d41e6f2a93`, API 서버 7)은 더하기·넓히기만 한다. 옛 파드의 거부 기록 INSERT 는 그대로 통과한다. `result` 의 서버 기본값 `DENIED` 도 그래서 남겼다. `seq` 는 같은 시각 줄의 순서를 고정한다(`id` 는 uuid 라 무작위다). 행동 줄이 쌓인 DB 는 downgrade 할 수 없다(줄을 고치거나 지울 수 없어 분명한 메시지로 실패한다). 운영은 forward-only 다.
 - 권한 규칙·검사 순서는 [docs/api/auth.md](api/auth.md), 조직 API 는 [docs/api/organizations.md](api/organizations.md).
