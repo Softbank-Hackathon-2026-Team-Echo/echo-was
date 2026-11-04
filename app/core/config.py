@@ -3,7 +3,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     data_sync_password_ref: str | None = None
     data_sync_ssl_mode: Literal["require", "verify-full", "disable"] = "require"
     data_sync_timeout_seconds: float = Field(default=3.0, gt=0)
+    # 컷오버 결과(API 서버 16). 이전 계획 상세가 고객 DB 의 echo_ops.cutover_runs 를 읽는다.
+    # 접속처·계정은 위 data_sync_* 를 쓰고 DB 이름만 다르다. 빈 값이면 기능을 끈다.
+    # not_before 보다 먼저 끝난 계획은 읽지 않는다(표가 생기기 전 계획에 나중 행이 붙지 않게).
+    # cache_seconds 는 못 찾음·창 열림·실패 결과를 다시 쓰는 시간이다.
+    cutover_runs_database: str = "app"
+    cutover_results_not_before: AwareDatetime | None = None
+    cutover_result_cache_seconds: int = Field(default=5, ge=1)
 
     # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
     # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
@@ -379,6 +386,13 @@ class Settings(BaseSettings):
                 "entrypoint_executor_mode is http"
             )
         return self
+
+    @property
+    def cutover_results_enabled(self) -> bool:
+        """이전 계획 상세가 고객 DB 의 컷오버 결과 표를 읽어도 되는가."""
+        return self.data_sync_checker_mode is DataSyncCheckerMode.POSTGRES and bool(
+            self.cutover_runs_database
+        )
 
     @field_validator("data_sync_databases")
     @classmethod

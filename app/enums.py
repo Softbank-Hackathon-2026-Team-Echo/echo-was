@@ -328,6 +328,17 @@ class MigrationPlanMode(StrEnum):
     FAILBACK = "FAILBACK"
 
 
+class CutoverKind(StrEnum):
+    """인프라 스크립트가 고객 DB 의 `echo_ops.cutover_runs` 에 남긴 결과의 종류(원본 표기 그대로).
+
+    `cutover.sh` 는 CUTOVER, `rollback.sh` 는 ROLLBACK 을 쓴다. 복귀(FAILBACK) 계획은 ROLLBACK,
+    그 밖의 계획은 CUTOVER 를 찾는다.
+    """
+
+    CUTOVER = "CUTOVER"
+    ROLLBACK = "ROLLBACK"
+
+
 # 서비스당 하나만 있을 수 있는 끝나지 않은 상태(부분 unique).
 OPEN_MIGRATION_PLAN_STATUSES = frozenset(
     {

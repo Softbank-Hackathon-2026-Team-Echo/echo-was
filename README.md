@@ -315,6 +315,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `APP_SECRET_STORE_MODE`·`APP_SECRET_PROJECT_ID`·`APP_SECRET_NAME_PREFIX` | `fake` · (비움) · `echo-app-` | 고객 앱 환경 변수 보관함. `gcp` 면 GCP Secret Manager(프로젝트 필수). `fake` + `EXECUTOR_MODE=real` 이면 쓰기 API 409, 실행기는 앱 Secret 을 건드리지 않는다 ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_CHECKER_MODE`·`DATA_SYNC_DATABASES`·`DATA_SYNC_PASSWORD_REF` | `fake` · (비움) · `env:ECHO_SECRET_DATA_SYNC_PASSWORD` | `postgres` 면 이전 계획 데이터 확인이 출발 PostgreSQL 의 `pg_stat_replication` 복제 지연을 읽는다. 매핑은 `<환경 id 또는 종류>=<host>:<port>/<구독 이름>` ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_USER`·`DATA_SYNC_DATABASE`·`DATA_SYNC_SSL_MODE`·`DATA_SYNC_TIMEOUT_SECONDS` | `echo_monitor` · `postgres` · `require` · `3` | `pg_monitor` 권한 계정, 접속 DB, TLS(`require`·`verify-full`·`disable`), 제한 시간 |
+| `CUTOVER_RUNS_DATABASE`·`CUTOVER_RESULTS_NOT_BEFORE`·`CUTOVER_RESULT_CACHE_SECONDS` | `app` · (없음) · `5` | 이전 계획 상세의 컷오버 결과(`result`). `postgres` 모드에서 도착 환경 고객 DB 의 `echo_ops.cutover_runs` 를 읽는다. DB 이름이 비면 끈다 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |
 | `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`·`GITHUB_APP_INSTALL_URL`·`GITHUB_API_BASE_URL` | | GitHub App 설정. 개인키는 `env:ECHO_SECRET_…` 참조만 |
 | `GITHUB_APP_CLIENT_ID`·`GITHUB_APP_CLIENT_SECRET_REF`·`GITHUB_OAUTH_REDIRECT_URI`·`FRONTEND_BASE_URL` | | GitHub 로그인 설정. 하나라도 비면 로그인·콜백만 503 |

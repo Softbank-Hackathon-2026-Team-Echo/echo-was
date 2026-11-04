@@ -25,6 +25,7 @@
 | `TrafficExecutor` | `set_weights(route, weights: tuple[WeightedTarget(target, weight)], idempotency_key)` | `TrafficApplied(applied_at)` · `TrafficFailed(code)` (API 서버 8) |
 | `MetricsProvider` | `read_counts(target)` · `read(target, since, until)` | `RequestCounts(requests, errors_5xx)` · `CountsUnavailable(code)` (판정용 누적 카운터, API 서버 8-1) · `Metrics(error_rate_percent, p95_ms, request_count)` · `MetricsUnavailable` (p95 참고용) |
 | `DataSyncChecker` | `replication_lag(source, target)` | `DataSyncLag(seconds)` · `DataSyncUnavailable` (API 서버 8) |
+| `CutoverRunReader` | `find_first(target, kind, since, until)` | `CutoverRun` · `CutoverRunNotFound` · `CutoverRunUnavailable(code)` (API 서버 16, API 프로세스만) |
 
 모든 실행기는 `simulated` 속성을 가진다(가짜면 true). 결과의 `simulated` 는 요청·빌드 행에 저장된다. 이전 계획의 `simulated` 는 만들 때 `EXECUTOR_MODE = fake` 이면 true 로 계획 행에 저장한다. 이 모드의 묶음은 빌드·배포·내리기·데이터 복제 확인이 늘 가짜라 "계획을 실행할 묶음에 가짜가 하나라도 있으면 true" 와 같고, 트래픽·카운터가 실제 진입점(`ENTRYPOINT_EXECUTOR_MODE=http`)·헬스체크가 실제(`HEALTH_CHECKER_MODE=http`)여도 지금은 true 다([api/migration-plans.md](api/migration-plans.md) 응답).
 
@@ -177,6 +178,15 @@ class MetricsProvider(Protocol):
 - 비밀번호는 비밀 참조(`DATA_SYNC_PASSWORD_REF`)로만 받아 호출마다 읽는다. TLS 는 `DATA_SYNC_SSL_MODE`(`require` 기본 = 암호화만·자체 서명 허용, `verify-full`, 로컬 PoC 용 `disable`).
 - 매핑 없음·비밀값 없음·접속 실패(시간 초과 `DATA_SYNC_TIMEOUT_SECONDS`, 기본 3초)·구독 없음/streaming 아님은 예외 대신 `DataSyncUnavailable` 이고, 경고 로그에는 코드(`DATA_SYNC_ENV_UNMAPPED`·`DATA_SYNC_SECRET_MISSING`·`DATA_SYNC_UNREACHABLE`·`DATA_SYNC_NOT_STREAMING`)와 환경 id 만 남긴다(주소·비밀값 없음).
 - 이전 계획의 `simulated` 는 지금처럼 `EXECUTOR_MODE` 로만 정한다(이 실행기를 켜도 바뀌지 않는다).
+
+### 컷오버 결과 읽기 (`CutoverRunReader`, API 서버 16)
+
+- 인프라 스크립트(`cutover.sh`·`rollback.sh`)가 고객 DB 표 `echo_ops.cutover_runs` 에 쓴 행을 읽어 이전 계획 상세 `result` 로 보여 준다([api/migration-plans.md](api/migration-plans.md)). 쓰지 않는다. 상태를 바꾸지 않아 멱등 키가 없고, 부르는 쪽(`MigrationPlanResultService`)이 트랜잭션 밖에서 부른다.
+- 기본 구현 `NoCutoverRuns`: 늘 `CutoverRunNotFound`. 가짜 값을 만들지 않으므로 `simulated` 속성이 없다. 행을 주입하는 읽기는 `tests/` 에만 있다.
+- 실제 구현 `PostgresCutoverRunReader`(`DATA_SYNC_CHECKER_MODE=postgres` 이고 `CUTOVER_RUNS_DATABASE` 가 비지 않을 때 `build_executor_set` 이 넣는다): **도착 환경**의 `DATA_SYNC_DATABASES` 매핑(환경 id → 종류)에서 host·port 만 쓰고(구독 이름은 쓰지 않는다), 계정·비밀번호 참조·TLS·제한 시간은 데이터 확인과 같다. DB 이름만 `CUTOVER_RUNS_DATABASE`(기본 `app`)다. 호출마다 연결 → `fetchrow` → `close` 한다(풀 없음, 부르는 쪽의 5초 캐시가 횟수를 줄인다).
+- 계정 `echo_monitor` 에는 `echo_ops` 의 `USAGE` 와 `cutover_runs` 의 `SELECT` 만 더 있다(echo-infra `replication/k8s/scripts/common.sh`).
+- 제한 시간이 지나면 `close` 를 기다리지 않고 `terminate` 로 끊는다(끊긴 망에서 `close` 가 제한 시간을 넘기지 않게).
+- 실패는 예외 대신 `CutoverRunUnavailable(code)`: 매핑 없음 `CUTOVER_RESULT_ENV_UNMAPPED`, 비밀값 없음 `CUTOVER_RESULT_SECRET_MISSING`, 접속 실패·시간 초과(`OSError`·`TimeoutError`·`asyncpg.InterfaceError`) `CUTOVER_RESULT_UNREACHABLE`, 서버가 거절(`asyncpg.PostgresError`: 권한 없음·표 없음 등) `CUTOVER_RESULT_QUERY_FAILED`. 경고 로그는 부르는 쪽이 코드와 계획·환경 id 로만 남긴다.
 
 ### 내리기 (`TeardownExecutor`)
 

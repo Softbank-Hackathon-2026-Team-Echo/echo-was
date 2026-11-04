@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.guards import HumanDeveloperAccess, ViewerAccess
-from app.dependencies import get_migration_plan_service
+from app.dependencies import get_migration_plan_result_service, get_migration_plan_service
 from app.enums import MigrationPlanStatus
 from app.schemas.migration_plan import (
     CreateMigrationPlanRequest,
@@ -13,6 +13,7 @@ from app.schemas.migration_plan import (
     MigrationPlanSummaryResponse,
 )
 from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
+from app.services.migration_plan_result import MigrationPlanResultService
 from app.services.migration_plan_service import CreateMigrationPlanCommand, MigrationPlanService
 
 # 조회·로그는 뷰어(에이전트 가능). 만들기·승인·거절·취소·중단은 개발자 이상 사람
@@ -20,6 +21,9 @@ from app.services.migration_plan_service import CreateMigrationPlanCommand, Migr
 router = APIRouter(prefix="/api/v1/orgs/{org_id}", tags=["migration-plan"])
 
 MigrationPlans = Annotated[MigrationPlanService, Depends(get_migration_plan_service)]
+MigrationPlanResults = Annotated[
+    MigrationPlanResultService, Depends(get_migration_plan_result_service)
+]
 
 DEFAULT_LOG_PAGE_SIZE = 200
 MAX_LOG_PAGE_SIZE = 500
@@ -83,10 +87,14 @@ async def search_migration_plans(
 
 @router.get("/migration-plans/{plan_id}", response_model=ApiResponse[MigrationPlanDetailResponse])
 async def get_migration_plan(
-    access: ViewerAccess, plan_id: uuid.UUID, migration_plans: MigrationPlans
+    access: ViewerAccess,
+    plan_id: uuid.UUID,
+    migration_plans: MigrationPlans,
+    results: MigrationPlanResults,
 ) -> ApiResponse[MigrationPlanDetailResponse]:
     view = await migration_plans.get_plan(access.organization_id, plan_id)
-    return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))
+    cutover_run = await results.find_cutover_run(view)
+    return ApiResponse(data=MigrationPlanDetailResponse.from_view(view, cutover_run))
 
 
 @router.post(

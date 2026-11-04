@@ -25,6 +25,7 @@ from app.core.config import (
 from app.core.database import get_session_factory
 from app.core.secrets import parse_secret_ref
 from app.executors import ExecutorSet, build_executor_set
+from app.executors.base import NoCutoverRuns
 from app.executors.google_metadata import GoogleMetadataClient
 from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_factory
@@ -43,6 +44,7 @@ from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
+from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
@@ -260,6 +262,24 @@ async def get_executor_set(
     if settings.executor_mode is ExecutorMode.FAKE:
         return build_executor_set(settings, clock)
     return await executor_set_holder(request.app.state).get(settings, clock, session_factory)
+
+
+def get_migration_plan_result_service(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    executors: Annotated[ExecutorSet | None, Depends(get_executor_set)],
+) -> MigrationPlanResultService:
+    return MigrationPlanResultService(
+        session=session,
+        reader=executors.cutover_runs if executors is not None else NoCutoverRuns(),
+        cache=cutover_result_cache(request.app.state),
+        clock=clock,
+        is_enabled=settings.cutover_results_enabled,
+        not_before=settings.cutover_results_not_before,
+        cache_seconds=settings.cutover_result_cache_seconds,
+    )
 
 
 def get_deploy_request_service(
