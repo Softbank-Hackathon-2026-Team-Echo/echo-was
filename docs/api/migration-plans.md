@@ -170,6 +170,43 @@
 - 기준값을 읽는 순간 처리 중이던 요청 때문에 도착 `requests` 가 `errors5xx` 보다 잠깐 작게 나올 수 있다(예: 요청 2 < 5xx 3). 요청과 5xx 카운터가 같은 순간에 올라가지 않아서이고, 판정은 각 값의 증가분만 따로 쓰므로 영향이 없다. 화면은 이 경우를 오류로 다루지 않는다.
 - 단계별 실제 시간은 10% 3.5~6.7초, 50% 2.3~3.5초, 100% 약 1.2초였다(예상 시간 `expectedSeconds` 는 보수적으로 둔다). 1초 폴링이면 100% 단계의 진행 숫자는 0~1번만 보인다. 그 단계의 마지막 숫자는 단계 결과(`steps[4].result.metrics`)에 남는다.
 
+### 컷오버 결과 `result` (단건 조회만, API 서버 16)
+
+인프라 스크립트(`cutover.sh`·`rollback.sh`)가 고객 DB 표 `echo_ops.cutover_runs` 에 남긴 쓰기 정지·누락·중복 값을 이전 계획 상세에 붙인다. 화면이 그 값을 "이 이전의 결과"로 보여 주게 하려는 칸이다. 계획 단계와 따로 도는 작업의 결과이고, echo-was 는 읽기만 한다(저장하지 않고 고객 DB 에 쓰지 않는다).
+
+| 칸 | 타입 | 뜻 |
+|---|---|---|
+| `writePauseMs` | int \| null | 쓰기 정지 시간(ms) |
+| `missingRows` · `duplicateRows` | int \| null | 장부 대조로 찾은 누락·중복 행 수 |
+| `rowsTotal` | int \| null | 대조한 장부 행 수 |
+| `kind` | `CUTOVER` \| `ROLLBACK` \| null | 행의 종류 |
+| `measuredBy` | `INFRA_SCRIPT` \| null | 행이 있으면 늘 `INFRA_SCRIPT` |
+| `pausedAt` · `resumedAt` | datetime(UTC) \| null | 쓰기를 멈춘 시각·다시 연 시각(스크립트를 돌린 컴퓨터의 시계) |
+| `drainMs` · `catchupMs` · `switchMs` | int \| null | 정지 시간의 구간별 값(ms) |
+
+```json
+"result": {"writePauseMs": 5817, "missingRows": 0, "duplicateRows": 0, "rowsTotal": 168,
+           "kind": "CUTOVER", "measuredBy": "INFRA_SCRIPT",
+           "pausedAt": "2026-11-04T13:51:59.670Z", "resumedAt": "2026-11-04T13:52:05.487Z",
+           "drainMs": 774, "catchupMs": 428, "switchMs": 4615}
+```
+
+null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
+
+| 상황 | `result` |
+|---|---|
+| 끝나지 않은 계획(`PENDING_APPROVAL`·`APPROVED`·`RUNNING`·`ROLLING_BACK`) | `null`. 고객 DB 를 읽지 않는다 |
+| 끝난 계획 + 행 있음 | 위 칸 모두 값. 표에서 NULL 을 허용하는 칸(`drainMs`·`catchupMs`·`switchMs`·`rowsTotal`·`missingRows`·`duplicateRows`)이 NULL 이면 그 칸만 null |
+| 끝난 계획 + 행 없음 · 읽지 못함 · 읽는 조건 밖 | 객체, 안의 칸 전부 null. `measuredBy == null` 로 구분한다 |
+
+- **읽는 조건**: `DATA_SYNC_CHECKER_MODE=postgres` · 끝 상태 7종 중 하나 · 계획 행 `simulated = false` · `CUTOVER_RUNS_DATABASE` 가 비어 있지 않음 · `finishedAt >= CUTOVER_RESULTS_NOT_BEFORE`(설정했을 때). 하나라도 아니면 고객 DB 에 붙지 않는다. 가짜 숫자를 만드는 모드는 없다.
+- **찾는 규칙**: 행에는 서비스·계획 id 가 없어 시간 창으로 찾는다. 창 = [그 계획 `finishedAt`, 같은 서비스의 다음 계획 `createdAt`)(다음 계획이 없으면 끝 없음). 종류 = `mode` 가 `FAILBACK` 이면 `ROLLBACK`, 그 밖(`PLANNED`·`EMERGENCY`)은 `CUTOVER`. 창 안에서 `pausedAt` 이 가장 이른 행 하나다(같으면 `created_at`·`id` 순).
+- **읽는 곳**: 도착 환경의 PostgreSQL(`DATA_SYNC_DATABASES` 매핑의 host·port). 응답 하나당 최대 3초(`DATA_SYNC_TIMEOUT_SECONDS`)다.
+- **캐시 5초**: API 프로세스 메모리, 계획 id 별로 최대 512개(먼저 넣은 것부터 버린다). 찾았고 창이 닫힌 결과는 버려질 때까지 쓴다. 못 찾음·창 열림·실패는 `CUTOVER_RESULT_CACHE_SECONDS`(기본 5) 뒤 다시 읽으므로, 스크립트를 돌린 뒤 값이 보일 때까지 최대 5초 걸린다. 같은 계획의 동시 요청은 한 번만 읽는다.
+- **상세 GET 만 읽는다.** 만들기·승인·거절·취소·중단 응답도 같은 모양이지만 고객 DB 를 읽지 않아, 끝나지 않았으면 null, 끝났으면(거절·취소) 칸 전부 null 이다. 목록·로그 응답에는 이 칸이 없다.
+- **주의 — 다른 서비스에 같은 행이 붙을 수 있다.** 매핑이 환경 종류 단위이고 행에 서비스 구분이 없어, 같은 시간대에 끝난 다른 서비스의 계획에도 같은 행이 붙는다. 서비스 하나를 시연하는 지금은 막지 않는다.
+- 읽지 못하면 경고 로그 `cutover result unavailable` 에 `plan_id`·`target_environment_id`·`error_code`(`CUTOVER_RESULT_ENV_UNMAPPED`·`CUTOVER_RESULT_SECRET_MISSING`·`CUTOVER_RESULT_UNREACHABLE`·`CUTOVER_RESULT_QUERY_FAILED`(권한 없음·표 없음 포함))만 남긴다. 주소·비밀값은 남기지 않고, 행이 없는 것은 로그를 남기지 않는다.
+
 ### 중단 `POST /migration-plans/{planId}/abort`
 
 `APPROVED`·`RUNNING` 에서만(아니면 409 `PLAN_NOT_RUNNING`). `abortRequestedAt`·`abortedBy` 를 적고 그 계획의 할 일을 지금으로 당긴다 → 202. 다시 중단해도 202(기록은 그대로). 일꾼이 다음 실행 맨 앞에서 보고 `RUNNING` 이면 롤백(`ABORTED`), `APPROVED` 면 트래픽을 바꾸지 않고 `CANCELLED` 로 끝낸다. 열린 할 일이 없으면(옛 일꾼이 할 일을 닫아 버린 경우 등) `APPROVED` 는 그 자리에서 `CANCELLED`, `RUNNING` 은 할 일을 새로 넣는다.
@@ -213,7 +250,7 @@
 
 `MigrationPlanSummary`: `id`, `serviceId`, `sourceEnvironmentId`·`targetEnvironmentId`(환경 id), `sourceServiceEnvironmentId`·`targetServiceEnvironmentId`(연결 id), `status`, `currentStep`, `expectedSeconds`, `createdBy{id, login}`, `approvedBy`, `selfApproved`, `errorCode`, `rollbackStatus`, `simulated`, `mode`(`PLANNED`·`EMERGENCY`·`FAILBACK`, 위 "계획 종류"), `createdAt`·`approvedAt`·`startedAt`·`finishedAt`·`expiresAt`.
 
-`MigrationPlanDetail` = Summary + `rollbackConditions{…, healthCheck: true, p95Advisory: true}`, `maxWaitSeconds`, `steps[]`(계획 값과 실제 결과를 나란히), `progress`, `rejectedBy`·`cancelledBy`·`abortedBy`, `abortRequestedAt`, `errorMessage`.
+`MigrationPlanDetail` = Summary + `rollbackConditions{…, healthCheck: true, p95Advisory: true}`, `maxWaitSeconds`, `steps[]`(계획 값과 실제 결과를 나란히), `progress`, `rejectedBy`·`cancelledBy`·`abortedBy`, `abortRequestedAt`, `errorMessage`, `result`(위 "컷오버 결과").
 
 - `maxWaitSeconds` 는 계획 행의 `observe_seconds` 칸이다(새 계획은 단계 최대 대기, 8-1 전 계획은 그 계획의 지켜보기 초). 8-1 에서 `observeSeconds` 칸을 뺐다.
 - `steps[i]`: `requiredRequests`·`maxWaitSeconds` 는 비율 단계만 값이 있다(8-1 전 계획의 `requiredRequests` 는 null).
@@ -271,7 +308,8 @@
     "cancelledBy": null,
     "abortedBy": null,
     "abortRequestedAt": null,
-    "errorMessage": null
+    "errorMessage": null,
+    "result": null
   }
 }
 ```
@@ -336,5 +374,8 @@
 | `MIGRATION_ROLLBACK_MAX_ATTEMPTS` | 3 | 롤백 비율 적용 최대 시도 |
 | `SECURITY_GATE_ENABLED` | `false` | 보안 게이트(승인·일꾼 시작 판정, 실행 직전 TLS 시험). API·일꾼 모두 같은 값 |
 | `WAS_VERSION` | (없음) | 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 두 통제는 확인 불가 |
+| `CUTOVER_RUNS_DATABASE` | `app` | 컷오버 결과 표가 있는 고객 DB 이름. 빈 값이면 읽지 않는다(`result` 칸 전부 null) |
+| `CUTOVER_RESULTS_NOT_BEFORE` | (없음) | 이보다 먼저 끝난 계획은 읽지 않는다(시간대가 있는 ISO 8601, 없으면 시작 때 설정 오류). 표가 생기기 전 계획에 나중 행이 붙지 않게 한다. 운영 `2026-11-04T13:30:00Z` |
+| `CUTOVER_RESULT_CACHE_SECONDS` | 5 | 못 찾음·창 열림·실패 결과를 다시 쓰는 시간(초, 1 이상) |
 
 `MIGRATION_OBSERVE_SECONDS_DEFAULT` 는 8-1 에서 없앴다(설정에 남아 있어도 무시한다).

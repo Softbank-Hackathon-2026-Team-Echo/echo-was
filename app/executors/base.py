@@ -9,6 +9,7 @@
 - MetricsProvider: 연결 하나의 누적 요청·5xx 카운터(판정용)와 구간 지표(오류율·p95·요청 수,
   p95 참고용)를 읽는다(실제는 고정 진입점 Envoy 의 GET /counters·GET /summary).
 - DataSyncChecker: 출발 → 도착 데이터 복제 지연을 읽는다(실제는 인프라 7).
+- CutoverRunReader: 인프라 스크립트가 고객 DB 에 남긴 컷오버·롤백 결과를 읽는다(API 서버 16).
 
 모든 시작 호출은 우리가 먼저 정한 멱등 키를 받는다(빌드 = builds.id, 배포·되돌리기 =
 deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown_attempt, 트래픽 비율 =
@@ -31,7 +32,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from app.adapters.base import EnvironmentConfig
 from app.core.secrets import SecretValue
-from app.enums import DeployRequestErrorCode, LogLevel, TeardownErrorCode
+from app.enums import CutoverKind, DeployRequestErrorCode, LogLevel, TeardownErrorCode
 
 # --- 넘기는 값 ---
 
@@ -317,6 +318,45 @@ class DataSyncUnavailable:
 type DataSyncResult = DataSyncLag | DataSyncUnavailable
 
 
+@dataclass(frozen=True)
+class CutoverRunTarget:
+    """컷오버 결과를 읽을 환경(이전 계획의 도착 환경)."""
+
+    environment_id: uuid.UUID
+    environment_kind: str
+
+
+@dataclass(frozen=True)
+class CutoverRun:
+    """`echo_ops.cutover_runs` 한 행. 표에서 NULL 을 허용하는 칸은 None 일 수 있다."""
+
+    kind: CutoverKind
+    paused_at: datetime
+    resumed_at: datetime
+    write_pause_ms: int
+    drain_ms: int | None
+    catchup_ms: int | None
+    switch_ms: int | None
+    rows_total: int | None
+    missing_rows: int | None
+    duplicate_rows: int | None
+
+
+@dataclass(frozen=True)
+class CutoverRunNotFound:
+    pass
+
+
+@dataclass(frozen=True)
+class CutoverRunUnavailable:
+    """읽지 못했다. code 는 고정 코드이고 주소·비밀값·외부 원문을 담지 않는다."""
+
+    code: str
+
+
+type CutoverRunResult = CutoverRun | CutoverRunNotFound | CutoverRunUnavailable
+
+
 def check_weights_total(weights: tuple[WeightedTarget, ...]) -> None:
     """비율 합계가 100 이 아니면 ValueError. 부르는 쪽의 버그라 실행기에 넘기지 않는다."""
     if sum(item.weight for item in weights) != TRAFFIC_WEIGHT_TOTAL or any(
@@ -529,3 +569,31 @@ class DataSyncChecker(Protocol):
     async def replication_lag(self, source: DeployTarget, target: DeployTarget) -> DataSyncResult:
         """출발 → 도착 데이터 복제 지연(초). 읽을 수 없으면 DataSyncUnavailable."""
         ...
+
+
+class CutoverRunReader(Protocol):
+    async def find_first(
+        self,
+        target: CutoverRunTarget,
+        kind: CutoverKind,
+        since: datetime,
+        until: datetime | None,
+    ) -> CutoverRunResult:
+        """[since, until) 안의 kind 행 중 paused_at 이 가장 이른 것. until 이 None 이면 끝이 없다.
+
+        없으면 CutoverRunNotFound, 읽지 못하면 CutoverRunUnavailable 이고 예외를 올리지 않는다.
+        """
+        ...
+
+
+class NoCutoverRuns:
+    """기본 구현. 늘 행이 없다(가짜 숫자를 만들지 않는다)."""
+
+    async def find_first(
+        self,
+        target: CutoverRunTarget,
+        kind: CutoverKind,
+        since: datetime,
+        until: datetime | None,
+    ) -> CutoverRunResult:
+        return CutoverRunNotFound()
