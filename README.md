@@ -42,6 +42,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
 | 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 고정 5단계·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
 | 조직·역할 권한 | 있음 | 조직·멤버·초대·에이전트 토큰 API, 모든 라우트의 검사기, 403 거부 기록(`audit_logs`) ([docs/api/organizations.md](docs/api/organizations.md)) |
+| 감사 로그 | 있음 | 쓰기 24개 경로 + 초대 적용(USER), 배포·이전·서비스 삭제의 끝(SYSTEM), 403 거부, AI 에이전트의 성공한 읽기(AGENT)를 누가·언제·무엇을·결과로 저장. 조직별 조회·거르기. 줄은 고치거나 지울 수 없다 ([docs/api/audit-logs.md](docs/api/audit-logs.md)) |
 
 ## 핵심 흐름
 
@@ -105,8 +106,9 @@ Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2.0(async) · PostgreSQL 17(
 ```text
 app/
 ├─ main.py         # FastAPI 앱, /healthz·/readyz, 라우터 등록, 환경 종류 discover()
-├─ routers/        # auth · organization · invitation · agent_token · environment · environment_kind · service · deploy_request · migration_plan (/api/v1)
-├─ auth/           # 권한 검사기(guards) · 403 거부 기록 처리기(audit) · 토큰·쿠키
+├─ routers/        # auth · organization · invitation · agent_token · environment · environment_kind · service · deploy_request · migration_plan · audit_log (/api/v1)
+├─ audit/          # 감사 로그: 행동 이름표(actions) · 기록 함수(recorder) · 끝 줄(lifecycle) · 요청 값(context)
+├─ auth/           # 권한 검사기(guards) · 거부·에이전트 읽기 감사 줄(audit) · 토큰·쿠키
 ├─ services/       # Environment*Service · ServiceService · DeployRequestService(접수·되돌리기·이력·로그) · Auth·Organization·Invitation·AgentToken Service
 │                  #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · service_view(역할·버전 상태)
 │                  #   deploy_job_log(배포 작업 로그 기록기) · deploy_log_messages(로그·오류 고정 문장)
@@ -270,6 +272,7 @@ FRONTEND_ALLOWED_ORIGINS=https://app.echoport.uk        # 비면 쿠키로 인�
 4. **허용 스위치**를 쓸 때: App 이 그 GitHub 조직에 설치돼 있고 **Organization permissions → Members: Read** 권한이 있다. 없으면 모두 `LOGIN_NOT_ALLOWED`.
 5. **로그인을 열기 전에** 데모 팀원이 각자 한 번 로그인한 뒤 `demo_seed` 를 실행해 `team-echo` 조직·역할·에이전트 토큰을 만든다(아래). `team-echo` 는 예약 slug 라 API 로는 만들 수 없다.
 6. 출력된 에이전트 토큰으로 배포 요청을 보내 403 `AGENT_READ_ONLY` 와 `audit_logs` 한 줄을 확인한다(데모 거부 장면).
+7. 방금 한 조작이 `GET /api/v1/orgs/{orgId}/audit-logs` 맨 위에 나오는지 본다(NFR-08). 대시보드 최근 활동은 `?includeReads=false&size=3` 으로 AI 읽기 줄을 뺀다.
 
 ### 데모 준비 명령
 
@@ -388,7 +391,8 @@ docker compose down                                   # DB 끄기 (데이터는 
 - 업무 API 는 로그인·조직·환경·서비스·배포 요청 API 다. **실제 GitHub 로그인은 GitHub App 설정 뒤에만 된다**(시험은 가짜 GitHub 를 의존성 교체로 쓴다). API 2·3 경로는 모두 `/api/v1/orgs/{orgId}` 아래로 옮겼다(깨지는 변경, 프론트 미연결).
 - **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
 - **이전 계획의 트래픽·지표·복제 확인은 가짜다**(`simulated: true`). 비율 칸·로그·판정 흐름은 실제이고, 실제 Envoy(인프라 6, 시연용은 늦으면 지민)·OpenTelemetry(인프라 9)·복제(인프라 7)가 붙으면 실행기만 바꾼다. 실제 연결 확인 전에는 이슈 #8 을 `In Progress` 로 둔다. 판정 최소 표본 수는 없다(실제 지표 연결 때 다시 본다). 예비·주력 동시 배포, 단계별 사람 승인, 비율 목록 변경은 하지 않는다.
-- AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 거부 기록은 있다. 거부 밖의 행위 기록·감사 로그 조회는 API 서버 7(되돌리기 요청자 기록도 그때).
+- AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 감사 기록 함수(`AuditRecorder`)는 있다.
+- **감사 로그의 범위**: 실시간 알림·보관 기간·내보내기·외부 수집기는 없다. 배포 요청 표·이력 응답에는 요청자 칸이 없고, 누가 눌렀는지는 감사 로그로 읽는다(`targetId`). 롤아웃 수 분 동안 옛 파드가 처리한 작업은 성공 줄이 없을 수 있다. 운영 스키마는 forward-only 다([docs/api/audit-logs.md](docs/api/audit-logs.md)).
 - **빌드·실행 로그는 기본(가짜 모드)에서 가짜 실행기가 만든 줄이다**(`simulated: true`). `EXECUTOR_MODE=real` 이면 Actions 잡 로그·앱 파드 로그를 즉석으로 읽는다(실행기 묶음은 API 프로세스당 하나). 가짜로 만든 기록을 실제 모드에서 읽으면 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
 - 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
 - 어댑터는 **가짜**다. 접속 확인·클러스터 정보는 고정 값이고 `simulated: true` 로 표시한다. 실제 EKS·GKE·k3s 접속은 클러스터가 생긴 뒤 별도 작업에서 같은 인터페이스·계약 검사로 바꾼다.
@@ -408,6 +412,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/schema.md](docs/schema.md) | 공통 모델 스키마 설명(ER·칸·행 예시·상태 흐름·설계 이유·새 환경 추가·조직 표) |
 | [docs/api/auth.md](docs/api/auth.md) | 로그인 흐름·쿠키·Origin·권한 검사 순서·역할 표·거부 기록·오류 |
 | [docs/api/organizations.md](docs/api/organizations.md) | 조직·멤버·초대·에이전트 토큰 API, 조직 열쇠 이름, 데모 준비 명령 |
+| [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그 조회·행동 이름표·결과 규칙·`component` 값·기록하지 않는 것·forward-only |
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·스키마·오류 코드·secretRef 형식·null 규칙) |
 | [docs/api/services.md](docs/api/services.md) | 서비스 API 계약(등록·수정·삭제, 역할·버전 상태, `simulated` 뜻) |
 | [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포·이력·되돌리기·로그 API 계약(접수 규칙·진행 단계·실패 코드·로그 줄) |

@@ -12,6 +12,8 @@ WARN 으로 보인다(규칙표). 규칙
 - 철회: 철회 전·만료 전이면 승인 전이어도 된다. 철회한 예외는 판정에 쓰지 않는다. 지우지 않는다.
 - 승인·철회는 조건부 UPDATE 로만 바꾸고, 0행이면 다시 읽어 409 를 올린다.
 - 상태(`SecurityExceptionStatus`)는 저장하지 않고 조회 때 칸과 지금 시각으로 정한다.
+- 요청·승인·철회는 같은 트랜잭션에서 감사 줄(USER, 대상 `security_exception`, 이름표 = 통제 ID)을
+  남긴다. 요청 줄 details 는 만료 시각만(사유 원문은 예외 행에 있다).
 """
 
 import logging
@@ -22,6 +24,8 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.core.clock import Clock
 from app.core.exceptions import (
     ErrorField,
@@ -112,6 +116,7 @@ class SecurityExceptionService:
         self._environments = EnvironmentRepository(session)
         self._organizations = OrganizationRepository(session)
         self._users = UserRepository(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def create_exception(
         self,
@@ -144,6 +149,12 @@ class SecurityExceptionService:
             )
             self._exceptions.add(exception)
             await self._session.flush()
+            self._record_audit(
+                AuditAction.SECURITY_EXCEPTION_REQUESTED,
+                exception,
+                actor_user_id,
+                {"expiresAt": exception.expires_at.isoformat()},
+            )
             view = await self._view(organization_id, exception.id, now)
         _log_exception("security exception requested", "create_security_exception", view)
         return view
@@ -206,6 +217,7 @@ class SecurityExceptionService:
                 raise SelfApprovalForbiddenError
             if not await self._exceptions.approve(exception.id, actor_user_id, now):
                 raise _not_pending(exception)
+            self._record_audit(AuditAction.SECURITY_EXCEPTION_APPROVED, exception, actor_user_id)
             view = await self._view(organization_id, exception.id, now)
         _log_exception("security exception approved", "approve_security_exception", view)
         return view
@@ -221,9 +233,27 @@ class SecurityExceptionService:
                     "security exception is already revoked or expired",
                     exception_id=str(exception.id),
                 )
+            self._record_audit(AuditAction.SECURITY_EXCEPTION_REVOKED, exception, actor_user_id)
             view = await self._view(organization_id, exception.id, now)
         _log_exception("security exception revoked", "revoke_security_exception", view)
         return view
+
+    def _record_audit(
+        self,
+        action: AuditAction,
+        exception: SecurityException,
+        actor_user_id: uuid.UUID,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        self._audit.record(
+            organization_id=exception.organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=action,
+            target=AuditTarget(
+                AuditTargetType.SECURITY_EXCEPTION, exception.id, str(exception.control_id)
+            ),
+            details=details,
+        )
 
     async def _get(self, organization_id: uuid.UUID, exception_id: uuid.UUID) -> SecurityException:
         exception = await self._exceptions.find_in_organization(organization_id, exception_id)

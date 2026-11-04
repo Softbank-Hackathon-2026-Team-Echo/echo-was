@@ -93,6 +93,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `GET ` (조직 하나) · `GET /environments…` · `GET /services…` · `GET /services/{id}/deploy-requests` · `GET /deploy-requests/{id}` | 뷰어 | 읽기 가능 |
 | `GET /deploy-requests/{id}/logs` (배포 작업·빌드·실행 로그, API 서버 4) | 뷰어 | 읽기 가능 |
 | `GET /services/{id}/migration-plans` · `GET /migration-plans/{id}` · `GET /migration-plans/{id}/logs` (이전 계획, API 서버 8) | 뷰어 | 읽기 가능 |
+| `GET /audit-logs` (감사 로그, API 서버 7) | 뷰어 | 읽기 가능 |
 | `GET /security/exceptions` · `GET /security/exceptions/{id}` (기한부 예외, 보안 3) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
@@ -124,13 +125,14 @@ async def create_rollback(access: HumanDeveloperAccess, ...) -> ...:
 
 ## 거부 기록 (`audit_logs`)
 
-403(`ROLE_FORBIDDEN`·`AGENT_READ_ONLY`·`CANNOT_CHANGE_OWN_ROLE`·`ORIGIN_NOT_ALLOWED`·`SELF_APPROVAL_FORBIDDEN`)마다 한 줄을 요청과 **따로 커밋**한다(요청은 실패해도 기록은 남는다). 401·404 는 기록하지 않는다. 행은 지울 수 없다(DELETE 금지 트리거). 조회 API 는 API 서버 7 이 만든다.
+403(`ROLE_FORBIDDEN`·`AGENT_READ_ONLY`·`CANNOT_CHANGE_OWN_ROLE`·`ORIGIN_NOT_ALLOWED`·`SELF_APPROVAL_FORBIDDEN`)마다 한 줄을 요청과 **따로 커밋**한다(요청은 실패해도 기록은 남는다). 401·404 는 기록하지 않는다. 행은 지우거나 고칠 수 없다(DELETE·UPDATE 금지 트리거). 성공 줄·끝 줄·에이전트 읽기 줄과 조회 API 는 [audit-logs.md](audit-logs.md).
 
 | 칸 | 값 |
 |---|---|
 | `organization_id` | 경로의 조직, 없으면 에이전트 토큰의 조직, 둘 다 없으면 NULL |
 | `actor_type` · `actor_user_id` · `actor_agent_token_id` | `USER`(사람) 또는 `AGENT`(토큰) 중 하나 |
-| `action` | 메서드 + 경로 틀. 예 `POST /api/v1/orgs/{org_id}/services/{service_id}/deploy-requests` |
+| `action` | 쓰기 경로면 행동 이름(예 `DEPLOY_REQUESTED`, [audit-logs.md](audit-logs.md)). 표에 없는 경로와 API 서버 6 때 쌓인 줄은 메서드 + 경로 틀 |
+| `route` | 메서드 + 경로 틀. 예 `POST /api/v1/orgs/{org_id}/services/{service_id}/deploy-requests` |
 | `path` · `reason` · `result` · `request_id` · `created_at` | 실제 경로 · 오류 코드 · `DENIED` · `X-Request-ID` · 시각 |
 
 ## 오류 코드

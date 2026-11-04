@@ -48,5 +48,5 @@ async def search_invitations(
 async def revoke_invitation(
     access: HumanAdminAccess, invitation_id: uuid.UUID, invitations: Invitations
 ) -> Response:
-    await invitations.revoke_invitation(access.organization_id, invitation_id)
+    await invitations.revoke_invitation(access.organization_id, invitation_id, access.user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

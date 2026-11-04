@@ -278,15 +278,18 @@ class InvitationStatus(StrEnum):
 
 
 class ActorType(StrEnum):
-    """요청한 쪽. USER 는 세션 쿠키로 들어온 사람, AGENT 는 에이전트 토큰."""
+    """누가 했나. USER 는 세션 쿠키로 들어온 사람, AGENT 는 에이전트 토큰, SYSTEM 은 서버 자신."""
 
     USER = "USER"
     AGENT = "AGENT"
+    SYSTEM = "SYSTEM"
 
 
 class AuditResult(StrEnum):
-    """거부 기록 결과. 이번에는 거부(403)만 남긴다."""
+    """감사 줄의 결과. DENIED 는 권한이 없어 막힌 요청(403)이다."""
 
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
     DENIED = "DENIED"
 
 

@@ -5,7 +5,7 @@
 - Depth: Standard (새 API 5개, DB 변경 없음 — 표는 #60 `security_exceptions`)
 - GitHub 이슈: https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/27 (보안·거버넌스 3, "예외는 사유·승인자·만료가 있을 때만")
 - 근거: 보안 1 SPEC `specs/sec-1-security-controls.md` §5.3(시연 예외)·§6.4(예외 규칙) / 규칙표 `app/services/security_rules.py`(`_is_valid_exception`·`scope_keys`) / PR #60 리뷰(Saccharine1211) ② 7일 상한과 시계 차이 / 보안 5 SPEC `specs/sec-5-migration-gate.md` §5(켜기 전 준비물)
-- 저장소: `echo-was` · 브랜치 `feat/sec-3-security-exceptions-api` (`feat/sec-5-migration-gate` = PR #61 위에 쌓음, #61 병합 뒤 `main` 으로 바꿈) · PR로 올린다
+- 저장소: `echo-was` · 브랜치 `feat/sec-3-security-exceptions-api` (처음엔 PR #61 위에 쌓음 → #61 이 11/5 병합돼 기준을 `main` 으로 바꿈) · PR로 올린다
 
 ## 1. 목표
 
@@ -17,7 +17,7 @@
 - `created_at` 은 서버 기본값 `now()` 다. 앱이 `now + 7일` 로 만료를 계산하면 DB 시각이 앱 시각보다 늦을 때 CHECK 위반(500)이 날 수 있다(#60 리뷰 ②).
 - 판정(`_is_valid_exception`)은 요청·승인이 사람이고, 승인자가 있고, 7일 이하이고, 범위가 맞을 때만 받는다. 자기 승인은 조직 스위치(`allow_self_approval`)를 본다. 게이트(#61)는 승인됐고 철회되지 않은 것만 읽는다.
 - 범위 비교는 통제가 정한 칸(`scope_keys`)만 하고, 판정 대상의 값이 없으면 맞지 않는다(조직 전체로 넓힐 수 없음).
-- `audit_logs` 는 거부(DENIED)만 받는다(CHECK).
+- (11/4 기준) `audit_logs` 는 거부(DENIED)만 받았다. 11/5 #66 으로 행동 줄(USER·SYSTEM·AGENT)이 생겼다.
 
 ## 3. 범위
 
@@ -30,7 +30,7 @@
 
 ### 3.2 다음 PR
 - 매트릭스 API(#59)가 예외를 읽어 칸에 "예외 적용 중"(`hasException`) 표시
-- 감사 확대(#32): 만들기·승인·철회·만료를 감사 행으로
+- 만료 감사 줄(만료 시각을 지난 예외를 일꾼이 기록할지)
 - 예외 화면(김도영 님): 목록·요청·승인 버튼
 
 ### 3.3 하지 않는다
@@ -49,7 +49,7 @@
 | D-6 | 승인·철회는 조건부 UPDATE(`approved_by IS NULL AND revoked_at IS NULL AND expires_at > now` 등). 0행이면 409 | 상태 변경 규칙 |
 | D-7 | 상태는 저장하지 않고 조회 때 정한다: REVOKED > EXPIRED > ACTIVE > PENDING. 목록의 상태 조건도 같은 규칙(SQL) | 만료는 시간이 지나면 바뀜 |
 | D-8 | 조회는 뷰어(에이전트 포함), 쓰기는 개발자 이상 사람 | 보안 1 §6.4 "AGENT는 예외를 만들 수 없다" |
-| AD-1 | 감사 행은 #32 로 미룬다(`audit_logs` 가 DENIED 만 받음). 그때까지 기록은 예외 행(요청·승인·철회한 사람·시각)과 구조화 로그 | AI-default |
+| AD-1 | ~~감사 행은 #32 로 미룬다~~ → **(11/5) #66(API 서버 7 감사 로그)이 병합돼 요청·승인·철회를 같은 트랜잭션에서 감사 줄로 남긴다**(`SECURITY_EXCEPTION_*`, 대상 `security_exception`). 만료는 줄을 남기지 않는다(조회 때 정함) | #66 |
 
 ## 5. Acceptance criteria
 
@@ -69,4 +69,4 @@
 
 - **R-a 쌓은 PR.** #61 이 먼저 병합되어야 한다(같은 저장소 파일을 만든다). #61 리뷰에서 그 파일이 바뀌면 이 브랜치를 다시 맞춘다.
 - **R-b 매트릭스 표시.** #59 가 이 표를 아직 읽지 않아, 게이트는 예외를 쓰지만 매트릭스 칸은 "예외 적용 중"을 아직 안 보인다(다음 PR).
-- **R-c 감사 공백.** 만들기·승인 기록이 감사 행에는 없다(AD-1). 시연 질문에는 예외 행과 로그로 답한다.
+- **R-c 만료는 감사 줄이 없다.** 만료는 시간이 지나 조회 때 정하는 상태라 따로 기록하지 않는다(보안 1 §6.4 "만료가 감사에 남는다"는 다음에 일꾼이 만료를 기록하게 할지 정한다).

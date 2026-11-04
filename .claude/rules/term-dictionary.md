@@ -96,7 +96,13 @@
 | 초대 | Invitation | `Invitation` / `invitations` | GitHub 아이디(숫자 번호로 저장) + 역할. 그 사람이 로그인하거나 `/me` 를 부르면 멤버가 된다. 7일 | F4 |
 | 세션 | Session | `UserSession` / `sessions`, 쿠키 `echo_session` | 브라우저 로그인 하나. 쿠키 값은 SHA-256 만 저장, 7일 고정 | F4, NFR-07 |
 | 에이전트 토큰 | Agent token | `AgentToken` / `agent_tokens`, `Authorization: Bearer echo_agt_…` | AI 에이전트 출입증. 조직 하나에 묶이고 그 조직을 읽기만 한다. 원문은 발급 응답에 한 번만 | F14·F16 |
-| 거부 기록 | Denial record (audit log) | `AuditLog` / `audit_logs` | 권한이 없어 막힌 요청(403) 한 건. 요청과 따로 커밋하고 지우지 않는다. 조회·다른 행위 기록은 API 서버 7 | F5, NFR-07·08 |
+| 감사 로그 | Audit log | `AuditLog` / `audit_logs`, `GET /api/v1/orgs/{orgId}/audit-logs` | 누가(사람·AI 에이전트·서버) 언제 무엇을 어떤 결과로 했는지. 지우지도 고치지도 않는다(DELETE·UPDATE 금지 트리거). 계약은 [docs/api/audit-logs.md](../../docs/api/audit-logs.md) | F5, NFR-08, API 7 |
+| 거부 기록 | Denial record | `audit_logs.result = DENIED` | 권한이 없어 막힌 요청(403) 한 줄. 요청과 따로 커밋한다 | F5, NFR-07·08 |
+| 행동 이름 | Audit action | `AuditAction`, `WRITE_ROUTE_ACTIONS` (`app/audit/actions.py`) / `audit_logs.action` | `DEPLOY_REQUESTED` 같은 고정 이름. 앱의 쓰기 경로(로그아웃 제외)는 모두 표에 이름이 있어야 한다(시험이 확인). API 서버 6 때 쌓인 거부 줄은 `METHOD 경로 틀` 문자열 그대로라 칸·응답은 문자열이다 | F5, API 7 |
+| 끝 줄 | Finish line | `SYSTEM` 줄 `DEPLOY_FINISHED`·`ROLLBACK_FINISHED`·`MIGRATION_FINISHED`·`SERVICE_DELETED` | 오래 걸리는 일이 끝 상태가 되는 순간 그 트랜잭션에 쓰는 한 줄. 접수 때의 USER 줄과 같은 대상 id 로 잇는다. 대상마다 하나 | F5, API 7 |
+| 감사 줄을 쓴 쪽 | Audit component | `AuditComponent` / `audit_logs.component` | SYSTEM 줄을 쓴 쪽. `deploy-worker`·`migration-worker`·`teardown-worker`, 사람 요청 안에서 서버 규칙으로 자동 종료한 것은 `api`(앞으로 `ai-runner`). 앱 로그의 `component`(`echo-api`)와 다르다 | API 7 |
+| 감사 대상 | Audit target | `AuditTarget`, `audit_logs.target_type`·`target_id`·`target_label` | 행동의 대상(FK 없음). `target_label` 은 기록할 때 복사한 사람이 읽는 이름이라 대상이 바뀌거나 지워져도 그대로다 | F5, API 7 |
+| 정렬 순번 | Audit sequence | `audit_logs.seq` (identity) | 같은 시각 줄의 순서를 고정하는 칸. 정렬은 `created_at DESC, seq DESC` | API 7 |
 | 권한 검사기 | Organization guard | `require_org_role(min_role, human_only=False)` (`app/auth/guards.py`) | 조직 경로마다 거는 FastAPI 의존성. 로그인 → 조직 멤버 → 최소 역할 → Origin 순서로 본문·리소스보다 먼저 검사 | F4, NFR-07 |
 | 이전 계획 | Migration plan | `MigrationPlan` / `migration_plans`, 경로 `/services/{id}/migration-plans`·`/migration-plans/{id}` | 서비스 트래픽을 출발 연결(지금 100%)에서 같은 이미지의 예비 연결(도착)로 옮기는 계획과 그 실행 기록. 고정 5단계·단계별 예상 시간·롤백 조건을 담는다. 서비스당 끝나지 않은 계획은 하나, 지우지 않는다 | F10, API 8 |
 | 출발 · 도착 | Source · Target | `source_service_environment_id` · `target_service_environment_id` | 출발 = 계획을 만들 때 비율 100 인 연결 하나. 도착 = 출발과 같은 이미지가 올라간 예비 연결(따라가는 중이면 `TARGET_SYNCING`, 없거나 다른 버전이면 `TARGET_NOT_READY`) | F10, API 8 |
@@ -265,10 +271,11 @@
 |---|---|---|
 | `VIEWER` · `DEVELOPER` · `ADMIN` | `organization_members.role`·`invitations.role` (`OrganizationRole`) | 순서 VIEWER < DEVELOPER < ADMIN. 에이전트 토큰은 역할 없이 읽기만 |
 | `PENDING` → `ACCEPTED`·`EXPIRED`·`REVOKED` | `invitations.status` (`InvitationStatus`) | `ACCEPTED` 일 때만 `accepted_at`. 같은 조직·번호의 PENDING 은 하나 |
-| `USER` · `AGENT` | `audit_logs.actor_type` (`ActorType`) | 세션 쿠키로 온 사람 · 에이전트 토큰 |
-| `DENIED` | `audit_logs.result` (`AuditResult`) | 이번에는 거부만 기록 |
+| `USER` · `AGENT` · `SYSTEM` | `audit_logs.actor_type` (`ActorType`) | 세션 쿠키로 온 사람 · 에이전트 토큰 · 서버 자신(`component` 칸에 쓴 쪽) |
+| `SUCCEEDED` · `FAILED` · `DENIED` | `audit_logs.result` (`AuditResult`) | 성공 · 끝 상태가 성공이 아님(취소·롤백·만료 포함) · 권한 거부(403) |
 
-- 거부 이유(`audit_logs.reason`): `ROLE_FORBIDDEN` · `AGENT_READ_ONLY` · `CANNOT_CHANGE_OWN_ROLE` · `ORIGIN_NOT_ALLOWED`.
+- 거부 이유(`audit_logs.reason`): `ROLE_FORBIDDEN` · `AGENT_READ_ONLY` · `CANNOT_CHANGE_OWN_ROLE` · `ORIGIN_NOT_ALLOWED` · `SELF_APPROVAL_FORBIDDEN`. 거부 줄에만 있다.
+- 감사 행동 이름(`AuditAction`)·대상 종류(`AuditTargetType`)·`details` 칸 표: [docs/api/audit-logs.md](../../docs/api/audit-logs.md).
 - 로그인 콜백 실패(프론트 `/login?error=`): `OAUTH_DENIED` · `OAUTH_STATE_MISMATCH` · `GITHUB_UNAVAILABLE` · `LOGIN_NOT_ALLOWED` · `LOGIN_NOT_CONFIGURED`.
 
 ### 비밀 저장소 (`SecretStore`) — `secret_ref` 의 첫 콜론 앞
@@ -305,7 +312,6 @@
 
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
-| 감사 로그\* | Audit log | `audit_logs` (거부 기록만 API 서버 6 이 만듦) | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다. 거부 밖의 행위 기록·조회 API 가 후속 | F5, NFR-08 | API 서버 7 |
 | 이전 사전 점검\* | Preflight check | (미정) | 이전 전 점검(체크리스트). 단계 0 "사전 확인"(`PREFLIGHT`)과도, AI 사전 점검과도 다르다 | F11 | API 서버 8 |
 | 정책 | Policy | 표 없음 — 코드 `app/services/security_rules.py::RULES`, 버전 `POLICY_VERSION`(`sec-rules-YYYY.MM.DD`) | 모든 환경에 같이 적용하는 **버전이 붙은 보안 규칙표**(통제마다 필수 여부·판정 시점·범위·받는 출처·유효기간). 저장소 안 코드 + 시험으로 관리하고 통제를 끄는 설정이 없다. 규칙을 바꾸면 버전을 올린다 | F13, 보안 3 | 보안 파트 |
 | finding\* | Finding | `findings` (보안 2) — 판정 입력 `SecurityFinding` | 클라우드별 보안 결과를 공통 스키마로 정규화한 한 건(통제·결과·모드·출처·범위·수집 시각·만료·정책 버전). 판정에서는 증거로 쓰여 사유 코드는 `EVIDENCE_*` 로 부른다 | F12, 보안 2·3 | 보안 파트 |

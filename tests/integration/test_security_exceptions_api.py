@@ -11,7 +11,7 @@ from typing import Any
 from httpx import AsyncClient, Response
 from sqlalchemy import select
 
-from app.enums import OrganizationRole, SecurityControlId
+from app.enums import AuditResult, OrganizationRole, SecurityControlId
 from app.models import AuditLog, SecurityException
 from tests.integration.auth_support import create_member, create_organization, make_client, org_path
 from tests.integration.migration_support import Migration
@@ -177,7 +177,18 @@ async def test_approve_by_other_developer_and_self_approval_follows_switch(
     )
     self_approved = await _act(migration, second["id"], "approve", client=migration.author_client)
     async with harness.session_factory() as session:
-        reasons = list(await session.scalars(select(AuditLog.reason)))
+        reasons = list(
+            await session.scalars(
+                select(AuditLog.reason).where(AuditLog.result == AuditResult.DENIED)
+            )
+        )
+        actions = list(
+            await session.scalars(
+                select(AuditLog.action)
+                .where(AuditLog.target_type == "security_exception")
+                .order_by(AuditLog.seq)
+            )
+        )
 
     assert _error(self_approve) == (403, "SELF_APPROVAL_FORBIDDEN")
     assert approved.status_code == 200, approved.text
@@ -190,6 +201,13 @@ async def test_approve_by_other_developer_and_self_approval_follows_switch(
     assert self_approved.status_code == 200, self_approved.text
     assert self_approved.json()["data"]["approvedBy"]["login"] == "dev-a"
     assert reasons == ["SELF_APPROVAL_FORBIDDEN"]
+    # 요청 2·승인 2 가 감사 줄로 남는다(막힌 자기 승인은 거부 줄).
+    assert actions == [
+        "SECURITY_EXCEPTION_REQUESTED",
+        "SECURITY_EXCEPTION_REQUESTED",
+        "SECURITY_EXCEPTION_APPROVED",
+        "SECURITY_EXCEPTION_APPROVED",
+    ]
 
 
 async def test_expired_or_revoked_exception_cannot_be_approved_or_revoked_again(

@@ -44,6 +44,10 @@
 
 만든 예외는 `PENDING`(승인 대기)이고 판정에 쓰이지 않는다.
 
+## 감사 기록
+
+요청·승인·철회는 그 작업과 같은 트랜잭션에서 감사 줄을 남긴다(`docs/api/audit-logs.md`): `SECURITY_EXCEPTION_REQUESTED`·`SECURITY_EXCEPTION_APPROVED`·`SECURITY_EXCEPTION_REVOKED`, 대상 `security_exception`(이름표 = 통제 ID), 요청 줄 `details` 는 `{expiresAt}` 만. 막힌 자기 승인은 거부 줄(403)이다. 만료는 따로 줄을 남기지 않는다(조회 때 `EXPIRED`).
+
 ## 승인 · 철회
 
 - **승인**: `PENDING` 일 때만(아니면 409 `SECURITY_EXCEPTION_NOT_PENDING`). 기본은 **요청한 사람이 아닌** 개발자다. 조직 설정 `allowSelfApproval = false`(기본)이면 요청한 사람의 승인은 403 `SELF_APPROVAL_FORBIDDEN`(거부 기록 남음). `true` 면 허용한다(판정도 같은 스위치를 본다).
@@ -67,5 +71,4 @@
 
 ## 지금 없는 것
 
-- 감사 기록(`audit_logs`)에는 거부(403)만 남는다. 만들기·승인·철회 기록은 예외 행 자신(요청·승인·철회한 사람과 시각)과 구조화 로그에 남고, 감사 확대(#32)에서 감사 행으로 더한다.
 - 매트릭스 칸의 "예외 적용 중"(`hasException`)은 매트릭스 API(#59)가 이 표를 읽게 붙인 뒤 보인다.

@@ -63,7 +63,7 @@ async def update_organization_settings(
     organizations: Organizations,
 ) -> ApiResponse[OrganizationResponse]:
     view = await organizations.update_settings(
-        access.organization_id, access.role, request.allow_self_approval
+        access.organization_id, access.user.id, access.role, request.allow_self_approval
     )
     return ApiResponse(data=OrganizationResponse.from_view(view))
 
