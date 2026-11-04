@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.core.clock import Clock
 from app.core.exceptions import (
     CannotChangeOwnRoleError,
@@ -143,6 +145,7 @@ class OrganizationService:
         self._organizations = OrganizationRepository(session)
         self._members = OrganizationMemberRepository(session)
         self._users = UserRepository(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def create_organization(self, user: User, slug: str, name: str) -> OrganizationView:
         """조직과 만든 사람의 ADMIN 멤버를 한 트랜잭션에 넣는다. 예약 slug 는 받지 않는다."""
@@ -175,6 +178,12 @@ class OrganizationService:
                 )
             )
             await self._session.flush()
+            self._audit.record(
+                organization_id=organization.id,
+                actor=AuditActor.user(user.id),
+                action=AuditAction.ORGANIZATION_CREATED,
+                target=AuditTarget(AuditTargetType.ORGANIZATION, organization.id, name),
+            )
         logger.info(
             "organization created",
             extra={
@@ -186,20 +195,35 @@ class OrganizationService:
         return OrganizationView(organization=organization, role=OrganizationRole.ADMIN)
 
     async def update_settings(
-        self, organization_id: uuid.UUID, role: OrganizationRole | None, allow_self_approval: bool
+        self,
+        organization_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        role: OrganizationRole | None,
+        allow_self_approval: bool,
     ) -> OrganizationView:
         """조직 행을 `FOR NO KEY UPDATE` 로 잠그고 자기 승인 스위치를 바꾼다.
 
-        어드민 검사는 라우트의 검사기가 한다.
+        어드민 검사는 라우트의 검사기가 한다. 값이 그대로면 감사 줄을 쓰지 않는다.
         """
         now = self._clock.now()
         async with self._session.begin():
             organization = await self._organizations.find_by_id(organization_id, lock=True)
             if organization is None:
                 raise OrganizationNotFoundError
+            previous = organization.allow_self_approval
             organization.allow_self_approval = allow_self_approval
             organization.updated_at = now
             await self._session.flush()
+            if previous != allow_self_approval:
+                self._audit.record(
+                    organization_id=organization_id,
+                    actor=AuditActor.user(actor_user_id),
+                    action=AuditAction.ORGANIZATION_SETTINGS_CHANGED,
+                    target=AuditTarget(
+                        AuditTargetType.ORGANIZATION, organization_id, organization.name
+                    ),
+                    details={"allowSelfApproval": {"from": previous, "to": allow_self_approval}},
+                )
         logger.info(
             "organization settings changed",
             extra={
@@ -257,11 +281,20 @@ class OrganizationService:
                 and await self._members.count_admins(organization_id) <= 1
             ):
                 raise LastAdminError
+            previous = member.role
             member.role = role
             member.updated_at = now
             await self._session.flush()
             user = await self._users.find_by_id(target_user_id)
             assert user is not None
+            if previous != role:
+                self._audit.record(
+                    organization_id=organization_id,
+                    actor=AuditActor.user(actor_user_id),
+                    action=AuditAction.MEMBER_ROLE_CHANGED,
+                    target=AuditTarget(AuditTargetType.USER, user.id, user.github_login),
+                    details={"role": {"from": str(previous), "to": str(role)}},
+                )
         logger.info(
             "organization member role changed",
             extra={
@@ -287,7 +320,17 @@ class OrganizationService:
                 and await self._members.count_admins(organization_id) <= 1
             ):
                 raise LastAdminError
+            removed_role = member.role
             await self._members.delete(member)
+            user = await self._users.find_by_id(target_user_id)
+            assert user is not None
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(actor_user_id),
+                action=AuditAction.MEMBER_REMOVED,
+                target=AuditTarget(AuditTargetType.USER, user.id, user.github_login),
+                details={"role": str(removed_role)},
+            )
         logger.info(
             "organization member removed",
             extra={

@@ -13,6 +13,7 @@ from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
+from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.clock import Clock, SystemClock
 from app.core.config import (
     EnvironmentAdapterMode,
@@ -30,6 +31,7 @@ from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_fact
 from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
+from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
@@ -43,6 +45,7 @@ from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.security_matrix_service import SecurityMatrixService
 from app.services.service_service import ServiceService
 from app.services.service_variable_service import ServiceVariableService
@@ -138,6 +141,7 @@ def get_environment_connection_service(
 def get_environment_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
     connection_service: Annotated[
         EnvironmentConnectionService, Depends(get_environment_connection_service)
     ],
@@ -147,6 +151,7 @@ def get_environment_service(
         environment_repository=EnvironmentRepository(session),
         connection_service=connection_service,
         public_base_domain=settings.public_base_domain,
+        clock=clock,
     )
 
 
@@ -389,10 +394,24 @@ def get_agent_token_service(
     )
 
 
+def get_public_tls_checker(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> PublicHostTlsChecker | None:
+    """보안 게이트의 실행 직전 TLS 시험기. 게이트가 꺼져 있으면 None(게이트 없음)."""
+    return build_public_tls_checker(settings)
+
+
+def get_audit_log_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AuditLogService:
+    return AuditLogService(session=session)
+
+
 def get_migration_plan_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
+    tls_checker: Annotated[PublicHostTlsChecker | None, Depends(get_public_tls_checker)],
 ) -> MigrationPlanService:
     return MigrationPlanService(
         session=session,
@@ -403,6 +422,11 @@ def get_migration_plan_service(
         expected_rps=settings.migration_expected_rps,
         step_overhead_seconds=settings.migration_step_overhead_seconds,
         approval_ttl_seconds=settings.migration_plan_approval_ttl_seconds,
+        security_gate=(
+            SecurityGate(session, clock, tls_checker, settings.was_version)
+            if tls_checker is not None
+            else None
+        ),
     )
 
 

@@ -13,6 +13,8 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.github_user import GithubUserClient
 from app.core.clock import Clock
 from app.core.exceptions import (
@@ -42,7 +44,8 @@ async def apply_pending_invitations(session: AsyncSession, user: User, clock: Cl
     """그 사람 github_id 의 PENDING 초대를 적용한다. 호출하는 쪽이 트랜잭션을 연다.
 
     만료 전이면 멤버로 넣고 ACCEPTED(이미 멤버면 역할은 그대로 두고 ACCEPTED), 만료됐으면 EXPIRED.
-    적용해 새로 멤버가 된 조직 수를 돌려준다.
+    적용해 새로 멤버가 된 조직 수를 돌려준다. 멤버 행을 실제로 만든 초대마다 MEMBER_JOINED 한 줄을
+    같은 트랜잭션에 쓴다(/me·로그인 콜백 두 경로가 모두 이 함수를 지난다).
     """
     invitations = InvitationRepository(session)
     members = OrganizationMemberRepository(session)
@@ -67,6 +70,13 @@ async def apply_pending_invitations(session: AsyncSession, user: User, clock: Cl
             now=now,
         ):
             joined += 1
+            AuditRecorder(session, clock).record(
+                organization_id=invitation.organization_id,
+                actor=AuditActor.user(user.id),
+                action=AuditAction.MEMBER_JOINED,
+                target=AuditTarget(AuditTargetType.USER, user.id, user.github_login),
+                details={"role": str(invitation.role), "invitationId": str(invitation.id)},
+            )
         logger.info(
             "invitation accepted",
             extra={
@@ -95,6 +105,7 @@ class InvitationService:
         self._organizations = OrganizationRepository(session)
         self._members = OrganizationMemberRepository(session)
         self._users = UserRepository(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def create_invitation(
         self,
@@ -134,6 +145,15 @@ class InvitationService:
             )
             self._invitations.add(invitation)
             await self._session.flush()
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(invited_by_user_id),
+                action=AuditAction.INVITATION_CREATED,
+                target=AuditTarget(
+                    AuditTargetType.INVITATION, invitation.id, invitation.github_login
+                ),
+                details={"githubLogin": invitation.github_login, "role": str(role)},
+            )
         logger.info(
             "invitation created",
             extra={
@@ -158,7 +178,9 @@ class InvitationService:
             total = await self._invitations.count_by_organization(organization_id)
         return InvitationSearchResult(items=items, total=total)
 
-    async def revoke_invitation(self, organization_id: uuid.UUID, invitation_id: uuid.UUID) -> None:
+    async def revoke_invitation(
+        self, organization_id: uuid.UUID, invitation_id: uuid.UUID, actor_user_id: uuid.UUID
+    ) -> None:
         now = self._clock.now()
         async with self._session.begin():
             invitation = await self._invitations.find_in_organization(
@@ -175,6 +197,14 @@ class InvitationService:
                 raise InvitationNotPendingError(
                     "invitation is not pending", invitation_id=str(invitation_id)
                 )
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(actor_user_id),
+                action=AuditAction.INVITATION_REVOKED,
+                target=AuditTarget(
+                    AuditTargetType.INVITATION, invitation.id, invitation.github_login
+                ),
+            )
         logger.info(
             "invitation revoked",
             extra={

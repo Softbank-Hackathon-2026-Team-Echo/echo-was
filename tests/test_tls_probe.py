@@ -15,7 +15,16 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from app.clients.tls_probe import CERT_MIN_REMAINING, SocketTlsProbeClient, judge_tls
+from app.clients.tls_probe import (
+    CERT_MIN_REMAINING,
+    AddressClass,
+    PublicHostTlsChecker,
+    SocketTlsProbeClient,
+    TlsProbeResult,
+    classify_addresses,
+    is_public_host_name,
+    judge_tls,
+)
 from app.enums import SecurityFindingReason
 
 HOST = "localhost"
@@ -150,6 +159,18 @@ async def test_probe_hostname_mismatch_is_reported(tls_server: StartServer) -> N
     assert result.reason == SecurityFindingReason.TLS_HOSTNAME_MISMATCH
 
 
+async def test_probe_with_address_connects_to_that_ip_and_verifies_host_name(
+    tls_server: StartServer,
+) -> None:
+    # 인증서는 host(localhost)로 검증하고 접속은 확인한 IP 로만 한다(DNS 를 다시 찾지 않는다).
+    port, ca_path = await tls_server()
+    client = SocketTlsProbeClient(ssl_context=trusting(ca_path))
+    pinned = await client.probe(HOST, port, address="127.0.0.1")
+    mismatched = await client.probe("other.localhost", port, address="127.0.0.1")
+    assert pinned.reason == SecurityFindingReason.TLS_OK
+    assert mismatched.reason == SecurityFindingReason.TLS_HOSTNAME_MISMATCH
+
+
 async def test_probe_closed_port_is_unreachable() -> None:
     server = await asyncio.start_server(_close_quietly, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -197,3 +218,109 @@ def test_judge_tls_checks_version_and_remaining_validity(
 def test_judge_tls_without_expiry_is_invalid() -> None:
     now = datetime(2026, 11, 5, tzinfo=UTC)
     assert judge_tls("TLSv1.3", None, now) == SecurityFindingReason.TLS_CERT_INVALID
+
+
+DOMAIN = "echoport.test"
+
+
+@pytest.mark.parametrize(
+    ("addresses", "expected"),
+    [
+        (["34.64.10.20"], AddressClass.PUBLIC),
+        (["34.64.10.20", "2600:1900:4000::1"], AddressClass.PUBLIC),
+        (["10.60.0.6"], AddressClass.PRIVATE),
+        (["172.16.0.1", "192.168.1.2", "fd00::1"], AddressClass.PRIVATE),
+        (["34.64.10.20", "10.60.0.6"], AddressClass.SUSPICIOUS),
+        (["127.0.0.1"], AddressClass.SUSPICIOUS),
+        (["169.254.169.254"], AddressClass.SUSPICIOUS),
+        (["100.64.0.1"], AddressClass.SUSPICIOUS),
+        (["0.0.0.0"], AddressClass.SUSPICIOUS),
+        (["::ffff:127.0.0.1"], AddressClass.SUSPICIOUS),
+        (["::ffff:10.0.0.1"], AddressClass.PRIVATE),
+        (["224.0.0.1"], AddressClass.SUSPICIOUS),
+        (["not-an-ip"], AddressClass.SUSPICIOUS),
+        ([], AddressClass.SUSPICIOUS),
+    ],
+)
+def test_classify_addresses_accepts_only_all_public_or_all_private(
+    addresses: list[str], expected: AddressClass
+) -> None:
+    assert classify_addresses(addresses) == expected
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        (f"shop-api-m1g2r3t4.{DOMAIN}", True),
+        (f"shop-api-m1g2r3t4.gcp-seoul.{DOMAIN}", True),
+        (DOMAIN, False),
+        (f"shop.{DOMAIN}.evil.test", False),
+        (f"Shop.{DOMAIN}", False),
+        (f"-shop.{DOMAIN}", False),
+        (f"shop_api.{DOMAIN}", False),
+        (f"shop..{DOMAIN}", False),
+        ("169.254.169.254", False),
+    ],
+)
+def test_is_public_host_name_requires_echo_domain(host: str, expected: bool) -> None:
+    assert is_public_host_name(host, DOMAIN) is expected
+
+
+class _Resolver:
+    def __init__(self, addresses_by_host: dict[str, list[str]], delay: float = 0.0) -> None:
+        self.addresses_by_host = addresses_by_host
+        self.delay = delay
+        self.calls: list[str] = []
+
+    async def resolve(self, host: str, port: int) -> list[str]:
+        self.calls.append(host)
+        await asyncio.sleep(self.delay)
+        if host not in self.addresses_by_host:
+            raise OSError("not found")
+        return self.addresses_by_host[host]
+
+
+class _Probe:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, str | None]] = []
+
+    async def probe(self, host: str, port: int = 443, address: str | None = None) -> TlsProbeResult:
+        self.calls.append((host, port, address))
+        return TlsProbeResult(host, port, SecurityFindingReason.TLS_OK)
+
+
+async def test_public_host_checker_probes_only_public_echo_hosts_on_443() -> None:
+    public, private, mixed, missing = (f"{n}.{DOMAIN}" for n in ("pub", "priv", "mix", "gone"))
+    outside = "pub.other.test"
+    resolver = _Resolver(
+        {
+            public: ["34.64.10.20", "34.64.10.21"],
+            private: ["10.60.0.6"],
+            mixed: ["34.64.10.20", "169.254.169.254"],
+            outside: ["34.64.10.20"],
+        }
+    )
+    probe = _Probe()
+    checker = PublicHostTlsChecker(probe, resolver, DOMAIN)
+
+    results = await checker.check_hosts([public, private, mixed, missing, outside, public])
+
+    assert [(r.host, r.reason) for r in results] == [
+        (public, SecurityFindingReason.TLS_OK),
+        (private, SecurityFindingReason.TLS_HOST_NOT_PUBLIC),
+        (mixed, SecurityFindingReason.TLS_HOST_SUSPICIOUS),
+        (missing, SecurityFindingReason.TLS_UNREACHABLE),
+        (outside, SecurityFindingReason.TLS_HOST_NOT_ALLOWED),
+    ]
+    assert probe.calls == [(public, 443, "34.64.10.20")]
+    # 공개 도메인 밖 주소는 DNS 조회도 하지 않는다.
+    assert outside not in resolver.calls
+
+
+async def test_public_host_checker_times_out_slow_dns() -> None:
+    host = f"slow.{DOMAIN}"
+    checker = PublicHostTlsChecker(
+        _Probe(), _Resolver({host: ["34.64.10.20"]}, delay=1.0), DOMAIN, timeout_seconds=0.05
+    )
+    (result,) = await checker.check_hosts([host])
+    assert result.reason == SecurityFindingReason.TLS_TIMEOUT

@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
+from app.audit.lifecycle import record_deploy_request_finished
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.exceptions import (
@@ -101,13 +104,31 @@ class ServiceService:
         self._deploy_requests = DeployRequestRepository(session)
         self._jobs = JobRepository(session)
         self._job_log = DeployJobLog(session)
+        self._audit = AuditRecorder(session, clock)
 
-    async def create_service(self, command: CreateServiceCommand) -> ServiceDetailView:
+    def _record_audit(
+        self,
+        action: AuditAction,
+        service: Service,
+        actor_user_id: uuid.UUID,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self._audit.record(
+            organization_id=service.organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=action,
+            target=AuditTarget(AuditTargetType.SERVICE, service.id, service.name),
+            details=details,
+        )
+
+    async def create_service(
+        self, command: CreateServiceCommand, actor_user_id: uuid.UUID
+    ) -> ServiceDetailView:
         """저장소 접근을 확인하고 서비스를 ACTIVE 로 저장한다.
 
         대표 주소 `{이름}-{suffix}.{도메인}` 은 이때 한 번 정한다. 이름은 조직 안에서만 유일하다.
         주소가 이미 쓰이면 새 suffix 로 PUBLIC_HOST_RETRY_LIMIT 번까지 다시 시도하고, 그래도 겹치면
-        409 PUBLIC_HOST_CONFLICT 다.
+        409 PUBLIC_HOST_CONFLICT 다. 감사 줄은 시도마다 같은 블록에 쓰므로 커밋된 시도만 남는다.
         """
         repo = parse_repo_url(command.repo_url)
         access = await self._source_client.check_access(repo)
@@ -130,7 +151,7 @@ class ServiceService:
                 organization_id=command.organization_id,
             )
             try:
-                view = await self._insert_service(service)
+                view = await self._insert_service(service, actor_user_id)
             except _PublicHostTakenError:
                 logger.warning(
                     "service public host collided",
@@ -159,9 +180,16 @@ class ServiceService:
             return await load_service_detail(self._session, service, self._clock.now())
 
     async def update_service(
-        self, organization_id: uuid.UUID, service_id: uuid.UUID, changes: ServiceChanges
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        changes: ServiceChanges,
     ) -> ServiceDetailView:
-        """바뀐 값은 다음 배포 요청부터 쓴다. 접수된 요청은 접수 때 사본을 쓴다."""
+        """바뀐 값은 다음 배포 요청부터 쓴다. 접수된 요청은 접수 때 사본을 쓴다.
+
+        바뀐 칸이 없으면 감사 줄을 쓰지 않고, 줄에는 바뀐 칸 이름만 적는다(값은 적지 않는다).
+        """
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id)
             _check_updatable(service, changes)
@@ -175,44 +203,74 @@ class ServiceService:
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             _check_updatable(service, changes)
+            changed_fields: list[str] = []
+            if changes.description_set and changes.description != service.description:
+                changed_fields.append("description")
             if changes.description_set:
                 service.description = changes.description
             if new_repo_url is not None and repo_private is not None:
+                if new_repo_url != service.repo_url:
+                    changed_fields.append("repoUrl")
                 service.repo_url = new_repo_url
                 service.repo_private = repo_private
+            if changes.health_check_path not in (None, service.health_check_path):
+                changed_fields.append("healthCheckPath")
             if changes.health_check_path is not None:
                 service.health_check_path = changes.health_check_path
+            if changes.health_check_timeout_seconds not in (
+                None,
+                service.health_check_timeout_seconds,
+            ):
+                changed_fields.append("healthCheckTimeoutSeconds")
             if changes.health_check_timeout_seconds is not None:
                 service.health_check_timeout_seconds = changes.health_check_timeout_seconds
+            if changes.container_port not in (None, service.container_port):
+                changed_fields.append("containerPort")
             if changes.container_port is not None:
                 service.container_port = changes.container_port
             await self._session.flush()
+            if changed_fields:
+                self._record_audit(
+                    AuditAction.SERVICE_UPDATED,
+                    service,
+                    actor_user_id,
+                    {"changedFields": changed_fields},
+                )
             view = await load_service_detail(self._session, service, self._clock.now())
         _log("service updated", "update_service", service)
         return view
 
     async def delete_service(
-        self, organization_id: uuid.UUID, service_id: uuid.UUID
+        self, organization_id: uuid.UUID, service_id: uuid.UUID, actor_user_id: uuid.UUID
     ) -> ServiceDetailView:
         """DELETING 으로 바꾸고 대기 요청을 취소한 뒤 내리기 할 일을 만든다.
 
         실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다. 이미 DELETING 이면 재시도다.
         내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려 새 멱등 키로 다시 내린다.
+        감사 줄은 상태를 DELETING 으로 바꾼 요청과, 재시도 중 다시 내리기가 실제로 시작된 요청(실패
+        연결을 다시 내림·실패 표시를 지움·할 일을 새로 만듦, details.retry)만 쓴다. 이미 내리는
+        중이라 바뀐 것이 없는 재시도는 쓰지 않는다.
         """
         now = self._clock.now()
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
             connections = await self._service_environments.lock_live_by_service(service.id)
             await check_no_migration_in_progress(self._session, service.id)
-            if service.status == ServiceStatus.DELETING:
+            is_retry = service.status == ServiceStatus.DELETING
+            is_teardown_restarted = False
+            if is_retry:
+                is_teardown_restarted = service.delete_error is not None
                 for connection in connections:
                     if connection.teardown_error is not None:
                         connection.teardown_attempt += 1
                         connection.teardown_error = None
                         connection.teardown_requested_at = None
                         connection.teardown_external_ref = None
+                        is_teardown_restarted = True
             service.status = ServiceStatus.DELETING
             service.delete_error = None
+            if not is_retry:
+                self._record_audit(AuditAction.SERVICE_DELETE_REQUESTED, service, actor_user_id)
             for queued in await self._deploy_requests.search_queued_by_service(service.id):
                 if await self._deploy_requests.transition(
                     queued.id,
@@ -225,6 +283,14 @@ class ServiceService:
                     },
                 ):
                     await self._job_log.append(queued, DeployLogCode.CANCELLED_SERVICE_DELETED, now)
+                    await record_deploy_request_finished(
+                        self._session,
+                        self._clock,
+                        queued,
+                        status=DeployRequestStatus.CANCELLED,
+                        component=AuditComponent.API,
+                        cancel_reason=DeployRequestCancelReason.SERVICE_DELETED,
+                    )
                     await self._jobs.cancel_queued_for_subject(queued.id, now)
             if await self._jobs.find_open_for_subject(service.id) is None:
                 self._jobs.add(
@@ -237,12 +303,19 @@ class ServiceService:
                         updated_at=now,
                     )
                 )
+                is_teardown_restarted = True
+            if is_retry and is_teardown_restarted:
+                self._record_audit(
+                    AuditAction.SERVICE_DELETE_REQUESTED, service, actor_user_id, {"retry": True}
+                )
             await self._session.flush()
             view = await load_service_detail(self._session, service, self._clock.now())
         _log("service deletion requested", "delete_service", service)
         return view
 
-    async def _insert_service(self, service: Service) -> ServiceDetailView:
+    async def _insert_service(
+        self, service: Service, actor_user_id: uuid.UUID
+    ) -> ServiceDetailView:
         """한 트랜잭션에서 이름·주소를 확인하고 넣는다. 주소가 쓰이면 _PublicHostTakenError."""
         async with self._session.begin():
             if (
@@ -257,6 +330,7 @@ class ServiceService:
                 raise _PublicHostTakenError
             self._services.add(service)
             await self._flush()
+            self._record_audit(AuditAction.SERVICE_CREATED, service, actor_user_id)
             return await load_service_detail(self._session, service, self._clock.now())
 
     async def _flush(self) -> None:

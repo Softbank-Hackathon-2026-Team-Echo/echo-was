@@ -8,6 +8,10 @@
 
 만료(EXPIRED)·낡음(STALE) 전환은 트랜잭션 안에서 적고 커밋한 뒤 트랜잭션 밖에서 409 를 올린다
 (안에서 올리면 전환과 로그가 되돌려진다). 자기 승인 403 은 상태를 바꾸지 않으므로 안에서 올린다.
+
+보안 게이트(설정으로 켤 때만 주입)는 승인 잠금 전에 판정하고(TLS 시험은 트랜잭션 밖), 잠금 안에서
+지문이 같을 때 판정 줄을 남긴다. 막혔으면 계획은 승인 대기 그대로 두고 커밋한 뒤 409
+SECURITY_GATE_BLOCKED 를 올린다.
 """
 
 import logging
@@ -21,6 +25,9 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditComponent
+from app.audit.lifecycle import migration_plan_target, record_migration_plan_finished
+from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
 from app.core.config import ExecutorMode
 from app.core.exceptions import (
@@ -35,6 +42,7 @@ from app.core.exceptions import (
     PlanNotRunningError,
     PlanStaleError,
     RequestFieldInvalidError,
+    SecurityGateBlockedError,
     SelfApprovalForbiddenError,
     ServiceDeletingError,
     SimulateNotAllowedError,
@@ -92,6 +100,7 @@ from app.services.migration_plan_support import (
     read_fingerprint,
     skip_pending_steps,
 )
+from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
 
 logger = logging.getLogger(__name__)
 
@@ -172,8 +181,10 @@ class MigrationPlanService:
         expected_rps: int,
         step_overhead_seconds: int,
         approval_ttl_seconds: int,
+        security_gate: SecurityGate | None = None,
     ) -> None:
         self._session = session
+        self._security_gate = security_gate
         self._clock = clock
         self._executor_mode = executor_mode
         self._required_requests_default = tuple(required_requests_default)
@@ -192,6 +203,23 @@ class MigrationPlanService:
         self._organizations = OrganizationRepository(session)
         self._users = UserRepository(session)
         self._log = MigrationPlanLogWriter(session)
+        self._audit = AuditRecorder(session, clock)
+
+    async def _record_audit(
+        self,
+        action: AuditAction,
+        plan: MigrationPlan,
+        organization_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._audit.record(
+            organization_id=organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=action,
+            target=await migration_plan_target(self._session, plan),
+            details=details,
+        )
 
     # --- 만들기 ---
 
@@ -261,6 +289,16 @@ class MigrationPlanService:
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
                     "mode": plan.mode,
+                },
+            )
+            await self._record_audit(
+                AuditAction.MIGRATION_PLAN_CREATED,
+                plan,
+                organization_id,
+                actor_user_id,
+                {
+                    "sourceEnvironmentId": str(source.environment_id),
+                    "targetEnvironmentId": str(target.environment_id),
                 },
             )
             view = (await self._views([plan]))[0]
@@ -440,11 +478,20 @@ class MigrationPlanService:
     async def approve_plan(
         self, organization_id: uuid.UUID, plan_id: uuid.UUID, actor_user_id: uuid.UUID
     ) -> MigrationPlanView:
-        """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다."""
+        """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다.
+
+        보안 게이트가 있으면 지문이 같을 때 판정을 남기고, 막혔으면 승인하지 않고 409 를 올린다.
+        """
         async with self._session.begin():
             await self._get_in_organization(organization_id, plan_id)
+        decision = (
+            await self._security_gate.evaluate_plan(plan_id)
+            if self._security_gate is not None
+            else None
+        )
         now = self._clock.now()
         rejection: tuple[_Outcome, list[str]] | None = None
+        gate_rejection: SecurityGateBlockedError | None = None
         async with self._session.begin():
             organization = await self._organizations.find_by_id(organization_id)
             if organization is None:
@@ -469,10 +516,34 @@ class MigrationPlanService:
                 if changed:
                     await self._mark_stale(plan, changed, now)
                     rejection = (_Outcome.STALE, changed)
+                elif decision is not None and decision.is_blocked:
+                    await self._log.append(
+                        plan,
+                        MigrationLogCode.SECURITY_GATE_BLOCKED,
+                        now,
+                        data=gate_log_data(decision),
+                    )
+                    gate_rejection = blocked_error(decision)
                 else:
+                    if decision is not None:
+                        await self._log.append(
+                            plan,
+                            MigrationLogCode.SECURITY_GATE_PASSED,
+                            now,
+                            data=gate_log_data(decision),
+                        )
                     await self._approve(plan, actor_user_id, is_self, now)
+                    await self._record_audit(
+                        AuditAction.MIGRATION_PLAN_APPROVED,
+                        plan,
+                        organization_id,
+                        actor_user_id,
+                        {"selfApproved": is_self},
+                    )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
+        if gate_rejection is not None:
+            raise gate_rejection
         _log_plan("migration plan approved", "approve_migration_plan", view.plan)
         return view
 
@@ -530,13 +601,15 @@ class MigrationPlanService:
                 raise SelfApprovalForbiddenError
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
-            else:
-                await self._close_pending(
-                    plan,
-                    MigrationPlanStatus.REJECTED,
-                    {"rejected_by_user_id": actor_user_id},
-                    MigrationLogCode.REJECTED,
-                    now,
+            elif await self._close_pending(
+                plan,
+                MigrationPlanStatus.REJECTED,
+                {"rejected_by_user_id": actor_user_id},
+                MigrationLogCode.REJECTED,
+                now,
+            ):
+                await self._record_audit(
+                    AuditAction.MIGRATION_PLAN_REJECTED, plan, organization_id, actor_user_id
                 )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
@@ -556,13 +629,15 @@ class MigrationPlanService:
             self._check_pending(plan)
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
-            else:
-                await self._close_pending(
-                    plan,
-                    MigrationPlanStatus.CANCELLED,
-                    {"cancelled_by_user_id": actor_user_id},
-                    MigrationLogCode.CANCELLED,
-                    now,
+            elif await self._close_pending(
+                plan,
+                MigrationPlanStatus.CANCELLED,
+                {"cancelled_by_user_id": actor_user_id},
+                MigrationLogCode.CANCELLED,
+                now,
+            ):
+                await self._record_audit(
+                    AuditAction.MIGRATION_PLAN_CANCELLED, plan, organization_id, actor_user_id
                 )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
@@ -601,6 +676,9 @@ class MigrationPlanService:
                 [MigrationPlan.abort_requested_at.is_(None)],
             ):
                 await self._log.append(plan, MigrationLogCode.ABORT_REQUESTED, now)
+                await self._record_audit(
+                    AuditAction.MIGRATION_ABORT_REQUESTED, plan, organization_id, actor_user_id
+                )
                 if await self._jobs.pull_open_for_subject(plan.id, now) == 0:
                     await self._recover_missing_job(plan, status, actor_user_id, now)
             view = await self._reload_view(plan_id)
@@ -627,6 +705,7 @@ class MigrationPlanService:
                 },
             ):
                 await self._log.append(plan, MigrationLogCode.CANCELLED, now)
+                await self._record_auto_finished(plan, MigrationPlanStatus.CANCELLED)
             return
         self._jobs.add(
             Job(
@@ -689,8 +768,13 @@ class MigrationPlanService:
         code: MigrationLogCode,
         now: datetime,
         data: dict[str, Any] | None = None,
-    ) -> None:
-        if await self._plans.transition(
+    ) -> bool:
+        """승인 대기 계획을 끝낸다. 반영됐으면 True.
+
+        만료·낡음은 사람이 고른 결과가 아니라 서버 규칙으로 끝난 것이라 SYSTEM(api) 줄을 쓴다. 거절·
+        취소는 부른 쪽이 USER 줄을 쓴다.
+        """
+        if not await self._plans.transition(
             plan.id,
             MigrationPlanStatus.PENDING_APPROVAL,
             {
@@ -701,7 +785,16 @@ class MigrationPlanService:
                 "updated_at": now,
             },
         ):
-            await self._log.append(plan, code, now, data=data)
+            return False
+        await self._log.append(plan, code, now, data=data)
+        if status in (MigrationPlanStatus.EXPIRED, MigrationPlanStatus.STALE):
+            await self._record_auto_finished(plan, status)
+        return True
+
+    async def _record_auto_finished(self, plan: MigrationPlan, status: MigrationPlanStatus) -> None:
+        await record_migration_plan_finished(
+            self._session, self._clock, plan, status=status, component=AuditComponent.API
+        )
 
     async def _get_in_organization(
         self, organization_id: uuid.UUID, plan_id: uuid.UUID

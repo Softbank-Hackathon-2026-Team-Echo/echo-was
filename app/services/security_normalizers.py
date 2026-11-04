@@ -13,6 +13,9 @@
 - C-IMG-2(시크릿 노출, gitleaks·Trivy secret): 하나라도 있으면 FAIL. 없으면 PASS.
 - C-CFG-1(설정 위반): 실패한 HIGH 이상 → FAIL. 그 밖의 실패 → WARN. 없으면 PASS.
 - C-TLS-1(공개 경로 TLS): 주소마다 접속 시험 결과의 가장 나쁜 값. 시간 초과·연결 불가는 UNKNOWN.
+  사설 대역만 나온 주소는 NA(공개 경로가 아님), 의심 주소·Echo 가 만들지 않은 주소는 UNKNOWN.
+- C-IMG-3(출발·도착 이미지 일치, WAS 상태): 두 현재 배포의 digest 가 같으면 PASS, 다르거나 한쪽에
+  현재 배포가 없으면 FAIL.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -47,6 +50,9 @@ _TLS_RESULT = {
     SecurityFindingReason.TLS_OK: SecurityResult.PASS,
     SecurityFindingReason.TLS_TIMEOUT: SecurityResult.UNKNOWN,
     SecurityFindingReason.TLS_UNREACHABLE: SecurityResult.UNKNOWN,
+    SecurityFindingReason.TLS_HOST_NOT_PUBLIC: SecurityResult.NA,
+    SecurityFindingReason.TLS_HOST_SUSPICIOUS: SecurityResult.UNKNOWN,
+    SecurityFindingReason.TLS_HOST_NOT_ALLOWED: SecurityResult.UNKNOWN,
 }
 
 _RESULT_ORDER = {
@@ -281,6 +287,32 @@ def normalize_tls_probes(
 
 def _tls_result(reason: SecurityFindingReason) -> SecurityResult:
     return _TLS_RESULT.get(reason, SecurityResult.FAIL)
+
+
+def normalize_image_match(
+    source_digest: str | None,
+    target_digest: str | None,
+    *,
+    scope: SecurityScope,
+    collected_at: datetime,
+) -> NormalizedFinding:
+    """출발·도착 현재 배포의 digest(WAS 상태) → C-IMG-3. 실행 시점에 WAS 가 DB 에서 읽은 값이다."""
+    is_same = source_digest is not None and source_digest == target_digest
+    items = [
+        FindingItem(item_id="source", target=source_digest),
+        FindingItem(item_id="target", target=target_digest),
+    ]
+    return _build(
+        SecurityControlId.IMG_3,
+        SecurityFindingSource.WAS_STATE,
+        scope,
+        collected_at,
+        SecurityFindingMode.REAL,
+        None,
+        SecurityResult.PASS if is_same else SecurityResult.FAIL,
+        SecurityFindingReason.IMAGE_MATCH if is_same else SecurityFindingReason.IMAGE_MISMATCH,
+        items,
+    )
 
 
 def _secret_finding(

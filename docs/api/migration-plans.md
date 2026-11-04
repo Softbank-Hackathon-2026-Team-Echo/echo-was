@@ -1,4 +1,4 @@
-# 이전 계획 API — 만들기 · 승인 · 실행 (API 서버 8 · 8-1)
+# 이전 계획 API — 만들기 · 승인 · 실행 (API 서버 8 · 8-1 · 보안 5 게이트)
 
 서비스 중인 앱의 트래픽을 지금 환경(**출발**, 비율 100%)에서 같은 이미지가 올라간 예비 환경(**도착**)으로 옮긴다. 계획을 만들고, 다른 개발자가 **승인하면 바로 실행**되고, 일꾼이 단계마다 비율을 바꾼 뒤 **도착이 요청 N건을 5xx 허용 안에서 처리했는지 세어** 자동으로 다음 단계로 간다. 실패·판단 불가·중단이면 출발 100% 로 되돌린다. 근거: SPEC [specs/api-8-migration-plans.md](../../specs/api-8-migration-plans.md), 판정 방식은 [specs/api-8-1-request-count-judgement.md](../../specs/api-8-1-request-count-judgement.md)(다르면 8-1 이 우선).
 
@@ -12,7 +12,7 @@
 | `POST /services/{serviceId}/migration-plans` | 201 `MigrationPlanDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409(아래 "만들기"), 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자(사람) |
 | `GET /services/{serviceId}/migration-plans?status&page&size` | 200 `Page[MigrationPlanSummary]`(최신순) | 404 `SERVICE_NOT_FOUND`, 422 | 뷰어·에이전트 |
 | `GET /migration-plans/{planId}` | 200 `MigrationPlanDetail` | 404 `MIGRATION_PLAN_NOT_FOUND` | 뷰어·에이전트 |
-| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED` | 개발자(사람) |
+| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED`·`SECURITY_GATE_BLOCKED`(게이트를 켰을 때) | 개발자(사람) |
 | `POST /migration-plans/{planId}/reject` | 200 `MigrationPlanDetail`(`REJECTED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/cancel` | 200 `MigrationPlanDetail`(`CANCELLED`) | 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/abort` | 202 `MigrationPlanDetail`(멱등) | 409 `PLAN_NOT_RUNNING` | 개발자(사람) |
@@ -84,7 +84,7 @@
 ## 승인 · 거절 · 취소
 
 - **승인 = 실행 시작**(별도 실행 버튼 없음). 개발자 이상의 사람만. 기본은 **만든 사람이 아닌 사람**이다. 조직 설정 `allowSelfApproval = false`(기본)이면 만든 사람의 승인·거절은 403 `SELF_APPROVAL_FORBIDDEN`(거부 기록 남음, 계획은 그대로). `true` 면 허용하고 `selfApproved = true`, 로그 `SELF_APPROVED`.
-- 승인 순서(서비스 → 연결 → 계획 잠금): `PENDING_APPROVAL` 아님 409 `PLAN_NOT_PENDING` → 자기 승인 403 → 만료면 `EXPIRED` 로 바꾸고 커밋한 뒤 409 `PLAN_EXPIRED` → **지문**이 다르면 `STALE` 로 바꾸고 커밋한 뒤 409 `PLAN_STALE`(`details` = 달라진 항목마다 `{field, reason: "CHANGED"}`) → 통과면 `APPROVED` + 할 일 `MIGRATION_PLAN` + 로그 `APPROVED` → 202.
+- 승인 순서(서비스 → 연결 → 계획 잠금): `PENDING_APPROVAL` 아님 409 `PLAN_NOT_PENDING` → 자기 승인 403 → 만료면 `EXPIRED` 로 바꾸고 커밋한 뒤 409 `PLAN_EXPIRED` → **지문**이 다르면 `STALE` 로 바꾸고 커밋한 뒤 409 `PLAN_STALE`(`details` = 달라진 항목마다 `{field, reason: "CHANGED"}`) → (보안 게이트를 켰을 때) 판정이 막으면 로그 `SECURITY_GATE_BLOCKED` 를 남기고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`(계획은 `PENDING_APPROVAL` 그대로, 아래 "보안 게이트") → 통과면 (게이트를 켰을 때 로그 `SECURITY_GATE_PASSED`) `APPROVED` + 할 일 `MIGRATION_PLAN` + 로그 `APPROVED` → 202.
 - 거절(`REJECTED`)·취소(`CANCELLED`)는 `PENDING_APPROVAL` 에서만이고 먼저 만료를 판정한다. 만든 사람의 거절도 자기 승인 스위치를 따른다(막혀 있으면 403 — 만든 사람은 취소를 쓴다). 취소는 개발자 이상 누구나.
 - 승인 대기는 24시간(`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`) 뒤 만료다. 만료 판정은 승인·거절·취소·새 계획 만들기 때 하고, 조회는 저장된 상태를 바꾸지 않는다(서비스 상세 `activeMigrationPlanId` 는 만료된 대기 계획을 세지 않는다).
 
@@ -100,6 +100,19 @@
 | `openDeployRequests` | 서비스의 열린 배포 요청 id 목록 |
 
 접속 재확인 시각(`connection_checked_at`)·`updated_at` 은 넣지 않는다 — 접속 재확인만으로는 낡지 않는다. 승인 대기 동안 배포를 접수하면(막지 않는다) 그 계획은 승인 때 `STALE` 이 된다.
+
+### 보안 게이트 (보안·거버넌스 5, `SECURITY_GATE_ENABLED`, 기본 꺼짐)
+
+켜면 **승인 때와 일꾼 시작 때** 같은 판정(규칙표 `evaluate_security`, 실행 시점 `EXECUTION`)을 한다. 사람 승인과 앞으로의 사전 승인 자동 DR 이 같은 판정을 쓴다. 꺼져 있으면 판정·네트워크·로그 줄이 모두 없다. 근거: [specs/sec-5-migration-gate.md](../../specs/sec-5-migration-gate.md).
+
+- **필수 통제 하나라도 FAIL·UNKNOWN 이고 유효한 기한부 예외가 없으면 막는다.** 승인은 409 `SECURITY_GATE_BLOCKED`(계획은 승인 대기 그대로라 고친 뒤 다시 승인할 수 있다), 일꾼 시작은 트래픽을 바꾸지 않고 `FAILED`(`SECURITY_GATE_BLOCKED`, `rollbackStatus = NOT_NEEDED`).
+- `details` 한 칸 = 막은 통제 하나의 사유 하나: `{field: 통제 ID, reason: 사유 코드}`. 예: `{"field": "C-AI-1", "reason": "PRECHECK_MISSING"}`, `{"field": "C-DB-1", "reason": "EVIDENCE_MISSING"}`.
+- 판정 직전에 두 가지를 새로 확인해 증거(`findings`, `sourceRef = migration-plan:{planId}`)로 남긴다. 이 두 통제는 방금 확인한 증거만 쓴다.
+  - **C-IMG-3** 출발·도착 현재 배포의 digest 가 같은가(WAS 상태).
+  - **C-TLS-1** 대표 주소·도착 환경 주소의 TLS 접속 시험(5초). Echo 가 만든 공개 도메인 아래 주소만, 443 만, DNS 로 받은 IP 를 확인한 뒤 그 IP 로 접속한다. 사설 대역만 나오면 접속하지 않고 NA, 루프백·링크 로컬·예약 대역이나 공인·사설이 섞이면 접속하지 않고 UNKNOWN.
+- 그 밖의 증거: 조직의 유효한 증거(빌드 검사·사람 점검 기록 등), 승인됐고 철회되지 않은 기한부 예외, 24시간 안에 성공한 AI 사전 점검(C-AI-1).
+- 판정은 로그 줄 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 의 `data` 에 정책 버전·판정 시점·막은 통제와 사유·쓴 증거 ID·예외 ID 로 남는다.
+- 판정을 만든 뒤 바뀐 상태(현재 배포·환경 설정)는 지문이 잡는다(승인·시작 모두 잠금 안에서 지문을 먼저 비교한다).
 
 ## 실행 (일꾼)
 
@@ -170,14 +183,14 @@
 | 값 | 뜻 | 다음 |
 |---|---|---|
 | `PENDING_APPROVAL` | 승인 대기 | `APPROVED`·`REJECTED`·`CANCELLED`·`EXPIRED`·`STALE` |
-| `APPROVED` | 승인됨, 일꾼 시작 전 | `RUNNING`·`STALE`·`CANCELLED`(시작 전 중단)·`FAILED`(`WORKER_LOST`) |
+| `APPROVED` | 승인됨, 일꾼 시작 전 | `RUNNING`·`STALE`·`CANCELLED`(시작 전 중단)·`FAILED`(`WORKER_LOST`·`SECURITY_GATE_BLOCKED`) |
 | `RUNNING` | 단계 진행 중 | `SUCCEEDED`·`ROLLING_BACK`·`FAILED`(`PREFLIGHT_FAILED`) |
 | `ROLLING_BACK` | 출발 100% 로 되돌리는 중 | `ROLLED_BACK`·`FAILED` |
 | `SUCCEEDED`·`ROLLED_BACK`·`FAILED`·`REJECTED`·`CANCELLED`·`EXPIRED`·`STALE` | 끝 | — |
 
 단계 결과(`steps[i].result.status`): `PENDING`·`RUNNING`·`PASSED`·`FAILED`·`SKIPPED`. 롤백·실패로 끝나면 남은 단계는 `SKIPPED`, 중단·일꾼 상실로 멈춘 단계는 `FAILED`(`failureCode` = 그 원인).
 
-원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR`. 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED`.
+원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `SECURITY_GATE_BLOCKED`(일꾼 시작 때 보안 게이트가 막음, 트래픽 그대로). 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED`.
 
 ## `simulate` (가짜 모드 시연)
 
@@ -265,7 +278,7 @@
 
 ### 실행 로그 `GET /migration-plans/{planId}/logs?cursor&limit`
 
-`MigrationLogPage`: `simulated`(계획 행 값), `items[{seq, step, at, level, code, message, data}]`, `nextCursor`, `hasMore`. 커서 = 마지막으로 받은 `seq`(숫자가 아니면 422 `VALIDATION_ERROR`), `limit` 1~500 기본 200. 줄은 상태 변경과 같은 트랜잭션에서 반영됐을 때만 쓰고(그래서 일꾼이 다시 시작해도 겹치거나 빠지지 않는다) 계획당 500줄(`LOG_TRUNCATED`)이다. `step` 은 계획 단계 번호라 응답의 `steps[i]` 와 맞춰 "계획 / 실제"를 볼 수 있다. `data` 는 비율·건수·지표 숫자(`STALE` 은 `changed` 항목 이름, `COUNTERS_RESET` 은 `counter`, 비율 단계 판정은 `lowTraffic`)만 담는다. 1초마다의 진행 숫자 갱신은 로그 줄을 남기지 않는다(`progress` 로 본다).
+`MigrationLogPage`: `simulated`(계획 행 값), `items[{seq, step, at, level, code, message, data}]`, `nextCursor`, `hasMore`. 커서 = 마지막으로 받은 `seq`(숫자가 아니면 422 `VALIDATION_ERROR`), `limit` 1~500 기본 200. 줄은 상태 변경과 같은 트랜잭션에서 반영됐을 때만 쓰고(그래서 일꾼이 다시 시작해도 겹치거나 빠지지 않는다) 계획당 500줄(`LOG_TRUNCATED`)이다. `step` 은 계획 단계 번호라 응답의 `steps[i]` 와 맞춰 "계획 / 실제"를 볼 수 있다. `data` 는 비율·건수·지표 숫자(`STALE` 은 `changed` 항목 이름, `COUNTERS_RESET` 은 `counter`, 비율 단계 판정은 `lowTraffic`, 보안 게이트 판정은 정책 버전·통제 ID·사유 코드·증거·예외 ID)만 담는다. 1초마다의 진행 숫자 갱신은 로그 줄을 남기지 않는다(`progress` 로 본다).
 
 | code | level | step | data |
 |---|---|---|---|
@@ -284,9 +297,10 @@
 | `ROLLBACK_STARTED` | WARN | 멈춘 단계 | |
 | `ROLLBACK_APPLIED` | INFO | — | `sourceWeight: 100`, `targetWeight: 0` |
 | `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` | WARN · ERROR | — | `attempt`(·`maxAttempts`) |
-| `FAILED` | ERROR | — | (일꾼 상실·내부 오류. 문장 = 원인 코드 문장) |
+| `FAILED` | ERROR | — | (일꾼 상실·내부 오류·보안 게이트. 문장 = 원인 코드 문장) |
+| `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | INFO · WARN | — | `policyVersion`, `phase`(`EXECUTION`), `blocking[{controlId, reasons}]`, `findingIds`, `exceptionIds`. 게이트를 켰을 때만. 승인 때 막히면 계획 상태는 그대로이고 이 줄만 남는다 |
 
-성공한 계획의 줄 순서: `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK, WEIGHT_APPLIED(1), JUDGE_PASSED(1), WEIGHT_APPLIED(2), JUDGE_PASSED(2), DATA_SYNC_OK(3), WEIGHT_APPLIED(4), JUDGE_PASSED(4), SUCCEEDED`(카운터가 재시작하면 그 단계 판정 줄 앞에 `COUNTERS_RESET`).
+성공한 계획의 줄 순서(게이트를 켜면 `APPROVED`·`STARTED` 앞에 `SECURITY_GATE_PASSED` 가 하나씩 더 있다): `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK, WEIGHT_APPLIED(1), JUDGE_PASSED(1), WEIGHT_APPLIED(2), JUDGE_PASSED(2), DATA_SYNC_OK(3), WEIGHT_APPLIED(4), JUDGE_PASSED(4), SUCCEEDED`(카운터가 재시작하면 그 단계 판정 줄 앞에 `COUNTERS_RESET`).
 
 ## HTTP 오류
 
@@ -304,6 +318,7 @@
 | 도착에 앱 없음·다른 버전 | 409 | `TARGET_NOT_READY`(+`NO_DEPLOYMENT`·`VERSION_MISMATCH`·`lastSyncError`) |
 | 승인 대기가 아님 · 실행 중이 아님 | 409 | `PLAN_NOT_PENDING` · `PLAN_NOT_RUNNING` |
 | 지문 다름 · 만료 | 409 | `PLAN_STALE`(+달라진 항목) · `PLAN_EXPIRED` |
+| 보안 게이트가 승인을 막음(게이트를 켰을 때) | 409 | `SECURITY_GATE_BLOCKED`(+통제 ID·사유 코드) |
 | 실행 중 그 서비스의 배포 요청·되돌리기·삭제 | 409 | `MIGRATION_IN_PROGRESS`(+`planId`) |
 
 ## 설정
@@ -319,5 +334,7 @@
 | `MIGRATION_STEP_OVERHEAD_SECONDS` | 2 | 단계 예상 시간에 더하는 여유(0~60) |
 | `MIGRATION_PLAN_APPROVAL_TTL_SECONDS` | 86400 | 승인 대기 만료 |
 | `MIGRATION_ROLLBACK_MAX_ATTEMPTS` | 3 | 롤백 비율 적용 최대 시도 |
+| `SECURITY_GATE_ENABLED` | `false` | 보안 게이트(승인·일꾼 시작 판정, 실행 직전 TLS 시험). API·일꾼 모두 같은 값 |
+| `WAS_VERSION` | (없음) | 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 두 통제는 확인 불가 |
 
 `MIGRATION_OBSERVE_SECONDS_DEFAULT` 는 8-1 에서 없앴다(설정에 남아 있어도 무시한다).

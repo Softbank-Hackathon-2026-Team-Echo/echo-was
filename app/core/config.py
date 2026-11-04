@@ -231,6 +231,12 @@ class Settings(BaseSettings):
     migration_plan_approval_ttl_seconds: int = Field(default=24 * 60 * 60, gt=0)
     migration_rollback_max_attempts: int = Field(default=3, ge=1, le=10)
 
+    # 보안 게이트(보안·거버넌스 5). 켜면 이전 승인과 일꾼 실행 시작 때 필수 보안 통제를 판정해
+    # 막는다(실행 직전 TLS 접속 시험 포함). 기본은 꺼짐이고, 꺼져 있으면 판정·기록을 하지 않는다.
+    security_gate_enabled: bool = False
+    # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
+    was_version: str | None = Field(default=None, min_length=1, max_length=64)
+
     @field_validator("public_base_domain")
     @classmethod
     def _check_public_base_domain(cls, value: str) -> str:

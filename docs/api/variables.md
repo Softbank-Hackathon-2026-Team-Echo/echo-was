@@ -4,6 +4,7 @@
 
 - 화면(echo-frontend #14)이 쓰는 계약이다. 공통 봉투·camelCase·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다.
 - **쓰기 전용이다.** 값·값 일부·길이는 어떤 응답·오류·로그에도 없다. 다시 보는 API 는 없다.
+- 넣기·지우기는 감사 로그에 남는다(`SERVICE_VARIABLE_SET`·`SERVICE_VARIABLE_DELETED`, [audit-logs.md](audit-logs.md)). 누가 어떤 키를 바꿨는지만 적고 값·비밀 참조·버전은 적지 않는다.
 - **앱은 다시 배포해야 바뀐다**(자동 재시작 없음). 응답 `pendingRedeploy` 로 보인다.
 - `environmentId` 는 환경 id(서비스 상세의 `environments[].environment.id`)다. 연결(`serviceEnvironmentId`)이 아니다.
 - **연결은 그 환경의 첫 배포 요청 때 생긴다.** 그 전에는 404 `SERVICE_ENVIRONMENT_NOT_FOUND` 다.

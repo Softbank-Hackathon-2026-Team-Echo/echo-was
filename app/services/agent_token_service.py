@@ -7,6 +7,8 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.auth.tokens import AGENT_TOKEN_LAST_CHARS, hash_token, new_agent_token
 from app.core.clock import Clock
 from app.core.exceptions import AgentTokenNotFoundError, RequestFieldInvalidError
@@ -38,7 +40,10 @@ async def issue_agent_token(
     expires_in_days: int,
     clock: Clock,
 ) -> IssuedAgentToken:
-    """토큰 행을 넣는다. 호출하는 쪽이 트랜잭션을 연다(데모 준비 명령도 쓴다)."""
+    """토큰 행을 넣는다. 호출하는 쪽이 트랜잭션을 연다(데모 준비 명령도 쓴다).
+
+    감사 줄은 API 경로의 AgentTokenService.issue 가 쓴다(데모 준비 명령은 기록하지 않는다).
+    """
     raw = new_agent_token()
     now = clock.now()
     token = AgentToken(
@@ -72,6 +77,7 @@ class AgentTokenService:
         self._default_days = default_days
         self._max_days = max_days
         self._tokens = AgentTokenRepository(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def issue(
         self,
@@ -84,7 +90,7 @@ class AgentTokenService:
         if days > self._max_days:
             raise RequestFieldInvalidError("expiresInDays", "EXPIRES_IN_DAYS_TOO_LONG")
         async with self._session.begin():
-            return await issue_agent_token(
+            issued = await issue_agent_token(
                 self._session,
                 organization_id=organization_id,
                 created_by_user_id=created_by_user_id,
@@ -92,6 +98,14 @@ class AgentTokenService:
                 expires_in_days=days,
                 clock=self._clock,
             )
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(created_by_user_id),
+                action=AuditAction.AGENT_TOKEN_ISSUED,
+                target=AuditTarget(AuditTargetType.AGENT_TOKEN, issued.token.id, name),
+                details={"name": name},
+            )
+            return issued
 
     async def search(
         self, organization_id: uuid.UUID, page: int, size: int
@@ -103,8 +117,10 @@ class AgentTokenService:
             total = await self._tokens.count_by_organization(organization_id)
         return AgentTokenSearchResult(items=items, total=total)
 
-    async def revoke(self, organization_id: uuid.UUID, token_id: uuid.UUID) -> None:
-        """폐기한다. 이미 폐기됐어도 성공이다."""
+    async def revoke(
+        self, organization_id: uuid.UUID, token_id: uuid.UUID, actor_user_id: uuid.UUID
+    ) -> None:
+        """폐기한다. 이미 폐기됐어도 성공이다(이때는 바뀐 것이 없어 감사 줄을 쓰지 않는다)."""
         now = self._clock.now()
         async with self._session.begin():
             token = await self._tokens.find_in_organization(organization_id, token_id)
@@ -112,6 +128,12 @@ class AgentTokenService:
                 raise AgentTokenNotFoundError("agent token not found", agent_token_id=str(token_id))
             if token.revoked_at is None:
                 token.revoked_at = now
+                self._audit.record(
+                    organization_id=organization_id,
+                    actor=AuditActor.user(actor_user_id),
+                    action=AuditAction.AGENT_TOKEN_REVOKED,
+                    target=AuditTarget(AuditTargetType.AGENT_TOKEN, token.id, token.name),
+                )
         logger.info(
             "agent token revoked",
             extra={
