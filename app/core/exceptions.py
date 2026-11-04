@@ -432,6 +432,15 @@ class PlanExpiredError(ConflictError):
     code = "PLAN_EXPIRED"
 
 
+class SecurityGateBlockedError(ConflictError):
+    """보안 게이트가 승인을 막았다. 계획은 승인 대기 그대로다.
+
+    details 한 칸 = 막은 통제 하나의 사유 하나(field 는 통제 ID, reason 은 판정 사유 코드).
+    """
+
+    code = "SECURITY_GATE_BLOCKED"
+
+
 class MigrationInProgressError(ConflictError):
     """이 서비스의 이전 계획이 실행 중이라 배포 요청·되돌리기·서비스 삭제를 받지 않는다."""
 

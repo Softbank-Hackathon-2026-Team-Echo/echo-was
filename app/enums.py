@@ -387,6 +387,8 @@ class MigrationErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
     # 도착에 갔어야 할 만큼 출발에 요청이 왔는데 도착이 거의 받지 못했다(진입점이 비율을 안 따름).
     TARGET_NOT_RECEIVING = "TARGET_NOT_RECEIVING"
+    # 실행 시작 때 보안 게이트가 막았다(필수 통제 FAIL·UNKNOWN, 유효한 예외 없음). 트래픽은 그대로.
+    SECURITY_GATE_BLOCKED = "SECURITY_GATE_BLOCKED"
 
 
 class MigrationRollbackStatus(StrEnum):
@@ -450,6 +452,9 @@ class MigrationLogCode(StrEnum):
     FAILED = "FAILED"
     COUNTERS_RESET = "COUNTERS_RESET"
     LOG_TRUNCATED = "LOG_TRUNCATED"
+    # 보안 게이트 판정(승인 때·실행 시작 때). data 에 정책 버전·막은 통제·증거·예외 ID.
+    SECURITY_GATE_PASSED = "SECURITY_GATE_PASSED"
+    SECURITY_GATE_BLOCKED = "SECURITY_GATE_BLOCKED"
 
 
 # --- 보안 판정 (보안·거버넌스 3) ---
@@ -592,6 +597,15 @@ class SecurityFindingReason(StrEnum):
     # 시간 초과·연결 불가는 확인하지 못한 것이다(UNKNOWN).
     TLS_TIMEOUT = "TLS_TIMEOUT"
     TLS_UNREACHABLE = "TLS_UNREACHABLE"
+    # 접속하지 않은 주소. DNS 결과가 모두 사설 대역이면 공개 경로가 아니다(NA, 대표 주소 시험이
+    # 공개 경로를 본다). 루프백·링크 로컬·예약 대역이나 공인·사설이 섞이면 의심 설정(UNKNOWN).
+    # Echo 가 만든 주소(공개 도메인 아래)가 아니면 접속하지 않는다(UNKNOWN).
+    TLS_HOST_NOT_PUBLIC = "TLS_HOST_NOT_PUBLIC"
+    TLS_HOST_SUSPICIOUS = "TLS_HOST_SUSPICIOUS"
+    TLS_HOST_NOT_ALLOWED = "TLS_HOST_NOT_ALLOWED"
+    # 출발·도착 이미지 일치(C-IMG-3, WAS 상태). 한쪽에 현재 배포가 없어도 불일치다.
+    IMAGE_MATCH = "IMAGE_MATCH"
+    IMAGE_MISMATCH = "IMAGE_MISMATCH"
     # 사람 점검 기록. 결과는 점검자가 정한 값(result)이다.
     MANUAL_REVIEW_RECORDED = "MANUAL_REVIEW_RECORDED"
 

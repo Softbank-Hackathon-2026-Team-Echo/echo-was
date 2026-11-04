@@ -7,13 +7,28 @@
 - TLS 1.2 미만 → `TLS_VERSION_TOO_LOW`, 그 밖의 핸드셰이크 실패 → `TLS_HANDSHAKE_FAILED`
 - 만료까지 7일 미만 → `TLS_EXPIRES_SOON`
 - 시간 초과 → `TLS_TIMEOUT`, DNS·연결 실패 → `TLS_UNREACHABLE`(확인하지 못한 것, UNKNOWN)
+
+`PublicHostTlsChecker` 는 Echo 가 만든 공개 주소에만 붙는다(WAS 가 내부 주소로 나가지 않게).
+주소가 공개 도메인 아래인지 보고, DNS 로 받은 IP 를 확인한 뒤 그 IP 로 바로 접속한다(확인과 접속
+사이에 DNS 가 바뀌어도 확인한 IP 로만 간다). 포트는 443 만 쓴다.
+
+- DNS 결과가 모두 공인 IP → 첫 IP 로 TLS 시험
+- 모두 사설 대역(10/8·172.16/12·192.168/16·fc00::/7) → 접속하지 않음, `TLS_HOST_NOT_PUBLIC`
+- 루프백·링크 로컬(메타데이터)·예약 대역이 있거나 공인·사설이 섞임 → 접속하지 않음,
+  `TLS_HOST_SUSPICIOUS`
+- 공개 도메인 아래가 아님 → 접속하지 않음, `TLS_HOST_NOT_ALLOWED`
+- DNS 실패 → `TLS_UNREACHABLE`, 주소 하나의 확인 전체가 제한 시간을 넘으면 `TLS_TIMEOUT`
 """
 
 import asyncio
 import contextlib
+import ipaddress
+import socket
 import ssl
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Protocol
 
 from app.core.clock import Clock, SystemClock
@@ -44,7 +59,9 @@ class TlsProbeResult:
 
 
 class TlsProbeClient(Protocol):
-    async def probe(self, host: str, port: int = 443) -> TlsProbeResult: ...
+    async def probe(self, host: str, port: int = 443, address: str | None = None) -> TlsProbeResult:
+        """address 가 있으면 DNS 를 다시 찾지 않고 그 IP 로 붙는다(인증서는 host 로 검증)."""
+        ...
 
 
 class SocketTlsProbeClient:
@@ -61,10 +78,12 @@ class SocketTlsProbeClient:
         self._ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         self._clock = clock or SystemClock()
 
-    async def probe(self, host: str, port: int = 443) -> TlsProbeResult:
+    async def probe(self, host: str, port: int = 443, address: str | None = None) -> TlsProbeResult:
         try:
             _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=self._ssl_context, server_hostname=host),
+                asyncio.open_connection(
+                    address or host, port, ssl=self._ssl_context, server_hostname=host
+                ),
                 timeout=self._timeout_seconds,
             )
         except TimeoutError:
@@ -126,3 +145,115 @@ def _read_not_after(cert: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     return datetime.fromtimestamp(ssl.cert_time_to_seconds(value), UTC)
+
+
+PUBLIC_TLS_PORT = 443
+
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+class AddressClass(StrEnum):
+    """DNS 로 받은 IP 묶음의 분류."""
+
+    PUBLIC = "PUBLIC"
+    PRIVATE = "PRIVATE"
+    SUSPICIOUS = "SUSPICIOUS"
+
+
+class HostResolver(Protocol):
+    async def resolve(self, host: str, port: int) -> list[str]:
+        """host 의 IP 주소 목록(문자열). 찾지 못하면 OSError."""
+        ...
+
+
+class SystemHostResolver:
+    """운영체제 DNS(getaddrinfo)로 찾는다."""
+
+    async def resolve(self, host: str, port: int) -> list[str]:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
+def classify_addresses(addresses: Sequence[str]) -> AddressClass:
+    """모두 공인이면 PUBLIC, 모두 사설 대역이면 PRIVATE, 그 밖(섞임·루프백·예약 등)은 SUSPICIOUS."""
+    if not addresses:
+        return AddressClass.SUSPICIOUS
+    classes = {_classify_address(address) for address in addresses}
+    if classes == {AddressClass.PUBLIC}:
+        return AddressClass.PUBLIC
+    if classes == {AddressClass.PRIVATE}:
+        return AddressClass.PRIVATE
+    return AddressClass.SUSPICIOUS
+
+
+def _classify_address(address: str) -> AddressClass:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return AddressClass.SUSPICIOUS
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_global and not ip.is_multicast:
+        return AddressClass.PUBLIC
+    if any(ip in network for network in _PRIVATE_NETWORKS):
+        return AddressClass.PRIVATE
+    return AddressClass.SUSPICIOUS
+
+
+def is_public_host_name(host: str, public_base_domain: str) -> bool:
+    """Echo 가 만든 주소 모양인가: 소문자 이름이고 공개 도메인의 하위 이름이다."""
+    if not host.endswith(f".{public_base_domain}") or host != host.lower():
+        return False
+    labels = host.split(".")
+    return all(
+        0 < len(label) <= 63
+        and label[0] != "-"
+        and label[-1] != "-"
+        and all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in label)
+        for label in labels
+    )
+
+
+class PublicHostTlsChecker:
+    """Echo 가 만든 공개 주소만 TLS 시험한다. 주소마다 결과 하나(접속하지 않은 이유 포함)."""
+
+    def __init__(
+        self,
+        probe_client: TlsProbeClient,
+        resolver: HostResolver,
+        public_base_domain: str,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._probe_client = probe_client
+        self._resolver = resolver
+        self._public_base_domain = public_base_domain
+        self._timeout_seconds = timeout_seconds
+
+    async def check_hosts(self, hosts: Sequence[str]) -> list[TlsProbeResult]:
+        unique_hosts = list(dict.fromkeys(hosts))
+        return list(await asyncio.gather(*(self._check(host) for host in unique_hosts)))
+
+    async def _check(self, host: str) -> TlsProbeResult:
+        port = PUBLIC_TLS_PORT
+        if not is_public_host_name(host, self._public_base_domain):
+            return TlsProbeResult(host, port, SecurityFindingReason.TLS_HOST_NOT_ALLOWED)
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                try:
+                    addresses = await self._resolver.resolve(host, port)
+                except OSError:
+                    return TlsProbeResult(host, port, SecurityFindingReason.TLS_UNREACHABLE)
+                match classify_addresses(addresses):
+                    case AddressClass.PRIVATE:
+                        return TlsProbeResult(host, port, SecurityFindingReason.TLS_HOST_NOT_PUBLIC)
+                    case AddressClass.SUSPICIOUS:
+                        return TlsProbeResult(host, port, SecurityFindingReason.TLS_HOST_SUSPICIOUS)
+                    case AddressClass.PUBLIC:
+                        return await self._probe_client.probe(host, port, address=addresses[0])
+        except TimeoutError:
+            return TlsProbeResult(host, port, SecurityFindingReason.TLS_TIMEOUT)

@@ -330,6 +330,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `MIGRATION_REQUIRED_REQUESTS_DEFAULT`·`MIGRATION_MAX_WAIT_SECONDS_DEFAULT`·`MIGRATION_EXPECTED_RPS` | `20,50,50`·`30`·`50` | 이전 비율 단계 필요 건수(10·50·100%)·단계 최대 대기(5~300)·예상 rps(예상 시간·가짜 카운터) |
 | `MIGRATION_COUNT_POLL_SECONDS`·`MIGRATION_COUNTS_STALE_SECONDS`·`MIGRATION_P95_REFERENCE_WINDOW_SECONDS` | `1`·`5`·`30` | 카운터 읽기 주기·마감 때 오래된 읽기 기준·p95 참고 창 |
 | `MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `2`·`86400`·`3` | 단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
+| `SECURITY_GATE_ENABLED`·`WAS_VERSION` | `false`·(없음) | 보안 게이트(이전 승인·일꾼 시작 판정, 실행 직전 TLS 시험. API·일꾼 같은 값)·판정 범위의 WAS 버전([docs/api/migration-plans.md](docs/api/migration-plans.md) "보안 게이트") |
 
 `echo`/`echo` 는 로컬 compose 용 더미 계정이다. 실제 비밀값은 커밋하지 않는다.
 

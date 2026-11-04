@@ -15,11 +15,19 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.enums import SecurityControlId
 from app.models import Base
 from tests.integration.conftest import PROJECT_ROOT, run_alembic
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import create_rollback_fixture
+from tests.integration.security_gate_support import (
+    add_exception,
+    add_precheck,
+    enable_gate,
+    record_passing_evidence,
+    revoke_exception,
+)
 
 MODEL_SCHEMA = "model_check"
 
@@ -367,7 +375,8 @@ EXPECTED_CONSTRAINTS = {
         "'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, "
         "'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, "
         "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, "
-        "'TARGET_NOT_RECEIVING'::character varying])::text[])))"
+        "'TARGET_NOT_RECEIVING'::character varying, "
+        "'SECURITY_GATE_BLOCKED'::character varying])::text[])))"
     ),
     ("migration_plans", "ck_migration_plans_expected_seconds_non_negative"): (
         "CHECK ((expected_seconds >= 0))"
@@ -1006,8 +1015,12 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-HEAD_REVISION = "b7d41e6f2a93"
+# 감사 로그 확장(API 서버 7) 리비전과 그 직전(앱 환경 변수 표 = API 서버 10) 시점.
 BEFORE_AUDIT_EXTENSION = "48b2126a9c37"
+AUDIT_EXTENSION_REVISION = "b7d41e6f2a93"
+# 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(감사 로그 확장 = API 서버 7 head) 시점.
+BEFORE_SECURITY_GATE_BLOCKED = AUDIT_EXTENSION_REVISION
+HEAD_REVISION = "286d9ea982d6"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1575,6 +1588,57 @@ async def test_target_not_receiving_revision_downgrade_with_such_plans_fails_cle
     assert version == HEAD_REVISION
 
 
+async def test_security_gate_revision_downgrade_narrows_check_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_SECURITY_GATE_BLOCKED))
+        )
+        down = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_error_code_check)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert "SECURITY_GATE_BLOCKED" not in down
+    assert "TARGET_NOT_RECEIVING" in down
+    assert "SECURITY_GATE_BLOCKED" in up
+
+
+async def test_security_gate_revision_downgrade_with_blocked_plans_fails_clearly(
+    engine: AsyncEngine, migration: Migration
+) -> None:
+    # 실행 시작 때 게이트가 막아 FAILED(SECURITY_GATE_BLOCKED)로 끝난 계획 한 건.
+    enable_gate(migration)
+    await record_passing_evidence(migration)
+    await add_exception(migration, SecurityControlId.DB_1)
+    dst_exception = await add_exception(migration, SecurityControlId.DST_1)
+    await add_precheck(migration)
+    plan = await migration.create_plan()
+    await migration.approve(plan["id"])
+    await revoke_exception(migration, dst_exception)
+    await migration.harness.run_until_idle()
+    stored = await migration.plan_row(plan["id"])
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(
+            RuntimeError, match="migration_plans has 1 SECURITY_GATE_BLOCKED rows"
+        ) as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_SECURITY_GATE_BLOCKED))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert (stored.status, stored.error_code) == ("FAILED", "SECURITY_GATE_BLOCKED")
+    assert "does not rewrite migration plan history" in str(raised.value)
+    assert version == HEAD_REVISION
+
+
 def _mode_column_and_check(connection: Connection) -> tuple[bool, bool]:
     inspector = inspect(connection)
     has_column = any(
@@ -1786,7 +1850,9 @@ async def test_audit_logs_cannot_be_updated(harness: DeployHarness, engine: Asyn
             await connection.execute(text("DELETE FROM audit_logs"))
 
 
-# 고객 앱 환경 변수 표(API 서버 10) 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
+# 고객 앱 환경 변수 표(API 서버 10) 리비전과 그 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
+# 그 뒤에 감사 로그 확장(b7d41e6f2a93), 보안 게이트 원인 코드(286d9ea982d6)가 이어진다.
+SERVICE_VARIABLES_REVISION = BEFORE_AUDIT_EXTENSION
 BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
 SERVICE_VARIABLES_TABLE = "service_environment_variables"
 
@@ -1801,8 +1867,13 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
-    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_AUDIT_EXTENSION
-    assert scripts.get_revision(BEFORE_AUDIT_EXTENSION).down_revision == BEFORE_SERVICE_VARIABLES
+    gate = scripts.get_revision(HEAD_REVISION)
+    assert gate is not None and gate.down_revision == AUDIT_EXTENSION_REVISION
+    audit = scripts.get_revision(AUDIT_EXTENSION_REVISION)
+    assert audit is not None and audit.down_revision == SERVICE_VARIABLES_REVISION
+    service_variables = scripts.get_revision(SERVICE_VARIABLES_REVISION)
+    assert service_variables is not None
+    assert service_variables.down_revision == BEFORE_SERVICE_VARIABLES
 
 
 async def test_service_variables_revision_only_adds_a_table_and_has_no_value_column(

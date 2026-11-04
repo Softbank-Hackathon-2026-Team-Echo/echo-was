@@ -346,7 +346,7 @@ erDiagram
 | `control_id`·`result`·`mode`·`source` | varchar | N | 값 CHECK | 통제 ID(`C-IMG-1` 등)·결과·모드·출처(용어 사전 §3 보안 판정 값) |
 | `reason` | varchar(64) | N | 값 CHECK 없음(`SecurityFindingReason`) | 정규화 이유 |
 | `policy_version`·`tool_version` | varchar | N·Y | | 결과를 만든 규칙표 버전 · 검사 도구 버전 |
-| `source_ref` | varchar(500) | Y | | 원문 위치(검사 워크플로 실행·산출물 등) |
+| `source_ref` | varchar(500) | Y | | 원문 위치(검사 워크플로 실행·산출물 등, 보안 게이트가 실행 직전에 만든 증거는 `migration-plan:{계획 id}`) |
 | `items`·`total_items` | jsonb·int | N | 배열, `>= 0` | 근거 줄(최대 50, 값 없는 칸은 키 없음)과 전체 개수. **비밀값 원문 없음** |
 | `reviewer_user_id`·`basis_url` | uuid·text | Y | `source = MANUAL_REVIEW` 면 둘 다 필수 | 사람 점검자·근거 링크 |
 | `confirmation` | varchar | Y | `source = AI_REVIEW` 일 때만 있음 | AI 결과의 사람 확인 상태 |
@@ -546,10 +546,10 @@ stateDiagram-v2
     PENDING_APPROVAL --> CANCELLED : 취소
     PENDING_APPROVAL --> EXPIRED : 24시간 지남(승인·거절·취소·새 계획 때 판정)
     PENDING_APPROVAL --> STALE : 승인 때 지문 다름
-    APPROVED --> RUNNING : 일꾼 시작(지문 같음)
+    APPROVED --> RUNNING : 일꾼 시작(지문 같음, 게이트를 켰으면 통과)
     APPROVED --> STALE : 일꾼 시작 때 지문 다름
     APPROVED --> CANCELLED : 시작 전 중단
-    APPROVED --> FAILED : 일꾼 상실(WORKER_LOST)
+    APPROVED --> FAILED : 일꾼 상실(WORKER_LOST) · 보안 게이트 막음(SECURITY_GATE_BLOCKED)
     RUNNING --> SUCCEEDED : 단계 4 판정 통과
     RUNNING --> FAILED : 단계 0 사전 확인 실패(rollbackStatus NOT_NEEDED)
     RUNNING --> ROLLING_BACK : 판정 실패·판단 불가·적용 실패·중단·일꾼 상실

@@ -20,6 +20,7 @@ from app.services.security_normalizers import (
     MAX_ITEMS,
     NormalizedFinding,
     normalize_gitleaks,
+    normalize_image_match,
     normalize_tls_probes,
     normalize_trivy_config,
     normalize_trivy_image,
@@ -319,6 +320,11 @@ def test_trivy_config_without_commit_is_unknown() -> None:
         ([Reason.TLS_OK, Reason.TLS_TIMEOUT], R.UNKNOWN, Reason.TLS_TIMEOUT),
         ([Reason.TLS_UNREACHABLE, Reason.TLS_EXPIRES_SOON], R.FAIL, Reason.TLS_EXPIRES_SOON),
         ([Reason.TLS_HOSTNAME_MISMATCH], R.FAIL, Reason.TLS_HOSTNAME_MISMATCH),
+        # 사설 대역만 나온 도착 주소는 NA, 대표 주소 결과가 공개 경로를 정한다.
+        ([Reason.TLS_OK, Reason.TLS_HOST_NOT_PUBLIC], R.PASS, Reason.TLS_OK),
+        ([Reason.TLS_HOST_NOT_PUBLIC], R.NA, Reason.TLS_HOST_NOT_PUBLIC),
+        ([Reason.TLS_OK, Reason.TLS_HOST_SUSPICIOUS], R.UNKNOWN, Reason.TLS_HOST_SUSPICIOUS),
+        ([Reason.TLS_HOST_NOT_ALLOWED], R.UNKNOWN, Reason.TLS_HOST_NOT_ALLOWED),
     ],
 )
 def test_tls_probes_use_worst_host_result(
@@ -334,6 +340,36 @@ def test_tls_probes_use_worst_host_result(
 def test_tls_probes_without_hosts_is_unknown() -> None:
     normalized = normalize_tls_probes([], scope=SCOPE, collected_at=NOW)
     assert normalized.finding.result == R.UNKNOWN
+
+
+DIGEST_A = "sha256:" + "a" * 64
+DIGEST_B = "sha256:" + "b" * 64
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "result", "reason"),
+    [
+        (DIGEST_A, DIGEST_A, R.PASS, Reason.IMAGE_MATCH),
+        (DIGEST_A, DIGEST_B, R.FAIL, Reason.IMAGE_MISMATCH),
+        (DIGEST_A, None, R.FAIL, Reason.IMAGE_MISMATCH),
+        (None, None, R.FAIL, Reason.IMAGE_MISMATCH),
+    ],
+)
+def test_image_match_compares_current_deployment_digests(
+    source: str | None, target: str | None, result: SecurityResult, reason: SecurityFindingReason
+) -> None:
+    normalized = normalize_image_match(source, target, scope=SCOPE, collected_at=NOW)
+    finding = normalized.finding
+    assert (finding.control_id, finding.source) == (
+        SecurityControlId.IMG_3,
+        SecurityFindingSource.WAS_STATE,
+    )
+    assert (finding.result, normalized.reason) == (result, reason)
+    assert finding.expires_at == NOW + timedelta(minutes=2)
+    assert [(i.item_id, i.target) for i in normalized.items] == [
+        ("source", source),
+        ("target", target),
+    ]
 
 
 # --- 정규화한 증거를 규칙표가 그대로 쓴다 ---

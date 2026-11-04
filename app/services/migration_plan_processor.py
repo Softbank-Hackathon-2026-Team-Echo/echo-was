@@ -26,6 +26,9 @@
 - 매 동작 맨 앞(잠금 안)에서 중단 요청·임대 상실을 본다. 임대를 3번 잃었으면(한 번 참이면 계속 참)
   APPROVED 는 FAILED(WORKER_LOST), RUNNING 은 롤백을 시작하고, 롤백은 남은 시도 횟수만큼 계속한다.
   끝 상태가 되면 할 일을 FAILED(WORKER_LOST) 로 닫는다.
+- 보안 게이트(설정으로 켤 때만 주입)는 실행 시작(APPROVED → RUNNING) 잠금 전에 다시 판정하고,
+  잠금 안에서 지문이 같을 때 판정 줄을 남긴다. 막혔으면 트래픽을 바꾸지 않고
+  FAILED(SECURITY_GATE_BLOCKED)로 끝낸다.
 - simulate(가짜 모드)는 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계는
   "설정 rps × 비율 × 지난 시간"으로 카운터를 만든다. ERROR_RATE 는 기준값 뒤 5xx 를 허용 + 1 로,
   TARGET_NOT_RECEIVING 은 도착을 고정하고 출발을 100% 로, LOW_TRAFFIC 은 둘 다 고정한다. HEALTH
@@ -109,6 +112,7 @@ from app.services.migration_plan_support import (
     step_required_requests,
     with_step_result,
 )
+from app.services.security_gate import SecurityGate, gate_log_data
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +158,14 @@ class MigrationPlanProcessor:
         settings: Settings,
         clock: Clock,
         executors: ExecutorSet,
+        security_gate: SecurityGate | None = None,
     ) -> None:
         self._session = session
         self._lease = lease
         self._settings = settings
         self._clock = clock
         self._executors = executors
+        self._security_gate = security_gate
         self._plans = MigrationPlanRepository(session)
         self._services = ServiceRepository(session)
         self._connections = ServiceEnvironmentRepository(session)
@@ -201,6 +207,11 @@ class MigrationPlanProcessor:
     # --- APPROVED: 지문 확인 → RUNNING ---
 
     async def _start(self) -> JobOutcome | None:
+        decision = (
+            await self._security_gate.evaluate_plan(self._plan_id)
+            if self._security_gate is not None
+            else None
+        )
         now = self._clock.now()
         async with self._session.begin():
             locked = await self._lock()
@@ -261,6 +272,16 @@ class MigrationPlanProcessor:
                     await self._record_finished(plan, MigrationPlanStatus.STALE)
                 self._report("migration plan stale at start", plan)
                 return self._closed()
+            if decision is not None and decision.is_blocked:
+                await self._fail(
+                    plan,
+                    MigrationErrorCode.SECURITY_GATE_BLOCKED,
+                    now,
+                    preceding_lines=[
+                        (MigrationLogCode.SECURITY_GATE_BLOCKED, gate_log_data(decision))
+                    ],
+                )
+                return self._closed()
             if await self._plans.transition(
                 plan.id,
                 MigrationPlanStatus.APPROVED,
@@ -281,6 +302,13 @@ class MigrationPlanProcessor:
                     "updated_at": now,
                 },
             ):
+                if decision is not None:
+                    await self._log.append(
+                        plan,
+                        MigrationLogCode.SECURITY_GATE_PASSED,
+                        now,
+                        data=gate_log_data(decision),
+                    )
                 await self._log.append(plan, MigrationLogCode.STARTED, now)
         self._report("migration started", plan)
         return None
@@ -970,8 +998,18 @@ class MigrationPlanProcessor:
 
     # --- 공통 ---
 
-    async def _fail(self, plan: MigrationPlan, code: MigrationErrorCode, now: datetime) -> None:
-        """트래픽을 바꾸기 전(APPROVED) 또는 방어용으로 FAILED 로 끝낸다(잠근 트랜잭션 안)."""
+    async def _fail(
+        self,
+        plan: MigrationPlan,
+        code: MigrationErrorCode,
+        now: datetime,
+        *,
+        preceding_lines: Sequence[_LogLine] = (),
+    ) -> None:
+        """트래픽을 바꾸기 전(APPROVED) 또는 방어용으로 FAILED 로 끝낸다(잠근 트랜잭션 안).
+
+        preceding_lines 는 전환이 반영됐을 때 FAILED 줄 앞에 쓴다(예: 보안 게이트 판정 줄).
+        """
         status = MigrationPlanStatus(plan.status)
         rollback_status = (
             MigrationRollbackStatus.NOT_NEEDED
@@ -991,6 +1029,8 @@ class MigrationPlanProcessor:
                 "updated_at": now,
             },
         ):
+            for line_code, data in preceding_lines:
+                await self._log.append(plan, line_code, now, data=data)
             await self._log.append(plan, MigrationLogCode.FAILED, now, error_code=code)
             await self._record_finished(plan, MigrationPlanStatus.FAILED, code)
         self._report("migration failed", plan, error_code=code)
