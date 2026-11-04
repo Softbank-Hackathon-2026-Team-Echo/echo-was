@@ -1007,7 +1007,7 @@ BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
 HEAD_REVISION = "b7d41e6f2a93"
-BEFORE_AUDIT_EXTENSION = "201cf5419f4d"
+BEFORE_AUDIT_EXTENSION = "48b2126a9c37"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1799,8 +1799,10 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
+    # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
-    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_SERVICE_VARIABLES
+    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_AUDIT_EXTENSION
+    assert scripts.get_revision(BEFORE_AUDIT_EXTENSION).down_revision == BEFORE_SERVICE_VARIABLES
 
 
 async def test_service_variables_revision_only_adds_a_table_and_has_no_value_column(

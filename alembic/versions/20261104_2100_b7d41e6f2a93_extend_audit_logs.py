@@ -15,7 +15,7 @@ downgrade 는 빈 표나 옛 모양 행만 있을 때의 왕복 시험용이다.
 revision 은 남긴다. 옛 코드는 넓어진 스키마에서 거부 줄만 쓰므로 그대로 동작한다.
 
 Revision ID: b7d41e6f2a93
-Revises: 201cf5419f4d
+Revises: 48b2126a9c37
 Create Date: 2026-11-04 21:00:00.000000
 
 """
@@ -28,7 +28,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "b7d41e6f2a93"
-down_revision: str | Sequence[str] | None = "201cf5419f4d"
+down_revision: str | Sequence[str] | None = "48b2126a9c37"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -25,6 +25,8 @@ class AuditAction(StrEnum):
     SERVICE_CREATED = "SERVICE_CREATED"
     SERVICE_UPDATED = "SERVICE_UPDATED"
     SERVICE_DELETE_REQUESTED = "SERVICE_DELETE_REQUESTED"
+    SERVICE_VARIABLE_SET = "SERVICE_VARIABLE_SET"
+    SERVICE_VARIABLE_DELETED = "SERVICE_VARIABLE_DELETED"
     DEPLOY_REQUESTED = "DEPLOY_REQUESTED"
     ROLLBACK_REQUESTED = "ROLLBACK_REQUESTED"
     MIGRATION_PLAN_CREATED = "MIGRATION_PLAN_CREATED"
@@ -64,6 +66,9 @@ class AuditComponent(StrEnum):
 
 
 _ORG = "/api/v1/orgs/{org_id}"
+_SERVICE_VARIABLE = (
+    f"{_ORG}/services/{{service_id}}/environments/{{environment_id}}/variables/{{key}}"
+)
 
 # (메서드, 경로 틀) → 행동 이름. 로그아웃(POST /api/v1/auth/logout)만 조직 밖 행동이라 뺀다.
 WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
@@ -85,6 +90,8 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("POST", f"{_ORG}/services"): AuditAction.SERVICE_CREATED,
     ("PATCH", f"{_ORG}/services/{{service_id}}"): AuditAction.SERVICE_UPDATED,
     ("DELETE", f"{_ORG}/services/{{service_id}}"): AuditAction.SERVICE_DELETE_REQUESTED,
+    ("PUT", _SERVICE_VARIABLE): AuditAction.SERVICE_VARIABLE_SET,
+    ("DELETE", _SERVICE_VARIABLE): AuditAction.SERVICE_VARIABLE_DELETED,
     ("POST", f"{_ORG}/services/{{service_id}}/deploy-requests"): AuditAction.DEPLOY_REQUESTED,
     ("POST", f"{_ORG}/deploy-requests/{{deploy_request_id}}/rollback"): (
         AuditAction.ROLLBACK_REQUESTED

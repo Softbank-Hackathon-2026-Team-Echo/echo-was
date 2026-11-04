@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 
 from app.audit.actions import WRITE_ROUTE_ACTIONS, AuditAction
 from app.audit.recorder import AuditRecorder
+from app.clients.app_secret_store import FakeAppSecretStore
 from app.clients.github_user import GithubUser
 from app.enums import (
     ActorType,
@@ -30,6 +31,7 @@ from app.executors.base import HealthHttpError
 from app.executors.fake import FakeBuildExecutor
 from app.main import app
 from app.models import AuditLog, Environment, Job, Service, User
+from app.services.service_variable_service import app_secret_name
 from tests.integration.auth_support import (
     create_agent_token,
     create_member,
@@ -139,10 +141,10 @@ def test_every_write_route_has_an_action_name() -> None:
 
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 22
+    assert len(WRITE_ROUTE_ACTIONS) == 24
 
 
-# --- AC-2: 쓰기 22개 경로 ---
+# --- AC-2: 쓰기 24개 경로 ---
 
 
 @dataclass
@@ -427,6 +429,55 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         {"rollbackOfId": first["id"], "environmentId": str(migration.aws.id)},
     )
     await harness.run_until_idle()
+    await ledger.skip()
+
+    # 앱 환경 변수: 키만 적고 값·비밀 참조·버전은 적지 않는다.
+    variable_path = f"{service_path}/environments/{migration.aws.id}/variables/DATABASE_URL"
+    variable_label = "pay-api · aws-seoul · DATABASE_URL"
+    variable_details = {"environmentId": str(migration.aws.id), "key": "DATABASE_URL"}
+    variable_value = f"postgres://user:sv-{uuid.uuid4()}@db/app"
+    variable_saved = await client.put(variable_path, json={"value": variable_value})
+    await ledger.expect_one(
+        variable_saved,
+        AuditAction.SERVICE_VARIABLE_SET,
+        admin.user,
+        team_id,
+        "service",
+        service_id,
+        variable_label,
+        variable_details,
+    )
+    # 같은 값을 다시 넣어도 새 버전이 생긴 변경이다(값을 다시 읽지 않아 같은지 모른다).
+    variable_resaved = await client.put(variable_path, json={"value": variable_value})
+    assert _data(variable_resaved)["version"] == _data(variable_saved)["version"] + 1
+    await ledger.expect_one(
+        variable_resaved,
+        AuditAction.SERVICE_VARIABLE_SET,
+        admin.user,
+        team_id,
+        "service",
+        service_id,
+        variable_label,
+        variable_details,
+    )
+    variable_secret_ref = _data(variable_resaved)["secretRef"]
+    await ledger.expect_one(
+        await client.delete(variable_path),
+        AuditAction.SERVICE_VARIABLE_DELETED,
+        admin.user,
+        team_id,
+        "service",
+        service_id,
+        variable_label,
+        variable_details,
+    )
+    missing_variable = await client.delete(variable_path)
+    assert (missing_variable.status_code, missing_variable.json()["code"]) == (
+        404,
+        "ENV_VAR_NOT_FOUND",
+    )
+    assert await _user_actions(harness, AuditLog.seq > ledger.after_seq) == []
+
     await ledger.expect_one(
         await client.delete(service_path),
         AuditAction.SERVICE_DELETE_REQUESTED,
@@ -502,15 +553,86 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         label,
     )
 
-    # 22개를 모두 지났다. 어느 줄에도 토큰 원문이 없다.
+    # 24개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(
-        [[row.action, row.path, row.target_label, row.details] for row in everything],
+        [
+            [row.action, row.route, row.path, row.reason, row.target_label, row.details]
+            for row in everything
+        ],
         ensure_ascii=False,
     )
     assert token["token"] not in dumped
     assert "echo_agt_" not in dumped
+    assert variable_value not in dumped
+    assert variable_secret_ref not in dumped
+    assert "versions/" not in dumped
+
+
+async def _variable_setup(harness: DeployHarness) -> tuple[str, Environment]:
+    service = await harness.create_service("shop-api")
+    aws = await harness.add_environment("aws-seoul")
+    await deploy_and_finish(harness, service["id"], aws.id, branch="main")
+    return service["id"], aws
+
+
+async def test_variable_write_that_fails_has_no_user_line(harness: DeployHarness) -> None:
+    service_id, aws = await _variable_setup(harness)
+    before = await _user_actions(harness)
+    base = f"{harness.services}/{service_id}/environments"
+    secret = f"sv-{uuid.uuid4()}"
+
+    invalid_key = await harness.client.put(
+        f"{base}/{aws.id}/variables/bad-key", json={"value": "x"}
+    )
+    no_connection = await harness.client.put(
+        f"{base}/{uuid.uuid4()}/variables/DATABASE_URL", json={"value": secret}
+    )
+    assert isinstance(harness.app_secret_store, FakeAppSecretStore)
+    harness.app_secret_store.unavailable_names.add(
+        app_secret_name(
+            harness.settings.app_secret_name_prefix,
+            harness.organization.slug,
+            uuid.UUID(service_id),
+            aws.id,
+            "DATABASE_URL",
+        )
+    )
+    store_down = await harness.client.put(
+        f"{base}/{aws.id}/variables/DATABASE_URL", json={"value": secret}
+    )
+
+    assert invalid_key.status_code == 422
+    assert no_connection.status_code == 404
+    assert (store_down.status_code, store_down.json()["code"]) == (
+        502,
+        "SECRET_STORE_UNAVAILABLE",
+    )
+    assert await _user_actions(harness) == before
+
+
+async def test_agent_variable_put_is_denied_without_value_in_the_line(
+    harness: DeployHarness,
+) -> None:
+    service_id, aws = await _variable_setup(harness)
+    _, raw = await create_agent_token(
+        harness.session_factory, harness.organization, harness.admin.user, harness.clock.now()
+    )
+    secret = f"sv-{uuid.uuid4()}"
+
+    async with make_client(agent_token=raw) as agent:
+        response = await agent.put(
+            f"{harness.services}/{service_id}/environments/{aws.id}/variables/DATABASE_URL",
+            json={"value": secret},
+        )
+
+    assert (response.status_code, response.json()["code"]) == (403, "AGENT_READ_ONLY")
+    rows = await _rows(harness, AuditLog.result == AuditResult.DENIED)
+    assert [row.action for row in rows] == [AuditAction.SERVICE_VARIABLE_SET]
+    assert rows[0].route == ROUTE_BY_ACTION[AuditAction.SERVICE_VARIABLE_SET]
+    assert rows[0].details == {}
+    assert secret not in json.dumps([rows[0].path, rows[0].target_label, rows[0].details])
 
 
 async def test_connection_check_discarded_result_is_still_recorded(
