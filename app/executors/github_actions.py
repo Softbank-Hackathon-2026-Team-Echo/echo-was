@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -59,7 +60,19 @@ SCAN_META_FILE = "meta.json"
 SCAN_TRIVY_FILE = "trivy-image.json"
 SCAN_GITLEAKS_FILE = "gitleaks.json"
 SCAN_SCHEMA_VERSION = 1
-SCAN_FILE_MAX_BYTES = 32 * 1024 * 1024
+# 일꾼 메모리 상한(384Mi) 안에서 세 파일을 함께 들 수 있게 한다. 아티팩트 zip 도 같은 상한.
+SCAN_FILE_MAX_BYTES = 8 * 1024 * 1024
+SCAN_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024
+# zip 이 깨졌거나(zlib·EOF), 지원하지 않는 압축이거나, 암호가 걸린 항목(RuntimeError)이면
+# 그 파일만 버린다.
+_ZIP_READ_ERRORS = (
+    ValueError,
+    zipfile.BadZipFile,
+    zlib.error,
+    EOFError,
+    NotImplementedError,
+    RuntimeError,
+)
 _TOOL_VERSION = re.compile(r"^[0-9A-Za-z.+-]{1,32}$")
 _API_VERSION = "2026-03-10"
 _APP_JWT_BACKDATE = timedelta(seconds=60)
@@ -84,6 +97,11 @@ BUILD_RESULT_INVALID = "BUILD_RESULT_INVALID"
 BUILD_REF_UNKNOWN = "BUILD_REF_UNKNOWN"
 SECURITY_SCAN_MISSING = "SECURITY_SCAN_MISSING"
 SECURITY_SCAN_INVALID = "SECURITY_SCAN_INVALID"
+SECURITY_SCAN_TOO_LARGE = "SECURITY_SCAN_TOO_LARGE"
+
+
+class _ArtifactTooLargeError(Exception):
+    """아티팩트가 받을 상한보다 크다(목록의 size_in_bytes 또는 받은 크기)."""
 
 
 class _GithubAuthError(Exception):
@@ -285,8 +303,14 @@ class GithubActionsBuildExecutor:
             return None
         return _parse_result(archive)
 
-    async def _artifact_archive(self, run_id: int, name: str) -> bytes | None:
-        """실행의 이름이 name 인(만료 안 된) 아티팩트 zip. 없으면 None."""
+    async def _artifact_archive(
+        self, run_id: int, name: str, max_bytes: int | None = None
+    ) -> bytes | None:
+        """실행의 이름이 name 인(만료 안 된) 아티팩트 zip. 없으면 None.
+
+        max_bytes 를 주면 목록의 size_in_bytes 가 넘을 때 받지 않고, 받은 크기도 다시 본다
+        (넘으면 _ArtifactTooLargeError).
+        """
         response = await self._request(
             "GET",
             f"/repos/{self._repository}/actions/runs/{run_id}/artifacts",
@@ -306,7 +330,13 @@ class GithubActionsBuildExecutor:
         # 우리 토큰을 실을 주소라 API 주소 아래인지 확인한다.
         if not isinstance(url, str) or not url.startswith(f"{self._api_base_url}/"):
             return None
-        return await self._download(url)
+        size = artifact.get("size_in_bytes") if artifact is not None else None
+        if max_bytes is not None and isinstance(size, int) and size > max_bytes:
+            raise _ArtifactTooLargeError
+        archive = await self._download(url)
+        if max_bytes is not None and archive is not None and len(archive) > max_bytes:
+            raise _ArtifactTooLargeError
+        return archive
 
     # --- 보안 검사 원문 (보안·거버넌스 2·11) ---
 
@@ -319,12 +349,17 @@ class GithubActionsBuildExecutor:
         if run_id is None:
             return None
         try:
-            archive = await self._artifact_archive(run_id, SCAN_ARTIFACT)
+            archive = await self._artifact_archive(
+                run_id, SCAN_ARTIFACT, max_bytes=SCAN_ARCHIVE_MAX_BYTES
+            )
         except TransientError as exc:
             _warn(exc.code, run_id)
             return None
         except _GithubAuthError:
             _warn(BUILD_UNAUTHORIZED, run_id)
+            return None
+        except _ArtifactTooLargeError:
+            _warn(SECURITY_SCAN_TOO_LARGE, run_id)
             return None
         if archive is None:
             _warn(SECURITY_SCAN_MISSING, run_id)
@@ -573,7 +608,7 @@ def _parse_security_scan(archive: bytes, *, source_ref: str) -> BuildSecuritySca
             meta = _zip_json(bundle, SCAN_META_FILE)
             trivy = _zip_json(bundle, SCAN_TRIVY_FILE)
             gitleaks = _zip_json(bundle, SCAN_GITLEAKS_FILE)
-    except zipfile.BadZipFile:
+    except _ZIP_READ_ERRORS:
         return None
     if not isinstance(meta, dict) or meta.get("schema_version") != SCAN_SCHEMA_VERSION:
         return None
@@ -604,7 +639,7 @@ def _zip_json(bundle: zipfile.ZipFile, name: str) -> object | None:
         return None
     try:
         body: object = json.loads(bundle.read(info))
-    except (ValueError, zipfile.BadZipFile):
+    except _ZIP_READ_ERRORS:
         return None
     return body
 

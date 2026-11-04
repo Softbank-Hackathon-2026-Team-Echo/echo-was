@@ -33,6 +33,8 @@
 
 ### 3.3 하지 않는다
 - 증거 때문에 배포를 막거나 늦추기(차단은 이전 게이트)
+- 빌드를 `SUCCEEDED`로 반영한 뒤 수집 전에 일꾼이 죽은 빌드를 다시 모으기. 그 빌드의 증거는 UNKNOWN으로 남고, 다시 빌드하거나 주기 재검사(다음 PR)에서 채운다
+- 수집을 따로 할 일(JobKind)로 빼기(마감 뒤, API 서버 담당 리뷰 11/4)
 
 ## 4. 결정
 
@@ -43,8 +45,8 @@
 | D-3 | 원문의 `build_id`가 빌드 id와 다르거나 digest가 빌드 digest와 다르면 버리고 경고만 남긴다 | 다른 빌드의 증거 금지 |
 | D-4 | 증거 3건: Trivy 이미지 → C-IMG-1(`TRIVY_IMAGE`), Trivy 비밀 → C-IMG-2(`TRIVY_SECRET`), gitleaks → C-IMG-2(`GITLEAKS`). 범위 = 조직·서비스·digest. 보고서가 없으면(검사 실패) 그 증거는 UNKNOWN(`REPORT_INVALID`) | #45 정규화 |
 | D-5 | 수집 시각 = 원문의 `scanned_at`. 없거나 우리 시계보다 5분 넘게 앞서면 지금 시각 | AI-default |
-| D-6 | 실패해도 예외를 올리지 않는다. 원문 읽기는 `None`(예외 없음), DB 오류는 `SQLAlchemyError`만 잡아 로그를 남기고 0건. 증거가 없으면 판정이 UNKNOWN으로 본다 | 배포 우선 |
-| D-7 | 원문은 신뢰하지 않는 입력으로 다룬다. zip 안 파일은 풀린 크기 32MB 상한, JSON만, 도구 버전은 `^[0-9A-Za-z.+-]{1,32}$`일 때만 쓴다. 근거 줄 상한(50)과 비밀값 원문 버리기는 정규화가 한다 | — |
+| D-6 | 실패해도 예외를 올리지 않는다. 원문 읽기부터 확인·정규화까지의 **어떤 예외도** 경고 로그(예외 종류만, 원문·메시지 없음) + 0건으로 끝낸다. DB 오류는 `SQLAlchemyError`. `CancelledError`(BaseException)는 그대로 나간다. 실행기도 깨진 zip(`zlib.error`·`EOFError`)·지원하지 않는 압축(`NotImplementedError`)·암호 걸린 항목(`RuntimeError`)을 그 파일만 `None`으로 둔다 | 배포 우선, API 서버 담당 리뷰(11/4) |
+| D-7 | 원문은 신뢰하지 않는 입력으로 다룬다. 일꾼 메모리 상한(384Mi) 안에서 세 파일을 함께 들 수 있게 **아티팩트 zip 8MB**(목록의 `size_in_bytes`가 넘으면 받지 않고, 받은 크기도 다시 봄, 넘으면 경고 `SECURITY_SCAN_TOO_LARGE`)·**zip 안 파일 풀린 크기 8MB** 상한. JSON만, 도구 버전은 `^[0-9A-Za-z.+-]{1,32}$`일 때만 쓴다. 근거 줄 상한(50)과 비밀값 원문 버리기는 정규화가 한다 | API 서버 담당 리뷰(11/4) |
 | AD-1 | `source_ref` = `github-actions:{빌드 저장소}/actions/runs/{run id}` | AI-default |
 
 ## 5. Acceptance criteria
@@ -52,12 +54,12 @@
 | AC | 확인 | 시험 |
 |---|---|---|
 | AC-1 | `read_security_scan`이 meta·보고서를 돌려주고 빌드 성공 판정은 그대로다 | `test_read_security_scan_returns_reports_and_meta`, `…_does_not_change_build_result` |
-| AC-2 | 아티팩트 없음·meta 틀림·크기 초과·서버/인증 오류 → `None` 또는 그 칸만 `None`, 예외 없음 | `test_read_security_scan_*` |
+| AC-2 | 아티팩트 없음·meta 틀림·깨진 zip 항목·크기 초과(목록·받은 크기·풀린 크기)·서버/인증 오류 → `None` 또는 그 칸만 `None`, 예외 없음 | `test_read_security_scan_*` |
 | AC-3 | 빌드 성공 직후 같은 digest의 증거 3건이 남는다(C-IMG-1 FAIL, C-IMG-2 PASS×2, 출처·수집 시각·서비스) | `test_build_success_records_image_findings_for_built_digest` |
 | AC-4 | 재사용 빌드는 다시 모으지 않는다 | `test_reused_build_is_not_collected_again` |
 | AC-5 | 다른 빌드·다른 digest의 원문은 버리고 배포는 성공한다 | `test_scan_for_other_build_or_digest_is_ignored_and_deploy_continues`, `test_scan_for_other_digest_is_ignored` |
 | AC-6 | 보고서가 없으면 UNKNOWN 증거 | `test_missing_reports_are_recorded_as_unknown` |
-| AC-7 | 원문이 없거나 가짜 실행기면 아무것도 남기지 않고 배포는 성공한다. 미래 검사 시각은 지금으로 | `test_no_scan_records_nothing_and_deploy_succeeds`, `test_fake_build_executor_records_nothing`, `test_scan_time_ahead_of_our_clock_uses_now` |
+| AC-7 | 원문이 없거나, 읽다 예상하지 못한 예외가 나거나, 가짜 실행기면 아무것도 남기지 않고 배포는 성공한다(로그에 원문·예외 메시지 없음). 미래 검사 시각은 지금으로 | `test_no_scan_records_nothing_and_deploy_succeeds`, `test_unexpected_scan_error_records_nothing_and_deploy_succeeds`, `test_fake_build_executor_records_nothing`, `test_scan_time_ahead_of_our_clock_uses_now` |
 
 ## 6. 리스크
 

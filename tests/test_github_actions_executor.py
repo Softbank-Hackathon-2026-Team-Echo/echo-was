@@ -1,7 +1,9 @@
 """실제 빌드 실행기(GitHub Actions) 시험(SPEC api-3-2 AC-1·AC-2). 가짜 GitHub 전송만 쓴다."""
 
+import io
 import logging
 import uuid
+import zipfile
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -33,6 +35,7 @@ from tests.real_executor_fakes import (
     AR_REPOSITORY,
     BUILD_REPOSITORY,
     DIGEST,
+    SCAN_ARTIFACT_ID_OFFSET,
     DictSecretClient,
     FakeActions,
     RecordingSleep,
@@ -462,6 +465,87 @@ async def test_read_security_scan_skips_report_larger_than_limit(
     # 풀린 크기로 본다. 큰 보고서만 버리고(그 증거는 UNKNOWN) 나머지는 쓴다.
     assert scan is not None
     assert (scan.trivy_report, scan.gitleaks_report) == (None, [])
+
+
+def _corrupt_member(archive: bytes, name: str) -> bytes:
+    """zip 안 파일 하나의 압축 데이터를 깨뜨린다(목록·다른 파일은 그대로)."""
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        info = bundle.getinfo(name)
+    data = bytearray(archive)
+    # 로컬 헤더(30바이트 + 이름 + extra) 뒤가 압축 데이터다.
+    start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    for offset in range(start, start + min(info.compress_size, 64)):
+        data[offset] ^= 0xFF
+    return bytes(data)
+
+
+def _deflated_scan_zip(build_id: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        source = zipfile.ZipFile(io.BytesIO(scan_zip(build_id, trivy=TRIVY_REPORT, gitleaks=[])))
+        for item in source.infolist():
+            bundle.writestr(item.filename, source.read(item))
+    return buffer.getvalue()
+
+
+async def test_read_security_scan_corrupted_report_leaves_that_report_none() -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(
+        lambda build_id: _corrupt_member(_deflated_scan_zip(build_id), "trivy-image.json")
+    )
+
+    scan = await executor.read_security_scan(external_ref)
+
+    assert scan is not None
+    assert (scan.trivy_report, scan.gitleaks_report) == (None, [])
+
+
+async def test_read_security_scan_skips_artifact_listed_larger_than_limit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(github_actions, "SCAN_ARCHIVE_MAX_BYTES", 64)
+    executor, external_ref, actions, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(build_id, trivy=TRIVY_REPORT, gitleaks=[])
+    )
+    downloads_before = len([r for r in actions.requests if r.url.host != "api.github.test"])
+
+    assert await executor.read_security_scan(external_ref) is None
+    assert _warning_codes(caplog) == ["SECURITY_SCAN_TOO_LARGE"]
+    # 목록의 크기만 보고 받지 않는다.
+    assert len([r for r in actions.requests if r.url.host != "api.github.test"]) == downloads_before
+
+
+async def test_read_security_scan_rejects_download_larger_than_limit_without_listed_size(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(github_actions, "SCAN_ARCHIVE_MAX_BYTES", 64)
+    executor, external_ref, actions, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(build_id, trivy=TRIVY_REPORT, gitleaks=[])
+    )
+    run_id = next(iter(actions.runs))
+    artifact_id = run_id + SCAN_ARTIFACT_ID_OFFSET
+    actions.override = lambda request: (
+        httpx.Response(
+            200,
+            json={
+                "artifacts": [
+                    {
+                        "id": artifact_id,
+                        "name": "security-scan",
+                        "expired": False,
+                        "archive_download_url": (
+                            f"{API_BASE}/repos/{BUILD_REPOSITORY}/actions/artifacts/"
+                            f"{artifact_id}/zip"
+                        ),
+                    }
+                ]
+            },
+        )
+        if request.url.path.endswith(f"/runs/{run_id}/artifacts")
+        else None
+    )
+
+    assert await executor.read_security_scan(external_ref) is None
+    assert _warning_codes(caplog) == ["SECURITY_SCAN_TOO_LARGE"]
 
 
 @pytest.mark.parametrize("status", [500, 401])

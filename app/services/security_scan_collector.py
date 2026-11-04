@@ -5,10 +5,12 @@
 - 원문의 build_id·digest 가 그 빌드와 다르면 버린다.
 - 보고서가 없으면(검사 실패) UNKNOWN 증거를 남긴다.
 - 실패해도 예외를 올리지 않는다. 배포는 계속하고, 증거가 없으면 판정이 UNKNOWN 으로 본다.
+- 빌드 반영과 수집 사이에 일꾼이 죽으면 그 빌드는 다시 모으지 않는다(다시 빌드하거나 주기 재검사).
 """
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clock import Clock
 from app.enums import BuildStatus
 from app.executors.base import BuildSecurityScan, BuildSecurityScanReader
-from app.models import Build, Service
 from app.repositories.build_repository import BuildRepository
 from app.repositories.service_repository import ServiceRepository
 from app.services.security_finding_service import SecurityFindingService
@@ -33,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 # 원문의 검사 시각이 우리 시계보다 이만큼 넘게 앞서면 믿지 않고 지금 시각을 쓴다.
 _CLOCK_SKEW = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class _ScanTarget:
+    build_id: uuid.UUID
+    external_ref: str
+    image_digest: str
+    organization_id: uuid.UUID
+    service_id: uuid.UUID
 
 
 class BuildSecurityScanCollector:
@@ -53,15 +63,23 @@ class BuildSecurityScanCollector:
             return 0
         if target is None:
             return 0
-        build, service = target
-        assert build.external_ref is not None and build.image_digest is not None
-        scan = await reader.read_security_scan(build.external_ref)
-        if scan is None:
+        # 원문 읽기·확인·정규화의 어떤 실패도 배포를 멈추지 않는다(증거가 없으면 판정이 UNKNOWN).
+        # 원문 내용이 로그에 섞이지 않게 예외 종류만 남긴다.
+        # CancelledError(BaseException)는 그대로 나간다.
+        try:
+            scan = await reader.read_security_scan(target.external_ref)
+            if scan is None:
+                return 0
+            if scan.build_id != str(target.build_id) or scan.image_digest != target.image_digest:
+                logger.warning("security scan does not match build", extra=_extra(build_id))
+                return 0
+            findings = self._normalize(scan, target)
+        except Exception as exc:
+            logger.warning(
+                "security scan not collected",
+                extra={**_extra(build_id), "error_type": type(exc).__name__},
+            )
             return 0
-        if scan.build_id != str(build.id) or scan.image_digest != build.image_digest:
-            logger.warning("security scan does not match build", extra=_extra(build_id))
-            return 0
-        findings = self._normalize(scan, service)
         try:
             await SecurityFindingService(self._session).record_all(findings, scan.source_ref)
         except SQLAlchemyError:
@@ -69,7 +87,7 @@ class BuildSecurityScanCollector:
             return 0
         return len(findings)
 
-    async def _find_target(self, build_id: uuid.UUID) -> tuple[Build, Service] | None:
+    async def _find_target(self, build_id: uuid.UUID) -> _ScanTarget | None:
         async with self._session.begin():
             build = await self._builds.find_by_id(build_id)
             if (
@@ -80,12 +98,20 @@ class BuildSecurityScanCollector:
             ):
                 return None
             service = await self._services.find_by_id(build.service_id)
-        return (build, service) if service is not None else None
-
-    def _normalize(self, scan: BuildSecurityScan, service: Service) -> list[NormalizedFinding]:
-        scope = SecurityScope(
+        if service is None:
+            return None
+        return _ScanTarget(
+            build_id=build.id,
+            external_ref=build.external_ref,
+            image_digest=build.image_digest,
             organization_id=service.organization_id,
             service_id=service.id,
+        )
+
+    def _normalize(self, scan: BuildSecurityScan, target: _ScanTarget) -> list[NormalizedFinding]:
+        scope = SecurityScope(
+            organization_id=target.organization_id,
+            service_id=target.service_id,
             image_digest=scan.image_digest,
         )
         collected_at = self._collected_at(scan.scanned_at)
