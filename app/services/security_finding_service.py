@@ -49,20 +49,28 @@ class SecurityFindingService:
         self, normalized: NormalizedFinding, source_ref: str | None = None
     ) -> uuid.UUID:
         """정규화한 증거 한 건을 남긴다."""
-        model = to_finding_model(normalized, source_ref)
+        return (await self.record_all([normalized], source_ref))[0]
+
+    async def record_all(
+        self, normalized_findings: list[NormalizedFinding], source_ref: str | None = None
+    ) -> list[uuid.UUID]:
+        """같은 원문에서 나온 증거 여러 건을 한 트랜잭션으로 남긴다."""
+        models = [to_finding_model(normalized, source_ref) for normalized in normalized_findings]
         async with self._session.begin():
-            self._findings.add(model)
-        logger.info(
-            "security finding recorded",
-            extra={
-                "action": "record_security_finding",
-                "finding_id": str(model.id),
-                "organization_id": str(model.organization_id),
-                "control_id": model.control_id,
-                "result": model.result,
-            },
-        )
-        return model.id
+            for model in models:
+                self._findings.add(model)
+        for model in models:
+            logger.info(
+                "security finding recorded",
+                extra={
+                    "action": "record_security_finding",
+                    "finding_id": str(model.id),
+                    "organization_id": str(model.organization_id),
+                    "control_id": model.control_id,
+                    "result": model.result,
+                },
+            )
+        return [model.id for model in models]
 
     async def record_manual_review(
         self,

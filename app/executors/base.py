@@ -26,7 +26,7 @@ deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from app.adapters.base import EnvironmentConfig
 from app.core.secrets import SecretValue
@@ -148,6 +148,23 @@ class BuildFailed:
 
 
 type BuildPollResult = BuildRunning | BuildSucceeded | BuildFailed
+
+
+@dataclass(frozen=True)
+class BuildSecurityScan:
+    """빌드 실행이 남긴 보안 검사 원문(보안·거버넌스 2·11). 판정하지 않고 그대로 넘긴다.
+
+    보고서가 None 이면 그 검사가 실패했거나 파일이 없었다. 받는 쪽이 UNKNOWN 증거로 남긴다.
+    """
+
+    build_id: str
+    image_digest: str
+    source_ref: str
+    scanned_at: datetime | None
+    trivy_version: str | None
+    gitleaks_version: str | None
+    trivy_report: dict[str, Any] | None
+    gitleaks_report: object | None
 
 
 @dataclass(frozen=True)
@@ -395,6 +412,16 @@ class BuildExecutor(Protocol):
     async def read_logs(self, external_ref: str, cursor: str | None, limit: int) -> LogChunk:
         """빌드 로그를 읽는다(상태를 바꾸지 않는다). 계약은 아래 '로그 읽기 계약'과 같다."""
         ...
+
+
+@runtime_checkable
+class BuildSecurityScanReader(Protocol):
+    """빌드 실행의 보안 검사 원문을 읽는다(실제 빌드 실행기만, 가짜는 없음).
+
+    없거나 읽지 못하면 None 이고 예외를 올리지 않는다(증거 수집이 배포를 막지 않는다).
+    """
+
+    async def read_security_scan(self, external_ref: str) -> BuildSecurityScan | None: ...
 
 
 class DeployExecutor(Protocol):

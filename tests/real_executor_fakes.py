@@ -119,6 +119,43 @@ def result_zip(build_id: str, digest: str = DIGEST, repository: str = AR_REPOSIT
     return buffer.getvalue()
 
 
+def scan_zip(
+    build_id: str,
+    digest: str = DIGEST,
+    *,
+    trivy: object | None = None,
+    gitleaks: object | None = None,
+    meta: dict[str, Any] | None = None,
+    raw_files: dict[str, bytes] | None = None,
+) -> bytes:
+    """customer-build.yml 이 남기는 security-scan 아티팩트(보안·거버넌스 11) 모양."""
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "build_id": build_id,
+        "image_digest": digest,
+        "ar_repository": AR_REPOSITORY,
+        "scanned_at": "2026-11-04T08:00:00Z",
+        "trivy": {"version": "0.75.0", "outcome": "success"},
+        "gitleaks": {"version": "8.30.1", "outcome": "success"},
+        **(meta or {}),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        if "meta.json" not in (raw_files or {}):
+            bundle.writestr("meta.json", json.dumps(body))
+        if trivy is not None:
+            bundle.writestr("trivy-image.json", json.dumps(trivy))
+        if gitleaks is not None:
+            bundle.writestr("gitleaks.json", json.dumps(gitleaks))
+        for name, content in (raw_files or {}).items():
+            bundle.writestr(name, content)
+    return buffer.getvalue()
+
+
+# security-scan 아티팩트 id = 실행 id + 이 값(build-result 아티팩트 id = 실행 id).
+SCAN_ARTIFACT_ID_OFFSET = 100_000
+
+
 @dataclass
 class FakeRun:
     id: int
@@ -127,6 +164,7 @@ class FakeRun:
     status: str = "queued"
     conclusion: str | None = None
     artifact: bytes | None = None
+    scan_artifact: bytes | None = None
     log: str = ""
     visible_after_list_calls: int = 0
 
@@ -229,21 +267,24 @@ class FakeActions:
             if len(rest) == 3:
                 return httpx.Response(200, json=run.as_json())
             if rest[3] == "artifacts":
-                artifacts = (
-                    [
-                        {
-                            "id": run.id,
-                            "name": "build-result",
-                            "expired": False,
-                            "archive_download_url": (
-                                f"{API_BASE}/repos/{BUILD_REPOSITORY}/actions/artifacts/"
-                                f"{run.id}/zip"
-                            ),
-                        }
-                    ]
-                    if run.artifact is not None
-                    else []
+                wanted = request.url.params.get("name")
+                stored = (
+                    (run.id, "build-result", run.artifact),
+                    (run.id + SCAN_ARTIFACT_ID_OFFSET, "security-scan", run.scan_artifact),
                 )
+                artifacts = [
+                    {
+                        "id": artifact_id,
+                        "name": name,
+                        "expired": False,
+                        "archive_download_url": (
+                            f"{API_BASE}/repos/{BUILD_REPOSITORY}/actions/artifacts/"
+                            f"{artifact_id}/zip"
+                        ),
+                    }
+                    for artifact_id, name, content in stored
+                    if content is not None and wanted in (None, name)
+                ]
                 return httpx.Response(200, json={"artifacts": artifacts})
             if rest[3] == "jobs":
                 return httpx.Response(
@@ -263,8 +304,11 @@ class FakeActions:
     def _blob(self, request: httpx.Request) -> httpx.Response:
         # 서명된 저장소 주소에는 우리 토큰이 실리면 안 된다.
         assert "authorization" not in request.headers
-        kind, run_id = request.url.path.strip("/").split("/")
-        run = self.runs[int(run_id)]
+        kind, blob_id = request.url.path.strip("/").split("/")
+        if kind == "artifact" and int(blob_id) > SCAN_ARTIFACT_ID_OFFSET:
+            scanned = self.runs[int(blob_id) - SCAN_ARTIFACT_ID_OFFSET]
+            return httpx.Response(200, content=scanned.scan_artifact or b"")
+        run = self.runs[int(blob_id)]
         if kind == "artifact":
             return httpx.Response(200, content=run.artifact or b"")
         return httpx.Response(200, text="﻿" + run.log)

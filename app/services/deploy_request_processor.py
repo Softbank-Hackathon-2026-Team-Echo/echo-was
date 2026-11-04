@@ -83,6 +83,7 @@ from app.services.deploy_support import (
 )
 from app.services.integrity import violated_constraint_name
 from app.services.job_lease import JobLease, JobOutcome
+from app.services.security_scan_collector import BuildSecurityScanCollector
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +399,7 @@ class DeployRequestProcessor:
             case BuildSucceeded(image_repository=image_repository, image_digest=image_digest):
                 async with self._session.begin():
                     await self._lock(lock_build=True)
-                    await self._builds.transition(
+                    succeeded = await self._builds.transition(
                         build.id,
                         BuildStatus.RUNNING,
                         {
@@ -412,6 +413,12 @@ class DeployRequestProcessor:
                 logger.info(
                     "build succeeded", extra={"action": "poll_build", "build_id": str(build.id)}
                 )
+                if succeeded:
+                    # 같은 실행의 보안 검사 원문을 증거로 남긴다(보안·거버넌스 2·11).
+                    # 실패해도 배포는 계속한다.
+                    await BuildSecurityScanCollector(self._session, self._clock).collect(
+                        build.id, self._executors.build
+                    )
         return self._next_run_now()
 
     async def _close_build(self, build_id: uuid.UUID, code: DeployRequestErrorCode) -> None:

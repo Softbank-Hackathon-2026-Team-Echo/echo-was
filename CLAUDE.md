@@ -50,6 +50,7 @@ app/
 │                     #   security_rules(공통 보안 규칙표·판정·매트릭스 칸 요약, 순수 계산, 보안 3)
 │                     #   security_normalizers(Trivy·gitleaks·TLS 시험 원문 → 공통 증거, 비밀값 원문 버림, 보안 2)
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
+│                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings, 실패해도 배포 계속, 보안 2·11)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
