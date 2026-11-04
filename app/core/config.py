@@ -31,6 +31,17 @@ MIGRATION_MIN_MAX_WAIT_SECONDS = 5
 MIGRATION_MAX_MAX_WAIT_SECONDS = 300
 
 
+# 데이터 확인 접속처 `<host>:<port>/<구독 이름>`(구독 이름은 PostgreSQL 식별자).
+REPLICATION_ENDPOINT_PATTERN = re.compile(
+    r"(?P<host>[A-Za-z0-9.-]+):(?P<port>[0-9]{1,5})/(?P<subscription>[a-z_][a-z0-9_]{0,62})"
+)
+
+
+def _is_replication_endpoint(value: str) -> bool:
+    match = REPLICATION_ENDPOINT_PATTERN.fullmatch(value.strip())
+    return match is not None and 1 <= int(match["port"]) <= 65535
+
+
 def _split_comma_list(value: object) -> object:
     """환경변수의 쉼표 구분 문자열을 목록으로 바꾼다. 빈 칸은 버린다."""
     if isinstance(value, str):
@@ -58,6 +69,13 @@ class EntrypointExecutorMode(StrEnum):
 
     FAKE = "fake"
     HTTP = "http"
+
+
+class DataSyncCheckerMode(StrEnum):
+    """데이터 확인 실행기. postgres 면 출발 PostgreSQL 의 pg_stat_replication 을 읽는다."""
+
+    FAKE = "fake"
+    POSTGRES = "postgres"
 
 
 class SourceClientMode(StrEnum):
@@ -100,6 +118,16 @@ class Settings(BaseSettings):
     # 환경 id(또는 환경 종류) → 진입점 환경 이름. 비면 환경 종류(aws·gcp)를 그대로 쓴다.
     entrypoint_environment_map: Annotated[list[str], NoDecode] = Field(default_factory=list)
     entrypoint_request_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    # 데이터 확인(인프라 7). postgres 면 출발 환경 PostgreSQL 에서 도착 구독의 복제 지연을 읽는다.
+    # 환경 id(또는 종류) → `<host>:<port>/<그 환경의 구독 이름>`. 비밀번호는 비밀 참조만.
+    data_sync_checker_mode: DataSyncCheckerMode = DataSyncCheckerMode.FAKE
+    data_sync_databases: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    data_sync_user: str = "echo_monitor"
+    data_sync_database: str = "postgres"
+    data_sync_password_ref: str | None = None
+    data_sync_ssl_mode: Literal["require", "verify-full", "disable"] = "require"
+    data_sync_timeout_seconds: float = Field(default=3.0, gt=0)
 
     # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
     # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
@@ -201,6 +229,7 @@ class Settings(BaseSettings):
         "reserved_org_slugs",
         "migration_required_requests_default",
         "entrypoint_environment_map",
+        "data_sync_databases",
         "image_registry_mirrors",
         mode="before",
     )
@@ -307,6 +336,39 @@ class Settings(BaseSettings):
             raise ValueError(
                 "entrypoint_base_url and entrypoint_token_ref are required when "
                 "entrypoint_executor_mode is http"
+            )
+        return self
+
+    @field_validator("data_sync_databases")
+    @classmethod
+    def _check_data_sync_databases(cls, value: list[str]) -> list[str]:
+        for item in value:
+            key, separator, endpoint = item.partition("=")
+            if not separator or not key.strip() or not _is_replication_endpoint(endpoint):
+                raise ValueError(
+                    "data_sync_databases items must be <environment>=<host>:<port>/<subscription>"
+                )
+        return value
+
+    @field_validator("data_sync_password_ref")
+    @classmethod
+    def _check_data_sync_password_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError("data_sync_password_ref must be a secret reference") from None
+        return value
+
+    @model_validator(mode="after")
+    def _check_data_sync_settings(self) -> "Settings":
+        if self.data_sync_checker_mode is DataSyncCheckerMode.POSTGRES and not (
+            self.data_sync_databases and self.data_sync_password_ref
+        ):
+            raise ValueError(
+                "data_sync_databases and data_sync_password_ref are required when "
+                "data_sync_checker_mode is postgres"
             )
         return self
 
