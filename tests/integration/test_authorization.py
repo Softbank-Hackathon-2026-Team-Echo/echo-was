@@ -151,6 +151,12 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
         A,
         human_only=True,
     ),
+    # --- 보안 3: 기한부 예외(조회는 뷰어·에이전트, 요청·승인·철회는 개발자 이상 사람) ---
+    _org("GET", "/security/exceptions", V),
+    _org("GET", "/security/exceptions/{exception_id}", V),
+    _org("POST", "/security/exceptions", D, human_only=True),
+    _org("POST", "/security/exceptions/{exception_id}/approve", D, human_only=True),
+    _org("POST", "/security/exceptions/{exception_id}/revoke", D, human_only=True),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
 ]

@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 24개 경로 + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 27개 경로(기한부 예외 3개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
 | 에이전트 토큰의 성공한 GET·HEAD(2xx) | `AGENT` | 응답 뒤 따로 커밋(실패해도 응답은 그대로) | `SUCCEEDED` |
@@ -116,6 +116,9 @@
 | `MIGRATION_PLAN_REJECTED` | `POST /migration-plans/{id}/reject` | `migration_plan` | `{}` |
 | `MIGRATION_PLAN_CANCELLED` | `POST /migration-plans/{id}/cancel` | `migration_plan` | `{}` |
 | `MIGRATION_ABORT_REQUESTED` | `POST /migration-plans/{id}/abort` | `migration_plan` | `{}` |
+| `SECURITY_EXCEPTION_REQUESTED` | `POST /security/exceptions` | `security_exception`(이름표 = 통제 ID) | `{expiresAt}`(사유 원문은 예외 행에만) |
+| `SECURITY_EXCEPTION_APPROVED` | `POST /security/exceptions/{id}/approve` | `security_exception` | `{}` |
+| `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |
 | `DEPLOY_FINISHED` · `ROLLBACK_FINISHED` | 끝 상태(SYSTEM). `trigger = ROLLBACK` 이면 `ROLLBACK_FINISHED`, 예비 따라가기는 `DEPLOY_FINISHED` + `details.trigger` | `deploy_request` | `{status, trigger, cancelReason?, errorCode?, simulated?}` |
 | `MIGRATION_FINISHED` | 끝 상태(SYSTEM) | `migration_plan` | `{status, errorCode?, simulated?}` |
 | `SERVICE_DELETED` | 삭제 완료(SYSTEM) | `service` | `{}` |

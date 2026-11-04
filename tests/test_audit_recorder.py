@@ -126,8 +126,9 @@ def test_request_context_before_routing_has_no_route() -> None:
 def test_write_route_actions_are_unique_user_actions() -> None:
     names = list(WRITE_ROUTE_ACTIONS.values())
 
-    assert len(names) == 24
-    assert len(set(names)) == 24
+    # API 서버 7 의 24개 + 기한부 예외(보안·거버넌스 3) 3개
+    assert len(names) == 27
+    assert len(set(names)) == 27
     # 초대 적용·끝 상태·에이전트 읽기는 쓰기 경로의 이름이 아니다.
     assert not set(names) & {
         AuditAction.MEMBER_JOINED,

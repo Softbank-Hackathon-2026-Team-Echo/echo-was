@@ -227,6 +227,7 @@
 | `PASS` · `WARN` · `FAIL` · `UNKNOWN` · `NA` | 증거·통제·매트릭스 칸 결과 (`SecurityResult`) | 확인하지 못한 것(`UNKNOWN`)과 목업은 PASS 가 아니다. `NA` 는 그 환경에 해당하지 않는 통제 |
 | `REAL` · `CACHE` · `SIMULATED` | 증거 모드 (`SecurityFindingMode`) | `CACHE` 는 유효기간 안에서만 쓴다. `SIMULATED` 증거는 판정에 쓰지 않는다 |
 | `TRIVY_IMAGE` · `TRIVY_CONFIG` · `TRIVY_SECRET` · `GITLEAKS` · `TLS_PROBE` · `MANUAL_REVIEW` · `WAS_TEST` · `WAS_STATE` · `AUDIT_LOG` · `PRECHECK` · `ENTRYPOINT` · `DATA_ENGINE` · `CLOUD_API` · `KUBERNETES_API` · `GITHUB_API` · `AI_REVIEW` | 증거 출처 (`SecurityFindingSource`) | 통제마다 받는 출처가 규칙표에 있다. `MANUAL_REVIEW` 는 점검자·근거 링크가 있어야 쓰고, `AI_REVIEW` 는 PASS 를 만들 수 없다 |
+| `PENDING` · `ACTIVE` · `EXPIRED` · `REVOKED` | 기한부 예외 상태 (`SecurityExceptionStatus`, API `status`, 저장하지 않음) | 철회함 > 만료 > 승인됨 > 승인 대기 순으로 칸과 지금 시각으로 정한다. 판정에는 `ACTIVE` 만 쓴다 |
 | `UNCONFIRMED` · `ESCALATED` · `DISMISSED` | AI 결과 확인 (`AiFindingConfirmation`) | 사람이 `ESCALATED` 로 바꿔야 차단 사유가 된다. 그 전에는 WARN, `DISMISSED` 는 쓰지 않는다 |
 | `PREPARATION` · `EXECUTION` · `POST_SWITCH` | 판정 시점 (`SecurityCheckPhase`) | 준비(배포·설정 변경·주기 수집) · 실행(이전 승인·일꾼 시작, 준비 통제도 함께 본다) · 전환 직후 |
 | `IAM` · `ENCRYPTION` · `AUDIT_LOG` · `POLICY` | 매트릭스 칸 (`SecurityMatrixCell`, API `iam`·`encryption`·`auditLog`·`policy`) | 칸 결과는 그 칸 통제의 가장 나쁜 값: FAIL > 필수 UNKNOWN > WARN(예외 포함) > 선택 UNKNOWN > PASS |

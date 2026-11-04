@@ -95,12 +95,14 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `GET /services/{id}/migration-plans` · `GET /migration-plans/{id}` · `GET /migration-plans/{id}/logs` (이전 계획, API 서버 8) | 뷰어 | 읽기 가능 |
 | `GET /audit-logs` (감사 로그, API 서버 7) | 뷰어 | 읽기 가능 |
 | `GET /security/matrix` · `GET /security/findings` (보안 매트릭스·증거, 보안·거버넌스 4) | 뷰어 | 읽기 가능 |
+| `GET /security/exceptions` · `GET /security/exceptions/{id}` (기한부 예외, 보안 3) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
 | `POST /services` · `PATCH /services/{id}` · `POST /services/{id}/deploy-requests` | 개발자 | 403 |
 | `POST /deploy-requests/{id}/rollback` (되돌리기, API 서버 4. 배포 요청 접수와 같은 검사기) | 개발자 | 403 |
 | `POST·GET /agent-tokens` · `DELETE /agent-tokens/{id}` | 개발자(사람만) | 403 |
 | `POST /services/{id}/migration-plans` · `POST /migration-plans/{id}/approve·reject·cancel·abort` (이전 계획 만들기·승인·거절·취소·중단, API 서버 8) | 개발자(사람만) | 403 |
+| `POST /security/exceptions` · `POST /security/exceptions/{id}/approve·revoke` (기한부 예외 요청·승인·철회, 보안 3) | 개발자(사람만) | 403 |
 | `DELETE /environments/{id}` · `DELETE /services/{id}` | 어드민 | 403 |
 | `PATCH /members/{userId}` · `POST·GET /invitations` · `DELETE /invitations/{id}` | 어드민(사람만) | 403 |
 | `PATCH /settings` (자기 승인 스위치 `allowSelfApproval`, API 서버 8) | 어드민(사람만) | 403 |
@@ -142,7 +144,7 @@ async def create_rollback(access: HumanDeveloperAccess, ...) -> ...:
 | 403 | `ORIGIN_NOT_ALLOWED` | 쿠키 인증 변경 요청의 Origin 이 허용 목록에 없음 |
 | 403 | `ROLE_FORBIDDEN` | 역할이 모자람(서비스가 잠금 안에서 다시 본 결과 포함) |
 | 403 | `AGENT_READ_ONLY` | 에이전트의 쓰기·사람만 경로 |
-| 403 | `SELF_APPROVAL_FORBIDDEN` | 이전 계획을 만든 사람의 승인·거절인데 조직이 자기 승인을 막아 둠(API 서버 8) |
+| 403 | `SELF_APPROVAL_FORBIDDEN` | 이전 계획을 만든 사람의 승인·거절, 또는 기한부 예외를 요청한 사람의 승인인데 조직이 자기 승인을 막아 둠(API 서버 8, 보안 3) |
 | 404 | `ORGANIZATION_NOT_FOUND` | 조직이 없거나 멤버가 아님(구분하지 않음) |
 | 503 | `LOGIN_NOT_CONFIGURED` | 로그인 설정이 비어 있음(로그인 시작) |
 

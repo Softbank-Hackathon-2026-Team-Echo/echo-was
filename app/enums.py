@@ -543,6 +543,18 @@ class AiFindingConfirmation(StrEnum):
     DISMISSED = "DISMISSED"
 
 
+class SecurityExceptionStatus(StrEnum):
+    """기한부 예외의 상태(응답용, 저장하지 않고 승인·철회·만료 칸과 지금 시각으로 정한다).
+
+    REVOKED > EXPIRED > ACTIVE(승인됨) > PENDING(승인 대기) 순서로 본다. 판정에는 ACTIVE 만 쓴다.
+    """
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+
+
 class SecurityCheckPhase(StrEnum):
     """판정 시점. 준비(배포·설정 변경·주기 수집) · 실행(이전 승인·일꾼 시작) · 전환 직후."""
 

@@ -329,6 +329,18 @@ class RequestFieldInvalidError(InvalidInputError):
         super().__init__("request validation failed", details=[ErrorField(field, reason)])
 
 
+class RequestFieldsInvalidError(InvalidInputError):
+    """스키마 밖 규칙(예: 통제가 정한 범위 칸)에 맞지 않는 요청 칸 여러 개.
+
+    스키마 검증과 같은 코드(VALIDATION_ERROR)로 응답한다.
+    """
+
+    code = "VALIDATION_ERROR"
+
+    def __init__(self, details: Sequence[ErrorField]) -> None:
+        super().__init__("request validation failed", details=details)
+
+
 class GithubUnavailableError(ExternalError):
     """GitHub 사용자 API 장애·시간 초과·한도 초과(403·429)."""
 
@@ -430,6 +442,22 @@ class PlanExpiredError(ConflictError):
     """승인 대기 시간이 지났다. 계획은 EXPIRED 로 끝났다."""
 
     code = "PLAN_EXPIRED"
+
+
+class SecurityExceptionNotFoundError(NotFoundError):
+    code = "SECURITY_EXCEPTION_NOT_FOUND"
+
+
+class SecurityExceptionNotPendingError(ConflictError):
+    """승인 대기(승인 전·철회 전·만료 전)가 아닌 예외를 승인하려 했다."""
+
+    code = "SECURITY_EXCEPTION_NOT_PENDING"
+
+
+class SecurityExceptionClosedError(ConflictError):
+    """이미 철회했거나 만료된 예외를 철회하려 했다."""
+
+    code = "SECURITY_EXCEPTION_CLOSED"
 
 
 class SecurityGateBlockedError(ConflictError):

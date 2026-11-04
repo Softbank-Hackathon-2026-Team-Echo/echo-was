@@ -29,6 +29,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포·이력·되돌리기·로그 API 계약(역할·버전 상태·겹침 규칙·실패 코드·로그 줄·`simulated`)을 바꾸거나 쓸 때 |
 | [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기·로그 읽기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서·로그 읽기·마스킹 계약 |
 | [docs/api/variables.md](docs/api/variables.md) | 고객 앱 환경 변수 API(쓰기 전용·권한·오류·`pendingRedeploy`)를 바꾸거나 쓸 때. 주입 규칙은 [docs/executors.md](docs/executors.md) "앱 환경 변수" |
+| [docs/api/security-exceptions.md](docs/api/security-exceptions.md) | 기한부 예외 API(통제별 범위 칸·7일 상한·자기 승인·상태)를 바꾸거나 쓸 때 |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
@@ -41,7 +42,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security·security_exception 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
 ├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
@@ -59,6 +60,7 @@ app/
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
+│                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository

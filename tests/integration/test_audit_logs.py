@@ -141,10 +141,10 @@ def test_every_write_route_has_an_action_name() -> None:
 
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 24
+    assert len(WRITE_ROUTE_ACTIONS) == 27
 
 
-# --- AC-2: 쓰기 24개 경로 ---
+# --- AC-2: 쓰기 27개 경로(API 서버 7 의 24개 + 기한부 예외 3개) ---
 
 
 @dataclass
@@ -553,7 +553,50 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         label,
     )
 
-    # 24개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # 기한부 예외(보안·거버넌스 3): 요청은 만든 사람, 승인은 다른 개발자, 철회는 만든 사람
+    exceptions_path = org_path(team_id, "/security/exceptions")
+    expires_at = harness.clock.now() + timedelta(days=1)
+    requested = await migration.author_client.post(
+        exceptions_path,
+        json={
+            "controlId": "C-DB-1",
+            "serviceId": migration.service_id,
+            "environmentId": str(migration.gcp.id),
+            "reason": "D04~D07 결정 전, 시연은 쓰기 정지 구간에서 수동 확인",
+            "expiresAt": expires_at.isoformat(),
+        },
+    )
+    exception_id = _data(requested)["id"]
+    await ledger.expect_one(
+        requested,
+        AuditAction.SECURITY_EXCEPTION_REQUESTED,
+        migration.author.user,
+        team_id,
+        "security_exception",
+        exception_id,
+        "C-DB-1",
+        {"expiresAt": expires_at.isoformat()},
+    )
+    await ledger.expect_one(
+        await migration.approver_client.post(f"{exceptions_path}/{exception_id}/approve"),
+        AuditAction.SECURITY_EXCEPTION_APPROVED,
+        migration.approver.user,
+        team_id,
+        "security_exception",
+        exception_id,
+        "C-DB-1",
+    )
+    await ledger.expect_one(
+        await migration.author_client.post(f"{exceptions_path}/{exception_id}/revoke"),
+        AuditAction.SECURITY_EXCEPTION_REVOKED,
+        migration.author.user,
+        team_id,
+        "security_exception",
+        exception_id,
+        "C-DB-1",
+    )
+
+    # 27개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(
