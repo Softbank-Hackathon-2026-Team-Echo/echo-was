@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import SourceNotSingleError
 from app.enums import MigrationStepKind, MigrationStepStatus
 from app.executors.base import DeployTarget, MainRoute
 from app.models import Deployment, Environment, Service, ServiceEnvironment
@@ -234,6 +235,17 @@ class MigrationTargets:
     target_connection: ServiceEnvironment
     source_deployment: Deployment | None
     target_deployment: Deployment | None
+
+
+def single_source(connections: Sequence[ServiceEnvironment]) -> ServiceEnvironment:
+    """출발 연결: 비율 100 으로 서비스 중인 연결 하나(현재 배포 있음). 아니면 409."""
+    serving = [item for item in connections if item.traffic_weight > 0]
+    if len(serving) != 1 or serving[0].traffic_weight != 100:
+        raise SourceNotSingleError("service must be served by exactly one environment at 100%")
+    source = serving[0]
+    if source.current_deployment_id is None:
+        raise SourceNotSingleError("serving environment has no deployment")
+    return source
 
 
 async def load_migration_targets(

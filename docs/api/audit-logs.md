@@ -78,8 +78,9 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 27개 경로(기한부 예외 3개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 29개 경로(기한부 예외 3개·AI 사전 점검 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
+| AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
 | 에이전트 토큰의 성공한 GET·HEAD(2xx) | `AGENT` | 응답 뒤 따로 커밋(실패해도 응답은 그대로) | `SUCCEEDED` |
 
@@ -87,7 +88,7 @@
 
 ### 행동 이름
 
-쓰기 경로 ↔ 이름 표는 `app/audit/actions.py` 의 `WRITE_ROUTE_ACTIONS` 다. 앱의 모든 POST·PUT·PATCH·DELETE 중 `POST /api/v1/auth/logout` 만 빼고 전부 이 표에 있어야 한다(`test_every_write_route_has_an_action_name`). **새 쓰기 경로를 더하면 이름도 더한다.**
+쓰기 경로 ↔ 이름 표는 `app/audit/actions.py` 의 `WRITE_ROUTE_ACTIONS` 다. 러너 경로는 별도 표 `RUNNER_ROUTE_ACTIONS` 다(heartbeat·events 는 값이 `None`, 줄을 쓰지 않는다). 앱의 모든 POST·PUT·PATCH·DELETE 중 `POST /api/v1/auth/logout` 만 빼고 전부 두 표 중 하나에 있어야 한다(`test_every_write_route_has_an_action_name`). **새 쓰기 경로를 더하면 이름도 더한다.**
 
 | 이름 | 경로(`/api/v1/orgs/{orgId}` 아래) | 대상 | `details` |
 |---|---|---|---|
@@ -119,6 +120,11 @@
 | `SECURITY_EXCEPTION_REQUESTED` | `POST /security/exceptions` | `security_exception`(이름표 = 통제 ID) | `{expiresAt}`(사유 원문은 예외 행에만) |
 | `SECURITY_EXCEPTION_APPROVED` | `POST /security/exceptions/{id}/approve` | `security_exception` | `{}` |
 | `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |
+| `PRECHECK_REQUESTED` | `POST /prechecks` | `agent_run`(이름표 = 서비스 이름) | `{serviceId, targetEnvironmentId}` |
+| `PRECHECK_CANCELLED` | `POST /prechecks/{id}/cancel` | `agent_run` | `{serviceId, targetEnvironmentId}` |
+| `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName}` |
+| `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{status, failureCode?, simulated, aiReviewed}` |
+| `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
 | `DEPLOY_FINISHED` · `ROLLBACK_FINISHED` | 끝 상태(SYSTEM). `trigger = ROLLBACK` 이면 `ROLLBACK_FINISHED`, 예비 따라가기는 `DEPLOY_FINISHED` + `details.trigger` | `deploy_request` | `{status, trigger, cancelReason?, errorCode?, simulated?}` |
 | `MIGRATION_FINISHED` | 끝 상태(SYSTEM) | `migration_plan` | `{status, errorCode?, simulated?}` |
 | `SERVICE_DELETED` | 삭제 완료(SYSTEM) | `service` | `{}` |
@@ -138,7 +144,7 @@
 | `migration-worker` | 이전 일꾼의 모든 끝(`SUCCEEDED`·`ROLLED_BACK`·`FAILED`·`STALE`·`CANCELLED`) |
 | `teardown-worker` | 서비스 삭제 완료, 삭제 일꾼의 배포 요청 취소 |
 | `api` | 사람 요청을 처리하다 서버 규칙으로 **자동으로** 끝낸 것: 대기 요청 밀어내기(`SUPERSEDED`), 서비스 삭제의 배포 요청 취소, 승인·거절·취소 시도 때 만료(`EXPIRED`), 승인 때 낡음(`STALE`), 새 계획을 만들 때 옛 대기 계획 만료, 중단의 할 일 복구(`CANCELLED`). 누른 사람의 행동이 아니므로 USER 로 쓰지 않는다. 그래서 승인 시도가 `EXPIRED` 로 끝나면 USER 승인 줄은 없고 SYSTEM `api` 줄만 있다 |
-| `ai-runner` | 앞으로 AI 러너 API 가 `AuditRecorder` 로 쓴다(지금은 없다) |
+| `ai-runner` | AI 실행 가져가기·결과 제출·시간 초과. 러너 신원은 이 행동만 한다(하트비트·이벤트는 줄이 없다). 사전 점검 요청 안에서 만료한 것도 이 값이다 |
 
 ## 기록하지 않는 것
 

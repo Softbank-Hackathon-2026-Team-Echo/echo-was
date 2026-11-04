@@ -1,7 +1,7 @@
 """감사 로그 이름표: 행동 이름, 대상 종류, SYSTEM 줄을 쓴 쪽, 쓰기 경로 → 행동 이름 표.
 
-쓰기 경로를 새로 만들면 WRITE_ROUTE_ACTIONS 에 이름을 더한다. 이름이 빠지면 시험이 실패한다
-(앱의 모든 POST·PUT·PATCH·DELETE 중 로그아웃만 뺀다).
+쓰기 경로를 새로 만들면 WRITE_ROUTE_ACTIONS(러너 경로는 RUNNER_ROUTE_ACTIONS)에 이름을 더한다.
+이름이 빠지면 시험이 실패한다(앱의 모든 POST·PUT·PATCH·DELETE 중 로그아웃만 뺀다).
 """
 
 from enum import StrEnum
@@ -37,11 +37,17 @@ class AuditAction(StrEnum):
     SECURITY_EXCEPTION_REQUESTED = "SECURITY_EXCEPTION_REQUESTED"
     SECURITY_EXCEPTION_APPROVED = "SECURITY_EXCEPTION_APPROVED"
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
+    PRECHECK_REQUESTED = "PRECHECK_REQUESTED"
+    PRECHECK_CANCELLED = "PRECHECK_CANCELLED"
     # --- 서버(SYSTEM): 끝 상태 ---
     DEPLOY_FINISHED = "DEPLOY_FINISHED"
     ROLLBACK_FINISHED = "ROLLBACK_FINISHED"
     MIGRATION_FINISHED = "MIGRATION_FINISHED"
     SERVICE_DELETED = "SERVICE_DELETED"
+    # --- 서버(SYSTEM, component = ai-runner): AI 실행 ---
+    AGENT_RUN_CLAIMED = "AGENT_RUN_CLAIMED"
+    AGENT_RUN_FINISHED = "AGENT_RUN_FINISHED"
+    AGENT_RUN_TIMED_OUT = "AGENT_RUN_TIMED_OUT"
     # --- AI 에이전트(AGENT): 성공한 읽기 ---
     RESOURCE_READ = "RESOURCE_READ"
 
@@ -58,6 +64,7 @@ class AuditTargetType(StrEnum):
     DEPLOY_REQUEST = "deploy_request"
     MIGRATION_PLAN = "migration_plan"
     SECURITY_EXCEPTION = "security_exception"
+    AGENT_RUN = "agent_run"
 
 
 class AuditComponent(StrEnum):
@@ -67,6 +74,7 @@ class AuditComponent(StrEnum):
     DEPLOY_WORKER = "deploy-worker"
     MIGRATION_WORKER = "migration-worker"
     TEARDOWN_WORKER = "teardown-worker"
+    AI_RUNNER = "ai-runner"
 
 
 _ORG = "/api/v1/orgs/{org_id}"
@@ -112,4 +120,17 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("POST", f"{_ORG}/security/exceptions/{{exception_id}}/revoke"): (
         AuditAction.SECURITY_EXCEPTION_REVOKED
     ),
+    ("POST", f"{_ORG}/prechecks"): AuditAction.PRECHECK_REQUESTED,
+    ("POST", f"{_ORG}/prechecks/{{precheck_id}}/cancel"): AuditAction.PRECHECK_CANCELLED,
+}
+
+_RUNNER = "/api/v1/runner/runs"
+
+# 러너 쓰기 경로 → SYSTEM(component = ai-runner) 줄의 행동 이름. None 은 줄을 쓰지 않는 경로다.
+# 시험은 "쓰기 경로 = WRITE_ROUTE_ACTIONS ∪ RUNNER_ROUTE_ACTIONS ∪ 로그아웃"을 확인한다.
+RUNNER_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction | None] = {
+    ("POST", f"{_RUNNER}:claim"): AuditAction.AGENT_RUN_CLAIMED,
+    ("POST", f"{_RUNNER}/{{run_id}}/heartbeat"): None,
+    ("POST", f"{_RUNNER}/{{run_id}}/events"): None,
+    ("POST", f"{_RUNNER}/{{run_id}}/result"): AuditAction.AGENT_RUN_FINISHED,
 }

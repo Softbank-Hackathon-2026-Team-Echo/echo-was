@@ -1,4 +1,4 @@
-"""세션 쿠키·에이전트 토큰·로그인 상태 값 만들기와 해시.
+"""세션 쿠키·에이전트 토큰·러너 토큰·실행 토큰·로그인 상태 값 만들기와 해시.
 
 원문은 SecretValue 로만 들고 다닌다. DB 에는 SHA-256(16진수 64자)만 둔다.
 """
@@ -14,6 +14,8 @@ from app.core.secrets import SecretValue
 
 TOKEN_BYTES = 32
 AGENT_TOKEN_PREFIX = "echo_agt_"
+RUNNER_TOKEN_PREFIX = "echo_rnr_"
+RUN_TOKEN_PREFIX = "echo_run_"
 AGENT_TOKEN_LAST_CHARS = 4
 _STATE_SEPARATOR = "."
 
@@ -28,6 +30,14 @@ def new_session_token() -> SecretValue:
 
 def new_agent_token() -> SecretValue:
     return SecretValue(AGENT_TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES))
+
+
+def new_runner_token() -> SecretValue:
+    return SecretValue(RUNNER_TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES))
+
+
+def new_run_token() -> SecretValue:
+    return SecretValue(RUN_TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES))
 
 
 def new_oauth_state() -> str:

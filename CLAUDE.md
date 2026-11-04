@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기), AI 사전 점검 API + 러너 계약(만들기·가져가기·이벤트·결과, C-AI-1 증거)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -33,6 +33,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
+| [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -42,10 +43,10 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security·security_exception 라우터
-│                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
-├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
-├─ auth/              # guards(require_login·require_human·require_org_role) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security·security_exception·precheck 라우터
+│                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나) + runner 라우터(/api/v1/runner/runs, 러너·실행 토큰)
+├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표·러너 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
+├─ auth/              # guards(require_login·require_human·require_org_role) · runner_guards(require_runner·require_run_token) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
 ├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수·되돌리기·이력·로그)
 │                     #   AuthService(로그인·세션·/me) · OrganizationService · InvitationService · AgentTokenService
 │                     #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · deploy_support · service_view · job_lease
@@ -62,11 +63,14 @@ app/
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
+│                     #   PrecheckService(AI 사전 점검 만들기·조회·이벤트·취소·입력 사본) · AgentRunService(러너: 가져가기·하트비트·이벤트·결과, 부를 때 만료)
+│                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository · Finding Repository(보안 증거, 조직 조건 필수)
 │                     #   ServiceEnvironmentVariable Repository(앱 환경 변수 행, 값 없음)
-│                     #   SecurityException Repository(판정용: 승인·미철회만) · AgentRun Repository(최근 성공한 AI 사전 점검)
+│                     #   SecurityException Repository(판정용: 승인·미철회만) · AgentRun Repository(AI 실행 조회·조건부 전이, 최근 성공한 AI 사전 점검)
+│                     #   AgentRunner·AgentRunEvent Repository(러너 신원, 이벤트 ON CONFLICT 무시)
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
 │                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만.
@@ -87,7 +91,7 @@ app/
 │                     #   security_exceptions(기한부 예외) · agent_runners·agent_runs·agent_run_events·agent_patch_approvals(AI 실행, 러너 계약 v1)
 │                     #   service_environment_variables(앱 환경 변수 이름·참조·버전, 값 칸 없음)
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
-├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
+├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰) · issue_runner_token (러너 토큰 발급·철회)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
 ├─ dependencies.py    # Depends 주입 함수 (세션 팩토리·서비스·어댑터·소스 클라이언트·GitHub 사용자 클라이언트·시계·비밀값 조회기·로그용 실행기 묶음 get_executor_set)
 └─ enums.py           # 배포·배포 요청·빌드·할 일·서비스 상태, 조직 역할·초대 상태·행위자 종류, 이전 계획 상태·종류·단계·원인, 보안 판정 값 (용어 사전 §3)
@@ -186,6 +190,15 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - `details` 에 비밀값·토큰 원문·수정한 값을 넣지 않는다(수정은 `changedFields` 칸 이름만). `action` 은 옛 거부 줄의 `METHOD 경로 틀` 때문에 칸·응답이 문자열이다.
 - 거부 줄과 에이전트의 성공한 GET·HEAD(2xx, 미들웨어가 응답 뒤) 줄만 따로 커밋한다(`app/auth/audit.py`). 에이전트 읽기 기록 실패는 로그만 남기고 응답을 바꾸지 않는다.
 - 줄은 UPDATE·DELETE 트리거로 막혀 있다. 표를 세는 시험은 `result = DENIED` 등으로 거른다. 이 revision 은 행동 줄이 있으면 downgrade 가 멈춘다(운영은 forward-only).
+
+### AI 사전 점검·러너 (자주 어기는 것)
+- **러너 경로는 조직 경로와 자격 증명을 섞지 않는다.** `require_runner`(`echo_rnr_`, 가져가기만)·`require_run_token`(`echo_run_`, 그 실행만)은 `AUTH_GUARDS` 에 있다. 러너 쓰기 경로는 `WRITE_ROUTE_ACTIONS` 가 아니라 `RUNNER_ROUTE_ACTIONS` 에 넣는다(줄 없는 경로는 값 `None`).
+- **러너 감사 줄은 SYSTEM `component = ai-runner`** 이고 가져가기·결과·시간 초과만 쓴다. `RUNNER` 행위자를 만들지 않는다.
+- **`simulated` 는 "값을 지어냈는가"다.** 러너가 낸 값을 그대로 저장하고 모델 유무로 덮어쓰지 않는다. 모델 유무는 응답 `aiReviewed`(저장 안 함) 로 보인다. `simulated = true` 는 C-AI-1 증거가 아니다.
+- **만료는 부를 때 한다**(`expire_overdue_runs`, 일꾼 루프 없음). 만료 전환은 `begin()` 안에서 적고 커밋한 뒤 블록 밖에서 409 를 올린다. `GET` 은 쓰지 않는다. 실행 토큰 해시를 지우지 않고 상태로 무효를 판정한다.
+- **입력 사본·이벤트·결과는 저장 전에 가린다**(`mask_secrets_in_json`, 문자열마다. 직렬화 글자 전체에 걸면 잘린 개인 키 블록이 JSON 구조까지 지운다). 입력 사본에 `secretRef`·변수 값을 넣지 않는다.
+- 이벤트·결과 본문은 FastAPI 본문 인자로 받지 않는다(`parse_runner_payload`). 검증 실패는 422 `RESULT_INVALID` 다. AI `findings` 는 `findings` 표에 넣지 않는다(2차).
+- 러너 토큰 발급 명령(`app.scripts.issue_runner_token`)은 시험 DB 밖에서 함부로 돌리지 않는다. 운영 실행은 README "AI 러너 토큰"을 따른다.
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

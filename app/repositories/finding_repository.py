@@ -1,11 +1,13 @@
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.enums import SecurityFindingMode
 from app.models import Finding
 
 # 판정 한 번에 읽는 증거 상한. 조직의 유효한 증거가 이보다 많으면 최신 것부터 읽는다.
@@ -27,6 +29,33 @@ class FindingRepository:
         stmt = (
             select(Finding)
             .where(Finding.organization_id == organization_id, Finding.expires_at > now)
+            .order_by(Finding.collected_at.desc(), Finding.id)
+            .limit(limit)
+        )
+        return list((await self._session.scalars(stmt)).all())
+
+    async def search_recent_for_precheck(
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        environment_ids: Sequence[uuid.UUID],
+        image_digests: Sequence[str],
+        now: datetime,
+        limit: int,
+    ) -> list[Finding]:
+        """사전 점검 입력에 실을 증거: 그 서비스·환경·이미지의 만료 전 실제 증거. 최신순."""
+        stmt = (
+            select(Finding)
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.expires_at > now,
+                Finding.mode != SecurityFindingMode.SIMULATED,
+                or_(
+                    Finding.service_id == service_id,
+                    Finding.environment_id.in_(environment_ids),
+                    Finding.image_digest.in_(image_digests),
+                ),
+            )
             .order_by(Finding.collected_at.desc(), Finding.id)
             .limit(limit)
         )

@@ -1,0 +1,342 @@
+"""러너 경로 요청·응답 스키마(WAS ↔ 러너 계약 v1 + SPEC api-runner-prechecks).
+
+이벤트·결과 본문은 검증 실패를 VALIDATION_ERROR 가 아니라 422 RESULT_INVALID 로 돌려줘야 해서
+FastAPI 본문 인자로 받지 않고 parse_runner_payload 로 읽는다. 모르는 칸은 거부하고, JSON 이름은
+camelCase 다. 응답 details 에는 칸 경로와 이유만 넣고 입력 값은 넣지 않는다.
+"""
+
+import json
+import uuid
+from datetime import datetime
+from typing import Annotated, Any, Literal, Self
+
+from pydantic import (
+    AwareDatetime,
+    Field,
+    JsonValue,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+from app.core.exceptions import ErrorField, ResultInvalidError
+from app.enums import (
+    AgentRunKind,
+    AgentRunOrigin,
+    AgentRunSeverity,
+    AgentRunStatus,
+    AgentRunStep,
+    LogLevel,
+    SecurityResult,
+)
+from app.models.agent_run_event import AGENT_RUN_EVENT_MESSAGE_MAX_LENGTH
+from app.schemas.response import ApiModel, ApiRequestModel
+from app.services.agent_run_service import ClaimedRun, RunEventCommand
+from app.services.run_result import NormalizedRunResult, normalize_run_result
+
+MAX_BODY_BYTES = 1024 * 1024
+MAX_EVENTS_PER_REQUEST = 100
+MAX_EVENT_SEQ = 2_147_483_647
+MAX_STRING_LENGTH = 2_000
+MAX_DIFF_BYTES = 200 * 1024
+MAX_CONFIG_DIFFS = 200
+MAX_FEATURE_GAPS = 100
+MAX_FINDINGS = 100
+MAX_PATCHES = 10
+MAX_BLOCKED_ATTEMPTS = 50
+MAX_MODEL_ID_LENGTH = 64
+MAX_PROMPT_VERSION_LENGTH = 32
+FAILURE_CODE_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
+PATCH_HASH_PATTERN = "^sha256:[0-9a-f]{64}$"
+CHECK_RESULT_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
+BODY_TOO_LARGE_REASON = "BODY_TOO_LARGE"
+NUL_CHARACTER_REASON = "NUL_CHARACTER"
+_BODY_FIELD = "body"
+
+Text = Annotated[str, Field(min_length=1, max_length=MAX_STRING_LENGTH)]
+OptionalText = Annotated[str, Field(max_length=MAX_STRING_LENGTH)] | None
+ResultStatus = Literal[AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED]
+FindingResult = Literal[
+    SecurityResult.PASS, SecurityResult.WARN, SecurityResult.FAIL, SecurityResult.UNKNOWN
+]
+
+
+def _check_json_value_size(value: JsonValue) -> JsonValue:
+    if len(json.dumps(value, ensure_ascii=False)) > MAX_STRING_LENGTH:
+        raise ValueError(f"value must be at most {MAX_STRING_LENGTH} characters of JSON")
+    return value
+
+
+def _contains_nul(value: Any) -> bool:
+    """PostgreSQL 은 문자열·JSONB 에 NUL 을 담지 못한다. 저장 전에 422 로 막는다."""
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, list):
+        return any(_contains_nul(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
+    return False
+
+
+def parse_runner_payload[T: ApiRequestModel](raw: bytes, model: type[T]) -> T:
+    """러너 본문을 읽는다. 크기·형식·칸 검사 실패는 모두 422 RESULT_INVALID."""
+    if len(raw) > MAX_BODY_BYTES:
+        raise ResultInvalidError([ErrorField(_BODY_FIELD, BODY_TOO_LARGE_REASON)])
+    try:
+        parsed = model.model_validate_json(raw)
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False, include_url=False, include_context=False)
+        raise ResultInvalidError(
+            [
+                ErrorField(
+                    ".".join(str(part) for part in error["loc"]) or _BODY_FIELD, error["msg"]
+                )
+                for error in errors
+            ]
+        ) from None
+    if _contains_nul(parsed.model_dump(mode="json", by_alias=True)):
+        raise ResultInvalidError([ErrorField(_BODY_FIELD, NUL_CHARACTER_REASON)])
+    return parsed
+
+
+def openapi_request_body(model: type[ApiRequestModel]) -> dict[str, Any]:
+    """FastAPI 본문 인자가 아닌 경로의 OpenAPI 요청 본문. `$defs` 참조를 그 자리에 풀어 넣는다."""
+    schema = model.model_json_schema()
+    definitions = schema.pop("$defs", {})
+
+    def inline(value: Any) -> Any:
+        if isinstance(value, list):
+            return [inline(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str):
+            return inline(definitions[reference.rsplit("/", 1)[-1]])
+        return {key: inline(item) for key, item in value.items()}
+
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": inline(schema)}},
+        }
+    }
+
+
+# --- 가져가기 ---
+
+
+class ClaimRunRequest(ApiRequestModel):
+    runner_id: Annotated[str, Field(min_length=1, max_length=63)]
+    capabilities: Annotated[list[Annotated[str, Field(max_length=32)]], Field(max_length=16)]
+
+
+class ClaimedRunResponse(ApiModel):
+    id: uuid.UUID
+    kind: AgentRunKind
+    org_id: uuid.UUID
+    service_id: uuid.UUID
+    source_environment_id: uuid.UUID | None
+    target_environment_id: uuid.UUID | None
+    input_snapshot: dict[str, Any]
+    input_hash: str
+    scenario_ref: str | None
+    deadline_at: datetime
+    lease_until: datetime | None
+
+
+class ClaimRunResponse(ApiModel):
+    """가져갈 실행이 없으면 run·runToken 이 null 이다. runToken 은 여기서 한 번만 준다."""
+
+    run: ClaimedRunResponse | None = None
+    run_token: str | None = None
+
+    @classmethod
+    def from_claimed(cls, claimed: ClaimedRun | None) -> Self:
+        if claimed is None:
+            return cls()
+        run = claimed.run
+        return cls(
+            run=ClaimedRunResponse(
+                id=run.id,
+                kind=AgentRunKind(run.kind),
+                org_id=run.organization_id,
+                service_id=run.service_id,
+                source_environment_id=run.source_environment_id,
+                target_environment_id=run.target_environment_id,
+                input_snapshot=run.input_snapshot,
+                input_hash=run.input_hash,
+                scenario_ref=run.scenario_ref,
+                deadline_at=run.deadline_at,
+                lease_until=run.lease_until,
+            ),
+            run_token=claimed.run_token.get_secret_value(),
+        )
+
+
+class HeartbeatResponse(ApiModel):
+    status: AgentRunStatus
+    lease_until: datetime | None
+
+
+# --- 이벤트 ---
+
+
+class RunEventRequest(ApiRequestModel):
+    seq: Annotated[int, Field(ge=1, le=MAX_EVENT_SEQ)]
+    at: AwareDatetime
+    step: AgentRunStep
+    level: LogLevel
+    message: Annotated[str, Field(min_length=1, max_length=AGENT_RUN_EVENT_MESSAGE_MAX_LENGTH)]
+    data: dict[str, JsonValue] | None = None
+
+    @field_validator("data")
+    @classmethod
+    def _check_data_size(cls, value: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+        if value is not None:
+            _check_json_value_size(value)
+        return value
+
+
+class SubmitRunEventsRequest(ApiRequestModel):
+    events: Annotated[list[RunEventRequest], Field(min_length=1, max_length=MAX_EVENTS_PER_REQUEST)]
+
+    def to_commands(self) -> list[RunEventCommand]:
+        return [
+            RunEventCommand(
+                seq=event.seq,
+                at=event.at,
+                step=event.step,
+                level=event.level,
+                message=event.message,
+                data=event.data,
+            )
+            for event in self.events
+        ]
+
+
+class SubmitRunEventsResponse(ApiModel):
+    accepted_up_to: int
+
+
+# --- 결과 ---
+
+
+class RunSandboxRequest(ApiRequestModel):
+    id: Text
+    started_at: AwareDatetime
+    finished_at: AwareDatetime | None = None
+    network: Text
+    deleted_at: AwareDatetime | None = None
+
+
+class RunModelRequest(ApiRequestModel):
+    id: Annotated[str, Field(min_length=1, max_length=MAX_MODEL_ID_LENGTH)]
+    effort: OptionalText = None
+    prompt_version: Annotated[str, Field(max_length=MAX_PROMPT_VERSION_LENGTH)] | None = None
+    refusal: bool = False
+
+
+class RunConfigDiffRequest(ApiRequestModel):
+    key: Text
+    source: JsonValue
+    target: JsonValue
+    origin: AgentRunOrigin
+    severity: AgentRunSeverity
+
+    @field_validator("source", "target")
+    @classmethod
+    def _check_value_size(cls, value: JsonValue) -> JsonValue:
+        return _check_json_value_size(value)
+
+
+class RunFeatureGapRequest(ApiRequestModel):
+    source: Text
+    target: Text
+    gap: Text
+    action: Text
+    has_replacement: bool
+    severity: AgentRunSeverity
+    origin: AgentRunOrigin
+
+
+class RunFindingRequest(ApiRequestModel):
+    control: Text
+    environment_id: uuid.UUID | None = None
+    result: FindingResult
+    title: Text
+    reason: Text
+    origin: AgentRunOrigin
+    suggested_fix: OptionalText = None
+
+    @model_validator(mode="after")
+    def _check_ai_cannot_pass(self) -> Self:
+        if self.origin is AgentRunOrigin.AI and self.result is SecurityResult.PASS:
+            raise ValueError("an AI finding cannot be PASS")
+        return self
+
+
+class RunPatchCheckRequest(ApiRequestModel):
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    result: Annotated[str, Field(pattern=CHECK_RESULT_PATTERN)]
+    tool_version: OptionalText = None
+    policy_version: OptionalText = None
+    summary: OptionalText = None
+
+
+class RunPatchRequest(ApiRequestModel):
+    id: Annotated[str, Field(min_length=1, max_length=64)]
+    patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
+    files: Annotated[list[Text], Field(min_length=1)]
+    diff: str
+    reason: Text
+    touches_protected_files: bool
+    checks: list[RunPatchCheckRequest]
+
+    @field_validator("diff")
+    @classmethod
+    def _check_diff_size(cls, value: str) -> str:
+        if len(value.encode()) > MAX_DIFF_BYTES:
+            raise ValueError(f"diff must be at most {MAX_DIFF_BYTES} bytes")
+        return value
+
+
+class RunBlockedAttemptRequest(ApiRequestModel):
+    action: Text
+    target: Text
+    at: AwareDatetime
+    reason: Text
+
+
+class RunResultRequest(ApiRequestModel):
+    """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다."""
+
+    status: ResultStatus
+    failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
+    simulated: bool
+    sandbox: RunSandboxRequest | None = None
+    model: RunModelRequest | None = None
+    config_diff: Annotated[list[RunConfigDiffRequest], Field(max_length=MAX_CONFIG_DIFFS)] = []
+    feature_gaps: Annotated[list[RunFeatureGapRequest], Field(max_length=MAX_FEATURE_GAPS)] = []
+    findings: Annotated[list[RunFindingRequest], Field(max_length=MAX_FINDINGS)] = []
+    patches: Annotated[list[RunPatchRequest], Field(max_length=MAX_PATCHES)] = []
+    blocked_attempts: Annotated[
+        list[RunBlockedAttemptRequest], Field(max_length=MAX_BLOCKED_ATTEMPTS)
+    ] = []
+
+    @model_validator(mode="after")
+    def _check_failure_code_and_patch_ids(self) -> Self:
+        if self.status == AgentRunStatus.SUCCEEDED and self.failure_code is not None:
+            raise ValueError("failureCode must be null when status is SUCCEEDED")
+        if self.status == AgentRunStatus.FAILED and self.failure_code is None:
+            raise ValueError("failureCode is required when status is FAILED")
+        patch_ids = [patch.id for patch in self.patches]
+        if len(patch_ids) != len(set(patch_ids)):
+            raise ValueError("patch id must be unique")
+        return self
+
+    def to_normalized(self) -> NormalizedRunResult:
+        return normalize_run_result(self.model_dump(mode="json", by_alias=True))
+
+
+class SubmitRunResultResponse(ApiModel):
+    status: AgentRunStatus
