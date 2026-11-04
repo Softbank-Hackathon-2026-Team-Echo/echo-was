@@ -94,6 +94,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `GET /deploy-requests/{id}/logs` (배포 작업·빌드·실행 로그, API 서버 4) | 뷰어 | 읽기 가능 |
 | `GET /services/{id}/migration-plans` · `GET /migration-plans/{id}` · `GET /migration-plans/{id}/logs` (이전 계획, API 서버 8) | 뷰어 | 읽기 가능 |
 | `GET /audit-logs` (감사 로그, API 서버 7) | 뷰어 | 읽기 가능 |
+| `GET /security/matrix` · `GET /security/findings` (보안 매트릭스·증거, 보안·거버넌스 4) | 뷰어 | 읽기 가능 |
 | `GET /security/exceptions` · `GET /security/exceptions/{id}` (기한부 예외, 보안 3) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |

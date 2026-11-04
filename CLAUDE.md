@@ -32,6 +32,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/security-exceptions.md](docs/api/security-exceptions.md) | 기한부 예외 API(통제별 범위 칸·7일 상한·자기 승인·상태)를 바꾸거나 쓸 때 |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
+| [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -41,7 +42,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security_exception 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security·security_exception 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
 ├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
@@ -55,6 +56,7 @@ app/
 │                     #   security_normalizers(Trivy·gitleaks·TLS 시험 원문 → 공통 증거, 비밀값 원문 버림, 보안 2)
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
 │                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings, 실패해도 배포 계속, 보안 2·11)
+│                     #   SecurityMatrixService(환경 × 4칸 매트릭스·증거 목록, 서비스 단위 통제는 지금 이미지로, 보안 4)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
