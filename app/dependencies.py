@@ -43,6 +43,7 @@ from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.service_service import ServiceService
 
@@ -337,6 +338,13 @@ def get_agent_token_service(
         default_days=settings.agent_token_default_days,
         max_days=settings.agent_token_max_days,
     )
+
+
+def get_security_exception_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> SecurityExceptionService:
+    return SecurityExceptionService(session, clock)
 
 
 def get_public_tls_checker(
