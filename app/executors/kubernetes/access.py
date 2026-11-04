@@ -17,6 +17,7 @@
 import base64
 import json
 import logging
+import re
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -94,6 +95,26 @@ class _AwsCredentials:
 class _EksToken:
     token: SecretValue
     expires_at: datetime
+
+
+# STS 가 HTTP 400 으로 주지만 다시 시도하면 되는 오류(AWS STS 공통 오류 문서).
+STS_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "IDPCommunicationError",
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "ServiceUnavailable",
+        "InternalFailure",
+    }
+)
+_STS_ERROR_CODE = re.compile(r"<Code>\s*([A-Za-z]{1,64})\s*</Code>")
+
+
+def _sts_error_code(body: str) -> str | None:
+    """STS 오류 본문에서 <Code> 이름 하나만 꺼낸다(나머지 본문은 쓰지 않는다)."""
+    match = _STS_ERROR_CODE.search(body)
+    return match.group(1) if match else None
 
 
 class ClusterAccessProvider:
@@ -251,6 +272,9 @@ class ClusterAccessProvider:
             },
         )
         if response.status_code >= 400:
+            # STS 는 일시 오류 일부를 HTTP 400 으로 준다. 코드 이름만 보고 본문은 버린다.
+            if _sts_error_code(response.text) in STS_TRANSIENT_ERROR_CODES:
+                raise TransientError(CLUSTER_UNREACHABLE)
             # 신뢰 정책·역할 문제다(원문에는 토큰 일부가 들어 있을 수 있어 남기지 않는다).
             raise ClusterAuthError
         parsed = _parse_sts_credentials(response.text)

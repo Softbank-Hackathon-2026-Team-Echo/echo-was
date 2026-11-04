@@ -130,6 +130,17 @@ def _rig(*, default_role: str | None = None) -> Rig:
     return Rig(cloud, cluster, sleep, reader)
 
 
+def _slow_attempt_reader(rig: Rig, seconds_per_attempt: float) -> ClusterReader:
+    ticks = iter(range(1000))  # 시도 하나가 시작 때와 끝날 때 읽는 시계: 0 → seconds_per_attempt
+    reader = rig.reader
+
+    def monotonic() -> float:
+        return next(ticks) * seconds_per_attempt
+
+    reader._monotonic = monotonic  # type: ignore[attr-defined]
+    return reader
+
+
 def _config(kind: str, raw: dict[str, Any]) -> EnvironmentConfig:
     return validate_environment_config(kind, raw, by_alias=True)
 
@@ -500,3 +511,65 @@ async def test_resolver_in_real_mode_injects_the_reader_and_reuses_it() -> None:
 def test_unknown_adapter_mode_is_a_startup_error() -> None:
     with pytest.raises(ValueError):
         Settings(environment_adapter_mode="maybe")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("code", ["IDPCommunicationError", "Throttling", "ServiceUnavailable"])
+async def test_sts_transient_400_is_retried_as_transient(code: str) -> None:
+    rig = _rig()
+    rig.cloud.sts_status = 400
+    rig.cloud.sts_error_body = f"<ErrorResponse><Error><Code>{code}</Code></Error></ErrorResponse>"
+
+    with pytest.raises(ConnectionCheckError) as raised:
+        await get_environment_adapter("aws", reader=rig.reader).check_connection(
+            _config("aws", AWS_CONFIG), PLACEHOLDER
+        )
+
+    assert raised.value.reason is ConnectionErrorCode.UNREACHABLE
+    assert rig.sleep.delays == [0.5]
+    assert len(rig.cloud.sts_calls) == 2
+
+
+async def test_sts_400_with_other_code_is_auth_failed_without_retry() -> None:
+    rig = _rig()
+    rig.cloud.sts_status = 400
+    rig.cloud.sts_error_body = "<Error><Code>InvalidIdentityToken</Code></Error>"
+
+    with pytest.raises(ConnectionCheckError) as raised:
+        await get_environment_adapter("aws", reader=rig.reader).check_connection(
+            _config("aws", AWS_CONFIG), PLACEHOLDER
+        )
+
+    assert raised.value.reason is ConnectionErrorCode.AUTH_FAILED
+    assert rig.sleep.delays == []
+
+
+async def test_slow_failed_attempt_is_not_retried() -> None:
+    rig = _rig()
+    rig.cluster.statuses["/version"] = [503, 503]
+    reader = _slow_attempt_reader(rig, seconds_per_attempt=2.0)
+
+    with pytest.raises(ConnectionCheckError) as raised:
+        await get_environment_adapter("onprem", reader=reader).check_connection(
+            _config("onprem", ONPREM_CONFIG), ONPREM_TOKEN
+        )
+
+    assert raised.value.reason is ConnectionErrorCode.UNREACHABLE
+    assert rig.sleep.delays == []
+    assert len(rig.cluster.requests) == 1
+
+
+def test_adapter_modules_do_not_import_executors_or_models() -> None:
+    """순환 import 방지(SPEC 8.1): 어댑터 파일은 app.executors·app.models 를 import 하지 않는다."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "app" / "adapters"
+    for path in root.glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            modules = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            for module in modules:
+                assert not module.startswith(("app.executors", "app.models")), (path.name, module)

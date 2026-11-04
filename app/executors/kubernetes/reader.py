@@ -12,6 +12,8 @@
 
 import logging
 import re
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -30,11 +32,14 @@ from app.executors.kubernetes.access import (
     ClusterConfigError,
 )
 from app.executors.kubernetes.api import KubeHttpClients
-from app.executors.retry import Sleep, TransientError, real_sleep, retry_transient
+from app.executors.retry import Sleep, TransientError, real_sleep
 
 logger = logging.getLogger(__name__)
 
 RETRY_DELAY_SECONDS = 0.5
+# 실패한 시도 하나가 이보다 오래 걸렸으면 다시 시도하지 않는다(전체 5초 안에서 원인을 TIMEOUT 에
+# 가리지 않으려고. 남은 시간 5 - 1.5 - 0.5 = 3초가 온프레 터널 새 연결 상한과 맞는다).
+RETRY_MAX_ATTEMPT_SECONDS = 1.5
 _VERSION = re.compile(KUBERNETES_VERSION_PATTERN)
 
 
@@ -47,10 +52,12 @@ class ClusterReader:
         clients: KubeHttpClients,
         *,
         sleep: Sleep = real_sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._provider = provider
         self._clients = clients
         self._sleep = sleep
+        self._monotonic = monotonic
 
     async def read_version(self, config: EnvironmentConfig, token: SecretValue | None) -> str:
         body = await self._get_json(config, token, "/version")
@@ -70,9 +77,7 @@ class ClusterReader:
         self, config: EnvironmentConfig, token: SecretValue | None, path: str
     ) -> dict[str, Any]:
         try:
-            response = await retry_transient(
-                lambda: self._get(config, token, path), self._sleep, (RETRY_DELAY_SECONDS,)
-            )
+            response = await self._get_with_one_retry(config, token, path)
         except ClusterAuthError:
             raise self._failed(config, ConnectionErrorCode.AUTH_FAILED) from None
         except ClusterConfigError:
@@ -89,6 +94,18 @@ class ClusterReader:
         if not isinstance(body, dict):
             raise self._failed(config, ConnectionErrorCode.CONFIG_INVALID)
         return body
+
+    async def _get_with_one_retry(
+        self, config: EnvironmentConfig, token: SecretValue | None, path: str
+    ) -> httpx.Response:
+        started = self._monotonic()
+        try:
+            return await self._get(config, token, path)
+        except TransientError:
+            if self._monotonic() - started > RETRY_MAX_ATTEMPT_SECONDS:
+                raise
+        await self._sleep(RETRY_DELAY_SECONDS)
+        return await self._get(config, token, path)
 
     async def _get(
         self, config: EnvironmentConfig, token: SecretValue | None, path: str

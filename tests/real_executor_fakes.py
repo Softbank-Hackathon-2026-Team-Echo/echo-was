@@ -290,6 +290,7 @@ class FakeCloud:
     clock: TestClock
     token_expires_in: int = 3599
     sts_status: int = 200
+    sts_error_body: str = "<Error>denied</Error>"
     metadata_token_calls: int = 0
     identity_calls: int = 0
     sts_calls: list[dict[str, list[str]]] = field(default_factory=list)
@@ -320,7 +321,7 @@ class FakeCloud:
         if url.host.startswith("sts."):
             self.sts_calls.append(parse_qs(request.content.decode()))
             if self.sts_status != 200:
-                return httpx.Response(self.sts_status, text="<Error>denied</Error>")
+                return httpx.Response(self.sts_status, text=self.sts_error_body)
             return httpx.Response(200, text=sts_response(self.clock.now() + timedelta(hours=1)))
         if url.host.startswith("eks."):
             self.eks_calls += 1
