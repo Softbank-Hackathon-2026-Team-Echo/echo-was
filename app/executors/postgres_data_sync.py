@@ -15,6 +15,7 @@ application_name 으로 보인다(정방향 A→B 는 B 의 `echo_sub`, 역방�
 import asyncio
 import logging
 import ssl
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -74,6 +75,16 @@ def parse_replication_endpoints(items: list[str]) -> dict[str, ReplicationEndpoi
     return endpoints
 
 
+def find_replication_endpoint(
+    endpoints: Mapping[str, ReplicationEndpoint], environment_id: uuid.UUID, environment_kind: str
+) -> ReplicationEndpoint | None:
+    """환경 id 매핑 → 환경 종류 매핑 순서로 찾는다. 없으면 None."""
+    by_id = endpoints.get(str(environment_id))
+    if by_id is not None:
+        return by_id
+    return endpoints.get(environment_kind)
+
+
 class Connection(Protocol):
     async def fetchrow(self, query: str, *args: Any) -> Mapping[str, Any] | None: ...
 
@@ -101,7 +112,7 @@ class PostgresDataSyncChecker:
         self._database = database
         self._password_ref = password_ref
         self._secret_client = secret_client
-        self._ssl = _ssl_option(ssl_mode)
+        self._ssl = postgres_ssl_option(ssl_mode)
         self._timeout_seconds = timeout_seconds
         self._connect = connect
 
@@ -111,10 +122,9 @@ class PostgresDataSyncChecker:
 
     def endpoint(self, target: DeployTarget) -> ReplicationEndpoint | None:
         """연결의 PostgreSQL. 환경 id 매핑 → 환경 종류 매핑. 없으면 None."""
-        by_id = self._endpoints.get(str(target.environment_id))
-        if by_id is not None:
-            return by_id
-        return self._endpoints.get(target.environment_kind)
+        return find_replication_endpoint(
+            self._endpoints, target.environment_id, target.environment_kind
+        )
 
     async def replication_lag(self, source: DeployTarget, target: DeployTarget) -> DataSyncResult:
         publisher = self.endpoint(source)
@@ -159,7 +169,7 @@ def _lag_seconds(row: Mapping[str, Any] | None) -> float | None:
     return None
 
 
-def _ssl_option(ssl_mode: str) -> ssl.SSLContext | bool:
+def postgres_ssl_option(ssl_mode: str) -> ssl.SSLContext | bool:
     """require 는 암호화만(자체 서명 인증서, 검증 없음), verify-full 은 시스템 CA 로 검증,
     disable 은 평문(로컬 PoC 시험용)."""
     if ssl_mode == "disable":

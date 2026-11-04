@@ -5,7 +5,7 @@ JSON 이름은 camelCase, 모든 응답 칸은 항상 있고 값이 없으면 nu
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
@@ -18,6 +18,7 @@ from app.core.config import (
     MIGRATION_SHIFT_STEP_COUNT,
 )
 from app.enums import (
+    CutoverKind,
     LogLevel,
     MigrationErrorCode,
     MigrationPlanMode,
@@ -28,6 +29,7 @@ from app.enums import (
     MigrationStepPhase,
     MigrationStepStatus,
 )
+from app.executors.base import CutoverRun
 from app.models import MigrationPlan, User
 from app.models.migration_plan import LAST_STEP_INDEX
 from app.schemas.response import ApiModel, ApiRequestModel
@@ -246,6 +248,64 @@ class MigrationProgressResponse(ApiModel):
         )
 
 
+class MigrationPlanResultResponse(ApiModel):
+    """인프라 스크립트가 고객 DB 에 남긴 컷오버·롤백 결과(API 서버 16).
+
+    행이 없거나 읽지 못하면 칸이 전부 null 이다. measuredBy 는 행이 있을 때 값을 잰 쪽이다.
+    """
+
+    write_pause_ms: int | None
+    missing_rows: int | None
+    duplicate_rows: int | None
+    rows_total: int | None
+    kind: CutoverKind | None
+    measured_by: Literal["INFRA_SCRIPT"] | None
+    paused_at: datetime | None
+    resumed_at: datetime | None
+    drain_ms: int | None
+    catchup_ms: int | None
+    switch_ms: int | None
+
+    @classmethod
+    def from_run(cls, run: CutoverRun) -> Self:
+        return cls(
+            write_pause_ms=run.write_pause_ms,
+            missing_rows=run.missing_rows,
+            duplicate_rows=run.duplicate_rows,
+            rows_total=run.rows_total,
+            kind=run.kind,
+            measured_by="INFRA_SCRIPT",
+            paused_at=run.paused_at,
+            resumed_at=run.resumed_at,
+            drain_ms=run.drain_ms,
+            catchup_ms=run.catchup_ms,
+            switch_ms=run.switch_ms,
+        )
+
+    @classmethod
+    def empty(cls) -> Self:
+        return cls(
+            write_pause_ms=None,
+            missing_rows=None,
+            duplicate_rows=None,
+            rows_total=None,
+            kind=None,
+            measured_by=None,
+            paused_at=None,
+            resumed_at=None,
+            drain_ms=None,
+            catchup_ms=None,
+            switch_ms=None,
+        )
+
+    @classmethod
+    def from_plan(cls, plan: MigrationPlan, run: CutoverRun | None) -> Self | None:
+        """끝나지 않은 계획은 null, 끝난 계획은 늘 객체다."""
+        if not MigrationPlanStatus(plan.status).is_terminal:
+            return None
+        return cls.from_run(run) if run is not None else cls.empty()
+
+
 class MigrationPlanSummaryResponse(ApiModel):
     """이전 계획 목록 한 항목. simulated=true 면 가짜 실행기로 진행하는 계획이다.
 
@@ -283,6 +343,7 @@ class MigrationPlanSummaryResponse(ApiModel):
 class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
     """단건 응답. maxWaitSeconds 는 계획 행의 observe_seconds 칸(새 계획은 단계 최대 대기, 8-1 전
     계획은 그 계획의 지켜보기 초)이다. progress 는 비율 단계를 세는 동안만 값이 있다(1초 폴링용).
+    result 는 고객 DB 의 컷오버 결과이고 상세 GET 만 읽는다(쓰기 응답은 끝난 계획이면 칸 전부 null).
     """
 
     rollback_conditions: RollbackConditionsResponse
@@ -294,9 +355,10 @@ class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
     aborted_by: UserRefResponse | None
     abort_requested_at: datetime | None
     error_message: str | None
+    result: MigrationPlanResultResponse | None
 
     @classmethod
-    def from_view(cls, view: MigrationPlanView) -> Self:
+    def from_view(cls, view: MigrationPlanView, cutover_run: CutoverRun | None = None) -> Self:
         plan = view.plan
         conditions = plan.rollback_conditions
         error_code = MigrationErrorCode(plan.error_code) if plan.error_code else None
@@ -318,6 +380,7 @@ class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
             aborted_by=UserRefResponse.from_model(view.user(plan.aborted_by_user_id)),
             abort_requested_at=plan.abort_requested_at,
             error_message=MIGRATION_ERROR_MESSAGES[error_code] if error_code else None,
+            result=MigrationPlanResultResponse.from_plan(plan, cutover_run),
         )
 
 

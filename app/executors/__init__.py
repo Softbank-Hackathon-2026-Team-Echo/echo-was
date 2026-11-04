@@ -21,12 +21,14 @@ from app.core.config import (
 from app.core.secrets import parse_secret_ref
 from app.executors.base import (
     BuildExecutor,
+    CutoverRunReader,
     DataSyncChecker,
     DeployExecutor,
     EnvironmentLookup,
     HealthChecker,
     MainRouteExecutor,
     MetricsProvider,
+    NoCutoverRuns,
     TeardownExecutor,
     TrafficExecutor,
 )
@@ -57,6 +59,7 @@ from app.executors.kubernetes.executors import (
     KubernetesRuntime,
     KubernetesTeardownExecutor,
 )
+from app.executors.postgres_cutover_runs import PostgresCutoverRunReader
 from app.executors.postgres_data_sync import PostgresDataSyncChecker, parse_replication_endpoints
 from app.executors.retry import Sleep, real_sleep
 
@@ -73,6 +76,8 @@ class ExecutorSet:
     traffic: TrafficExecutor
     metrics: MetricsProvider
     data_sync: DataSyncChecker
+    # 컷오버 결과 읽기(API 프로세스의 이전 계획 상세만 쓴다). 기본은 늘 행 없음이다.
+    cutover_runs: CutoverRunReader = field(default_factory=NoCutoverRuns)
     # 프로세스가 끝날 때 닫을 HTTP 클라이언트(실제 실행기만).
     closers: tuple[Closer, ...] = field(default=(), repr=False)
 
@@ -105,7 +110,8 @@ def build_executor_set(
 
     `executor_mode = real` 이면 빌드·배포·내리기가 실제(GitHub Actions + 쿠버네티스 직접 반영)다.
     만들 때 네트워크·비밀값 조회를 하지 않는다(처음 호출할 때 한다). 데이터 확인은
-    `data_sync_checker_mode = postgres` 면 출발 PostgreSQL 의 복제 지연을 읽는다(인프라 7).
+    `data_sync_checker_mode = postgres` 면 출발 PostgreSQL 의 복제 지연을 읽고(인프라 7), 같은
+    접속 설정으로 컷오버 결과 표도 읽는다(API 서버 16, cutover_runs_database 가 비면 읽지 않는다).
     트래픽·대표 주소·지표는 `entrypoint_executor_mode = http` 면 고정 진입점을 부른다.
     가짜 지표·카운터는 가짜 트래픽 실행기가 적용한 비율과 설정 MIGRATION_EXPECTED_RPS 로 만든다.
     """
@@ -148,18 +154,31 @@ def build_executor_set(
         deploy = FakeDeployExecutor(clock, step_seconds)
         teardown = FakeTeardownExecutor(clock, step_seconds)
     data_sync: DataSyncChecker = FakeDataSyncChecker()
+    cutover_runs: CutoverRunReader = NoCutoverRuns()
     if settings.data_sync_checker_mode is DataSyncCheckerMode.POSTGRES:
         if not settings.data_sync_password_ref:
             raise ValueError("data_sync_password_ref is required")
+        endpoints = parse_replication_endpoints(settings.data_sync_databases)
+        password_ref = parse_secret_ref(settings.data_sync_password_ref)
         data_sync = PostgresDataSyncChecker(
-            parse_replication_endpoints(settings.data_sync_databases),
+            endpoints,
             user=settings.data_sync_user,
             database=settings.data_sync_database,
-            password_ref=parse_secret_ref(settings.data_sync_password_ref),
+            password_ref=password_ref,
             secret_client=secrets,
             ssl_mode=settings.data_sync_ssl_mode,
             timeout_seconds=settings.data_sync_timeout_seconds,
         )
+        if settings.cutover_results_enabled:
+            cutover_runs = PostgresCutoverRunReader(
+                endpoints,
+                user=settings.data_sync_user,
+                database=settings.cutover_runs_database,
+                password_ref=password_ref,
+                secret_client=secrets,
+                ssl_mode=settings.data_sync_ssl_mode,
+                timeout_seconds=settings.data_sync_timeout_seconds,
+            )
     return ExecutorSet(
         build=build,
         deploy=deploy,
@@ -169,6 +188,7 @@ def build_executor_set(
         traffic=traffic,
         metrics=metrics,
         data_sync=data_sync,
+        cutover_runs=cutover_runs,
         closers=closers,
     )
 

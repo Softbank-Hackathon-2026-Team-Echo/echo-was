@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import ColumnElement, Select, func, select
@@ -81,6 +82,17 @@ class MigrationPlanRepository:
             select(MigrationPlan)
             .where(MigrationPlan.service_id == service_id, MigrationPlan.status.in_(statuses))
             .execution_options(populate_existing=True)
+        )
+
+    async def find_next_created_at(
+        self, service_id: uuid.UUID, created_at: datetime
+    ) -> datetime | None:
+        """같은 서비스에서 created_at 뒤에 만든 계획 중 가장 이른 것의 created_at."""
+        return await self._session.scalar(
+            select(MigrationPlan.created_at)
+            .where(MigrationPlan.service_id == service_id, MigrationPlan.created_at > created_at)
+            .order_by(MigrationPlan.created_at)
+            .limit(1)
         )
 
     async def find_last_succeeded_for_service(self, service_id: uuid.UUID) -> MigrationPlan | None:
