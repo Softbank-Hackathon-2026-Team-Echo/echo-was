@@ -10,6 +10,7 @@ import pytest
 
 from app.core.secrets import parse_secret_ref
 from app.enums import DeployRequestErrorCode, LogLevel
+from app.executors import github_actions
 from app.executors.base import (
     BuildFailed,
     BuildRunning,
@@ -37,6 +38,7 @@ from tests.real_executor_fakes import (
     RecordingSleep,
     TestClock,
     result_zip,
+    scan_zip,
 )
 
 KEY_ENV = "ECHO_SECRET_GITHUB_APP_PRIVATE_KEY"
@@ -351,6 +353,134 @@ async def test_poll_unknown_ref_fails_without_calls() -> None:
     result = await _executor(actions, clock).poll("fake-build|key|0|x|y|z")
 
     assert result == BuildFailed()
+    assert actions.requests == []
+
+
+# --- 보안 검사 원문 (보안·거버넌스 2·11) ---
+
+TRIVY_REPORT = {"SchemaVersion": 2, "ArtifactName": f"{AR_REPOSITORY}@{DIGEST}", "Results": []}
+
+
+async def _finished_with_scan(
+    scan: Callable[[str], bytes] | None,
+) -> tuple[GithubActionsBuildExecutor, str, FakeActions, BuildSpec]:
+    clock = TestClock()
+    actions = FakeActions(clock)
+    executor, external_ref, build = await _started(actions, clock)
+    run = next(iter(actions.runs.values()))
+    actions.finish(run)
+    run.scan_artifact = scan(str(build.build_id)) if scan is not None else None
+    return executor, external_ref, actions, build
+
+
+def _warning_codes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    codes = [getattr(record, "error_code", None) for record in caplog.records]
+    return [code for code in codes if code is not None]
+
+
+async def test_read_security_scan_returns_reports_and_meta() -> None:
+    executor, external_ref, actions, build = await _finished_with_scan(
+        lambda build_id: scan_zip(build_id, trivy=TRIVY_REPORT, gitleaks=[])
+    )
+    run_id = next(iter(actions.runs))
+
+    scan = await executor.read_security_scan(external_ref)
+
+    assert scan is not None
+    assert (scan.build_id, scan.image_digest) == (str(build.build_id), DIGEST)
+    assert (scan.trivy_version, scan.gitleaks_version) == ("0.75.0", "8.30.1")
+    assert (scan.trivy_report, scan.gitleaks_report) == (TRIVY_REPORT, [])
+    assert scan.scanned_at is not None and scan.scanned_at.utcoffset() == timedelta(0)
+    assert scan.source_ref == f"github-actions:{BUILD_REPOSITORY}/actions/runs/{run_id}"
+
+
+async def test_read_security_scan_does_not_change_build_result() -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(None)
+
+    assert await executor.poll(external_ref) == BuildSucceeded(
+        image_repository=AR_REPOSITORY, image_digest=DIGEST
+    )
+
+
+async def test_read_security_scan_without_artifact_is_none_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(None)
+
+    assert await executor.read_security_scan(external_ref) is None
+    assert _warning_codes(caplog) == ["SECURITY_SCAN_MISSING"]
+
+
+@pytest.mark.parametrize(
+    "make_scan",
+    [
+        lambda build_id: b"not a zip",
+        lambda build_id: scan_zip(build_id, meta={"schema_version": 2}),
+        lambda build_id: scan_zip(build_id, digest="sha256:ABC"),
+        lambda build_id: scan_zip(build_id, meta={"build_id": 7}),
+        lambda build_id: scan_zip(build_id, raw_files={"meta.json": b"{broken"}),
+    ],
+    ids=["broken-zip", "other-schema", "bad-digest", "bad-build-id", "broken-meta"],
+)
+async def test_read_security_scan_invalid_meta_is_none_with_warning(
+    make_scan: Callable[[str], bytes], caplog: pytest.LogCaptureFixture
+) -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(make_scan)
+
+    assert await executor.read_security_scan(external_ref) is None
+    assert _warning_codes(caplog) == ["SECURITY_SCAN_INVALID"]
+
+
+async def test_read_security_scan_missing_or_broken_report_leaves_that_report_none() -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(
+            build_id,
+            meta={"trivy": {"version": "0.75.0; rm"}, "scanned_at": "yesterday"},
+            raw_files={"gitleaks.json": b"[broken"},
+        )
+    )
+
+    scan = await executor.read_security_scan(external_ref)
+
+    assert scan is not None
+    assert (scan.trivy_report, scan.gitleaks_report) == (None, None)
+    assert (scan.trivy_version, scan.scanned_at) == (None, None)
+
+
+async def test_read_security_scan_skips_report_larger_than_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_actions, "SCAN_FILE_MAX_BYTES", 1024)
+    executor, external_ref, _, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(
+            build_id, trivy={**TRIVY_REPORT, "padding": "x" * 4096}, gitleaks=[]
+        )
+    )
+
+    scan = await executor.read_security_scan(external_ref)
+
+    # 풀린 크기로 본다. 큰 보고서만 버리고(그 증거는 UNKNOWN) 나머지는 쓴다.
+    assert scan is not None
+    assert (scan.trivy_report, scan.gitleaks_report) == (None, [])
+
+
+@pytest.mark.parametrize("status", [500, 401])
+async def test_read_security_scan_server_or_auth_error_is_none(status: int) -> None:
+    executor, external_ref, actions, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(build_id, trivy=TRIVY_REPORT, gitleaks=[])
+    )
+    actions.override = lambda request: (
+        httpx.Response(status) if request.url.path.endswith("/artifacts") else None
+    )
+
+    assert await executor.read_security_scan(external_ref) is None
+
+
+async def test_read_security_scan_unknown_ref_is_none_without_calls() -> None:
+    clock = TestClock()
+    actions = FakeActions(clock)
+
+    assert await _executor(actions, clock).read_security_scan("fake-build|x") is None
     assert actions.requests == []
 
 

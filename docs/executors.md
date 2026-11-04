@@ -13,6 +13,7 @@
 | `BuildExecutor` | `start(build, source_access, idempotency_key) -> external_ref` | |
 | | `poll(external_ref)` | `BuildRunning` · `BuildSucceeded(image_repository, image_digest)` · `BuildFailed(code)` |
 | | `read_logs(external_ref, cursor, limit)` | `LogChunk(lines, next_cursor, has_more)` · `InvalidLogCursor` (API 서버 4) |
+| `BuildSecurityScanReader` (실제 빌드 실행기만) | `read_security_scan(external_ref)` | `BuildSecurityScan` · `None`(없음·모양 틀림, 예외 없음) (보안·거버넌스 2·11) |
 | `DeployExecutor` | `apply(deployment, target, idempotency_key) -> external_ref` | |
 | | `poll(external_ref)` | `DeployPending` · `DeployApplied` · `DeployFailed(code)` |
 | | `revert(target, previous_deployment \| None, idempotency_key)` | `Reverted(external_ref)` · `RevertFailed(code)` |
@@ -231,6 +232,7 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
 | 소스 | 비공개면 워크플로 안에서 `actions/create-github-app-token`(App id·개인키 = Actions secret, `owner`·`repositories` = 고객 저장소)으로 1시간 읽기 토큰 → 그 커밋 checkout. **토큰을 입력값으로 받지 않는다** |
 | 빌드·게시 | ECR `echo/app` + Artifact Registry `echo/app`, 같은 digest, 태그 `b-<build_id 앞 12자>` |
 | 결과 | 아티팩트 `build-result`(파일 `build-result.json`): `{"build_id", "image_digest": "sha256:…", "ar_repository", "ecr_repository"}` |
+| 보안 검사 원문 | 아티팩트 `security-scan`(보안·거버넌스 11, `specs/sec-11-build-scan.md`): `meta.json`(`schema_version` 1·`build_id`·`image_digest`·`scanned_at`·`trivy.version`·`gitleaks.version` …) · `trivy-image.json` · `gitleaks.json`. 빌드 성공 판정과 상관없다(없어도 `BuildSucceeded`) |
 | 실패 | 단계 이름 고정(`checkout`, `build`, `push`) |
 
 - 인증: GitHub App JWT(`GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`) → 빌드 저장소 설치 → 설치 토큰(`permissions: {actions: write}`, 만료 5분 전까지 재사용). App 에 **Actions 읽기·쓰기** 권한과 빌드 저장소 설치가 필요하다.
@@ -238,6 +240,8 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
   - 재시작 경로(`BuildSpec.resumed_after` = 이미 있던 `start_requested_at`): ①을 5초 간격 3번(만든 시각 ≥ 요청함 시각 − 60초) 해 본 뒤에만 dispatch 한다. 그래도 중복이 생기면 ref 가 가리키는 실행만 쓴다(같은 커밋·같은 태그).
   - `SourceAccess.read_token` 은 쓰지 않는다. 처리기는 비공개 저장소 접근 확인을 위해 지금처럼 `issue_read_token` 을 부른다.
 - `poll`: `GET …/actions/runs/{id}` — `queued|in_progress|waiting|pending|requested` → `BuildRunning`, `completed`+`success` → 아티팩트를 내려받아(302 로 넘겨받은 저장소 주소에는 우리 토큰을 싣지 않는다) `BuildSucceeded(ar_repository, image_digest)`, 그 밖 → `BuildFailed(BUILD_FAILED)`. 아티팩트가 없거나, zip·JSON 모양이 다르거나, digest 가 `^sha256:[0-9a-f]{64}$` 가 아니거나, 저장소에 tag(`:`)가 있거나, `build_id` 가 실행 이름의 키와 다르면 `BuildFailed` + 경고 `BUILD_RESULT_INVALID`.
+- `read_security_scan`(보안·거버넌스 2-3): 같은 실행의 `security-scan` 아티팩트를 `build-result` 와 같은 방법으로 받는다. `meta.json` 이 없거나 `schema_version` 이 1 이 아니거나 `build_id`·digest 모양이 틀리면 `None` + 경고 `SECURITY_SCAN_INVALID`, 아티팩트가 없으면 `None` + `SECURITY_SCAN_MISSING`. 보고서 파일은 없거나 JSON 이 아니거나 풀린 크기가 32MB 를 넘으면 그 칸만 `None`. 일시 오류·인증 실패도 `None`(예외 없음). `source_ref` = `github-actions:{빌드 저장소}/actions/runs/{run id}`.
+  - 배포 처리기가 빌드를 `SUCCEEDED` 로 바꾼 직후 한 번 부른다(`BuildSecurityScanCollector`, 재사용 빌드는 다시 부르지 않음). 원문의 `build_id`·digest 가 그 빌드와 다르면 버리고, 맞으면 C-IMG-1·C-IMG-2 증거 3건을 `findings` 에 남긴다. 보고서가 `None` 이면 그 증거는 UNKNOWN. 실패해도 배포는 계속한다.
 - `read_logs`: 실행의 잡 로그(`GET …/actions/jobs/{job}/logs`)를 잡 순서(시작 시각·id)·줄 순서로 잇는다. cursor = `"{잡 순번}:{줄 번호}"`(다음에 읽을 줄). 실행이 끝나기 전에는 빈 청크(`has_more=true`, 같은 cursor). `##[error]`·`##[warning]` 줄은 `ERROR`·`WARN`. Actions 가 이미 가린 값 위에 `mask_secrets` 를 한 번 더 거친다. 끝난 실행의 로그는 프로세스에 최근 32개 기억한다.
 
 ### 쿠버네티스 직접 반영 (`KubernetesDeployExecutor`)

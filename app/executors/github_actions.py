@@ -35,6 +35,7 @@ from app.executors.base import (
     BuildFailed,
     BuildPollResult,
     BuildRunning,
+    BuildSecurityScan,
     BuildSpec,
     BuildStartError,
     BuildSucceeded,
@@ -52,6 +53,14 @@ EXTERNAL_REF_PREFIX = "gha:"
 RUN_NAME_PREFIX = "build "
 RESULT_ARTIFACT = "build-result"
 RESULT_FILE = "build-result.json"
+# 보안 검사 원문(보안·거버넌스 11, 워크플로가 build-result 뒤에 남긴다). 판정은 보안 규칙표가 한다.
+SCAN_ARTIFACT = "security-scan"
+SCAN_META_FILE = "meta.json"
+SCAN_TRIVY_FILE = "trivy-image.json"
+SCAN_GITLEAKS_FILE = "gitleaks.json"
+SCAN_SCHEMA_VERSION = 1
+SCAN_FILE_MAX_BYTES = 32 * 1024 * 1024
+_TOOL_VERSION = re.compile(r"^[0-9A-Za-z.+-]{1,32}$")
 _API_VERSION = "2026-03-10"
 _APP_JWT_BACKDATE = timedelta(seconds=60)
 _APP_JWT_LIFETIME = timedelta(minutes=9)
@@ -73,6 +82,8 @@ BUILD_UNAUTHORIZED = "BUILD_UNAUTHORIZED"
 BUILD_RUN_NOT_FOUND = "BUILD_RUN_NOT_FOUND"
 BUILD_RESULT_INVALID = "BUILD_RESULT_INVALID"
 BUILD_REF_UNKNOWN = "BUILD_REF_UNKNOWN"
+SECURITY_SCAN_MISSING = "SECURITY_SCAN_MISSING"
+SECURITY_SCAN_INVALID = "SECURITY_SCAN_INVALID"
 
 
 class _GithubAuthError(Exception):
@@ -269,10 +280,17 @@ class GithubActionsBuildExecutor:
 
         없거나 모양이 다르면 None.
         """
+        archive = await self._artifact_archive(run_id, RESULT_ARTIFACT)
+        if archive is None:
+            return None
+        return _parse_result(archive)
+
+    async def _artifact_archive(self, run_id: int, name: str) -> bytes | None:
+        """실행의 이름이 name 인(만료 안 된) 아티팩트 zip. 없으면 None."""
         response = await self._request(
             "GET",
             f"/repos/{self._repository}/actions/runs/{run_id}/artifacts",
-            params={"name": RESULT_ARTIFACT},
+            params={"name": name},
         )
         _raise_for_poll(response)
         artifacts = _json(response).get("artifacts")
@@ -280,9 +298,7 @@ class GithubActionsBuildExecutor:
             (
                 item
                 for item in artifacts or []
-                if isinstance(item, dict)
-                and item.get("name") == RESULT_ARTIFACT
-                and not item.get("expired")
+                if isinstance(item, dict) and item.get("name") == name and not item.get("expired")
             ),
             None,
         )
@@ -290,10 +306,35 @@ class GithubActionsBuildExecutor:
         # 우리 토큰을 실을 주소라 API 주소 아래인지 확인한다.
         if not isinstance(url, str) or not url.startswith(f"{self._api_base_url}/"):
             return None
-        archive = await self._download(url)
-        if archive is None:
+        return await self._download(url)
+
+    # --- 보안 검사 원문 (보안·거버넌스 2·11) ---
+
+    async def read_security_scan(self, external_ref: str) -> BuildSecurityScan | None:
+        """같은 실행의 아티팩트 security-scan → 검사 원문. 없거나 모양이 다르면 None(예외 없음).
+
+        빌드 성공 판정과 상관없다. 원문이 없으면 받는 쪽이 그 증거를 UNKNOWN 으로 본다.
+        """
+        run_id = _parse_ref(external_ref)
+        if run_id is None:
             return None
-        return _parse_result(archive)
+        try:
+            archive = await self._artifact_archive(run_id, SCAN_ARTIFACT)
+        except TransientError as exc:
+            _warn(exc.code, run_id)
+            return None
+        except _GithubAuthError:
+            _warn(BUILD_UNAUTHORIZED, run_id)
+            return None
+        if archive is None:
+            _warn(SECURITY_SCAN_MISSING, run_id)
+            return None
+        scan = _parse_security_scan(
+            archive, source_ref=f"github-actions:{self._repository}/actions/runs/{run_id}"
+        )
+        if scan is None:
+            _warn(SECURITY_SCAN_INVALID, run_id)
+        return scan
 
     # --- 로그 ---
 
@@ -520,6 +561,67 @@ def _parse_result(archive: bytes) -> tuple[BuildSucceeded, str] | None:
     ):
         return None
     return BuildSucceeded(image_repository=repository, image_digest=digest), build_id
+
+
+def _parse_security_scan(archive: bytes, *, source_ref: str) -> BuildSecurityScan | None:
+    """security-scan zip → 원문.
+
+    meta.json 이 없거나 틀리면 None, 보고서가 없거나 틀리면 그 칸만 None.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            meta = _zip_json(bundle, SCAN_META_FILE)
+            trivy = _zip_json(bundle, SCAN_TRIVY_FILE)
+            gitleaks = _zip_json(bundle, SCAN_GITLEAKS_FILE)
+    except zipfile.BadZipFile:
+        return None
+    if not isinstance(meta, dict) or meta.get("schema_version") != SCAN_SCHEMA_VERSION:
+        return None
+    build_id, digest = meta.get("build_id"), meta.get("image_digest")
+    if not isinstance(build_id, str) or not isinstance(digest, str):
+        return None
+    if not _DIGEST.fullmatch(digest):
+        return None
+    return BuildSecurityScan(
+        build_id=build_id,
+        image_digest=digest,
+        source_ref=source_ref,
+        scanned_at=_parse_scanned_at(meta.get("scanned_at")),
+        trivy_version=_tool_version(meta.get("trivy")),
+        gitleaks_version=_tool_version(meta.get("gitleaks")),
+        trivy_report=trivy if isinstance(trivy, dict) else None,
+        gitleaks_report=gitleaks,
+    )
+
+
+def _zip_json(bundle: zipfile.ZipFile, name: str) -> object | None:
+    """zip 안 JSON 파일 하나. 없거나, 너무 크거나(풀린 크기 기준), JSON 이 아니면 None."""
+    try:
+        info = bundle.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > SCAN_FILE_MAX_BYTES:
+        return None
+    try:
+        body: object = json.loads(bundle.read(info))
+    except (ValueError, zipfile.BadZipFile):
+        return None
+    return body
+
+
+def _tool_version(tool: object) -> str | None:
+    version = tool.get("version") if isinstance(tool, dict) else None
+    return version if isinstance(version, str) and _TOOL_VERSION.fullmatch(version) else None
+
+
+def _parse_scanned_at(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def _parse_ref(external_ref: str) -> int | None:
