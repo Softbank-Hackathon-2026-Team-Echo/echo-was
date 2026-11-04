@@ -1,9 +1,9 @@
 # API 서버 12: 실제 클러스터 접속 어댑터 SPEC (EKS · GKE · 온프레 k3s)
 
-- 상태: Draft (사용자 확정 대기)
+- 상태: Draft (사용자 확정 대기). **미결: 접속 증명 방식(AD-2) — /version 만으로는 인증 증명이 안 된다는 검증 결과가 나와 사용자 결정 대기.**
 - 작성일: 2026-11-04
 - Depth: Deep
-- 바꾸는 SPEC: [api-2-environment-api-adapters.md](api-2-environment-api-adapters.md)의 "가짜 어댑터" 부분(D-2·FR-6·AC-4 중 `simulated`). 다르면 이 문서가 우선한다. 나머지(API 모양·상태 흐름·`secretRef` 형식·오류 코드)는 그대로 통과해야 한다.
+- 바꾸는 SPEC: [api-2-environment-api-adapters.md](api-2-environment-api-adapters.md)의 "어댑터는 가짜" 전제(`simulated` 값). 이 문서의 결정 번호(D-n)는 api-2와 별개다. 다르면 이 문서가 우선한다. 나머지(API 모양·상태 흐름·`secretRef` 형식·오류 코드)는 그대로 통과해야 한다.
 - GitHub 이슈: https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/13 (제목은 EKS만 적혀 있으나 사용자가 범위를 GKE·온프레까지 넓힘 — 이슈 문구 수정은 승인 항목)
 - 저장소: `echo-was` · 브랜치 `feat/real-cluster-adapters` (`main` = `42d80d5`에서)
 
@@ -43,6 +43,11 @@
 - 고객 클러스터가 `/version`을 비로그인에 여는 경우의 추가 방어(미검증, 후속).
 - 프론트 변경(응답 모양 불변).
 
+## 4. 사용자 시나리오
+
+- 개발자가 환경을 등록·수정하거나 "다시 확인"을 누르면, 환경 카드에 실제 클러스터의 버전·노드 수가 나오고 접속이 안 되면 이유 코드가 나온다.
+- 배포·이전은 접속 상태가 `FAILED`인 환경을 계속 거절한다(기존 동작).
+
 ## 5. 흐름
 
 ```mermaid
@@ -50,7 +55,7 @@ sequenceDiagram
     participant S as EnvironmentConnectionService
     participant A as 어댑터(aws/gcp/onprem)
     participant R as ClusterReader(포트 구현)
-    participant P as ClusterAccessProvider
+    participant P as ClusterAccessProvider(aws·gcp 캐시, onprem 은 넘겨받은 토큰을 기억하지 않음)
     participant K as 클러스터 API
     S->>A: check_connection(config, credentials)
     A->>R: read_version(config, token)
@@ -72,7 +77,8 @@ sequenceDiagram
 - `FR-3` `read_cluster_info` = `GET /version`의 `gitVersion` + `GET /api/v1/nodes`의 `items` 길이. `ClusterInfo(server_version, node_count, simulated=False)`. 노드 목록은 쿼리 없이 전체를 읽는다.
 - `FR-4` 인증 자료: aws·gcp는 `credentials`(자리 표시 비밀)를 **읽지 않는다**. 접속 경로는 배포 실행기와 같다(`ClusterAccessProvider`). onprem은 서비스가 이미 조회해 넘긴 `credentials`를 토큰으로 쓴다(`apiUrl` 필수, 비밀 이중 조회 없음).
 - `FR-5` 이유 코드 매핑(8.2)을 따른다. 권한 오류를 시간 초과로 뭉개지 않는다.
-- `FR-6` 일시 오류(연결 실패·5xx·429 = `TransientError`)는 0.5초 뒤 한 번 더 시도하고, 그래도 실패하면 `UNREACHABLE`.
+- `FR-6` 일시 오류(연결 실패·5xx·429 = `TransientError`, 그리고 STS 가 HTTP 400 으로 주는 `IDPCommunicationError`·`Throttling`·`ThrottlingException`·`RequestLimitExceeded`·`ServiceUnavailable`·`InternalFailure`)는 0.5초 뒤 한 번 더 시도하고, 그래도 실패하면 `UNREACHABLE`. 실패한 시도 하나가 1.5초를 넘었으면 다시 시도하지 않는다(전체 5초 안에서 원인을 `TIMEOUT` 에 가리지 않으려고). 401 은 일시 오류가 아니라 토큰을 다시 얻어 한 번 더 부른다(재시도와 별개). 403·404·그 밖 4xx 는 다시 시도하지 않는다. 메타데이터 서버 503 은 0.5초로 안 풀릴 수 있고 그때 결과는 `UNREACHABLE` 이다.
+- `FR-6a` STS 오류 분류는 공용 `access.py` 에서 하므로 배포 실행기에도 같이 적용된다(사용자 승인, D-9).
 - `FR-7` 노드 목록 읽기가 401·403이면 `read_cluster_info`는 `ConnectionCheckError(AUTH_FAILED)`로 실패한다. 이때 `check_connection`은 성공이므로 접속 상태는 `CONNECTED`, `clusterInfo = null`, `clusterInfoError = AUTH_FAILED`.
 - `FR-8` 비밀값·토큰·응답 본문·클러스터 이름·주소는 로그·예외 메시지·응답·`external_ref`에 넣지 않는다. 실패 로그는 `kind`·`reason`·`stage`만.
 - `FR-9` 포트 구현 객체(`ClusterAccessProvider`·`KubeHttpClients`·`GoogleMetadataClient`)는 프로세스당 하나를 만들어 재사용하고 앱 종료 때 닫는다. 만들 때 네트워크·비밀 조회를 하지 않는다.
@@ -96,15 +102,18 @@ sequenceDiagram
 
 | 상황 | 이유 코드 |
 |---|---|
-| 클러스터 401·403(재발급 1회 뒤에도), STS·EKS·GKE API 거절, 메타데이터에서 토큰을 못 받음 (`ClusterAuthError`) | `AUTH_FAILED` |
+| 클러스터 401(토큰을 다시 얻은 뒤에도)·403, STS·EKS·GKE API 거절, 메타데이터 서버가 토큰을 거절(4xx·빈 본문, `MetadataAuthError`) (`ClusterAuthError`) | `AUTH_FAILED` |
 | 역할 ARN 없음(config·설정 모두), 클러스터 조회 404·그 밖 4xx, 온프레 `apiUrl` 없음, `/version` 404 또는 본문이 쿠버네티스 모양이 아님 (`ClusterConfigError` 등) | `CONFIG_INVALID` |
-| 연결 실패·TLS 검증 실패·5xx·429(한 번 더 시도한 뒤) (`TransientError`) | `UNREACHABLE` |
+| 연결 실패·TLS 검증 실패·5xx·429(한 번 더 시도한 뒤), 메타데이터 서버 자체의 연결 실패·5xx·429, STS 일시 오류 400 (`TransientError`) | `UNREACHABLE` |
+| `/version`·`/nodes` 의 그 밖 비성공 응답(400·404·409 등), JSON 이 아니거나 객체가 아닌 본문, `gitVersion` 이 `v1.2.3` 모양이 아님 | `CONFIG_INVALID` (주소가 쿠버네티스 창구가 아니라고 본다) |
 | 전체 제한 시간 5초 초과 | `TIMEOUT` (서비스가 판정, 어댑터가 직접 내지 않음) |
 | 그 밖 예외 | 어댑터가 삼키지 않는다 → 서비스가 `UNKNOWN` |
 
 ### 8.3 설정
 - `ENVIRONMENT_ADAPTER_MODE` (`simulated`|`real`, 기본 `simulated`). `real`이어도 aws 역할은 환경 `config.roleArn` 또는 기존 `EXECUTOR_AWS_ROLE_ARN`을 쓴다(새 칸 없음).
-- 읽기 호출 제한 시간은 `ENVIRONMENT_CHECK_TIMEOUT_SECONDS`와 같은 값. 기존 `KUBE_REQUEST_TIMEOUT_SECONDS`(배포용)는 바꾸지 않는다.
+- 읽기 호출 제한 시간은 `ENVIRONMENT_CHECK_TIMEOUT_SECONDS`와 같은 값. 읽기용 `ClusterAccessProvider`·`KubeHttpClients`·`GoogleMetadataClient` 는 배포 실행기와 **별개 인스턴스**(`ClusterReaderHolder`)라 `KUBE_REQUEST_TIMEOUT_SECONDS`(배포용, 15초)를 건드리지 않는다. 대가: STS 임시 키·EKS 토큰·엔드포인트 캐시가 API 프로세스에 두 벌 생긴다. 호출 1건 상한(httpx)과 전체 상한(서비스)이 둘 다 5초라, 느린 클러스터의 결과는 `TIMEOUT` 또는 `UNREACHABLE` 중 먼저 걸린 쪽이다(AC-9 는 서비스 단계의 `TIMEOUT` 만 고정한다).
+- `ENVIRONMENT_ADAPTER_MODE` 의 모르는 값은 시작 오류이고, `Settings` 는 API·일꾼·마이그레이션이 같은 ConfigMap 을 읽으므로 오타 하나가 세 프로세스를 모두 멈춘다.
+- `real` 모드에서 포트(`reader`)가 주입되지 않는 경로는 없다(`get_adapter_resolver` 가 항상 넣고 시험으로 고정한다). 포트 없는 어댑터 생성은 시험·`simulated` 전용이다.
 
 ## 9. 호환성·배포·복구
 
@@ -125,10 +134,19 @@ sequenceDiagram
 - `AC-5` Given 역할 ARN이 없거나 클러스터 조회가 404이거나 온프레 `apiUrl`이 없거나 `/version`이 쿠버네티스 모양이 아니면, Then `CONFIG_INVALID`.
 - `AC-6` Given 노드 목록이 403이고 `/version`이 200, When 서비스를 통해 다시 확인하면, Then 접속 상태 `CONNECTED`·`clusterInfo = null`·`clusterInfoError = AUTH_FAILED`.
 - `AC-7` Given 서로 구별되는 가짜 토큰·ID 토큰·임시 키 문자열로 성공·각 실패 경로를 돌렸을 때, Then 잡은 로그 전체·응답 본문·예외 문자열·`repr`에 그 문자열이 0회 나온다.
-- `AC-8` 공통 계약 시험(`assert_adapter_contract`)이 세 종류의 실제 어댑터(스텁 전송 주입)를 통과한다. 실패 묶음 포함.
+- `AC-8` `tests/test_real_cluster_adapters.py` 가 세 종류의 실제 어댑터(스텁 전송 주입)에 대해 같은 계약 항목(접속 확인 성공·실패 코드, 정보 읽기, 비밀값이 로그에 없음)을 확인한다. 기존 `assert_adapter_contract` 는 인자 없는 `get_environment_adapter(kind)` 를 부르는 가짜 어댑터 계약으로 **그대로 둔다**(AD-1): 종류별 성공 설정·스텁이 필요해 같은 함수에 얹지 않는다.
+- `AC-12` 어댑터 파일(`app/adapters/*.py`)은 `app.executors`·`app.models` 를 import 하지 않는다(순환 방지, AST 시험).
+- `AC-13` `real` 모드의 `get_adapter_resolver` 가 포트가 든 어댑터를 만들고 같은 앱에서 읽기 구현을 재사용한다.
+- `AC-14` STS 가 400 + `IDPCommunicationError`/`Throttling` 이면 한 번 다시 시도하고, 그 밖 400 코드는 다시 시도하지 않고 `AUTH_FAILED`. 실패한 시도가 1.5초를 넘으면 다시 시도하지 않는다.
 - `AC-9` Given 느린 스텁(5초 초과), When 서비스를 통해 확인하면, Then `TIMEOUT`이고 어댑터 예외로 새지 않는다.
-- `AC-10` (운영, 2단계 이후) 시연 조직 aws-tokyo·gcp-seoul·onprem을 다시 확인하면 세 환경 모두 `CONNECTED`이고 `clusterInfo`가 `simulated=false`의 실제 버전·노드 수다(aws `v1.35.x`·2, gcp `v1.36.x`·2, onprem 버전 + 노드 권한 적용 뒤 노드 수). 확인한 명령·응답은 이슈 댓글로 남긴다.
-- `AC-11` `ruff`·`ruff format --check`·`mypy`·`pytest`(DB 포함) 통과, `alembic check`·스키마 덤프 변화 없음, 키 패턴 `git grep` 0건.
+- `AC-10` (운영 확인, 이 PR 밖의 별도 추적: 2단계 PR + echo-infra 노드 권한 승인 뒤. 이 PR 의 완료 판정은 AC-1~9·11~14 로 한다) 시연 조직 aws-tokyo·gcp-seoul·onprem을 다시 확인하면 세 환경 모두 `CONNECTED`이고 `clusterInfo`가 `simulated=false`의 실제 버전·노드 수다(aws `v1.35.x`·2, gcp `v1.36.x`·2, onprem 버전 + 노드 권한 적용 뒤 노드 수). 확인한 명령·응답은 이슈 댓글로 남긴다.
+- `AC-11` `ruff`·`ruff format --check`·`mypy`·`pytest`(DB 포함) 통과, `git grep -E 'AKIA[0-9A-Z]{16}|BEGIN (RSA |EC )?PRIVATE KEY|ghp_[A-Za-z0-9]{20}'` 0건. DB 스키마는 바꾸지 않는다.
+
+## 11. 비기능
+
+- 보안: 쓰기 호출 없음, 비밀값·응답 본문·원문 예외 미기록(FR-8). 저장 비밀 0건(D-2).
+- 성능: 한 번 확인 = 호출 3건 이상(`check_connection`의 `/version`, `read_cluster_info`의 `/version`·`/nodes`). 운영 시험 최악 1.1초(EKS 콜드), 캐시된 뒤는 호출 1건당 수십~수백 ms. 전체 5초는 기존 서비스가 판정한다.
+- 로그: 실패마다 `kind`·`reason`만 남기는 경고 1줄(reader). 서비스의 "예상 밖 예외" 로그는 기존대로.
 
 ## 12. 리스크 (premortem)
 
@@ -139,6 +157,9 @@ sequenceDiagram
 | 토큰·출입증 문자열이 로그·예외에 샘 | 예외 원문 버림, 문자열 포함 검사 | FR-8, AC-7 |
 | 고객 클러스터가 `/version`을 비로그인 허용 | 수용(이 세 클러스터는 401 확인), 후속 과제 | §3 제외 |
 | 단건 조회가 매번 실제 호출 | 토큰·창구 캐시, 환경 목록은 어댑터 미호출, 5초 상한 | FR-9 |
+| 등록자가 임의의 `roleArn`·클러스터 이름·온프레 `apiUrl`·`secretRef` 를 넣어 플랫폼 신원으로 버전·노드 수를 읽음(배포 실행기와 같은 구조) | **수용**. 허용 목록(대상 계정·프로젝트·도메인 제한)은 후속. 반환 정보는 버전·노드 수뿐 | D-10 |
+| 단계 1의 `UNREACHABLE`·`TIMEOUT` 도 `FAILED` 라 배포 접수(409 `ENVIRONMENT_UNHEALTHY`)가 막힘 | 서비스 불변(기존 SPEC 그대로). 일시 오류는 1회 재시도로 완화. 다음 "다시 확인" 성공 때 풀림 | D-11 |
+| API 파드의 메타데이터 서버 문제가 "고객 클러스터 `UNREACHABLE`" 로 보임 | 8.2 에 코드 명시. 2단계 전에 운영 파드에서 먼저 확인 | §9 |
 
 ## 13. 결정 기록
 
@@ -151,11 +172,14 @@ sequenceDiagram
 | D-5 | 구현 전 운영 파드 읽기 전용 시험 2회 | 5초 제한·접속 증명 확인 | 사용자 |
 | D-6 | 온프레 노드 권한 한 줄 추가(PR, 적용은 별도 승인) + 노드 읽기 실패 시 `AUTH_FAILED`·`CONNECTED` 유지 | 같은 모양의 카드 + 고객 클러스터 대비 | 사용자 |
 | D-7 | 사전 부검 3건 요구사항화 | 시연 안정성·원인 추적·보안 | 사용자 |
+| D-9 | STS 의 HTTP 400 일시 오류 코드를 재시도 대상으로 분류(공용 `access.py`, 배포 실행기에도 적용, 최소 범위) | 검증 3: AWS 문서상 400 이라 `AUTH_FAILED` 로 오분류됨 | 사용자 |
+| D-10 | 임의 대상 등록 위험은 수용, 허용 목록은 후속 | 마감 11/7, 배포 실행기와 같은 구조 | 사용자 |
+| D-11 | 단계 1 실패(`UNREACHABLE`·`TIMEOUT` 포함)의 `FAILED` 판정은 서비스 불변 | 기존 SPEC 유지 | 사용자 |
 | D-8 | 두 단계로 켠다(코드 → 확인 → 설정 전환) | 처음으로 실제 문이 되는 `FAILED` 차단 | 사용자 |
 | AD-1 | 어댑터는 `reader`가 없으면 가짜로 동작(상속 유지) | 인자 없는 `get_environment_adapter`·공통 계약·기존 시험 불변 | AI-default |
-| AD-2 | `/version` 200을 접속 증명으로 쓴다(SelfSubjectReview 미사용) | 시험 2: 세 곳 모두 무토큰 401, 쓰기 호출 0 | 시험 근거 |
+| AD-2 | **미결(사용자 결정 대기)**. 현재 구현은 `/version` 200 만 본다. 검증 1: 기본 설정 클러스터(kubeadm·kind)는 비로그인 `/version` 이 200 이라 인증 증명이 안 됨(틀린 토큰은 401). 후보: A `/version` + 인증이 있어야 열리는 `GET /api`(우리 3곳 확인 필요), B + SelfSubjectReview(POST, 3곳 201 확인), C `/version` 만 + 한계 명시 | 시험 2(우리 3곳 무토큰 401)는 우리 클러스터에서만 성립 | 검증 1 |
 | AD-3 | 노드 목록은 쿼리 없이 전체 | 해커톤 규모, 단순성 | AI-default |
-| AD-4 | 재시도 간격 0.5초 1회 | 최악 1.1초 ×2 + 0.5 < 5초 | AI-default |
+| AD-4 | 재시도 간격 0.5초 1회, 실패한 시도가 1.5초를 넘으면 재시도 안 함 | 확인 1회는 호출 3건 이상이라 호출마다 재시도하면 5초 초과 가능(검증 3). 첫 호출만 콜드(EKS 1.1초) | AI-default |
 | AD-5 | 요청별 TIMEOUT은 어댑터가 내지 않고 서비스 판정에 맡김 | 전송 오류가 `TransientError`로 합쳐지는 기존 접근 경로 | AI-default |
 
 ## 14. 구현 계획으로 위임한 low-impact 세부사항
