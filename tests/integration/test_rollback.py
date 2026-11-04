@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import ExecutorMode
-from app.enums import ConnectionErrorCode, DeployRequestStatus, OrganizationRole
+from app.enums import AuditResult, ConnectionErrorCode, DeployRequestStatus, OrganizationRole
 from app.executors.fake import FakeBuildExecutor
 from app.models import AuditLog, Build, Deployment, DeployRequest, Environment, ServiceEnvironment
 from app.worker.runner import Worker
@@ -302,14 +302,19 @@ async def test_rollback_permissions_by_role_and_agent(harness: DeployHarness) ->
             )
         ]
     async with harness.session_factory() as session:
-        audits = list((await session.scalars(select(AuditLog))).all())
+        audits = list(
+            (
+                await session.scalars(select(AuditLog).where(AuditLog.result == AuditResult.DENIED))
+            ).all()
+        )
 
     assert (denied_viewer.status_code, denied_viewer.json()["code"]) == (403, "ROLE_FORBIDDEN")
     assert (denied_agent.status_code, denied_agent.json()["code"]) == (403, "AGENT_READ_ONLY")
     assert (by_developer.status_code, by_admin.status_code) == (202, 202)
     assert [response.status_code for response in reads] == [200] * len(reads)
-    assert sorted(audit.reason for audit in audits) == ["AGENT_READ_ONLY", "ROLE_FORBIDDEN"]
-    assert {audit.action for audit in audits} == {
+    assert sorted(audit.reason or "" for audit in audits) == ["AGENT_READ_ONLY", "ROLE_FORBIDDEN"]
+    assert {audit.action for audit in audits} == {"ROLLBACK_REQUESTED"}
+    assert {audit.route for audit in audits} == {
         "POST /api/v1/orgs/{org_id}/deploy-requests/{deploy_request_id}/rollback"
     }
     # 개발자가 접수한 대기 요청은 어드민의 새 요청에 밀린다(실행 1 + 대기 1).

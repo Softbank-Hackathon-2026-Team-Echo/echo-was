@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.core.config import ExecutorMode
-from app.enums import ConnectionErrorCode, DeployRequestStatus, OrganizationRole
+from app.enums import AuditResult, ConnectionErrorCode, DeployRequestStatus, OrganizationRole
 from app.models import AuditLog, Environment
 from tests.integration.auth_support import (
     create_agent_token,
@@ -258,7 +258,13 @@ async def test_self_approval_is_forbidden_by_default_and_allowed_by_admin_switch
     organization = await harness.client.get(org_path(harness.organization.id))
     approved = await migration.act(plan["id"], "approve", client=migration.author_client)
     async with harness.session_factory() as session:
-        reasons = list(await session.scalars(select(AuditLog.reason).order_by(AuditLog.created_at)))
+        reasons = list(
+            await session.scalars(
+                select(AuditLog.reason)
+                .where(AuditLog.result == AuditResult.DENIED)
+                .order_by(AuditLog.created_at, AuditLog.seq)
+            )
+        )
 
     assert _error(self_approve) == (403, "SELF_APPROVAL_FORBIDDEN")
     assert _error(self_reject) == (403, "SELF_APPROVAL_FORBIDDEN")
@@ -781,6 +787,8 @@ async def test_plan_and_logs_carry_stored_simulated_flag(migration: Migration) -
         stored = await session.scalar(
             text("SELECT simulated FROM migration_plans WHERE id = :id"), {"id": plan["id"]}
         )
-        count = await session.scalar(select(func.count()).select_from(AuditLog))
+        count = await session.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.result == AuditResult.DENIED)
+        )
     assert stored is True
     assert count == 0

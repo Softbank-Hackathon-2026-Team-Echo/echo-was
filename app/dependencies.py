@@ -31,6 +31,7 @@ from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_fact
 from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
+from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
@@ -139,6 +140,7 @@ def get_environment_connection_service(
 def get_environment_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
     connection_service: Annotated[
         EnvironmentConnectionService, Depends(get_environment_connection_service)
     ],
@@ -148,6 +150,7 @@ def get_environment_service(
         environment_repository=EnvironmentRepository(session),
         connection_service=connection_service,
         public_base_domain=settings.public_base_domain,
+        clock=clock,
     )
 
 
@@ -395,6 +398,12 @@ def get_public_tls_checker(
 ) -> PublicHostTlsChecker | None:
     """보안 게이트의 실행 직전 TLS 시험기. 게이트가 꺼져 있으면 None(게이트 없음)."""
     return build_public_tls_checker(settings)
+
+
+def get_audit_log_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AuditLogService:
+    return AuditLogService(session=session)
 
 
 def get_migration_plan_service(

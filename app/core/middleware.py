@@ -7,6 +7,8 @@ from uuid import uuid4
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.audit.context import bind_request_scope
+from app.auth.audit import record_agent_read
 from app.core.exception_handlers import error_response
 from app.core.logging import log_context
 
@@ -31,7 +33,8 @@ def resolve_request_id(scope: Scope) -> str:
 class RequestContextMiddleware:
     """요청마다 request_id 를 로그 컨텍스트와 응답 헤더에 싣고, 접근 로그 1줄을 남긴다.
 
-    처리되지 않은 예외는 여기서 한 번만 기록하고 500 공통 봉투로 응답한다.
+    처리되지 않은 예외는 여기서 한 번만 기록하고 500 공통 봉투로 응답한다. 응답을 정상으로 마친 뒤
+    에이전트의 성공한 읽기를 감사 로그에 남긴다(FastAPI yield 의존성은 응답 상태를 볼 수 없다).
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -57,7 +60,7 @@ class RequestContextMiddleware:
             await send(message)
 
         started_at = perf_counter()
-        with log_context(request_id=request_id):
+        with log_context(request_id=request_id), bind_request_scope(scope):
             try:
                 await self.app(scope, receive, send_with_request_id)
             except Exception:
@@ -68,6 +71,8 @@ class RequestContextMiddleware:
                     HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "internal server error"
                 )
                 await response(scope, receive, send_with_request_id)
+            else:
+                await record_agent_read(scope, status_code)
             finally:
                 if scope["path"] not in _UNLOGGED_PATHS:
                     route = scope.get("route")

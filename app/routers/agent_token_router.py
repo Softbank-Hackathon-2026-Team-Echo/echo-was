@@ -54,5 +54,5 @@ async def revoke_agent_token(
     access: HumanDeveloperAccess, token_id: uuid.UUID, agent_tokens: AgentTokens
 ) -> Response:
     """이미 폐기된 토큰이어도 204."""
-    await agent_tokens.revoke(access.organization_id, token_id)
+    await agent_tokens.revoke(access.organization_id, token_id, access.user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

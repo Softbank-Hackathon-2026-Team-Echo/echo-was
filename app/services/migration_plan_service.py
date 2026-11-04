@@ -25,6 +25,9 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditComponent
+from app.audit.lifecycle import migration_plan_target, record_migration_plan_finished
+from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
 from app.core.config import ExecutorMode
 from app.core.exceptions import (
@@ -200,6 +203,23 @@ class MigrationPlanService:
         self._organizations = OrganizationRepository(session)
         self._users = UserRepository(session)
         self._log = MigrationPlanLogWriter(session)
+        self._audit = AuditRecorder(session, clock)
+
+    async def _record_audit(
+        self,
+        action: AuditAction,
+        plan: MigrationPlan,
+        organization_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._audit.record(
+            organization_id=organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=action,
+            target=await migration_plan_target(self._session, plan),
+            details=details,
+        )
 
     # --- 만들기 ---
 
@@ -269,6 +289,16 @@ class MigrationPlanService:
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
                     "mode": plan.mode,
+                },
+            )
+            await self._record_audit(
+                AuditAction.MIGRATION_PLAN_CREATED,
+                plan,
+                organization_id,
+                actor_user_id,
+                {
+                    "sourceEnvironmentId": str(source.environment_id),
+                    "targetEnvironmentId": str(target.environment_id),
                 },
             )
             view = (await self._views([plan]))[0]
@@ -503,6 +533,13 @@ class MigrationPlanService:
                             data=gate_log_data(decision),
                         )
                     await self._approve(plan, actor_user_id, is_self, now)
+                    await self._record_audit(
+                        AuditAction.MIGRATION_PLAN_APPROVED,
+                        plan,
+                        organization_id,
+                        actor_user_id,
+                        {"selfApproved": is_self},
+                    )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
         if gate_rejection is not None:
@@ -564,13 +601,15 @@ class MigrationPlanService:
                 raise SelfApprovalForbiddenError
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
-            else:
-                await self._close_pending(
-                    plan,
-                    MigrationPlanStatus.REJECTED,
-                    {"rejected_by_user_id": actor_user_id},
-                    MigrationLogCode.REJECTED,
-                    now,
+            elif await self._close_pending(
+                plan,
+                MigrationPlanStatus.REJECTED,
+                {"rejected_by_user_id": actor_user_id},
+                MigrationLogCode.REJECTED,
+                now,
+            ):
+                await self._record_audit(
+                    AuditAction.MIGRATION_PLAN_REJECTED, plan, organization_id, actor_user_id
                 )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
@@ -590,13 +629,15 @@ class MigrationPlanService:
             self._check_pending(plan)
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
-            else:
-                await self._close_pending(
-                    plan,
-                    MigrationPlanStatus.CANCELLED,
-                    {"cancelled_by_user_id": actor_user_id},
-                    MigrationLogCode.CANCELLED,
-                    now,
+            elif await self._close_pending(
+                plan,
+                MigrationPlanStatus.CANCELLED,
+                {"cancelled_by_user_id": actor_user_id},
+                MigrationLogCode.CANCELLED,
+                now,
+            ):
+                await self._record_audit(
+                    AuditAction.MIGRATION_PLAN_CANCELLED, plan, organization_id, actor_user_id
                 )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
@@ -635,6 +676,9 @@ class MigrationPlanService:
                 [MigrationPlan.abort_requested_at.is_(None)],
             ):
                 await self._log.append(plan, MigrationLogCode.ABORT_REQUESTED, now)
+                await self._record_audit(
+                    AuditAction.MIGRATION_ABORT_REQUESTED, plan, organization_id, actor_user_id
+                )
                 if await self._jobs.pull_open_for_subject(plan.id, now) == 0:
                     await self._recover_missing_job(plan, status, actor_user_id, now)
             view = await self._reload_view(plan_id)
@@ -661,6 +705,7 @@ class MigrationPlanService:
                 },
             ):
                 await self._log.append(plan, MigrationLogCode.CANCELLED, now)
+                await self._record_auto_finished(plan, MigrationPlanStatus.CANCELLED)
             return
         self._jobs.add(
             Job(
@@ -723,8 +768,13 @@ class MigrationPlanService:
         code: MigrationLogCode,
         now: datetime,
         data: dict[str, Any] | None = None,
-    ) -> None:
-        if await self._plans.transition(
+    ) -> bool:
+        """승인 대기 계획을 끝낸다. 반영됐으면 True.
+
+        만료·낡음은 사람이 고른 결과가 아니라 서버 규칙으로 끝난 것이라 SYSTEM(api) 줄을 쓴다. 거절·
+        취소는 부른 쪽이 USER 줄을 쓴다.
+        """
+        if not await self._plans.transition(
             plan.id,
             MigrationPlanStatus.PENDING_APPROVAL,
             {
@@ -735,7 +785,16 @@ class MigrationPlanService:
                 "updated_at": now,
             },
         ):
-            await self._log.append(plan, code, now, data=data)
+            return False
+        await self._log.append(plan, code, now, data=data)
+        if status in (MigrationPlanStatus.EXPIRED, MigrationPlanStatus.STALE):
+            await self._record_auto_finished(plan, status)
+        return True
+
+    async def _record_auto_finished(self, plan: MigrationPlan, status: MigrationPlanStatus) -> None:
+        await record_migration_plan_finished(
+            self._session, self._clock, plan, status=status, component=AuditComponent.API
+        )
 
     async def _get_in_organization(
         self, organization_id: uuid.UUID, plan_id: uuid.UUID

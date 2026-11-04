@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -30,6 +30,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기·로그 읽기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서·로그 읽기·마스킹 계약 |
 | [docs/api/variables.md](docs/api/variables.md) | 고객 앱 환경 변수 API(쓰기 전용·권한·오류·`pendingRedeploy`)를 바꾸거나 쓸 때. 주입 규칙은 [docs/executors.md](docs/executors.md) "앱 환경 변수" |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
+| [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -39,9 +40,10 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
-├─ auth/              # guards(require_login·require_human·require_org_role) · audit(403 거부 기록 처리기) · tokens · cookies · actors
+├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
+├─ auth/              # guards(require_login·require_human·require_org_role) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
 ├─ services/          # EnvironmentService · EnvironmentConnectionService · ServiceService · DeployRequestService(접수·되돌리기·이력·로그)
 │                     #   AuthService(로그인·세션·/me) · OrganizationService · InvitationService · AgentTokenService
 │                     #   DeployRequestProcessor · ServiceTeardownProcessor(일꾼 단계) · deploy_support · service_view · job_lease
@@ -53,6 +55,7 @@ app/
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
 │                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings, 실패해도 배포 계속, 보안 2·11)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
+│                     #   AuditLogService(감사 로그 조회)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
@@ -130,7 +133,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 서비스 이름은 조직 안 유일(`uq_services_org_name_live`), 환경 이름도 조직 안 유일(`uq_environments_org_name_live`). 주소 유일성은 `services.host_suffix`(무작위 8자) + `public_host` 전체 unique 가 맡는다.
 - 고객 앱 주소는 도메인 바로 아래 한 단계: 대표 `{서비스}-{suffix}.{도메인}`, 환경별 `{서비스}-{환경}-{같은 suffix}.{도메인}`(`deploy_support` 의 함수로만 만든다, 63자 넘으면 앞부분 54자로 자름). suffix 는 `get_host_suffix_generator` 로 주입하고 시험은 고정 값으로 바꾼다. 대표 주소가 겹치면 새 suffix 로 3번 다시 시도한 뒤 409 `PUBLIC_HOST_CONFLICT`.
 - `env:` 비밀 참조는 `ECHO_SECRET_<조직 키>__` 로 시작해야 한다(422 `SECRET_REF_NOT_IN_ORGANIZATION`). 조직 slug 는 바꾸지 않는다.
-- 403 은 `AuditedForbiddenError` 하위(ROLE_FORBIDDEN·AGENT_READ_ONLY·CANNOT_CHANGE_OWN_ROLE·ORIGIN_NOT_ALLOWED)로 raise 한다. 예외 처리기가 `request.state` 의 팩토리로 `audit_logs` 를 따로 커밋한다. 401·404 는 기록하지 않는다.
+- 403 은 `AuditedForbiddenError` 하위(ROLE_FORBIDDEN·AGENT_READ_ONLY·CANNOT_CHANGE_OWN_ROLE·ORIGIN_NOT_ALLOWED)로 raise 한다. 예외 처리기가 `request.state` 의 팩토리로 거부 줄을 `audit_logs` 에 따로 커밋한다. 401·404 는 기록하지 않는다.
 - 멤버 변경은 조직 행 `FOR NO KEY UPDATE` 뒤 잠금 안에서 행위자 역할을 다시 읽는다(자기 역할 변경 금지·어드민 1명 이상). 첫 로그인·초대 적용·개인 조직 slug 는 `ON CONFLICT DO NOTHING`.
 - 세션 쿠키 값·에이전트 토큰 원문(발급 응답 제외)·GitHub 사용자 토큰·client secret 은 저장·로그·응답에 넣지 않는다(DB 에는 SHA-256 만). 개발용·비상용 로그인과 설정으로 켜는 가짜 GitHub 는 만들지 않는다(가짜는 시험의 의존성 교체로만).
 
@@ -171,6 +174,14 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 API 서버 9 부터.
 - **비율 단계 판정은 "도착이 요청 N건을 5xx 허용 안에서 처리했나"**(API 서버 8-1, `migration_counting`). `OBSERVE` 한 번 실행 = 카운터(`MetricsProvider.read_counts`, 트랜잭션 밖) 한 번 읽기, 센 값은 `step_results[i].counting` 에 조건부 UPDATE 로 적고 진행 갱신은 로그 줄을 남기지 않는다. 세기를 끝내면 `judgeReason` 을 같은 트랜잭션에 적고 `JUDGE` 는 저장값으로만 판정한다(카운터 재읽기 금지). p95 는 판정에 쓰지 않는다(참고 값만). API 에 `observeSeconds` 는 없고 DB `observe_seconds` 칸 = 최대 대기다.
 - **보안 게이트는 `SECURITY_GATE_ENABLED` 일 때만 주입한다**(보안 5, `SecurityGate`, API 는 `get_public_tls_checker`, 일꾼은 `Worker(tls_checker=)`). 승인·일꾼 시작 모두 **잠금 전·트랜잭션 밖에서 판정**(TLS 시험은 네트워크)하고, 잠금 안에서 지문이 같을 때 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 줄을 남긴다. 막힌 승인은 계획을 그대로 두고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`, 막힌 시작은 `FAILED(SECURITY_GATE_BLOCKED)`(트래픽 그대로). TLS 시험은 `PublicHostTlsChecker` 로만 한다(공개 도메인 주소·443·확인한 공인 IP). 기한부 예외는 승인·미철회만 읽는다.
+
+### 감사 로그 (자주 어기는 것)
+- **새 쓰기 경로에는 이름과 기록이 함께 간다.** `app/audit/actions.py` 의 `WRITE_ROUTE_ACTIONS` 에 이름을 더하고(빠지면 `test_every_write_route_has_an_action_name` 실패), 서비스의 변경 블록 **성공 분기**에서 `AuditRecorder.record` 를 부른다(`session.add` 만 한다). 아무것도 바뀌지 않은 멱등 성공과 409 분기에는 줄을 쓰지 않는다.
+- **끝 상태를 새로 만드는 곳에는 끝 줄도 쓴다.** 배포 요청·이전 계획의 끝 상태 전환은 조건부 UPDATE 가 반영됐을 때 같은 트랜잭션에서 `record_deploy_request_finished`·`record_migration_plan_finished`(`app/audit/lifecycle.py`)를 부른다. 행의 `status` 는 조건부 UPDATE 뒤에도 옛 값이므로 끝 상태를 인수로 넘긴다. 사람 요청 안에서 서버 규칙으로 끝낸 것(만료·낡음·밀어내기·삭제 취소)은 SYSTEM `component = api` 다.
+- 값은 명시적으로 받는다(`OrganizationAccess` 를 모른다). 요청 값(`route`·`path`·`request_id`)은 `RequestContextMiddleware` 가 묶은 contextvar 에서 기록 함수가 읽는다(요청 밖이면 NULL). 시각은 주입한 시계, 문자열은 칸 길이로 자른다(긴 이름으로 작업이 실패하면 안 된다).
+- `details` 에 비밀값·토큰 원문·수정한 값을 넣지 않는다(수정은 `changedFields` 칸 이름만). `action` 은 옛 거부 줄의 `METHOD 경로 틀` 때문에 칸·응답이 문자열이다.
+- 거부 줄과 에이전트의 성공한 GET·HEAD(2xx, 미들웨어가 응답 뒤) 줄만 따로 커밋한다(`app/auth/audit.py`). 에이전트 읽기 기록 실패는 로그만 남기고 응답을 바꾸지 않는다.
+- 줄은 UPDATE·DELETE 트리거로 막혀 있다. 표를 세는 시험은 `result = DENIED` 등으로 거른다. 이 revision 은 행동 줄이 있으면 downgrade 가 멈춘다(운영은 forward-only).
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.dependencies import get_clock
-from app.enums import ActorType, OrganizationRole
+from app.enums import ActorType, AuditResult, OrganizationRole
 from app.main import app
 from app.models import AgentToken, AuditLog, Organization, OrganizationMember
 from app.scripts import demo_seed
@@ -100,9 +100,13 @@ async def test_demo_seed_creates_org_members_token_and_is_idempotent(
         audit = (await session.scalars(select(AuditLog))).all()
     assert read.status_code == 200
     assert (denied.status_code, denied.json()["code"]) == (403, "AGENT_READ_ONLY")
-    assert [(row.actor_type, row.organization_id, row.reason) for row in audit] == [
+    denials = [row for row in audit if row.result == AuditResult.DENIED]
+    assert [(row.actor_type, row.organization_id, row.reason) for row in denials] == [
         (ActorType.AGENT, first.organization.id, "AGENT_READ_ONLY")
     ]
+    # 시드 자체는 줄을 남기지 않는다. 남은 것은 에이전트의 읽기·거부뿐이다.
+    assert {row.actor_type for row in audit} == {ActorType.AGENT}
+    assert sorted(row.action for row in audit) == ["DEPLOY_REQUESTED", "RESOURCE_READ"]
 
 
 async def test_demo_seed_fails_clearly_for_unknown_user_or_foreign_org(
