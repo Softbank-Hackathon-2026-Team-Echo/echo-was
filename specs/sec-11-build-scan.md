@@ -28,7 +28,7 @@
 - 이 SPEC
 
 ### 3.2 다음 PR (같은 이슈 #31·#26)
-- WAS가 `security-scan`을 읽어 `findings`에 기록(빌드 실행기 안 또는 빌드 성공 뒤 한 단계, API 서버 담당 리뷰) + `docs/executors.md` 계약
+- ~~WAS가 `security-scan`을 읽어 `findings`에 기록~~ → #54·#58 로 이미 병합됐다. **이 PR 을 병합하면 다음 실제 고객 빌드부터 증거가 쌓인다**(게이트는 꺼져 있어 이전에는 영향 없음)
 - 같은 digest 주기 재검사(새 취약점), IaC·매니페스트 검사(Trivy `config`, 매니페스트는 WAS가 만들어 대상이 다르다)
 
 ### 3.3 하지 않는다
@@ -48,13 +48,14 @@
 | D-7 | 산출물 `security-scan`(7일, `build-result`와 같음): `trivy-image.json`(취약점·비밀), `gitleaks.json`(소스 비밀), `meta.json` | — |
 | D-8 | `meta.json` 칸: `schema_version`(1), `build_id`, `image_digest`, `ar_repository`, `repository`, `commit_sha`, `run_id`, `run_attempt`, `workflow_sha`, `scanned_at`, `tools_outcome`, `trivy{version, vulnerability_db_updated_at, outcome}`, `gitleaks{version, outcome}`. 키는 `build-result.json`처럼 snake_case | 이슈 완료 기준 2 |
 | AD-1 | `gitleaks:allow` 주석을 무시해 오탐이 늘 수 있다. 오탐은 기한부 예외(사람 승인·7일)로 다룬다 | AI-default |
+| D-9 | GCP 인증 단계는 **자격 파일을 만들지 않는다**(`create_credentials_file: false`). 기본값이면 `$GITHUB_WORKSPACE`(= 고객 소스 폴더 = `docker build` 입력)에 OIDC 요청 토큰이 든 `gha-creds-*.json` 이 생겨 ① gitleaks 가 모든 빌드에서 비밀로 잡고(C-IMG-2 오탐 FAIL) ② 고객 Dockerfile 이 그 파일을 이미지에 복사하거나 빌드 중 읽어 CI 신원 권한을 얻을 수 있다. 뒤 단계는 `access_token` 출력(docker login)만 쓰고, Trivy 는 그 로그인 자격으로 이미지를 받는다 | #53 리뷰(Saccharine1211) |
 | AD-2 | 검사 시간은 로컬(캐시 있음) 3초, CI는 DB·이미지 받기 포함 1분 안팎으로 본다(**미측정**, 병합 뒤 첫 실행에서 잰다). 원터치 배포가 그만큼 늘어난다 | AI-default |
 
 ## 5. Acceptance criteria
 
 | AC | 확인 | 방법 |
 |---|---|---|
-| AC-1 | 기존 단계·`build-result` 계약이 그대로다 | diff가 헤더 주석 2줄 + 끝에 단계 추가뿐 |
+| AC-1 | 기존 단계·`build-result` 계약이 그대로다 | diff가 헤더 주석 2줄 + GCP 인증 단계 한 줄(`create_credentials_file: false`, D-9) + 끝에 단계 추가뿐 |
 | AC-2 | 같은 digest의 검사 원문 3개가 산출물에 남는다 | 워크플로 `run` 블록을 그대로 꺼내 로컬에서 실행(GHCR 시연 이미지 + echo-demo-app `0ff0d44`) |
 | AC-3 | 저장소의 `.trivyignore`·`trivy.yaml`·`.gitleaks.toml`·`gitleaks:allow`로 결과를 숨길 수 없다 | 로컬 재현: 193건·가짜 키 2건이 그대로 나옴 |
 | AC-4 | 비밀값 원문이 산출물에 없다 | 심은 가짜 키 문자열 검색 0건 |
@@ -66,4 +67,4 @@
 
 - **R-a 원터치 배포가 검사 시간만큼 늘어난다** → 병합 뒤 첫 실행에서 재고, 길면 Trivy DB 캐시를 더한다.
 - **R-b 시연 중 Trivy DB 받기 실패** → 그 빌드의 이미지 증거가 UNKNOWN이 되어 이전이 막힌다. 리허설 체크리스트에 산출물 확인을 넣고, 실패하면 빌드를 다시 돌린다.
-- **R-c 클라우드 자격을 고객 빌드보다 먼저 받는 기존 구조**는 그대로다(이 PR 범위 밖, 인프라 담당과 상의).
+- **R-c 클라우드 자격을 고객 빌드보다 먼저 받는 기존 구조**는 그대로다(이 PR 범위 밖, 인프라 담당과 상의). 다만 작업 폴더에 남던 GCP 자격 파일은 D-9 로 없앴다. AWS 자격은 환경변수라 `docker build` 에 넘어가지 않는다.

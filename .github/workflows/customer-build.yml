@@ -102,6 +102,10 @@ jobs:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.CI_SA }}
           token_format: access_token
+          # 자격 파일(gha-creds-*.json, OIDC 요청 토큰 포함)을 만들지 않는다. 기본값이면 고객 소스 폴더
+          # (= docker build 입력)에 생겨 고객 이미지에 들어가거나 빌드 중 읽힐 수 있고, gitleaks 가
+          # 비밀로 잡는다. 뒤 단계는 access_token 출력(docker login)만 쓴다.
+          create_credentials_file: false
 
       - uses: docker/login-action@v3
         with:
