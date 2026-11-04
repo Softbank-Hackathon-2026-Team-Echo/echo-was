@@ -122,6 +122,32 @@ class ServiceEnvironmentRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_live_current_by_organization(
+        self, organization_id: uuid.UUID
+    ) -> list[ServiceEnvironment]:
+        """그 조직의 살아 있는 연결 중 현재 배포가 있는 것(살아 있는 서비스·환경만).
+
+        서비스·현재 배포를 함께 읽는다. 보안 매트릭스가 환경마다 지금 도는 이미지를 본다.
+        """
+        statement = (
+            select(ServiceEnvironment)
+            .join(Environment, Environment.id == ServiceEnvironment.environment_id)
+            .join(Service, Service.id == ServiceEnvironment.service_id)
+            .where(
+                _is_live(),
+                ServiceEnvironment.current_deployment_id.is_not(None),
+                Service.organization_id == organization_id,
+                Service.is_deleted.is_(False),
+                Environment.is_deleted.is_(False),
+            )
+            .options(
+                selectinload(ServiceEnvironment.service),
+                selectinload(ServiceEnvironment.current_deployment),
+            )
+            .order_by(ServiceEnvironment.id)
+        )
+        return list((await self._session.scalars(statement)).all())
+
     async def is_public_host_in_use(self, public_host: str) -> bool:
         statement = select(
             exists().where(ServiceEnvironment.public_host == public_host, _is_live())
