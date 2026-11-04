@@ -1,6 +1,6 @@
 # API 서버 12: 실제 클러스터 접속 어댑터 SPEC (EKS · GKE · 온프레 k3s)
 
-- 상태: Draft (사용자 확정 대기). **미결: 접속 증명 방식(AD-2) — /version 만으로는 인증 증명이 안 된다는 검증 결과가 나와 사용자 결정 대기.**
+- 상태: Draft (사용자 확정 대기). 접속 증명 방식(AD-2)은 사용자가 A(`/version` + `GET /api`)로 결정했다. `GET /api` 가 우리 3곳에서 되는지는 운영 파드 시험 전까지 미검증.
 - 작성일: 2026-11-04
 - Depth: Deep
 - 바꾸는 SPEC: [api-2-environment-api-adapters.md](api-2-environment-api-adapters.md)의 "어댑터는 가짜" 전제(`simulated` 값). 이 문서의 결정 번호(D-n)는 api-2와 별개다. 다르면 이 문서가 우선한다. 나머지(API 모양·상태 흐름·`secretRef` 형식·오류 코드)는 그대로 통과해야 한다.
@@ -73,7 +73,7 @@ sequenceDiagram
 ## 6. 기능 요구사항
 
 - `FR-1` 어댑터는 `ClusterReadPort`(아래 8.1)를 생성자로 받는다. 포트가 없으면(`reader=None`) 지금처럼 가짜 값(`simulated=True`)을 돌려준다. `registry.get_environment_adapter(kind)`의 인자 없는 호출은 그대로 동작한다(공통 계약 시험·기존 시험 유지).
-- `FR-2` `check_connection` = 클러스터에 인증된 요청으로 `GET /version`을 보내 200을 받는 것. 반환값 없음(`None`).
+- `FR-2` `check_connection` = 클러스터에 `GET /version`(도달·쿠버네티스 확인)을 보내 200을 받고, 이어서 인증이 있어야만 열리는 `GET /api`(API 목록, `system:discovery`는 로그인한 사용자에게만 바인딩)가 200 + `versions` 목록이면 성공. 반환값 없음(`None`). `/api` 가 401·403 이면 `AUTH_FAILED`, 모양이 다르면 `CONFIG_INVALID`. `read_cluster_info` 는 `/api` 를 부르지 않는다.
 - `FR-3` `read_cluster_info` = `GET /version`의 `gitVersion` + `GET /api/v1/nodes`의 `items` 길이. `ClusterInfo(server_version, node_count, simulated=False)`. 노드 목록은 쿼리 없이 전체를 읽는다.
 - `FR-4` 인증 자료: aws·gcp는 `credentials`(자리 표시 비밀)를 **읽지 않는다**. 접속 경로는 배포 실행기와 같다(`ClusterAccessProvider`). onprem은 서비스가 이미 조회해 넘긴 `credentials`를 토큰으로 쓴다(`apiUrl` 필수, 비밀 이중 조회 없음).
 - `FR-5` 이유 코드 매핑(8.2)을 따른다. 권한 오류를 시간 초과로 뭉개지 않는다.
@@ -177,7 +177,7 @@ sequenceDiagram
 | D-11 | 단계 1 실패(`UNREACHABLE`·`TIMEOUT` 포함)의 `FAILED` 판정은 서비스 불변 | 기존 SPEC 유지 | 사용자 |
 | D-8 | 두 단계로 켠다(코드 → 확인 → 설정 전환) | 처음으로 실제 문이 되는 `FAILED` 차단 | 사용자 |
 | AD-1 | 어댑터는 `reader`가 없으면 가짜로 동작(상속 유지) | 인자 없는 `get_environment_adapter`·공통 계약·기존 시험 불변 | AI-default |
-| AD-2 | **미결(사용자 결정 대기)**. 현재 구현은 `/version` 200 만 본다. 검증 1: 기본 설정 클러스터(kubeadm·kind)는 비로그인 `/version` 이 200 이라 인증 증명이 안 됨(틀린 토큰은 401). 후보: A `/version` + 인증이 있어야 열리는 `GET /api`(우리 3곳 확인 필요), B + SelfSubjectReview(POST, 3곳 201 확인), C `/version` 만 + 한계 명시 | 시험 2(우리 3곳 무토큰 401)는 우리 클러스터에서만 성립 | 검증 1 |
+| AD-2 | **A 로 결정(사용자)**: `/version` + `GET /api`. 방어 한 겹 더일 뿐이다 — 공식 문서상 틀린 토큰은 401 이라, 이 호출이 막아 주는 것은 "토큰은 받아들이지만 익명으로 처리하는" 변칙 인증 구성과 권한 제거(`system:discovery`)다. 이전 판단 근거:  검증 1: 기본 설정 클러스터(kubeadm·kind)는 비로그인 `/version` 이 200 이라 인증 증명이 안 됨(틀린 토큰은 401). 후보: A `/version` + 인증이 있어야 열리는 `GET /api`(우리 3곳 확인 필요), B + SelfSubjectReview(POST, 3곳 201 확인), C `/version` 만 + 한계 명시 | 시험 2(우리 3곳 무토큰 401)는 우리 클러스터에서만 성립 | 검증 1 |
 | AD-3 | 노드 목록은 쿼리 없이 전체 | 해커톤 규모, 단순성 | AI-default |
 | AD-4 | 재시도 간격 0.5초 1회, 실패한 시도가 1.5초를 넘으면 재시도 안 함 | 확인 1회는 호출 3건 이상이라 호출마다 재시도하면 5초 초과 가능(검증 3). 첫 호출만 콜드(EKS 1.1초) | AI-default |
 | AD-5 | 요청별 TIMEOUT은 어댑터가 내지 않고 서비스 판정에 맡김 | 전송 오류가 `TransientError`로 합쳐지는 기존 접근 경로 | AI-default |

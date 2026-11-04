@@ -2,7 +2,8 @@
 
 - 접근 경로는 배포 실행기와 같다(`ClusterAccessProvider`): aws 는 구글 신분증 → STS 역할 → EKS 토큰,
   gcp 는 워크로드 신원 액세스 토큰 + GKE API, onprem 은 `apiUrl` + 서비스가 넘긴 서비스 계정 토큰.
-- 읽기 전용 GET 두 가지뿐이다: `/version`, `/api/v1/nodes`.
+- 읽기 전용 GET 세 가지뿐이다: `/version`, `/api`(인증이 있어야 열리는 API 목록, 출입증 증명),
+  `/api/v1/nodes`.
 - 실패는 `ConnectionCheckError(reason)` 로만 낸다. 원문(주소·헤더·본문)은 버린다.
   권한(401·403) AUTH_FAILED / 설정(역할 없음·404·쿠버네티스가 아닌 본문) CONFIG_INVALID /
   연결 실패·TLS·5xx·429(0.5초 뒤 한 번 더 시도한 뒤) UNREACHABLE. TIMEOUT 은 호출 쪽 전체
@@ -65,6 +66,12 @@ class ClusterReader:
         if not isinstance(version, str) or _VERSION.fullmatch(version) is None:
             raise self._failed(config, ConnectionErrorCode.CONFIG_INVALID)
         return version
+
+    async def verify_identity(self, config: EnvironmentConfig, token: SecretValue | None) -> None:
+        # GET /api (system:discovery)는 로그인한 사용자에게만 열린다: 익명 403, 틀린 토큰 401.
+        body = await self._get_json(config, token, "/api")
+        if not isinstance(body.get("versions"), list):
+            raise self._failed(config, ConnectionErrorCode.CONFIG_INVALID)
 
     async def count_nodes(self, config: EnvironmentConfig, token: SecretValue | None) -> int:
         body = await self._get_json(config, token, "/api/v1/nodes")

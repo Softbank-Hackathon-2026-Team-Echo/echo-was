@@ -157,6 +157,10 @@ class ClusterReadPort(Protocol):
 
     async def count_nodes(self, config: EnvironmentConfig, token: SecretValue | None) -> int: ...
 
+    async def verify_identity(self, config: EnvironmentConfig, token: SecretValue | None) -> None:
+        """인증이 있어야만 열리는 읽기 호출(API 목록)이 성공하는지 본다(출입증 유효 증명)."""
+        ...
+
 
 class EnvironmentAdapter(ABC):
     """환경 종류 하나의 동작 클래스. 종류마다 다른 클러스터 조작을 같은 메서드로 부른다.
@@ -225,7 +229,11 @@ class ClusterBackedEnvironmentAdapter(SimulatedEnvironmentAdapter):
     async def check_connection(self, config: EnvironmentConfig, credentials: SecretValue) -> None:
         if self._reader is None:
             return await super().check_connection(config, credentials)
-        await self._reader.read_version(config, self._token(credentials))
+        token = self._token(credentials)
+        await self._reader.read_version(config, token)
+        # /version 은 기본 설정 클러스터에서 비로그인으로도 열린다. 인증된 사용자에게만 열리는
+        # 호출을 더해 출입증 유효까지 증명한다(SPEC AD-2).
+        await self._reader.verify_identity(config, token)
         return None
 
     async def read_cluster_info(

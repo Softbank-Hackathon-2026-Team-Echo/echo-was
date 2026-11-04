@@ -72,6 +72,7 @@ class StubCluster:
     node_count: int = 2
     statuses: dict[str, list[int]] = field(default_factory=dict)  # 경로 → 앞으로 줄 상태 코드
     version_body: Any = None
+    api_body: Any = field(default_factory=lambda: {"kind": "APIVersions", "versions": ["v1"]})
     transport_failures: int = 0
     requests: list[httpx.Request] = field(default_factory=list)
 
@@ -93,6 +94,8 @@ class StubCluster:
             return httpx.Response(queued.pop(0), text="not-for-logs")
         if not request.headers.get("authorization", "").startswith("Bearer "):
             return httpx.Response(401)
+        if request.url.path == "/api":
+            return httpx.Response(200, json=self.api_body)
         if request.url.path == "/version":
             body = (
                 self.version_body if self.version_body is not None else {"gitVersion": self.version}
@@ -169,7 +172,11 @@ async def test_real_adapter_reads_version_and_node_count_without_writes(
 
     assert info == ClusterInfo(server_version=rig.cluster.version, node_count=2, simulated=False)
     assert rig.cluster.non_get() == []
-    assert {request.url.path for request in rig.cluster.requests} == {"/version", "/api/v1/nodes"}
+    assert {request.url.path for request in rig.cluster.requests} == {
+        "/version",
+        "/api",
+        "/api/v1/nodes",
+    }
 
 
 @pytest.mark.parametrize("kind", ["aws", "gcp", "onprem"])
@@ -269,7 +276,7 @@ async def test_transient_error_is_retried_once_then_succeeds(status: int) -> Non
     )
 
     assert rig.sleep.delays == [0.5]
-    assert len(rig.cluster.requests) == 2
+    assert len(rig.cluster.requests) == 3  # /version 실패 + /version 재시도 + /api
 
 
 @pytest.mark.parametrize("status", [500, 503, 429])
@@ -573,3 +580,47 @@ def test_adapter_modules_do_not_import_executors_or_models() -> None:
                 modules = [alias.name for alias in node.names]
             for module in modules:
                 assert not module.startswith(("app.executors", "app.models")), (path.name, module)
+
+
+async def test_check_connection_also_requires_the_authenticated_api_list() -> None:
+    rig = _rig()
+    await get_environment_adapter("onprem", reader=rig.reader).check_connection(
+        _config("onprem", ONPREM_CONFIG), ONPREM_TOKEN
+    )
+
+    assert [request.url.path for request in rig.cluster.requests] == ["/version", "/api"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_open_version_but_api_list_denied_is_auth_failed(status: int) -> None:
+    """/version 은 비로그인으로 열려 있어도(200) 출입증이 인정되지 않으면 접속 성공이 아니다."""
+    rig = _rig()
+    rig.cluster.statuses["/api"] = [status, status]
+
+    with pytest.raises(ConnectionCheckError) as raised:
+        await get_environment_adapter("onprem", reader=rig.reader).check_connection(
+            _config("onprem", ONPREM_CONFIG), ONPREM_TOKEN
+        )
+
+    assert raised.value.reason is ConnectionErrorCode.AUTH_FAILED
+
+
+async def test_api_list_with_unexpected_body_is_config_invalid() -> None:
+    rig = _rig()
+    rig.cluster.api_body = {"kind": "Status"}
+
+    with pytest.raises(ConnectionCheckError) as raised:
+        await get_environment_adapter("onprem", reader=rig.reader).check_connection(
+            _config("onprem", ONPREM_CONFIG), ONPREM_TOKEN
+        )
+
+    assert raised.value.reason is ConnectionErrorCode.CONFIG_INVALID
+
+
+async def test_cluster_info_does_not_call_the_api_list() -> None:
+    rig = _rig()
+    await get_environment_adapter("onprem", reader=rig.reader).read_cluster_info(
+        _config("onprem", ONPREM_CONFIG), ONPREM_TOKEN
+    )
+
+    assert "/api" not in {request.url.path for request in rig.cluster.requests}
