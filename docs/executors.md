@@ -289,6 +289,7 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
 | 이름 | 기본 | 뜻 |
 |---|---|---|
 | `EXECUTOR_MODE` | `fake` | `real` 이면 위 실행기. **필수**: `GITHUB_APP_ID`·`GITHUB_APP_PRIVATE_KEY_REF`, `SOURCE_CLIENT_MODE=github`, `HEALTH_CHECKER_MODE=http`(하나라도 빠지면 시작 때 설정 오류) |
+| `ENVIRONMENT_ADAPTER_MODE` | `simulated` | 환경 접속 확인 어댑터(API 서버 12). `real` 이면 실제 클러스터의 `/version`·노드 수를 읽는다(접근 경로는 위 실행기와 같다, [api/environments.md](api/environments.md)). 기본 가짜 |
 | `EXECUTOR_AWS_ROLE_ARN` | 없음 | aws 환경 config `roleArn` 이 비었을 때의 역할 |
 | `BUILD_GITHUB_REPOSITORY`·`BUILD_GITHUB_WORKFLOW`·`BUILD_GITHUB_REF` | `Softbank-Hackathon-2026-Team-Echo/echo-was` · `customer-build.yml` · `main` | 빌드 워크플로 |
 | `IMAGE_REGISTRY_MIRRORS` | 빈 목록 | `<AR 접두>=<ECR 접두>,…` 예 `asia-northeast3-docker.pkg.dev/team-echo-final/echo=706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo` |

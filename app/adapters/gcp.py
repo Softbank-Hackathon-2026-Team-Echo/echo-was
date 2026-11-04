@@ -3,11 +3,11 @@ from typing import Annotated
 from pydantic import StringConstraints
 
 from app.adapters.base import (
+    ClusterBackedEnvironmentAdapter,
     DomainName,
     EnvironmentConfig,
     KubernetesName,
     NonEmptyStr,
-    SimulatedEnvironmentAdapter,
     register_environment_adapter,
     register_environment_kind,
 )
@@ -43,10 +43,12 @@ class GcpEnvironmentConfig(EnvironmentConfig):
 
 
 @register_environment_adapter("gcp")
-class GcpEnvironmentAdapter(SimulatedEnvironmentAdapter):
-    """GCP(GKE) 동작 클래스 — **가짜(simulated)**. 네트워크 호출 없이 고정 값을 돌려준다.
+class GcpEnvironmentAdapter(ClusterBackedEnvironmentAdapter):
+    """GCP(GKE) 동작 클래스(API 서버 12).
 
-    실제 GKE 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 이 클래스를 바꾼다.
+    `ENVIRONMENT_ADAPTER_MODE=real` 이면 reader 가 주입되어 배포 실행기와 같은 접근 경로(워크로드
+    신원 액세스 토큰 + GKE API)로 `/version`·노드 수를 읽는다. 아니면 **가짜(simulated)** 고정
+    값이다. secretRef 의 값은 읽지 않는다.
     """
 
     simulated_server_version = "v1.31.1-gke.1000"

@@ -28,6 +28,7 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
 from app.adapters.aws import AwsEnvironmentConfig
+from app.adapters.base import EnvironmentConfig
 from app.adapters.gcp import GcpEnvironmentConfig
 from app.adapters.onprem import OnpremEnvironmentConfig
 from app.clients.secret_client import SecretClient, SecretLookupError
@@ -137,6 +138,34 @@ class ClusterAccessProvider:
                     return await self._eks_access(config, refresh=refresh)
                 case OnpremEnvironmentConfig():
                     return await self._onprem_access(environment, config, refresh=refresh)
+                case _:
+                    raise ClusterConfigError
+        except MetadataAuthError:
+            raise ClusterAuthError from None
+
+    async def access_for_config(
+        self,
+        config: EnvironmentConfig,
+        *,
+        onprem_token: SecretValue | None = None,
+        refresh: bool = False,
+    ) -> ClusterAccess:
+        """환경 설정만으로 창구를 얻는다(환경 접속 확인 어댑터용, API 서버 12).
+
+        aws·gcp 는 `access()` 와 같은 경로·같은 캐시를 쓴다. onprem 은 서비스가 이미 조회해 넘긴
+        서비스 계정 토큰을 그대로 쓰고(비밀을 다시 조회하지 않고, 기억하지도 않는다) `apiUrl` 이
+        없으면 설정 오류다.
+        """
+        try:
+            match config:
+                case GcpEnvironmentConfig():
+                    return await self._gke_access(config, refresh=refresh)
+                case AwsEnvironmentConfig():
+                    return await self._eks_access(config, refresh=refresh)
+                case OnpremEnvironmentConfig():
+                    if config.api_url is None or onprem_token is None:
+                        raise ClusterConfigError
+                    return ClusterAccess(server=config.api_url, ca_pem=None, token=onprem_token)
                 case _:
                     raise ClusterConfigError
         except MetadataAuthError:

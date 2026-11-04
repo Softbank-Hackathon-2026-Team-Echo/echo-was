@@ -3,11 +3,11 @@ from typing import Annotated
 from pydantic import StringConstraints
 
 from app.adapters.base import (
+    ClusterBackedEnvironmentAdapter,
     DomainName,
     EnvironmentConfig,
     KubernetesName,
     NonEmptyStr,
-    SimulatedEnvironmentAdapter,
     register_environment_adapter,
     register_environment_kind,
 )
@@ -50,10 +50,12 @@ class AwsEnvironmentConfig(EnvironmentConfig):
 
 
 @register_environment_adapter("aws")
-class AwsEnvironmentAdapter(SimulatedEnvironmentAdapter):
-    """AWS(EKS) 동작 클래스 — **가짜(simulated)**. 네트워크 호출 없이 고정 값을 돌려준다.
+class AwsEnvironmentAdapter(ClusterBackedEnvironmentAdapter):
+    """AWS(EKS) 동작 클래스(API 서버 12).
 
-    실제 EKS 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 이 클래스를 바꾼다.
+    `ENVIRONMENT_ADAPTER_MODE=real` 이면 reader 가 주입되어 배포 실행기와 같은 접근 경로(구글 신분증
+    → STS 역할 → EKS 토큰)로 `/version`·노드 수를 읽는다. 아니면 **가짜(simulated)** 고정 값이다.
+    secretRef 의 값(운영은 자리 표시 비밀)은 읽지 않는다.
     """
 
     simulated_server_version = "v1.31.0"
