@@ -1,6 +1,6 @@
 # API 서버 12: 실제 클러스터 접속 어댑터 SPEC (EKS · GKE · 온프레 k3s)
 
-- 상태: Draft (사용자 확정 대기). 접속 증명 방식(AD-2)은 사용자가 A(`/version` + `GET /api`)로 결정했다. `GET /api` 가 우리 3곳에서 되는지는 운영 파드 시험 전까지 미검증.
+- 상태: Draft (사용자 확정 대기). 접속 증명 방식(AD-2)은 사용자가 A(`/version` + `GET /api`)로 결정했다. `GET /api` 는 운영 파드 3차 시험(2026-11-04, `probe3-result-2026-11-04.txt`)에서 EKS·GKE·k3s 모두 진짜 토큰 200 / 틀린 토큰 401 / 토큰 없음 401 로 확인했다.
 - 작성일: 2026-11-04
 - Depth: Deep
 - 바꾸는 SPEC: [api-2-environment-api-adapters.md](api-2-environment-api-adapters.md)의 "어댑터는 가짜" 전제(`simulated` 값). 이 문서의 결정 번호(D-n)는 api-2와 별개다. 다르면 이 문서가 우선한다. 나머지(API 모양·상태 흐름·`secretRef` 형식·오류 코드)는 그대로 통과해야 한다.
