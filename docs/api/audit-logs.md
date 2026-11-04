@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 22개 경로 + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 24개 경로 + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
 | 에이전트 토큰의 성공한 GET·HEAD(2xx) | `AGENT` | 응답 뒤 따로 커밋(실패해도 응답은 그대로) | `SUCCEEDED` |
@@ -106,7 +106,9 @@
 | `ENVIRONMENT_CONNECTION_CHECKED` | `POST /environments/{id}/connection-check` | `environment` | `{connectionStatus, discarded?}` |
 | `SERVICE_CREATED` | `POST /services` | `service` | `{}` |
 | `SERVICE_UPDATED` | `PATCH /services/{id}` | `service` | `{changedFields: [...]}`(값 없음) |
-| `SERVICE_DELETE_REQUESTED` | `DELETE /services/{id}` | `service` | `{}` |
+| `SERVICE_DELETE_REQUESTED` | `DELETE /services/{id}` | `service` | `{retry?}`. 다시 내리기가 실제로 시작된 재요청이면 `retry: true` |
+| `SERVICE_VARIABLE_SET` | `PUT /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
+| `SERVICE_VARIABLE_DELETED` | `DELETE /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
 | `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests` | `deploy_request` | `{environmentId, ref, commitSha}` |
 | `ROLLBACK_REQUESTED` | `POST /deploy-requests/{id}/rollback` | `deploy_request` | `{rollbackOfId, environmentId}` |
 | `MIGRATION_PLAN_CREATED` | `POST /services/{id}/migration-plans` | `migration_plan` | `{sourceEnvironmentId, targetEnvironmentId}` |
@@ -121,7 +123,9 @@
 
 거부 줄의 `action` 은 위 이름이고(`route` 에 `METHOD 경로 틀`), 표에 없는 경로(사람만 읽는 GET 등)는 `METHOD 경로 틀` 문자열이다.
 
-대상 이름: 배포 요청은 `서비스 · 환경 · 커밋 7자`, 이전 계획은 `서비스 · 출발 → 도착`, 그 밖은 그 행의 이름이다.
+대상 이름: 배포 요청은 `서비스 · 환경 · 커밋 7자`, 이전 계획은 `서비스 · 출발 → 도착`, 앱 환경 변수는 `서비스 · 환경 · 키 이름`, 그 밖은 그 행의 이름이다.
+
+**앱 환경 변수 줄(API 서버 10)에는 누가 어떤 키를 바꿨는지만 적는다.** 값·비밀 참조(`secretRef`)·버전 번호는 어느 칸에도 넣지 않는다. 값을 다시 읽지 않으므로(쓰기 전용) 같은 값의 재저장도 새 버전이 생긴 변경이라 한 줄을 쓴다. 이 두 경로와 `details.retry` 는 SPEC(`specs/api-7-audit-logs.md`) 확정 뒤 더했다.
 
 ### `component` 값
 
@@ -135,7 +139,8 @@
 
 ## 기록하지 않는 것
 
-- **아무것도 바뀌지 않은 성공**: 이미 `DELETING` 인 서비스 삭제, 두 번째 중단, 이미 폐기된 토큰 폐기, 값이 그대로인 수정.
+- **아무것도 바뀌지 않은 성공**: 이미 내리는 중인 서비스의 다시 삭제(다시 내리기가 실제로 시작되면 `retry: true` 로 기록한다), 두 번째 중단, 이미 폐기된 토큰 폐기, 값이 그대로인 수정.
+- **서비스 내리기 실패**(`delete_error`): 끝 상태가 아니라 줄이 없다. 끝 줄 `SERVICE_DELETED` 는 삭제 완료 때만 생기고, 다시 삭제 요청 때 `SERVICE_DELETE_REQUESTED`(`retry: true`)로 기록한다.
 - 409 등으로 끝난 쓰기(그 트랜잭션이 되돌려지거나 그 분기에 줄이 없다).
 - 사람의 읽기, 401·404, 로그인·로그아웃, 첫 로그인의 개인 조직 자동 생성, 데모 시드(`app/scripts/demo_seed`).
 - 환경 등록·수정에 뒤따르는 접속 확인(`connection-check` 경로만 기록한다. 그 결과가 낡아 버려져도 `discarded: true` 로 남긴다).

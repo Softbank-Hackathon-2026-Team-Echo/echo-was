@@ -42,7 +42,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
 | 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 고정 5단계·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
 | 조직·역할 권한 | 있음 | 조직·멤버·초대·에이전트 토큰 API, 모든 라우트의 검사기, 403 거부 기록(`audit_logs`) ([docs/api/organizations.md](docs/api/organizations.md)) |
-| 감사 로그 | 있음 | 쓰기 22개 경로 + 초대 적용(USER), 배포·이전·서비스 삭제의 끝(SYSTEM), 403 거부, AI 에이전트의 성공한 읽기(AGENT)를 누가·언제·무엇을·결과로 저장. 조직별 조회·거르기. 줄은 고치거나 지울 수 없다 ([docs/api/audit-logs.md](docs/api/audit-logs.md)) |
+| 감사 로그 | 있음 | 쓰기 24개 경로 + 초대 적용(USER), 배포·이전·서비스 삭제의 끝(SYSTEM), 403 거부, AI 에이전트의 성공한 읽기(AGENT)를 누가·언제·무엇을·결과로 저장. 조직별 조회·거르기. 줄은 고치거나 지울 수 없다 ([docs/api/audit-logs.md](docs/api/audit-logs.md)) |
 
 ## 핵심 흐름
 
