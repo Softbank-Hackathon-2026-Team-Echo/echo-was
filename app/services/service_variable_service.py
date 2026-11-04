@@ -7,6 +7,9 @@
 - 앱은 다시 배포해야 바뀐다. 응답 pendingRedeploy 로 보인다.
 
 응답·로그·예외에 값·값 일부·길이를 넣지 않는다. 비밀 이름은 정상 응답의 secretRef 에만 나온다.
+
+감사 줄은 DB 행을 바꾸는 블록의 성공 분기에서 쓴다. 누가 어떤 키를 바꿨는지만 적고 값·비밀 참조·
+버전은 적지 않는다. 값을 다시 읽지 않으므로 같은 값의 재저장도 새 버전이 생긴 변경이라 한 줄을 쓴다.
 """
 
 import asyncio
@@ -18,6 +21,8 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.app_secret_store import (
     AppSecretForbiddenError,
     AppSecretStore,
@@ -39,7 +44,13 @@ from app.core.exceptions import (
 )
 from app.core.secrets import SecretValue
 from app.enums import ServiceStatus
-from app.models import Organization, Service, ServiceEnvironment, ServiceEnvironmentVariable
+from app.models import (
+    Environment,
+    Organization,
+    Service,
+    ServiceEnvironment,
+    ServiceEnvironmentVariable,
+)
 from app.models.service_environment_variable import (
     ENV_VAR_KEY_PATTERN,
     ENV_VAR_SECRET_NAME_MAX_LENGTH,
@@ -143,6 +154,7 @@ class ServiceVariableService:
         self._connections = ServiceEnvironmentRepository(session)
         self._variables = ServiceEnvironmentVariableRepository(session)
         self._deployments = DeploymentRepository(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def search_variables(
         self, organization_id: uuid.UUID, service_id: uuid.UUID, environment_id: uuid.UUID
@@ -214,6 +226,9 @@ class ServiceVariableService:
                 existing.updated_by_user_id = user_id
                 existing.updated_at = now
             await self._session.flush()
+            await self._record_audit(
+                AuditAction.SERVICE_VARIABLE_SET, service, environment_id, key, user_id
+            )
             view = next(item for item in await self._views(connection) if item.key == key)
         logger.info(
             "service variable saved",
@@ -237,13 +252,18 @@ class ServiceVariableService:
         self._check_store_configured()
         now = self._clock.now()
         async with self._session.begin():
-            _, connection = await self._lock_connection(organization_id, service_id, environment_id)
+            service, connection = await self._lock_connection(
+                organization_id, service_id, environment_id
+            )
             variable = await self._variables.find_live(connection.id, key)
             if variable is None:
                 raise EnvVarNotFoundError
             variable.mark_as_deleted(now)
             variable.updated_by_user_id = user_id
             variable.updated_at = now
+            await self._record_audit(
+                AuditAction.SERVICE_VARIABLE_DELETED, service, environment_id, key, user_id
+            )
         logger.info(
             "service variable deleted",
             extra={
@@ -251,6 +271,27 @@ class ServiceVariableService:
                 "service_environment_id": str(connection.id),
                 "env_key": key,
             },
+        )
+
+    async def _record_audit(
+        self,
+        action: AuditAction,
+        service: Service,
+        environment_id: uuid.UUID,
+        key: str,
+        user_id: uuid.UUID,
+    ) -> None:
+        environment = await self._session.get_one(Environment, environment_id)
+        self._audit.record(
+            organization_id=service.organization_id,
+            actor=AuditActor.user(user_id),
+            action=action,
+            target=AuditTarget(
+                AuditTargetType.SERVICE,
+                service.id,
+                f"{service.name} · {environment.name} · {key}",
+            ),
+            details={"environmentId": str(environment_id), "key": key},
         )
 
     def _check_store_configured(self) -> None:

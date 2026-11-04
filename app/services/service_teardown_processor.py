@@ -14,6 +14,9 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
+from app.audit.lifecycle import record_deploy_request_finished
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.enums import (
@@ -86,6 +89,14 @@ class ServiceTeardownProcessor:
                     },
                 ):
                     await self._job_log.append(queued, DeployLogCode.CANCELLED_SERVICE_DELETED, now)
+                    await record_deploy_request_finished(
+                        self._session,
+                        self._clock,
+                        queued,
+                        status=DeployRequestStatus.CANCELLED,
+                        component=AuditComponent.TEARDOWN_WORKER,
+                        cancel_reason=DeployRequestCancelReason.SERVICE_DELETED,
+                    )
                     await self._jobs.cancel_queued_for_subject(queued.id, now)
             has_active = await self._requests.has_active_for_service(service.id)
             await self._lease.hold()
@@ -173,6 +184,13 @@ class ServiceTeardownProcessor:
             await self._lease.hold()
             if not connections:
                 service.delete_error = None
+                if not service.is_deleted:
+                    AuditRecorder(self._session, self._clock).record(
+                        organization_id=service.organization_id,
+                        actor=AuditActor.system(AuditComponent.TEARDOWN_WORKER),
+                        action=AuditAction.SERVICE_DELETED,
+                        target=AuditTarget(AuditTargetType.SERVICE, service.id, service.name),
+                    )
                 service.mark_as_deleted(now)
                 logger.info(
                     "service deleted",

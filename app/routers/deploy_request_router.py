@@ -46,6 +46,7 @@ async def create_rollback(
     view = await deploy_requests.create_rollback(
         access.organization_id,
         deploy_request_id,
+        access.user.id,
         simulate.fail_at if simulate is not None else None,
     )
     return ApiResponse(data=DeployRequestDetailResponse.from_view(view))

@@ -6,7 +6,10 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-04T13:30Z · alembic/versions/20261104_2100_b7d41e6f2a93_extend_audit_logs.py (Edit, 훅 미기록분 수기) · audit_logs 확장 revision 의 down_revision 을 48b2126a9c37(앱 환경 변수 표) 뒤로 옮김. 칸·제약 변경 없음 (revision b7d41e6f2a93)
 - 2026-11-04T12:32Z · app/models/service_environment_variable.py (Write) · 신규/동일
+- 2026-11-04T12:09Z · app/models/audit_log.py (Edit) · seq, component, route, target_type, target_id, target_label, details 컬럼 추가; path, reason 컬럼 변경
+- 2026-11-04T12:05Z · app/models/audit_log.py (Write) · seq, component, route, target_type, target_id, target_label, details 컬럼 추가; path, reason 컬럼 변경
 - 2026-11-04T11:46Z · app/models/security_exception.py·agent_runner.py·agent_run.py·agent_run_event.py·agent_patch_approval.py (Write, 훅 미기록분 수기) · security_exceptions·agent_runners·agent_runs·agent_run_events·agent_patch_approvals 표 신규(보안·AI 기반 스키마, 기존 표 변경 없음) (revision 201cf5419f4d)
 - 2026-11-04T00:13Z · app/models/finding.py (Write, 훅 미기록분 수기) · findings 표 신규(보안 증거, CHECK 12개·FK 4개·ix_findings_organization_id_control_id_collected_at) (revision eee7a6c8229f)
 - 2026-11-03T09:23Z · app/models/migration_plan.py (스크립트 편집, 훅 미기록분 수기) · mode 칸(String(16) NOT NULL 기본 'PLANNED', 맨 뒤) + ck_migration_plans_mode_valid 추가 (revision a83f2c1d9e47)

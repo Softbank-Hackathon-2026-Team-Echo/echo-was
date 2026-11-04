@@ -25,6 +25,9 @@ from app.adapters.base import (
     UnknownEnvironmentKindError,
 )
 from app.adapters.registry import REASON_INVALID_FORMAT, validate_environment_config
+from app.audit.actions import AuditAction, AuditTargetType
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
+from app.core.clock import Clock
 from app.core.exceptions import (
     EnvironmentInUseError,
     EnvironmentKindImmutableError,
@@ -88,11 +91,28 @@ class EnvironmentService:
         environment_repository: EnvironmentRepository,
         connection_service: EnvironmentConnectionService,
         public_base_domain: str,
+        clock: Clock,
     ) -> None:
         self._session = session
         self._environment_repository = environment_repository
         self._connection_service = connection_service
         self._public_base_domain = public_base_domain
+        self._audit = AuditRecorder(session, clock)
+
+    def _record_audit(
+        self,
+        action: AuditAction,
+        environment: Environment,
+        actor_user_id: uuid.UUID,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self._audit.record(
+            organization_id=environment.organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=action,
+            target=AuditTarget(AuditTargetType.ENVIRONMENT, environment.id, environment.name),
+            details=details,
+        )
 
     def _check_ingress_domain(self, config: EnvironmentConfig) -> None:
         """환경별 하위 도메인은 대표 주소 도메인 바로 아래 한 단계여야 한다.
@@ -114,6 +134,7 @@ class EnvironmentService:
     async def create_environment(
         self,
         organization: Organization,
+        actor_user_id: uuid.UUID,
         name: str,
         kind: str,
         config: Mapping[str, object],
@@ -121,7 +142,8 @@ class EnvironmentService:
     ) -> EnvironmentDetailView:
         """환경을 UNCHECKED 로 저장·커밋한 뒤 접속을 확인하고 결과를 저장한다.
 
-        config 는 API 표기(camelCase)다. 접속 확인이 실패해도 등록은 된다.
+        config 는 API 표기(camelCase)다. 접속 확인이 실패해도 등록은 된다. 감사 줄은 등록 한 줄이고
+        뒤따르는 접속 확인은 따로 쓰지 않는다.
         """
         parsed_config = validate_environment_config(kind, config, by_alias=True)
         self._check_ingress_domain(parsed_config)
@@ -137,6 +159,9 @@ class EnvironmentService:
             await self._check_name_available(organization.id, name)
             self._environment_repository.add(environment)
             await self._flush()
+            self._record_audit(
+                AuditAction.ENVIRONMENT_CREATED, environment, actor_user_id, {"kind": kind}
+            )
         self._log("environment created", "create_environment", environment)
         return await self._check_and_record(environment)
 
@@ -164,12 +189,17 @@ class EnvironmentService:
         return await self._detail_with_cluster_info(environment)
 
     async def update_environment(
-        self, organization: Organization, environment_id: uuid.UUID, changes: EnvironmentChanges
+        self,
+        organization: Organization,
+        environment_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        changes: EnvironmentChanges,
     ) -> EnvironmentDetailView:
         """name·config(전체 교체)·secret_ref 를 바꾼다. kind 는 바꿀 수 없다.
 
         config·secret_ref 가 실제로 바뀌면 같은 커밋에서 접속 상태를 UNCHECKED 로 되돌리고,
-        커밋 뒤 다시 확인한다. name 만 바뀌면 다시 확인하지 않는다.
+        커밋 뒤 다시 확인한다. name 만 바뀌면 다시 확인하지 않는다. 바뀐 칸이 없으면 감사 줄을 쓰지
+        않고, 줄에는 바뀐 칸 이름만 적는다(값은 적지 않는다).
         """
         if changes.secret_ref is not None:
             _check_secret_ref_in_organization(changes.secret_ref, organization)
@@ -182,6 +212,7 @@ class EnvironmentService:
                     "environment kind cannot be changed", environment_id=str(environment_id)
                 )
             needs_check = False
+            changed_fields: list[str] = []
             if changes.config is not None:
                 parsed_config = validate_environment_config(
                     environment.kind, changes.config, by_alias=True
@@ -191,24 +222,34 @@ class EnvironmentService:
                 if new_config != environment.config:
                     environment.config = new_config
                     needs_check = True
+                    changed_fields.append("config")
             if changes.secret_ref is not None and changes.secret_ref != environment.secret_ref:
                 environment.secret_ref = changes.secret_ref
                 needs_check = True
+                changed_fields.append("secretRef")
             if changes.name is not None and changes.name != environment.name:
                 await self._check_name_available(organization.id, changes.name)
                 environment.name = changes.name
+                changed_fields.append("name")
             if needs_check:
                 environment.mark_connection_unchecked()
                 # 확인 중인 다른 요청이 결과를 버리도록 반드시 UPDATE 를 낸다.
                 flag_modified(environment, "config")
             await self._flush()
+            if changed_fields:
+                self._record_audit(
+                    AuditAction.ENVIRONMENT_UPDATED,
+                    environment,
+                    actor_user_id,
+                    {"changedFields": changed_fields},
+                )
         self._log("environment updated", "update_environment", environment)
         if needs_check:
             return await self._check_and_record(environment)
         return await self._detail_with_cluster_info(environment)
 
     async def delete_environment(
-        self, organization_id: uuid.UUID, environment_id: uuid.UUID
+        self, organization_id: uuid.UUID, environment_id: uuid.UUID, actor_user_id: uuid.UUID
     ) -> None:
         """살아 있는 서비스-환경 연결이 없으면 소프트 삭제한다. 있으면 EnvironmentInUseError.
 
@@ -225,19 +266,26 @@ class EnvironmentService:
                     environment_id=str(environment_id),
                 )
             environment.mark_as_deleted(datetime.now(UTC))
+            self._record_audit(AuditAction.ENVIRONMENT_DELETED, environment, actor_user_id)
         self._log("environment deleted", "delete_environment", environment)
 
     async def check_environment_connection(
-        self, organization_id: uuid.UUID, environment_id: uuid.UUID
+        self, organization_id: uuid.UUID, environment_id: uuid.UUID, actor_user_id: uuid.UUID
     ) -> EnvironmentDetailView:
         """커밋된 행으로 접속을 다시 확인하고 결과를 저장한다."""
         async with self._session.begin():
             environment = await self._environment_repository.get_live_by_id(
                 organization_id, environment_id
             )
-        return await self._check_and_record(environment)
+        return await self._check_and_record(environment, audit_actor_user_id=actor_user_id)
 
-    async def _check_and_record(self, environment: Environment) -> EnvironmentDetailView:
+    async def _check_and_record(
+        self, environment: Environment, *, audit_actor_user_id: uuid.UUID | None = None
+    ) -> EnvironmentDetailView:
+        """audit_actor_user_id 는 사람이 누른 '다시 확인'일 때만 준다.
+
+        결과가 낡아 버려져도 확인 행동은 일어났으므로 discarded 와 함께 기록한다.
+        """
         target = _connection_target(environment)
         result = await self._connection_service.check_connection(target)
 
@@ -253,6 +301,16 @@ class EnvironmentService:
             is_current = stored.config == target.config and stored.secret_ref == target.secret_ref
             if is_current:
                 stored.record_connection_check(datetime.now(UTC), result.connection_error)
+            if audit_actor_user_id is not None:
+                details: dict[str, object] = {"connectionStatus": str(stored.connection_status)}
+                if not is_current:
+                    details["discarded"] = True
+                self._record_audit(
+                    AuditAction.ENVIRONMENT_CONNECTION_CHECKED,
+                    stored,
+                    audit_actor_user_id,
+                    details,
+                )
 
         if not is_current:
             self._log("connection check result discarded", "check_environment_connection", stored)

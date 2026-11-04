@@ -12,7 +12,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.models import Base
 from tests.integration.conftest import PROJECT_ROOT, run_alembic
@@ -290,14 +291,24 @@ EXPECTED_CONSTRAINTS = {
     ("agent_tokens", "uq_agent_tokens_token_hash"): "UNIQUE (token_hash)",
     ("audit_logs", "ck_audit_logs_actor_consistency"): (
         "CHECK (((((actor_type)::text = 'USER'::text) AND (actor_user_id IS NOT NULL) "
-        "AND (actor_agent_token_id IS NULL)) OR (((actor_type)::text = 'AGENT'::text) "
-        "AND (actor_agent_token_id IS NOT NULL) AND (actor_user_id IS NULL))))"
+        "AND (actor_agent_token_id IS NULL) AND (component IS NULL)) OR "
+        "(((actor_type)::text = 'AGENT'::text) AND (actor_agent_token_id IS NOT NULL) "
+        "AND (actor_user_id IS NULL) AND (component IS NULL)) OR "
+        "(((actor_type)::text = 'SYSTEM'::text) AND (actor_user_id IS NULL) "
+        "AND (actor_agent_token_id IS NULL) AND (component IS NOT NULL))))"
     ),
     ("audit_logs", "ck_audit_logs_actor_type_valid"): (
         "CHECK (((actor_type)::text = ANY ((ARRAY['USER'::character varying, "
-        "'AGENT'::character varying])::text[])))"
+        "'AGENT'::character varying, 'SYSTEM'::character varying])::text[])))"
     ),
-    ("audit_logs", "ck_audit_logs_result_valid"): "CHECK (((result)::text = 'DENIED'::text))",
+    ("audit_logs", "ck_audit_logs_result_valid"): (
+        "CHECK (((result)::text = ANY ((ARRAY['SUCCEEDED'::character varying, "
+        "'FAILED'::character varying, 'DENIED'::character varying])::text[])))"
+    ),
+    ("audit_logs", "ck_audit_logs_target_consistency"): (
+        "CHECK ((((target_type IS NULL) = (target_id IS NULL)) "
+        "AND ((target_label IS NULL) OR (target_type IS NOT NULL))))"
+    ),
     ("audit_logs", "fk_audit_logs_actor_agent_token_id_agent_tokens"): (
         "FOREIGN KEY (actor_agent_token_id) REFERENCES agent_tokens(id) ON DELETE RESTRICT"
     ),
@@ -850,6 +861,11 @@ EXPECTED_INDEXES = {
         "CREATE INDEX ix_audit_logs_organization_id_created_at ON audit_logs "
         "USING btree (organization_id, created_at)"
     ),
+    # --- API 서버 7 ---
+    "ix_audit_logs_organization_id_target_id": (
+        "CREATE INDEX ix_audit_logs_organization_id_target_id ON audit_logs "
+        "USING btree (organization_id, target_id)"
+    ),
     # --- API 서버 8 ---
     "ix_migration_plans_service_id_created_at": (
         "CREATE INDEX ix_migration_plans_service_id_created_at ON migration_plans USING btree "
@@ -954,6 +970,11 @@ EXPECTED_TRIGGERS = {
         "CREATE TRIGGER trg_audit_logs_prevent_delete BEFORE DELETE ON audit_logs "
         "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
     ),
+    # 감사 줄은 고치지도 않는다(API 서버 7 소유 함수).
+    ("audit_logs", "trg_audit_logs_prevent_update"): (
+        "CREATE TRIGGER trg_audit_logs_prevent_update BEFORE UPDATE ON audit_logs "
+        "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_update()"
+    ),
     # 배포 작업 로그도 지우지 않는다(같은 공용 함수).
     ("deploy_request_logs", "trg_deploy_request_logs_prevent_delete"): (
         "CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON "
@@ -985,7 +1006,8 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-HEAD_REVISION = "48b2126a9c37"
+HEAD_REVISION = "b7d41e6f2a93"
+BEFORE_AUDIT_EXTENSION = "48b2126a9c37"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1061,6 +1083,15 @@ CONNECTION_CHECKS = {
     "ck_environments_connection_checked_at_consistency",
     "ck_environments_connection_error_consistency",
 }
+
+
+async def _forget_audit_rows(connection: AsyncConnection) -> None:
+    """이 시험의 트랜잭션 안에서만 감사 줄을 비운다(시험 끝에 되돌린다).
+
+    감사 줄이 있으면 그 revision 의 downgrade 가 먼저 멈춰(forward-only), 더 아래 revision 의 거절을
+    볼 수 없다.
+    """
+    await connection.execute(text("TRUNCATE audit_logs"))
 
 
 def _environment_columns_and_checks(connection: Connection) -> tuple[set[str], set[str]]:
@@ -1383,6 +1414,7 @@ async def test_rollback_revision_downgrade_with_rollback_rows_fails_clearly(
 
     async with engine.connect() as connection:
         transaction = await connection.begin()
+        await _forget_audit_rows(connection)
         with pytest.raises(RuntimeError, match="deploy_requests has 1 rollback rows") as raised:
             await connection.run_sync(
                 run_alembic(lambda config: command.downgrade(config, BEFORE_ROLLBACK))
@@ -1527,6 +1559,7 @@ async def test_target_not_receiving_revision_downgrade_with_such_plans_fails_cle
 
     async with engine.connect() as connection:
         transaction = await connection.begin()
+        await _forget_audit_rows(connection)
         with pytest.raises(
             RuntimeError, match="migration_plans has 1 TARGET_NOT_RECEIVING rows"
         ) as raised:
@@ -1561,6 +1594,7 @@ async def test_plan_mode_revision_round_trip_fills_existing_plans_with_planned(
 
     async with engine.connect() as connection:
         transaction = await connection.begin()
+        await _forget_audit_rows(connection)
         await connection.run_sync(
             run_alembic(lambda config: command.downgrade(config, BEFORE_PLAN_MODE))
         )
@@ -1603,6 +1637,155 @@ async def test_findings_revision_downgrade_removes_table_and_upgrade_restores(
     assert (down, up) == (False, True)
 
 
+def _audit_extension_state(connection: Connection) -> tuple[set[str], bool, set[str], int, int]:
+    inspector = inspect(connection)
+    columns = {column["name"]: column for column in inspector.get_columns("audit_logs")}
+    new_columns = columns.keys() & AUDIT_NEW_COLUMNS
+    triggers = connection.scalar(
+        text("SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_audit_logs_prevent_update'")
+    )
+    functions = connection.scalar(
+        text("SELECT count(*) FROM pg_proc WHERE proname = 'prevent_append_only_update'")
+    )
+    checks = {check["name"] or "" for check in inspector.get_check_constraints("audit_logs")}
+    return (
+        set(new_columns),
+        bool(columns["path"]["nullable"] and columns["reason"]["nullable"]),
+        checks,
+        int(triggers or 0),
+        int(functions or 0),
+    )
+
+
+AUDIT_NEW_COLUMNS = {
+    "seq",
+    "component",
+    "route",
+    "target_type",
+    "target_id",
+    "target_label",
+    "details",
+}
+# 옛 파드의 거부 기록 INSERT 모양(옛 칸만, result 는 서버 기본값).
+OLD_POD_DENIAL = (
+    "INSERT INTO audit_logs (organization_id, actor_type, actor_user_id, action, path, reason) "
+    "SELECT NULL, 'USER', id, 'POST /api/v1/orgs', '/api/v1/orgs', 'ORIGIN_NOT_ALLOWED' "
+    "FROM users LIMIT 1"
+)
+
+
+async def test_audit_extension_revision_round_trip_keeps_old_shape_rows(
+    harness: DeployHarness, engine: AsyncEngine
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.execute(text(OLD_POD_DENIAL))
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_AUDIT_EXTENSION))
+        )
+        down = await connection.run_sync(_audit_extension_state)
+        await connection.execute(text(OLD_POD_DENIAL))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up = await connection.run_sync(_audit_extension_state)
+        await connection.run_sync(run_alembic(command.check))
+        rows = (await connection.execute(text("SELECT seq, result, details FROM audit_logs"))).all()
+        await transaction.rollback()
+
+    assert (down[0], down[1], down[3], down[4]) == (set(), False, 0, 0)
+    assert "ck_audit_logs_target_consistency" not in down[2]
+    assert (up[0], up[1], up[3], up[4]) == (AUDIT_NEW_COLUMNS, True, 1, 1)
+    assert "ck_audit_logs_target_consistency" in up[2]
+    # 옛 행도 seq 가 채워진다.
+    assert sorted(row.seq for row in rows) == [1, 2]
+    assert {(row.result, str(row.details)) for row in rows} == {("DENIED", "{}")}
+
+
+async def test_audit_extension_revision_downgrade_with_action_rows_fails_clearly(
+    harness: DeployHarness, engine: AsyncEngine
+) -> None:
+    await harness.create_service()
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(RuntimeError, match="forward-only"):
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_AUDIT_EXTENSION))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert version == HEAD_REVISION
+
+
+async def test_old_pod_denial_insert_succeeds_on_head(
+    harness: DeployHarness, engine: AsyncEngine
+) -> None:
+    async with engine.begin() as connection:
+        result = await connection.execute(text(OLD_POD_DENIAL))
+
+    assert result.rowcount == 1
+
+
+def _user_line(columns: str = "", values: str = "") -> str:
+    return (
+        f"INSERT INTO audit_logs (actor_type, actor_user_id, action, result{columns}) "
+        f"SELECT 'USER', id, 'X', 'SUCCEEDED'{values} FROM users LIMIT 1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("statement", "violated"),
+    [
+        (_user_line(", component", ", 'api'"), "ck_audit_logs_actor_consistency"),
+        (
+            "INSERT INTO audit_logs (actor_type, action, result) VALUES ('SYSTEM', 'X', 'FAILED')",
+            "ck_audit_logs_actor_consistency",
+        ),
+        (
+            "INSERT INTO audit_logs (actor_type, component, action, result) "
+            "VALUES ('ROBOT', 'api', 'X', 'FAILED')",
+            # 제약은 이름순으로 검사한다. ROBOT 은 actor_type_valid 도 어긴다.
+            "ck_audit_logs_actor_consistency",
+        ),
+        (_user_line(", target_type", ", 'service'"), "ck_audit_logs_target_consistency"),
+        (_user_line(", target_label", ", 'shop-api'"), "ck_audit_logs_target_consistency"),
+    ],
+)
+async def test_audit_logs_checks_reject_inconsistent_rows(
+    harness: DeployHarness, engine: AsyncEngine, statement: str, violated: str
+) -> None:
+    with pytest.raises(IntegrityError, match=violated):
+        async with engine.begin() as connection:
+            await connection.execute(text(statement))
+
+
+async def test_audit_logs_system_line_needs_only_component(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO audit_logs (actor_type, component, action, result) "
+                "VALUES ('SYSTEM', 'deploy-worker', 'DEPLOY_FINISHED', 'FAILED')"
+            )
+        )
+        count = await connection.scalar(
+            text("SELECT count(*) FROM audit_logs WHERE actor_type = 'SYSTEM'")
+        )
+
+    assert count == 1
+
+
+async def test_audit_logs_cannot_be_updated(harness: DeployHarness, engine: AsyncEngine) -> None:
+    await harness.create_service()
+
+    with pytest.raises(DBAPIError, match="audit_logs rows are append-only and cannot be updated"):
+        async with engine.begin() as connection:
+            await connection.execute(text("UPDATE audit_logs SET action = 'TAMPERED'"))
+    with pytest.raises(DBAPIError, match="audit_logs rows are append-only"):
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM audit_logs"))
+
+
 # 고객 앱 환경 변수 표(API 서버 10) 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
 BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
 SERVICE_VARIABLES_TABLE = "service_environment_variables"
@@ -1616,8 +1799,10 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
 
+    # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
-    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_SERVICE_VARIABLES
+    assert scripts.get_revision(HEAD_REVISION).down_revision == BEFORE_AUDIT_EXTENSION
+    assert scripts.get_revision(BEFORE_AUDIT_EXTENSION).down_revision == BEFORE_SERVICE_VARIABLES
 
 
 async def test_service_variables_revision_only_adds_a_table_and_has_no_value_column(

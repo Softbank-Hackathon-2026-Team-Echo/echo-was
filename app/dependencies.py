@@ -30,6 +30,7 @@ from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_fact
 from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
+from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
@@ -137,6 +138,7 @@ def get_environment_connection_service(
 def get_environment_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
     connection_service: Annotated[
         EnvironmentConnectionService, Depends(get_environment_connection_service)
     ],
@@ -146,6 +148,7 @@ def get_environment_service(
         environment_repository=EnvironmentRepository(session),
         connection_service=connection_service,
         public_base_domain=settings.public_base_domain,
+        clock=clock,
     )
 
 
@@ -386,6 +389,12 @@ def get_agent_token_service(
         default_days=settings.agent_token_default_days,
         max_days=settings.agent_token_max_days,
     )
+
+
+def get_audit_log_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AuditLogService:
+    return AuditLogService(session=session)
 
 
 def get_migration_plan_service(
