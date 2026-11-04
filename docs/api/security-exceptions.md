@@ -42,6 +42,8 @@
 | C-TLS-2 · C-NET-1 · C-NET-2 · C-IAM-1 · C-AUD-2 | `environmentId` |
 | C-SEC-1 · C-CI-1 | 없음(조직 전체) |
 
+- **C-DB-1 · C-DST-1 · C-AI-1 · C-POST-1 의 `environmentId` = 이전 도착 환경.** 이전 게이트는 판정 범위를 도착 환경(`target_environment_id`)으로 만든다(`app/services/security_gate.py`). 출발 환경으로 만든 예외는 `ACTIVE` 로 보여도 범위가 맞지 않아 이전이 막힌다.
+
 만든 예외는 `PENDING`(승인 대기)이고 판정에 쓰이지 않는다.
 
 ## 감사 기록
@@ -61,7 +63,7 @@
 | 값 | 조건 | 판정에 쓰나 |
 |---|---|---|
 | `REVOKED` | 철회함 | 아니오 |
-| `EXPIRED` | `expiresAt <= 지금` | 아니오(판정 사유에 "예외 만료"가 붙는다) |
+| `EXPIRED` | `expiresAt <= 지금`. 승인 대기(`PENDING`)인 채로 기한이 지난 것도 `EXPIRED` | 아니오(판정 사유에 "예외 만료"가 붙는다) |
 | `ACTIVE` | 승인됨 | 예(범위가 맞는 FAIL·UNKNOWN 을 WARN 으로) |
 | `PENDING` | 승인 전 | 아니오 |
 
