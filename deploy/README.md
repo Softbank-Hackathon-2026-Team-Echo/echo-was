@@ -41,7 +41,7 @@
 | `APP_SECRET_PROJECT_ID` | 없음 | 보관함 프로젝트 id. `gcp` 면 필수 |
 | `APP_SECRET_NAME_PREFIX` | `echo-app-` | IAM 조건의 접두어와 같아야 한다 |
 
-- **`base.yaml` 은 아직 `fake` 다.** 켜기 전에 GSA `echo-dev-echo-was` 에 `roles/secretmanager.admin` + 조건 `resource.name.startsWith("projects/<프로젝트 번호>/secrets/echo-app-")` 를 주고 운영 파드에서 만들기·버전 추가·읽기를 시험한 뒤, `APP_SECRET_STORE_MODE: gcp`·`APP_SECRET_PROJECT_ID` 를 올린다.
+- **`base.yaml` 은 `gcp` 다(11/4).** GSA `echo-dev-echo-was` 에 `roles/secretmanager.admin` + 조건 `resource.name.startsWith("projects/573662116412/secrets/echo-app-")`(제목 `echo-app-secrets-only`)을 gcloud 로 주고, 운영 API 파드에서 만들기·버전 추가·읽기 200, 접두어 밖 만들기 403 을 확인했다. Terraform 반영은 echo-infra #42.
 - 되돌리려면 `fake` 로 바꾼다. 쓰기 API 가 409 가 되고, 이미 쓴 `{ns}-env` 는 그대로 남는다.
 - 지금 손으로 만든 시연 앱 `demo-y6cz3jrc-env` 는 값을 API 로 넣고 다시 배포하기 전까지 그대로 쓰인다(변수가 없는 연결은 손 Secret 을 건드리지 않는다). 넣고 배포하면 통째로 echo-was 소유로 바뀐다.
 - echo-was 는 보관함 비밀을 지우지 않는다. 정리는 라벨(`managed-by=echo-was`, `echo-service`)로 찾는 후속 일이다.
