@@ -1,7 +1,7 @@
 """`python -m app.worker` 진입점. SIGTERM·SIGINT 를 받으면 지금 실행만 끝내고 멈춘다.
 
 실제 실행기 모드(`EXECUTOR_MODE=real`)면 온프레 이미지 받기 자격 갱신 루프도 함께 돌린다.
-실행기 묶음은 프로세스당 하나이고 멈출 때 HTTP 클라이언트를 닫는다.
+실행기 묶음과 앱 환경 변수 보관함은 프로세스당 하나이고 멈출 때 HTTP 클라이언트를 닫는다.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import signal
 import socket
 import uuid
 
+from app.clients.app_secret_store import build_app_secret_store
 from app.core.clock import SystemClock
 from app.core.config import ExecutorMode, get_settings
 from app.core.database import get_engine, get_session_factory
@@ -32,12 +33,14 @@ async def main() -> None:
     executors = build_executor_set(
         settings, clock, environment_lookup=DbEnvironmentLookup(session_factory)
     )
+    app_secret_store = build_app_secret_store(settings, clock)
     worker = Worker(
         session_factory=session_factory,
         settings=settings,
         clock=clock,
         executors=executors,
         source_client=build_source_repository_client(settings, clock),
+        app_secret_store=app_secret_store,
         owner=owner,
     )
     stop = asyncio.Event()
@@ -52,6 +55,7 @@ async def main() -> None:
             "executor_mode": settings.executor_mode,
             "health_checker_mode": settings.health_checker_mode,
             "source_client_mode": settings.source_client_mode,
+            "app_secret_store_mode": settings.app_secret_store_mode,
             "concurrency": settings.worker_concurrency,
         },
     )
@@ -65,6 +69,7 @@ async def main() -> None:
                 group.create_task(refresher.run(stop))
     finally:
         await executors.aclose()
+        await app_secret_store.aclose()
         await get_engine().dispose()
     logger.info("worker stopped", extra={"action": "run_worker"})
 

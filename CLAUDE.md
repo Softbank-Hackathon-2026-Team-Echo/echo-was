@@ -28,6 +28,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/environments.md](docs/api/environments.md) | 환경 API 계약(엔드포인트·오류 코드·secretRef 형식·null 규칙)을 바꾸거나 쓸 때 |
 | [docs/api/services.md](docs/api/services.md) · [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 서비스·원터치 배포·이력·되돌리기·로그 API 계약(역할·버전 상태·겹침 규칙·실패 코드·로그 줄·`simulated`)을 바꾸거나 쓸 때 |
 | [docs/executors.md](docs/executors.md) | 실행기(빌드·배포·대표 주소·헬스·내리기·로그 읽기)를 바꾸거나 실제 구현을 붙일 때 — 멱등 키·호출 순서·로그 읽기·마스킹 계약 |
+| [docs/api/variables.md](docs/api/variables.md) | 고객 앱 환경 변수 API(쓰기 전용·권한·오류·`pendingRedeploy`)를 바꾸거나 쓸 때. 주입 규칙은 [docs/executors.md](docs/executors.md) "앱 환경 변수" |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
@@ -39,7 +40,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·deploy_request·migration_plan·audit_log 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나)
 ├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
@@ -55,12 +56,15 @@ app/
 │                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings, 실패해도 배포 계속, 보안 2·11)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
+│                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository · Finding Repository(보안 증거, 조직 조건 필수)
+│                     #   ServiceEnvironmentVariable Repository(앱 환경 변수 행, 값 없음)
 ├─ clients/           # secret_client(env 만 실제) · source_repository(인터페이스 + 가짜) · github_source_repository(GitHub App)
 │                     #   github_user(로그인·초대용 GitHub 사용자 클라이언트, 가짜는 tests/ 에만)
 │                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만)
+│                     #   app_secret_store(앱 환경 변수 보관함: GCP Secret Manager + 가짜, 지우는 메서드 없음)
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
@@ -74,6 +78,7 @@ app/
 │                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
 │                     #   migration_plans, migration_plan_logs, findings(보안 증거, 보안 2)
 │                     #   security_exceptions(기한부 예외) · agent_runners·agent_runs·agent_run_events·agent_patch_approvals(AI 실행, 러너 계약 v1)
+│                     #   service_environment_variables(앱 환경 변수 이름·참조·버전, 값 칸 없음)
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking
@@ -143,6 +148,13 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - 다시 불러도 소용없는 실패만 `BuildStartError`·`DeployApplyError(code)` 로 올린다. 시작 계열 일시 오류는 1·2·4초 재시도 뒤 `ExecutorUnavailableError`, **poll 계열은 예외 없이 진행 중 + 경고 로그**(예외 3번 = `WORKER_LOST`). 되돌리기는 예외 대신 `RevertFailed`.
 - 실행기는 앱 네임스페이스(`{서비스}-{suffix}`, 라벨 `app.kubernetes.io/managed-by=echo-was`) 밖을 쓰지 않는다. 라벨 없는 같은 이름 네임스페이스는 쓰지도 지우지도 않는다. 시험은 스텁 전송(`tests/real_executor_fakes.py`)만 쓴다.
 - 환경 config 새 칸은 모두 선택이고 **값이 없으면 키로 남기지 않는다**(`EnvironmentConfig` 직렬화기). 환경별 주소는 `ingressDomain` 이 있으면 `{서비스}-{suffix}.{ingressDomain}`, 이미 만든 연결 행은 바꾸지 않는다.
+
+### 고객 앱 환경 변수 (API 서버 10, 자주 어기는 것)
+- **값은 보관함(`AppSecretStore`)에만 둔다.** DB·로그·응답·예외·`config_snapshot` 에 값·값 일부·길이를 넣지 않는다(비밀 이름은 정상 응답의 `secretRef` 에만). 값은 `SecretValue` 로만 다룬다. 새 경로를 더하면 `test_secret_value_appears_nowhere_after_full_deploy` 대상에 넣는다.
+- **보관함 비밀은 지우지 않는다.** 키 삭제·서비스 삭제는 행만 삭제 표시하고, 다시 넣으면 이전 `secret_name` 에 버전이 이어진다. 옛 배포 기록·되돌리기가 그 버전을 읽는다.
+- **배포 기록에 버전을 고정한다**(`config_snapshot.envVars`, `_deployment_snapshot`). 새 배포·예비 따라가기는 그 연결의 지금 최신, 되돌리기는 대상 기록 그대로, 재실행은 기록 그대로. 값은 실행기 호출 직전에 트랜잭션 밖에서 꺼낸다(`AppEnvResolver`).
+- **`env_values = None` 이면 실행기는 `{ns}-env` 를 읽지도 쓰지도 않는다**(옛 기록, 가짜 보관함 + 실제 실행기, gcp 모드의 `fake-sm:` 참조). `{}` 면 echo-was 소유 Secret 만 비운다. 손으로 만든 Secret 은 변수가 없는 연결에서 절대 건드리지 않는다. 쓸 때는 서버 측 apply 가 아니라 GET → PUT·POST 로 통째로 쓴다.
+- **값 넣기 API 만 잠근 채 외부를 부른다**(서비스 → 연결 잠금 안에서 `add_version`, 호출 전체 10초). 다른 곳에 따라 하지 않는다.
 
 ### 되돌리기·배포 작업 로그 (자주 어기는 것)
 - **되돌리기는 `trigger = ROLLBACK` 배포 요청**이다(`DeployRequestService.create_rollback`). 대상의 `build_id`(`build_reused = true`)·커밋·배포 기록 `config_snapshot` 사본을 쓰고, 접수 순간 현재 배포를 `rollback_base_deployment_id` 에 적는다. 일꾼 `_start` 가 현재 배포가 다르면 `CANCELLED(BASE_CHANGED)`. 새 배포 기록은 `rollback_of_id` = 대상의 배포 기록. 예비 따라가기는 `MANUAL`·`ROLLBACK` 성공(서비스 중 연결)일 때만.
