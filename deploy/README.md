@@ -27,6 +27,7 @@
 - 고정 진입점 토큰은 진입점 VM이 만든 비밀 `echo-dev-entry-weights-token`에 있다. GSA `echo-dev-echo-was`의 읽기 권한은 echo-infra `control-plane.tf`가 준다(이 권한이 없으면 SecretSync가 실패한다).
 - Cloudflare DNS 토큰은 `echo-dev-echo-was-cloudflare-dns-token`에 있다(echoport.uk 영역의 DNS 편집·영역 읽기만, 온프레 앱 주소 레코드용). 비밀과 GSA `echo-dev-echo-was` 읽기 권한(이 비밀 하나에만)은 11/3 gcloud로 손으로 만들었다 — echo-infra `control-plane.tf`에는 아직 없다.
 - 시연 조직 `echo-demo` 온프레 환경의 k3s 실행기 토큰은 `echo-dev-echo-was-onprem-executor-token`에 있다(SA `echo-system/echo-executor`, 권한·라벨 정책은 echo-infra `onprem/manifests/echo-executor.yaml`). 환경 `secretRef`는 `env:ECHO_SECRET_ECHO_DEMO__ONPREM_EXECUTOR_TOKEN`. SecretSync 키는 밑줄 두 개를 받지 않아(`targetKey` 형식) `ECHO_DEMO_ONPREM_EXECUTOR_TOKEN`으로 옮긴 뒤 `app.yaml`의 `env`(`secretKeyRef`)가 조직 접두사 이름으로 바꿔 넣는다. 비밀과 읽기 권한(이 비밀 하나에만)은 11/4 gcloud로 손으로 만들었다.
+- 환경 접속 확인 어댑터는 `ENVIRONMENT_ADAPTER_MODE: real`(API 서버 12)이다. aws·gcp는 배포 실행기와 같은 워크로드 신원으로 붙고(저장 비밀 없음), 온프레는 위 k3s 실행기 토큰으로 붙는다. 온프레 노드 수를 읽으려면 `echo-executor` ClusterRole에 `nodes get,list`가 필요하다(없으면 환경은 `CONNECTED`, 클러스터 정보만 `AUTH_FAILED`). 되돌리려면 이 값을 `simulated`로 바꾼다.
 - `SecretSync`가 이 값을 Kubernetes Secret `echo-was-env`(`DATABASE_URL`·`ECHO_SECRET_GITHUB_APP_PRIVATE_KEY`·`ECHO_SECRET_GITHUB_APP_CLIENT_SECRET`·`ECHO_SECRET_ENTRYPOINT_TOKEN`·`ECHO_SECRET_CLOUDFLARE_DNS_TOKEN`·`ECHO_DEMO_ONPREM_EXECUTOR_TOKEN`)로 옮기고 API·일꾼·마이그레이션이 `envFrom`으로 읽는다. 값을 바꾸면 새 version을 추가한다(`gcloud secrets versions add <id> --data-file=-`). 동기화는 약 2분 간격이다.
 
 ## 손으로 만들어 두는 것 (저장소에 넣지 않는다)

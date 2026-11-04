@@ -143,6 +143,9 @@ data:
   EXECUTOR_MODE: real
   # 배포 뒤 환경별 주소(https)와 대표 주소로 헬스체크한다.
   HEALTH_CHECKER_MODE: http
+  # 환경 등록·다시 확인이 실제 클러스터의 /version·노드 수를 읽는다(API 서버 12, 운영 파드 시험 4회 확인).
+  # 되돌리려면 simulated(고정 값, simulated=true).
+  ENVIRONMENT_ADAPTER_MODE: real
   # aws 환경이 config.roleArn 을 비우면 넘겨받는 역할(신뢰 = 이 파드 GSA 의 Google ID 토큰, EKS Access Entry).
   EXECUTOR_AWS_ROLE_ARN: arn:aws:iam::706878591119:role/echo-dev-executor
   # 이미지 정본(AR) → aws 환경에서 받을 ECR. customer-build.yml 이 두 곳에 같은 digest 로 올린다.
@@ -151,9 +154,9 @@ data:
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
-  # 시연 조직 echo-demo 의 aws·gcp 환경 secretRef 자리 표시(실제 비밀 아님). aws·gcp 실제 실행기는 워크로드
-  # 신원으로 붙어 이 값을 읽지 않는다. 환경 등록은 secretRef 가 필수이고 연결 확인 어댑터가 아직 가짜라
-  # 비밀이 "있는지"만 보므로 둔다. 접속 확인 어댑터를 실제로 바꿀 때 지운다.
+  # 시연 조직 echo-demo 의 aws·gcp 환경 secretRef 자리 표시(실제 비밀 아님). aws·gcp 실행기와 접속 확인
+  # 어댑터는 워크로드 신원으로 붙어 이 값을 읽지 않는다. 환경 등록은 secretRef 가 필수이고 접속 확인
+  # 서비스가 어댑터 호출 전에 비밀이 "있는지" 조회하므로 지우지 않는다(API 서버 12 결정).
   ECHO_SECRET_ECHO_DEMO__FAKE_KUBECONFIG: fake-executor-placeholder
   SOURCE_CLIENT_MODE: github
   GITHUB_APP_ID: "5574944"
