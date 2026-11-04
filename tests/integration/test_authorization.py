@@ -134,6 +134,20 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/migration-plans/{plan_id}/reject", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/cancel", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/abort", D, human_only=True),
+    # API 서버 10: 앱 환경 변수(목록은 뷰어·에이전트, 넣기는 개발자 사람, 삭제는 어드민 사람)
+    _org("GET", "/services/{service_id}/environments/{environment_id}/variables", V),
+    _org(
+        "PUT",
+        "/services/{service_id}/environments/{environment_id}/variables/{key}",
+        D,
+        human_only=True,
+    ),
+    _org(
+        "DELETE",
+        "/services/{service_id}/environments/{environment_id}/variables/{key}",
+        A,
+        human_only=True,
+    ),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
 ]

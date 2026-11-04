@@ -4,6 +4,7 @@
 FAILED 줄만 문장이 그 실패 코드의 문장이다.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.enums import DeployLogCode, DeployLogStage, DeployRequestErrorCode, LogLevel
@@ -36,6 +37,9 @@ ERROR_MESSAGES: dict[DeployRequestErrorCode, str] = {
     DeployRequestErrorCode.CONTAINER_START_FAILED: (
         "The container kept crashing after it started."
     ),
+    DeployRequestErrorCode.ENV_SECRET_UNAVAILABLE: (
+        "An app environment variable could not be read from the secret store."
+    ),
 }
 
 
@@ -63,6 +67,10 @@ DEPLOY_LOG_ENTRIES: dict[DeployLogCode, DeployLogEntry] = {
     ),
     DeployLogCode.DEPLOY_REQUESTED: DeployLogEntry(
         _INFO, _S.DEPLOYING, "Deployment to the environment was requested."
+    ),
+    # 문장은 적용한 키 이름으로 만든다(env_vars_applied_message). 값은 넣지 않는다.
+    DeployLogCode.ENV_VARS_APPLIED: DeployLogEntry(
+        _INFO, _S.DEPLOYING, "App environment variables were applied."
     ),
     DeployLogCode.DEPLOY_APPLIED: DeployLogEntry(
         _INFO, _S.DEPLOYING, "The deployment was applied to the environment."
@@ -110,6 +118,20 @@ DEPLOY_LOG_ENTRIES: dict[DeployLogCode, DeployLogEntry] = {
         "Log line limit reached. Further lines for this request are not recorded.",
     ),
 }
+
+
+def env_vars_applied_message(keys: Sequence[str], max_length: int) -> str:
+    """앱 환경 변수 N개 적용 줄. 키 이름은 max_length 안에 들어가는 만큼만 적는다."""
+    head = f"App environment variables applied: {len(keys)} (keys: "
+    shown: list[str] = []
+    for index, key in enumerate(keys):
+        hidden = len(keys) - index - 1
+        tail = f", and {hidden} more)." if hidden else ")."
+        if len(head) + len(", ".join([*shown, key])) + len(tail) > max_length:
+            break
+        shown.append(key)
+    hidden = len(keys) - len(shown)
+    return f"{head}{', '.join(shown)}{f', and {hidden} more' if hidden else ''})."
 
 
 def deploy_log_message(

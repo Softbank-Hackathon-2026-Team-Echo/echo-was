@@ -6,7 +6,7 @@
 import secrets
 import string
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +17,7 @@ from app.adapters.base import (
     InvalidEnvironmentConfigError,
     UnknownEnvironmentKindError,
 )
+from app.core.secrets import SecretValue
 from app.enums import (
     DeployLogCode,
     DeployRequestCancelReason,
@@ -37,6 +38,8 @@ SNAPSHOT_HEALTH_CHECK_TIMEOUT_SECONDS = "healthCheckTimeoutSeconds"
 SNAPSHOT_CONTAINER_PORT = "containerPort"
 SNAPSHOT_MAIN_URL = "mainUrl"
 SNAPSHOT_ENVIRONMENT_URL = "environmentUrl"
+# 배포 기록의 앱 환경 변수 참조 {KEY: "<참조>/versions/<n>"}(API 서버 10). 값은 없다.
+SNAPSHOT_ENV_VARS = "envVars"
 SIMULATE_FAIL_AT = "failAt"
 
 
@@ -184,10 +187,13 @@ def read_environment_config(environment: Environment) -> EnvironmentConfig | Non
         return None
 
 
-def deployment_spec(deployment: Deployment) -> DeploymentSpec:
+def deployment_spec(
+    deployment: Deployment, env_values: Mapping[str, SecretValue] | None = None
+) -> DeploymentSpec:
     return DeploymentSpec(
         deployment_id=deployment.id,
         image_repository=deployment.image_repository,
         image_digest=deployment.image_digest,
         config_snapshot=dict(deployment.config_snapshot),
+        env_values=env_values,
     )

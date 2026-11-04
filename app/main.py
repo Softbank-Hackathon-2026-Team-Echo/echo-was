@@ -17,7 +17,7 @@ from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
-from app.dependencies import cluster_reader_holder, executor_set_holder
+from app.dependencies import app_secret_store_holder, cluster_reader_holder, executor_set_holder
 from app.routers import (
     agent_token_router,
     auth_router,
@@ -28,6 +28,7 @@ from app.routers import (
     migration_plan_router,
     organization_router,
     service_router,
+    service_variable_router,
 )
 
 configure_logging("echo-api", get_settings().log_level)
@@ -41,11 +42,12 @@ discover()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    """실제 실행기 묶음(로그 읽기용)과 환경 접속 확인용 클러스터 읽기 구현(처음 쓸 때 만든다)의
-    HTTP 클라이언트를 종료 때 닫는다."""
+    """실제 실행기 묶음(로그 읽기용), 환경 접속 확인용 클러스터 읽기 구현, 앱 환경 변수 보관함
+    (처음 쓸 때 만든다)의 HTTP 클라이언트를 종료 때 닫는다."""
     yield
     await executor_set_holder(application.state).aclose()
     await cluster_reader_holder(application.state).aclose()
+    await app_secret_store_holder(application.state).aclose()
 
 
 # 마이그레이션은 여기서 실행하지 않는다(lifespan 은 실행기 정리만 한다). README 의 빠른 시작·배포
@@ -57,7 +59,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().frontend_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
     expose_headers=["X-Request-ID"],
 )
@@ -71,6 +73,7 @@ app.include_router(agent_token_router.router)
 app.include_router(environment_router.router)
 app.include_router(environment_kind_router.router)
 app.include_router(service_router.router)
+app.include_router(service_variable_router.router)
 app.include_router(deploy_request_router.router)
 app.include_router(migration_plan_router.router)
 
