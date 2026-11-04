@@ -65,6 +65,13 @@ class SourceClientMode(StrEnum):
     GITHUB = "github"
 
 
+class EnvironmentAdapterMode(StrEnum):
+    """환경 접속 확인 어댑터(API 서버 12). real 이면 실제 클러스터에 붙어 버전·노드 수를 읽는다."""
+
+    SIMULATED = "simulated"
+    REAL = "real"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -77,6 +84,9 @@ class Settings(BaseSettings):
 
     # 퍼블릭 주소: 대표 {서비스}-{suffix}.{도메인}, 환경별 {서비스}-{환경}-{suffix}.{도메인}.
     public_base_domain: str = "apps.echo.test"
+
+    # 기본 simulated: 어댑터가 고정 값(simulated=true)을 돌려준다. 운영은 실환경 확인 뒤 real 로.
+    environment_adapter_mode: EnvironmentAdapterMode = EnvironmentAdapterMode.SIMULATED
 
     executor_mode: ExecutorMode = ExecutorMode.FAKE
     health_checker_mode: HealthCheckerMode = HealthCheckerMode.FAKE

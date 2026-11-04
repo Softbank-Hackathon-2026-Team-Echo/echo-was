@@ -61,7 +61,7 @@ app/
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
-├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(이번에는 가짜)
+├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(기본 가짜, `ENVIRONMENT_ADAPTER_MODE=real` 이면 실제 클러스터)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
 │   ├─ registry.py    #   discover()(양식·동작 짝 검사), validate_environment_config(by_alias), get_environment_adapter()
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나

@@ -4,7 +4,7 @@ AWS·GCP·온프레 클러스터를 **환경**으로 등록·조회·수정·삭
 
 - 실행 중인 서버의 OpenAPI: `GET /docs`(Swagger UI) · `GET /openapi.json`. 이 문서와 같은 계약이다.
 - **로그인·조직 범위(API 서버 6).** 모든 경로는 `/api/v1/orgs/{orgId}` 아래이고(종류 목록만 조직 밖), 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 등록·수정·다시 확인은 개발자, 삭제는 어드민이다. 검사 순서·오류는 [auth.md](auth.md).
-- **어댑터는 가짜(simulated)다.** aws·gcp·onprem 동작 클래스는 네트워크 호출 없이 고정 값을 돌려준다. 응답의 `clusterInfo.simulated = true` 가 그 표시다. 실제 클러스터 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 바꾼다. 요청·응답 모양은 실제와 같게 고정했다.
+- **어댑터는 기본이 가짜(simulated)이고, `ENVIRONMENT_ADAPTER_MODE=real` 이면 실제 클러스터에 붙는다**(API 서버 12). 가짜는 네트워크 호출 없이 고정 값을 돌려주고 응답의 `clusterInfo.simulated = true` 가 그 표시다. 실제 모드는 배포 실행기와 같은 접근 경로로 `GET /version`(접속 증명: 틀린 토큰이면 401)과 `GET /api/v1/nodes`(노드 수)만 읽는다 — 쓰기 요청 없음. aws·gcp 는 저장 비밀 없이 워크로드 신원(구글 신분증 → STS 역할 / 워크로드 액세스 토큰)으로 붙고 `secretRef` 의 값을 읽지 않는다(자리 표시 값이어도 된다). onprem 은 `secretRef` 의 서비스 계정 토큰으로 `apiUrl` 에 붙는다. 일시 오류(연결 실패·5xx·429)는 0.5초 뒤 한 번 더 시도한다. 이유 코드: 401·403·STS 거절 → `AUTH_FAILED`, 역할/`apiUrl` 없음·`/version` 404·쿠버네티스가 아닌 응답 → `CONFIG_INVALID`, 연결 실패·TLS·5xx·429 → `UNREACHABLE`. 노드 목록만 권한이 막히면 `CONNECTED` + `clusterInfo = null` + `clusterInfoError = AUTH_FAILED`(온프레 `echo-executor` 에 `nodes get,list` 가 필요하다). 요청·응답 모양은 가짜와 같다.
 
 ## 공통 규칙
 

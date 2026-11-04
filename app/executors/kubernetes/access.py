@@ -17,6 +17,7 @@
 import base64
 import json
 import logging
+import re
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
 from app.adapters.aws import AwsEnvironmentConfig
+from app.adapters.base import EnvironmentConfig
 from app.adapters.gcp import GcpEnvironmentConfig
 from app.adapters.onprem import OnpremEnvironmentConfig
 from app.clients.secret_client import SecretClient, SecretLookupError
@@ -95,6 +97,26 @@ class _EksToken:
     expires_at: datetime
 
 
+# STS 가 HTTP 400 으로 주지만 다시 시도하면 되는 오류(AWS STS 공통 오류 문서).
+STS_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "IDPCommunicationError",
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "ServiceUnavailable",
+        "InternalFailure",
+    }
+)
+_STS_ERROR_CODE = re.compile(r"<Code>\s*([A-Za-z]{1,64})\s*</Code>")
+
+
+def _sts_error_code(body: str) -> str | None:
+    """STS 오류 본문에서 <Code> 이름 하나만 꺼낸다(나머지 본문은 쓰지 않는다)."""
+    match = _STS_ERROR_CODE.search(body)
+    return match.group(1) if match else None
+
+
 class ClusterAccessProvider:
     """환경마다 창구·토큰을 얻고 기억한다. 401 을 받은 호출은 refresh=True 로 다시 얻는다."""
 
@@ -137,6 +159,34 @@ class ClusterAccessProvider:
                     return await self._eks_access(config, refresh=refresh)
                 case OnpremEnvironmentConfig():
                     return await self._onprem_access(environment, config, refresh=refresh)
+                case _:
+                    raise ClusterConfigError
+        except MetadataAuthError:
+            raise ClusterAuthError from None
+
+    async def access_for_config(
+        self,
+        config: EnvironmentConfig,
+        *,
+        onprem_token: SecretValue | None = None,
+        refresh: bool = False,
+    ) -> ClusterAccess:
+        """환경 설정만으로 창구를 얻는다(환경 접속 확인 어댑터용, API 서버 12).
+
+        aws·gcp 는 `access()` 와 같은 경로·같은 캐시를 쓴다. onprem 은 서비스가 이미 조회해 넘긴
+        서비스 계정 토큰을 그대로 쓰고(비밀을 다시 조회하지 않고, 기억하지도 않는다) `apiUrl` 이
+        없으면 설정 오류다.
+        """
+        try:
+            match config:
+                case GcpEnvironmentConfig():
+                    return await self._gke_access(config, refresh=refresh)
+                case AwsEnvironmentConfig():
+                    return await self._eks_access(config, refresh=refresh)
+                case OnpremEnvironmentConfig():
+                    if config.api_url is None or onprem_token is None:
+                        raise ClusterConfigError
+                    return ClusterAccess(server=config.api_url, ca_pem=None, token=onprem_token)
                 case _:
                     raise ClusterConfigError
         except MetadataAuthError:
@@ -222,6 +272,9 @@ class ClusterAccessProvider:
             },
         )
         if response.status_code >= 400:
+            # STS 는 일시 오류 일부를 HTTP 400 으로 준다. 코드 이름만 보고 본문은 버린다.
+            if _sts_error_code(response.text) in STS_TRANSIENT_ERROR_CODES:
+                raise TransientError(CLUSTER_UNREACHABLE)
             # 신뢰 정책·역할 문제다(원문에는 토큰 일부가 들어 있을 수 있어 남기지 않는다).
             raise ClusterAuthError
         parsed = _parse_sts_credentials(response.text)

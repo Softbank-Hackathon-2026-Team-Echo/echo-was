@@ -1,6 +1,6 @@
 """FastAPI 의존성 주입 함수. 시험은 app.dependency_overrides 로 바꾼다."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -13,10 +13,20 @@ from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
 from app.core.clock import Clock, SystemClock
-from app.core.config import ExecutorMode, Settings, SourceClientMode, get_settings
+from app.core.config import (
+    EnvironmentAdapterMode,
+    ExecutorMode,
+    Settings,
+    SourceClientMode,
+    get_settings,
+)
 from app.core.database import get_session_factory
 from app.core.secrets import parse_secret_ref
 from app.executors import ExecutorSet, build_executor_set
+from app.executors.google_metadata import GoogleMetadataClient
+from app.executors.kubernetes.access import ClusterAccessProvider
+from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_factory
+from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_token_service import AgentTokenService
 from app.services.auth_service import AuthService
@@ -47,8 +57,67 @@ def get_secret_client() -> SecretClient:
     return EnvVarSecretClient()
 
 
-def get_adapter_resolver() -> AdapterResolver:
-    return get_environment_adapter
+def get_clock() -> Clock:
+    return SystemClock()
+
+
+class ClusterReaderHolder:
+    """환경 접속 확인 어댑터가 쓰는 클러스터 읽기 구현(API 서버 12). 프로세스당 하나를 재사용한다.
+
+    ExecutorSetHolder 와 같은 모양이다. 만들 때 네트워크·비밀값 조회가 없다(첫 호출 때 한다).
+    설정 객체가 바뀌면(시험의 설정 교체) 옛 것을 닫고 새로 만든다. 읽기 호출의 제한 시간은
+    환경 접속 확인 전체 제한 시간과 같다.
+    """
+
+    def __init__(self) -> None:
+        self._settings: Settings | None = None
+        self._reader: ClusterReader | None = None
+        self._closers: tuple[Callable[[], Awaitable[None]], ...] = ()
+
+    async def get(self, settings: Settings, clock: Clock) -> ClusterReader:
+        if self._reader is None or self._settings is not settings:
+            await self.aclose()
+            timeout = settings.environment_check_timeout_seconds
+            metadata = GoogleMetadataClient(settings.google_metadata_base_url, clock)
+            provider = ClusterAccessProvider(
+                metadata=metadata,
+                secret_client=EnvVarSecretClient(),
+                clock=clock,
+                default_aws_role_arn=settings.executor_aws_role_arn,
+                timeout_seconds=timeout,
+            )
+            clients = KubeHttpClients(default_kube_http_factory, timeout)
+            self._reader = ClusterReader(provider, clients)
+            self._closers = (clients.aclose, provider.aclose, metadata.aclose)
+            self._settings = settings
+        return self._reader
+
+    async def aclose(self) -> None:
+        closers, self._closers = self._closers, ()
+        self._reader, self._settings = None, None
+        for close in closers:
+            await close()
+
+
+def cluster_reader_holder(state: State) -> ClusterReaderHolder:
+    """앱 state 의 클러스터 읽기 보관함(없으면 만든다)."""
+    holder = getattr(state, "cluster_reader_holder", None)
+    if not isinstance(holder, ClusterReaderHolder):
+        holder = ClusterReaderHolder()
+        state.cluster_reader_holder = holder
+    return holder
+
+
+async def get_adapter_resolver(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> AdapterResolver:
+    """환경 종류 → 어댑터. simulated(기본)면 가짜 값, real 이면 실제 클러스터 읽기 구현을 넣는다."""
+    if settings.environment_adapter_mode is EnvironmentAdapterMode.SIMULATED:
+        return get_environment_adapter
+    reader = await cluster_reader_holder(request.app.state).get(settings, clock)
+    return lambda kind: get_environment_adapter(kind, reader=reader)
 
 
 def get_environment_connection_service(
@@ -80,10 +149,6 @@ def get_environment_service(
 
 def get_environment_kind_service() -> EnvironmentKindService:
     return EnvironmentKindService()
-
-
-def get_clock() -> Clock:
-    return SystemClock()
 
 
 def build_source_repository_client(settings: Settings, clock: Clock) -> SourceRepositoryClient:

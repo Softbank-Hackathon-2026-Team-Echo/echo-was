@@ -297,6 +297,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 실제로는 작업 폴더마다 `echo_<폴더 해시 8자>_test` 를 쓰고, 없으면 테스트가 만든다 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
+| `ENVIRONMENT_ADAPTER_MODE` | `simulated` | `real` 이면 환경 접속 확인이 실제 클러스터(`/version`·노드 수)를 읽는다. 기본은 고정 값(`simulated: true`) |
 | `ECHO_SECRET_<조직 키>__<NAME>` | (로컬 더미 값) | `secretRef = env:ECHO_SECRET_<조직 키>__<NAME>` 이 가리키는 환경 접속 비밀값(조직 키 = slug 대문자·`-`→`_`). 프로세스 환경변수로만 읽는다 |
 | `PUBLIC_BASE_DOMAIN` | `apps.echo.test`(로컬) · `echoport.uk`(데모) | 퍼블릭 주소 도메인(125자 이하). 대표 `{서비스}-{무작위 8자}.{도메인}`, 환경별 `{서비스}-{같은 8자}.{환경 ingressDomain}`(클라우드) 또는 `{서비스}-{환경}-{같은 8자}.{도메인}` |
 | `EXECUTOR_MODE` | `fake` | 빌드·배포·내리기 실행기. `real` 이면 GitHub Actions 빌드 + 쿠버네티스 직접 반영(필수: GitHub App, `SOURCE_CLIENT_MODE=github`, `HEALTH_CHECKER_MODE=http`). 운영 기본값은 실환경 확인(AC-9) 전까지 `fake` |

@@ -17,7 +17,7 @@ from app.core.database import get_engine
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
-from app.dependencies import executor_set_holder
+from app.dependencies import cluster_reader_holder, executor_set_holder
 from app.routers import (
     agent_token_router,
     auth_router,
@@ -41,9 +41,11 @@ discover()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    """실제 실행기 묶음(로그 읽기용, 처음 쓸 때 만든다)의 HTTP 클라이언트를 종료 때 닫는다."""
+    """실제 실행기 묶음(로그 읽기용)과 환경 접속 확인용 클러스터 읽기 구현(처음 쓸 때 만든다)의
+    HTTP 클라이언트를 종료 때 닫는다."""
     yield
     await executor_set_holder(application.state).aclose()
+    await cluster_reader_holder(application.state).aclose()
 
 
 # 마이그레이션은 여기서 실행하지 않는다(lifespan 은 실행기 정리만 한다). README 의 빠른 시작·배포

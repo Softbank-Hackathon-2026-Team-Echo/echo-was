@@ -3,11 +3,11 @@ from typing import Annotated
 from pydantic import StringConstraints
 
 from app.adapters.base import (
+    ClusterBackedEnvironmentAdapter,
     DomainName,
     EnvironmentConfig,
     KubernetesName,
     NonEmptyStr,
-    SimulatedEnvironmentAdapter,
     register_environment_adapter,
     register_environment_kind,
 )
@@ -41,11 +41,14 @@ class OnpremEnvironmentConfig(EnvironmentConfig):
 
 
 @register_environment_adapter("onprem")
-class OnpremEnvironmentAdapter(SimulatedEnvironmentAdapter):
-    """온프레미스(k3s) 동작 클래스 — **가짜(simulated)**. 네트워크 호출 없이 고정 값을 돌려준다.
+class OnpremEnvironmentAdapter(ClusterBackedEnvironmentAdapter):
+    """온프레미스(k3s) 동작 클래스(API 서버 12).
 
-    실제 k3s 접속은 인프라 파트가 클러스터를 만든 뒤 별도 작업에서 이 클래스를 바꾼다.
+    `ENVIRONMENT_ADAPTER_MODE=real` 이면 reader 가 주입되어 `apiUrl` 로 붙고, secretRef 에서
+    서비스가 조회해 넘긴 서비스 계정 토큰을 쓴다. 아니면 **가짜(simulated)** 고정 값이다.
     """
+
+    uses_credentials_as_token = True
 
     simulated_server_version = "v1.31.4+k3s1"
     simulated_node_count = 1

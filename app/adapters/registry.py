@@ -13,6 +13,7 @@ from pydantic_core import ErrorDetails
 
 from app.adapters import base
 from app.adapters.base import (
+    ClusterReadPort,
     EnvironmentAdapter,
     EnvironmentConfig,
     InvalidEnvironmentConfigError,
@@ -66,13 +67,16 @@ def get_environment_config_class(kind: str) -> type[EnvironmentConfig]:
     return config_class
 
 
-def get_environment_adapter(kind: str) -> EnvironmentAdapter:
-    """kind 의 동작 객체를 만든다. 서비스는 이 함수를 의존성으로 주입받는다."""
+def get_environment_adapter(kind: str, reader: ClusterReadPort | None = None) -> EnvironmentAdapter:
+    """kind 의 동작 객체를 만든다. 서비스는 이 함수를 의존성으로 주입받는다.
+
+    reader 가 없으면(기본) 가짜로 동작하는 어댑터가 가짜 값을 돌려준다(API 서버 12).
+    """
     discover()
     adapter_class = base.registered_adapters().get(kind)
     if adapter_class is None:
         raise UnknownEnvironmentKindError("unknown environment kind", kind=kind)
-    return adapter_class()
+    return adapter_class(reader=reader)
 
 
 def search_environment_kinds() -> list[str]:
