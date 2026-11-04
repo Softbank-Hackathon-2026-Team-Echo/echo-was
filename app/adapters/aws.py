@@ -11,6 +11,7 @@ from app.adapters.base import (
     register_environment_adapter,
     register_environment_kind,
 )
+from app.core.places import Coordinates, find_aws_region_coordinates
 
 # 예: ap-northeast-2, us-east-1, us-gov-west-1
 AwsRegion = Annotated[str, StringConstraints(pattern=r"^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$")]
@@ -47,6 +48,9 @@ class AwsEnvironmentConfig(EnvironmentConfig):
 
     def environment_host_domain(self) -> str | None:
         return self.ingress_domain
+
+    def coordinates(self) -> Coordinates | None:
+        return find_aws_region_coordinates(self.region)
 
 
 @register_environment_adapter("aws")

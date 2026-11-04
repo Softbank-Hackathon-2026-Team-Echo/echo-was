@@ -30,6 +30,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from app.core.exceptions import ErrorField, ExternalError, InvalidInputError
+from app.core.places import Coordinates
 from app.core.secrets import SecretValue
 from app.enums import ConnectionErrorCode
 
@@ -118,6 +119,10 @@ class EnvironmentConfig(BaseModel):
 
     def environment_host_domain(self) -> str | None:
         """환경별 주소를 둘 하위 도메인. None 이면 대표 주소 도메인 아래 한 단계 형식을 쓴다."""
+        return None
+
+    def coordinates(self) -> Coordinates | None:
+        """지도·재난 판정용 좌표. None 이면 위치를 모른다(표에 없거나 표가 없는 종류)."""
         return None
 
 

@@ -11,6 +11,7 @@ from app.adapters.base import (
     register_environment_adapter,
     register_environment_kind,
 )
+from app.core.places import Coordinates, find_gcp_region_coordinates
 
 # GCP 프로젝트 ID 규칙: 6~30자, 소문자로 시작, 소문자·숫자·하이픈, 하이픈으로 끝나지 않음.
 GcpProjectId = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")]
@@ -40,6 +41,9 @@ class GcpEnvironmentConfig(EnvironmentConfig):
 
     def environment_host_domain(self) -> str | None:
         return self.ingress_domain
+
+    def coordinates(self) -> Coordinates | None:
+        return find_gcp_region_coordinates(self.region)
 
 
 @register_environment_adapter("gcp")
