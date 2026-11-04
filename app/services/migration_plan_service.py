@@ -46,7 +46,6 @@ from app.core.exceptions import (
     SelfApprovalForbiddenError,
     ServiceDeletingError,
     SimulateNotAllowedError,
-    SourceNotSingleError,
     TargetNotReadyError,
     TargetSyncingError,
 )
@@ -98,6 +97,7 @@ from app.services.migration_plan_support import (
     fingerprint_changes,
     initial_step_results,
     read_fingerprint,
+    single_source,
     skip_pending_steps,
 )
 from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
@@ -261,7 +261,7 @@ class MigrationPlanService:
             open_plan = await self._plans.find_open_for_service(service.id)
             if open_plan is not None:
                 raise MigrationPlanOpenError(str(open_plan.id))
-            source = _single_source(connections)
+            source = single_source(connections)
             target = next(
                 (item for item in connections if item.environment_id == environment.id), None
             )
@@ -863,16 +863,6 @@ def decide_plan_mode(
     ):
         return MigrationPlanMode.FAILBACK
     return MigrationPlanMode.PLANNED
-
-
-def _single_source(connections: list[ServiceEnvironment]) -> ServiceEnvironment:
-    serving = [item for item in connections if item.traffic_weight > 0]
-    if len(serving) != 1 or serving[0].traffic_weight != 100:
-        raise SourceNotSingleError("service must be served by exactly one environment at 100%")
-    source = serving[0]
-    if source.current_deployment_id is None:
-        raise SourceNotSingleError("serving environment has no deployment")
-    return source
 
 
 def _check_service_accepts(service: Service) -> None:

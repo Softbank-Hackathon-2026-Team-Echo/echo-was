@@ -96,6 +96,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `GET /audit-logs` (감사 로그, API 서버 7) | 뷰어 | 읽기 가능 |
 | `GET /security/matrix` · `GET /security/findings` (보안 매트릭스·증거, 보안·거버넌스 4) | 뷰어 | 읽기 가능 |
 | `GET /security/exceptions` · `GET /security/exceptions/{id}` (기한부 예외, 보안 3) | 뷰어 | 읽기 가능 |
+| `GET /prechecks/{id}` · `GET /prechecks/{id}/logs` (AI 사전 점검) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
 | `POST /services` · `PATCH /services/{id}` · `POST /services/{id}/deploy-requests` | 개발자 | 403 |
@@ -103,6 +104,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `POST·GET /agent-tokens` · `DELETE /agent-tokens/{id}` | 개발자(사람만) | 403 |
 | `POST /services/{id}/migration-plans` · `POST /migration-plans/{id}/approve·reject·cancel·abort` (이전 계획 만들기·승인·거절·취소·중단, API 서버 8) | 개발자(사람만) | 403 |
 | `POST /security/exceptions` · `POST /security/exceptions/{id}/approve·revoke` (기한부 예외 요청·승인·철회, 보안 3) | 개발자(사람만) | 403 |
+| `POST /prechecks` · `POST /prechecks/{id}/cancel` (AI 사전 점검 만들기·취소) | 개발자(사람만) | 403 |
 | `DELETE /environments/{id}` · `DELETE /services/{id}` | 어드민 | 403 |
 | `PATCH /members/{userId}` · `POST·GET /invitations` · `DELETE /invitations/{id}` | 어드민(사람만) | 403 |
 | `PATCH /settings` (자기 승인 스위치 `allowSelfApproval`, API 서버 8) | 어드민(사람만) | 403 |
@@ -147,6 +149,20 @@ async def create_rollback(access: HumanDeveloperAccess, ...) -> ...:
 | 403 | `SELF_APPROVAL_FORBIDDEN` | 이전 계획을 만든 사람의 승인·거절, 또는 기한부 예외를 요청한 사람의 승인인데 조직이 자기 승인을 막아 둠(API 서버 8, 보안 3) |
 | 404 | `ORGANIZATION_NOT_FOUND` | 조직이 없거나 멤버가 아님(구분하지 않음) |
 | 503 | `LOGIN_NOT_CONFIGURED` | 로그인 설정이 비어 있음(로그인 시작) |
+| 401 | `RUNNER_TOKEN_INVALID` | 러너 경로: 러너·실행 토큰 없음·형식 오류·모름·철회, 실행 토큰의 실행과 경로가 다름 |
+| 403 | `RUNNER_FORBIDDEN` | 러너 경로에 사람 쿠키·에이전트 토큰으로 옴(거부 줄을 남기지 않는다) |
+
+## 러너 경로 (`/api/v1/runner/runs…`)
+
+조직 경로와 자격 증명을 섞지 않는다. 검사기는 `require_runner`(`Bearer echo_rnr_…`, `POST :claim` 만)와 `require_run_token`(`Bearer echo_run_…`, 그 실행의 heartbeat·events·result)이다(`app/auth/runner_guards.py`, `AUTH_GUARDS` 등록). 표:
+
+| 자격 증명 | 러너 경로 | 조직 경로 |
+|---|---|---|
+| 없음 | 401 `RUNNER_TOKEN_INVALID` | 401 `UNAUTHENTICATED` |
+| 사람 쿠키 · `Bearer echo_agt_…` | 403 `RUNNER_FORBIDDEN` | 역할 표대로 |
+| `Bearer echo_rnr_…` · `Bearer echo_run_…` | 위대로 | 401 `UNAUTHENTICATED` |
+
+계약은 [docs/agent-runner.md](../agent-runner.md) 다.
 
 ## 설정
 

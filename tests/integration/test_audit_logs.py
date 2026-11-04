@@ -15,7 +15,7 @@ import pytest
 from httpx import Response
 from sqlalchemy import select, text
 
-from app.audit.actions import WRITE_ROUTE_ACTIONS, AuditAction
+from app.audit.actions import RUNNER_ROUTE_ACTIONS, WRITE_ROUTE_ACTIONS, AuditAction
 from app.audit.recorder import AuditRecorder
 from app.clients.app_secret_store import FakeAppSecretStore
 from app.clients.github_user import GithubUser
@@ -139,12 +139,15 @@ def test_every_write_route_has_an_action_name() -> None:
         if method in WRITE_METHODS
     }
 
-    assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS)
+    # 쓰기 경로 = 사람 표 ∪ 러너 표 ∪ 로그아웃. 두 표는 겹치지 않는다.
+    assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
+    assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 27
+    assert len(WRITE_ROUTE_ACTIONS) == 29
+    assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 27개 경로(API 서버 7 의 24개 + 기한부 예외 3개) ---
+# --- AC-2: 쓰기 29개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 2개) ---
 
 
 @dataclass
@@ -596,7 +599,39 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "C-DB-1",
     )
 
-    # 27개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # AI 사전 점검(러너 레인 A): 만들기·취소는 만든 개발자
+    prechecks_path = org_path(team_id, "/prechecks")
+    precheck_details = {
+        "serviceId": migration.service_id,
+        "targetEnvironmentId": str(migration.gcp.id),
+    }
+    precheck = await migration.author_client.post(
+        prechecks_path,
+        json={"serviceId": migration.service_id, "targetEnvironmentId": str(migration.gcp.id)},
+    )
+    precheck_id = _data(precheck)["id"]
+    await ledger.expect_one(
+        precheck,
+        AuditAction.PRECHECK_REQUESTED,
+        migration.author.user,
+        team_id,
+        "agent_run",
+        precheck_id,
+        migration.service["name"],
+        precheck_details,
+    )
+    await ledger.expect_one(
+        await migration.author_client.post(f"{prechecks_path}/{precheck_id}/cancel"),
+        AuditAction.PRECHECK_CANCELLED,
+        migration.author.user,
+        team_id,
+        "agent_run",
+        precheck_id,
+        migration.service["name"],
+        precheck_details,
+    )
+
+    # 29개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(

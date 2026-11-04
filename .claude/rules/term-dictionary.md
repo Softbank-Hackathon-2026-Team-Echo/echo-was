@@ -46,7 +46,7 @@
 | 되돌리기 가능 | Rollbackable | 응답 `rollbackable` (저장 안 함) | `SUCCEEDED` · 배포 기록 있음 · 현재 아님 · 연결 살아 있음 · 서비스 `ACTIVE`. 판정은 배포 기록 id 로 한다 | API 4 |
 | 배포 작업 로그 | Deploy job log | `DeployRequestLog` / `deploy_request_logs`, `source = DEPLOY_JOB` | 배포 요청 한 건의 진행 줄(접수·시작·빌드 연결·배포·헬스·성공·실패·되돌리기·취소). 상태 전환과 같은 트랜잭션에서 반영됐을 때만 쓰고, 요청마다 `seq` 1부터, 500줄 상한, 지우지 않는다 | F1, API 4 |
 | 빌드 로그 · 실행 로그 | Build log · Runtime log | `source = BUILD` · `RUNTIME`, `BuildExecutor.read_logs` · `DeployExecutor.read_runtime_logs` | 실행기가 즉석으로 읽는 로그(저장 안 함). 실행기는 비밀값을 가려서 돌려준다. 지금은 가짜(`simulated`) | F1, API 4 |
-| 로그 마스킹 | Log masking | `app/core/log_masking.py::mask_secrets` | 로그 응답 직전 알려진 비밀값 모양(GitHub 토큰·AWS 키·Bearer·`sk-`·개인 키 블록)을 `***` 로 바꾸는 방어용 이중 검사 | F16, API 4 |
+| 로그 마스킹 | Log masking | `app/core/log_masking.py::mask_secrets` · `mask_secrets_in_json` | 로그 응답 직전과 러너 입력·이벤트·결과 저장 직전에 알려진 비밀값 모양(GitHub 토큰·AWS 키·Bearer·`sk-`·Echo 토큰 `echo_agt_`·`echo_rnr_`·`echo_run_`·개인 키 블록)을 `***` 로 바꾸는 방어용 이중 검사 | F16, API 4 |
 | 트래픽 비율 | Traffic weight | `service_environments.traffic_weight` | 앞단 프록시에 **마지막으로 적용한** 비율(0~100). 실제 분배는 프록시(Envoy)가 한다. API 서버 3 에서는 가짜 대표 주소 라우터가 "적용했다"고 답한 값이며, 그 연결의 현재 배포 요청에 `simulated` 로 표시된다 | F3·F7 |
 | 비율 적용 시각 | Traffic applied at | `service_environments.traffic_applied_at` | 위 비율을 프록시에 적용한 시각 | F7 |
 | 어댑터 | Adapter | `app/adapters/<kind>.py` | 환경 종류마다 파일 하나. 설정 양식 + 동작 클래스를 함께 등록한다 | F2, NFR-15 |
@@ -100,7 +100,7 @@
 | 거부 기록 | Denial record | `audit_logs.result = DENIED` | 권한이 없어 막힌 요청(403) 한 줄. 요청과 따로 커밋한다 | F5, NFR-07·08 |
 | 행동 이름 | Audit action | `AuditAction`, `WRITE_ROUTE_ACTIONS` (`app/audit/actions.py`) / `audit_logs.action` | `DEPLOY_REQUESTED` 같은 고정 이름. 앱의 쓰기 경로(로그아웃 제외)는 모두 표에 이름이 있어야 한다(시험이 확인). API 서버 6 때 쌓인 거부 줄은 `METHOD 경로 틀` 문자열 그대로라 칸·응답은 문자열이다 | F5, API 7 |
 | 끝 줄 | Finish line | `SYSTEM` 줄 `DEPLOY_FINISHED`·`ROLLBACK_FINISHED`·`MIGRATION_FINISHED`·`SERVICE_DELETED` | 오래 걸리는 일이 끝 상태가 되는 순간 그 트랜잭션에 쓰는 한 줄. 접수 때의 USER 줄과 같은 대상 id 로 잇는다. 대상마다 하나 | F5, API 7 |
-| 감사 줄을 쓴 쪽 | Audit component | `AuditComponent` / `audit_logs.component` | SYSTEM 줄을 쓴 쪽. `deploy-worker`·`migration-worker`·`teardown-worker`, 사람 요청 안에서 서버 규칙으로 자동 종료한 것은 `api`(앞으로 `ai-runner`). 앱 로그의 `component`(`echo-api`)와 다르다 | API 7 |
+| 감사 줄을 쓴 쪽 | Audit component | `AuditComponent` / `audit_logs.component` | SYSTEM 줄을 쓴 쪽. `deploy-worker`·`migration-worker`·`teardown-worker`, 사람 요청 안에서 서버 규칙으로 자동 종료한 것은 `api`, AI 실행 가져가기·결과·시간 초과는 `ai-runner`. 앱 로그의 `component`(`echo-api`)와 다르다 | API 7 |
 | 감사 대상 | Audit target | `AuditTarget`, `audit_logs.target_type`·`target_id`·`target_label` | 행동의 대상(FK 없음). `target_label` 은 기록할 때 복사한 사람이 읽는 이름이라 대상이 바뀌거나 지워져도 그대로다 | F5, API 7 |
 | 정렬 순번 | Audit sequence | `audit_logs.seq` (identity) | 같은 시각 줄의 순서를 고정하는 칸. 정렬은 `created_at DESC, seq DESC` | API 7 |
 | 권한 검사기 | Organization guard | `require_org_role(min_role, human_only=False)` (`app/auth/guards.py`) | 조직 경로마다 거는 FastAPI 의존성. 로그인 → 조직 멤버 → 최소 역할 → Origin 순서로 본문·리소스보다 먼저 검사 | F4, NFR-07 |
@@ -136,6 +136,10 @@
 | 보안 게이트 | Security gate | `app/services/security_gate.py`, 설정 `SECURITY_GATE_ENABLED`(기본 꺼짐) | 이전 승인 때와 일꾼 시작 때 같은 규칙표로 실행 판정을 하고, 필수 통제가 FAIL·UNKNOWN 이고 유효한 예외가 없으면 막는 곳(승인 409 `SECURITY_GATE_BLOCKED`, 시작 `FAILED(SECURITY_GATE_BLOCKED)`). 판정 직전에 C-IMG-3·C-TLS-1 을 새로 확인한다 | F13·F7, 보안 5 |
 | AI 실행 이벤트 | Agent run event | `AgentRunEvent` / `agent_run_events` | 러너가 낸 진행 줄(seq·단계·수준·고정 문장·data). 같은 seq 는 무시(멱등) | F14·F17, 러너 계약 v1 |
 | AI 패치 결정 | Agent patch approval | `AgentPatchApproval` / `agent_patch_approvals` | AI 수정안 하나에 대한 사람의 결정(승인·거절). 지문 = 패치 해시 + 검사 요약 + 정책 버전. 승인하면 반영 실행이 생긴다. 개발자 이상의 사람만 | F15, 러너 계약 v1 |
+| 러너 토큰 · 실행 토큰 | Runner token · Run token | `echo_rnr_…`(`require_runner`) · `echo_run_…`(`require_run_token`) | 러너 토큰은 실행 가져가기만, 실행 토큰은 그 실행 하나의 하트비트·이벤트·결과만 한다. 둘 다 SHA-256 만 저장하고 모델에게 주지 않는다. 사람 쿠키·에이전트 토큰은 러너 경로에서 403 `RUNNER_FORBIDDEN` | F14, 러너 계약 v1 |
+| 입력 사본 | Input snapshot | `agent_runs.input_snapshot`, 응답 `inputSnapshot`·`inputHash` | 실행을 만들 때 고정한 입력(서비스·두 환경 설정·이미지·변수 이름·최근 증거). 비밀값·`secretRef`·변수 값이 없다. 같은 상태면 해시가 같다 | F14, 러너 계약 v1 |
+| 부를 때 만료 | Expire on call | `expire_overdue_runs`, `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 열린 실행을 일꾼 루프 없이 누가 부를 때 `TIMED_OUT` 으로 바꾸는 것(사전 점검 만들기·가져가기·실행 토큰 호출·취소). `GET` 은 쓰지 않는다 | 러너 계약 v1 |
+| AI 검토 여부 | AI reviewed | 응답 `aiReviewed` (저장 안 함, `model_id` 유무) | 결과에 모델이 있는가. false 는 "AI 검토 없음 · 규칙 비교만"이다. `simulated`(값을 지어냈는가)와 따로 본다. 실제 입력으로 규칙 비교만 한 러너는 `simulated = false` + `aiReviewed = false` 이고 C-AI-1 증거가 된다 | F14, D-1 |
 
 ---
 
@@ -242,6 +246,11 @@
 | `QUEUED` → `CLAIMED` → `RUNNING` → `SUCCEEDED`·`FAILED`·`TIMED_OUT`·`CANCELLED` | `agent_runs.status` (`AgentRunStatus`) | `CLAIMED`·`RUNNING` 은 러너·실행 토큰 해시·임대가 있다. 끝 상태는 `finished_at` 이 있다 |
 | `SANDBOX_CREATE` · `INPUT_LOAD` · `CONFIG_DIFF` · `ANALYZE` · `PATCH_PROPOSE` · `PATCH_VERIFY` · `SANDBOX_DELETE` | `agent_run_events.step` (`AgentRunStep`) | 러너 진행 단계(러너 `RunStep` 과 같은 값) |
 | `APPROVED` · `REJECTED` | `agent_patch_approvals.decision` (`AgentPatchDecision`) | 사람의 결정. `BLOCKED` 패치는 승인할 수 없다 |
+| `DEADLINE` · `LEASE_EXPIRED` · `DEADLINE_EXCEEDED` | `agent_runs.failure_code` (`AgentRunFailureCode`, 자유 문자열 칸) | 러너가 마감 전에 끝내지 못해 낸 실패 · WAS: 임대 끊김 · WAS: 마감 지남. 러너는 `^[A-Z][A-Z0-9_]{0,31}$` 인 다른 코드(`RUNNER_ERROR` 등)도 낼 수 있다 |
+| `RULE` · `AI` | 결과 `origin` (`AgentRunOrigin`) | 고정 규칙 비교 · 모델 판단. `AI` finding 은 PASS 를 낼 수 없고 `UNCONFIRMED` 로 저장한다 |
+| `INFO` · `WARN` · `FAIL` | 결과 `severity` (`AgentRunSeverity`) | 설정 차이·기능 차이의 심각도 |
+| `PROPOSED` · `BLOCKED` | 결과 `patches[].status` (`AgentPatchStatus`) | WAS 가 다시 계산한 패치 상태. 러너 값은 받지 않는다 |
+| `PROTECTED_FILES_TOUCHED` · `CHECKS_MISSING` · `CHECK_NOT_PASSED` | 결과 `patches[].blockReason` (`AgentPatchBlockReason`) | `BLOCKED` 인 이유 |
 
 ### 환경 종류 (`environments.kind`)
 

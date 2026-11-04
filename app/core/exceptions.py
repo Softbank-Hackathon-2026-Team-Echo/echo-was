@@ -567,3 +567,71 @@ class SecretStoreForbiddenError(ExternalError):
 
     def __init__(self) -> None:
         super().__init__("the app secret store denied access")
+
+
+class RunnerTokenInvalidError(UnauthorizedError):
+    """러너·실행 토큰이 없거나 형식이 틀리거나 무효다. 토큰 원문은 어디에도 넣지 않는다."""
+
+    code = "RUNNER_TOKEN_INVALID"
+
+    def __init__(self) -> None:
+        super().__init__("runner or run token is missing or invalid")
+
+
+class RunnerForbiddenError(ForbiddenError):
+    """러너 경로에 사람(쿠키)·에이전트 토큰으로 왔다. 거부 줄은 남기지 않는다."""
+
+    code = "RUNNER_FORBIDDEN"
+
+    def __init__(self) -> None:
+        super().__init__("runner routes accept runner and run tokens only")
+
+
+class RunNotActiveError(ConflictError):
+    """실행이 끝났거나 임대·마감이 지났다."""
+
+    code = "RUN_NOT_ACTIVE"
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__("run is not active", run_id=run_id)
+
+
+class ResultAlreadySubmittedError(ConflictError):
+    """이미 끝난 실행에 결과를 냈다."""
+
+    code = "RESULT_ALREADY_SUBMITTED"
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__("run has already finished", run_id=run_id)
+
+
+class ResultInvalidError(InvalidInputError):
+    """러너의 이벤트·결과가 형식·크기·AI PASS 규칙에 맞지 않는다. details 에 칸과 이유만 싣는다."""
+
+    code = "RESULT_INVALID"
+
+    def __init__(self, details: Sequence[ErrorField] | None = None) -> None:
+        super().__init__("runner payload is invalid", details=details)
+
+
+class PrecheckInProgressError(ConflictError):
+    """그 서비스에 끝나지 않은 AI 실행이 있다. details 에 그 실행 id 를 싣는다."""
+
+    code = "PRECHECK_IN_PROGRESS"
+
+    def __init__(self, run_id: str | None = None) -> None:
+        details = (
+            [ErrorField(field="runId", reason="PRECHECK_IN_PROGRESS", value=run_id)]
+            if run_id
+            else None
+        )
+        super().__init__("service already has an open agent run", details=details)
+
+
+class PrecheckNotFoundError(NotFoundError):
+    """사전 점검이 없다. 다른 조직 것과 PRECHECK 가 아닌 실행도 같다."""
+
+    code = "PRECHECK_NOT_FOUND"
+
+    def __init__(self, precheck_id: str) -> None:
+        super().__init__("precheck not found", precheck_id=precheck_id)

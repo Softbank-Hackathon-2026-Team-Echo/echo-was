@@ -28,6 +28,8 @@ from app.routers import (
     invitation_router,
     migration_plan_router,
     organization_router,
+    precheck_router,
+    runner_router,
     security_exception_router,
     security_router,
     service_router,
@@ -82,6 +84,8 @@ app.include_router(migration_plan_router.router)
 app.include_router(audit_log_router.router)
 app.include_router(security_router.router)
 app.include_router(security_exception_router.router)
+app.include_router(precheck_router.router)
+app.include_router(runner_router.router)
 
 
 @app.get("/healthz", status_code=status.HTTP_204_NO_CONTENT)

@@ -674,3 +674,41 @@ class AgentPatchDecision(StrEnum):
 
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+
+
+class AgentRunOrigin(StrEnum):
+    """러너 결과 한 줄의 출처. RULE 은 고정 규칙 비교, AI 는 모델 판단이다."""
+
+    RULE = "RULE"
+    AI = "AI"
+
+
+class AgentRunSeverity(StrEnum):
+    """설정 차이·기능 차이의 심각도."""
+
+    INFO = "INFO"
+    WARN = "WARN"
+    FAIL = "FAIL"
+
+
+class AgentPatchStatus(StrEnum):
+    """AI 수정안 상태. 러너 값을 믿지 않고 WAS 가 검사 결과로 다시 계산한다."""
+
+    PROPOSED = "PROPOSED"
+    BLOCKED = "BLOCKED"
+
+
+class AgentPatchBlockReason(StrEnum):
+    """수정안이 BLOCKED 인 이유."""
+
+    PROTECTED_FILES_TOUCHED = "PROTECTED_FILES_TOUCHED"
+    CHECKS_MISSING = "CHECKS_MISSING"
+    CHECK_NOT_PASSED = "CHECK_NOT_PASSED"
+
+
+class AgentRunFailureCode(StrEnum):
+    """실행 실패 이유 중 약속한 값. 러너는 그 밖의 코드도 낼 수 있어 DB 칸은 자유 문자열이다."""
+
+    DEADLINE = "DEADLINE"  # 러너가 마감 전에 끝내지 못해 스스로 실패로 냈다.
+    LEASE_EXPIRED = "LEASE_EXPIRED"  # WAS: 러너의 임대가 끊겼다.
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"  # WAS: 마감이 지났다.

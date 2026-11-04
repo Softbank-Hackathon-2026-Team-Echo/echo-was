@@ -120,7 +120,7 @@ app/
 ├─ worker/         # 일꾼 (python -m app.worker): 할 일 폴링·임대·종료 신호
 ├─ adapters/       # 환경 종류별 설정 양식 + 동작 클래스 (aws.py · gcp.py · onprem.py) + 레지스트리
 ├─ models/         # SQLAlchemy 모델 (표 17개)
-├─ scripts/        # demo_seed (데모 조직·멤버·에이전트 토큰)
+├─ scripts/        # demo_seed (데모 조직·멤버·에이전트 토큰) · issue_runner_token (AI 러너 토큰 발급·철회)
 ├─ schemas/        # 공통 응답 봉투, 환경·서비스·배포 요청 API 요청·응답
 ├─ core/           # 설정·DB 엔진·예외·로깅·요청 ID 미들웨어·비밀값 타입·시계·저장소 주소·로그 마스킹
 ├─ dependencies.py # Depends 주입 함수(세션·서비스·어댑터·소스·GitHub 사용자 클라이언트·시계·로그용 실행기 묶음)
@@ -282,6 +282,17 @@ uv run --env-file .env python -m app.scripts.demo_seed --org team-echo --admin <
 
 조직이 없으면 만들고 `--admin` 을 ADMIN, `--viewer` 를 VIEWER 로 맞춘 뒤 에이전트 토큰 하나를 발급해 원문을 표준 출력에 한 번 쓴다. 두 번 돌려도 조직·멤버는 늘지 않는다. 로그인한 적 없는 아이디나 남이 만든 같은 slug 조직이면 실패한다. 자세한 내용은 [docs/api/organizations.md](docs/api/organizations.md#데모-준비-명령).
 
+### AI 러너 토큰
+
+샌드박스 VM 의 러너(echo-ai-agent)가 WAS 를 부를 토큰이다. 새 환경 변수는 없다(마감 15분·임대 60초는 코드 상수). 배포된 API 와 같은 DB 설정으로 어드민이 한 번 돌린다.
+
+```bash
+uv run --env-file .env python -m app.scripts.issue_runner_token --name echo-sandbox-runner    # 발급
+uv run --env-file .env python -m app.scripts.issue_runner_token --revoke echo-sandbox-runner  # 철회(바로 401)
+```
+
+운영 WAS 파드 안에서는 `python -m app.scripts.issue_runner_token --name echo-sandbox-runner` 다. 출력된 원문은 **GCP Secret Manager 비밀 `echo-runner-token` 에만** 넣고(VM 서비스 계정에 그 비밀 읽기만 준다), 채팅·로그·`.env` 에 남기지 않는다. DB 에는 SHA-256 만 있어 다시 볼 수 없다. 이름이 있으면(철회한 이름 포함) 발급이 실패하므로 교체는 새 이름으로 한다. 계약은 [docs/agent-runner.md](docs/agent-runner.md), C-AI-1 을 실제로 판정하려면 `SECURITY_GATE_ENABLED=true` 가 필요하다(기본 꺼짐, 켜면 다른 필수 통제도 판정한다).
+
 자주 쓰는 명령
 
 ```bash
@@ -392,7 +403,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 - 업무 API 는 로그인·조직·환경·서비스·배포 요청 API 다. **실제 GitHub 로그인은 GitHub App 설정 뒤에만 된다**(시험은 가짜 GitHub 를 의존성 교체로 쓴다). API 2·3 경로는 모두 `/api/v1/orgs/{orgId}` 아래로 옮겼다(깨지는 변경, 프론트 미연결).
 - **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
 - **이전 계획의 트래픽·지표·복제 확인은 가짜다**(`simulated: true`). 비율 칸·로그·판정 흐름은 실제이고, 실제 Envoy(인프라 6, 시연용은 늦으면 지민)·OpenTelemetry(인프라 9)·복제(인프라 7)가 붙으면 실행기만 바꾼다. 실제 연결 확인 전에는 이슈 #8 을 `In Progress` 로 둔다. 판정 최소 표본 수는 없다(실제 지표 연결 때 다시 본다). 예비·주력 동시 배포, 단계별 사람 승인, 비율 목록 변경은 하지 않는다.
-- AI 반영 엔드포인트는 아직 없다. 그들이 걸 검사기(`require_org_role(DEVELOPER, human_only=True)` 등)와 감사 기록 함수(`AuditRecorder`)는 있다.
+- **AI 사전 점검 API·러너 계약은 있지만 러너 쪽은 별도다.** 러너 스크립트는 echo-ai-agent 에 있고, 러너 토큰은 배포 뒤 발급한다. 패치 승인·거절·`APPLY_PATCH`, AI 결과의 `findings` 표 저장, `blockedAttempts` 와 감사 줄 맞추기, 계획 만들 때 최신 점검 필수화, 주기 만료(일꾼 루프)는 2차다. 실행 시간 초과는 누가 부를 때 저장한다([docs/agent-runner.md](docs/agent-runner.md)).
 - **감사 로그의 범위**: 실시간 알림·보관 기간·내보내기·외부 수집기는 없다. 배포 요청 표·이력 응답에는 요청자 칸이 없고, 누가 눌렀는지는 감사 로그로 읽는다(`targetId`). 롤아웃 수 분 동안 옛 파드가 처리한 작업은 성공 줄이 없을 수 있다. 운영 스키마는 forward-only 다([docs/api/audit-logs.md](docs/api/audit-logs.md)).
 - **빌드·실행 로그는 기본(가짜 모드)에서 가짜 실행기가 만든 줄이다**(`simulated: true`). `EXECUTOR_MODE=real` 이면 Actions 잡 로그·앱 파드 로그를 즉석으로 읽는다(실행기 묶음은 API 프로세스당 하나). 가짜로 만든 기록을 실제 모드에서 읽으면 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
 - 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
@@ -418,6 +429,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/api/services.md](docs/api/services.md) | 서비스 API 계약(등록·수정·삭제, 역할·버전 상태, `simulated` 뜻) |
 | [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포·이력·되돌리기·로그 API 계약(접수 규칙·진행 단계·실패 코드·로그 줄) |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획 API 계약(만들기 거절 순서·승인·지문·단계 실행·롤백·중단·로그·`simulate`) |
+| [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 API(사람 쪽) · 러너 계약(토큰·임대·이벤트·`RunResult`·감사·발급 명령) |
 | [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·로그 읽기·마스킹·가짜 구현) |
 | [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md) | AI 도구용 작업 규칙 |
 | [.claude/rules/](.claude/rules/) | 용어 사전·DB 스키마(DDL)·마이그레이션·백엔드·Git 규칙 |

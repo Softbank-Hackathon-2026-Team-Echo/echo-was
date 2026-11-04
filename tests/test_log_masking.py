@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.core.log_masking import MASK, mask_secrets
+from app.core.log_masking import MASK, mask_secrets, mask_secrets_in_json
 from app.enums import DeployLogCode, DeployRequestErrorCode, LogLevel
 from app.services.deploy_log_messages import (
     DEPLOY_LOG_ENTRIES,
@@ -22,6 +22,10 @@ GITHUB_TOKENS = [prefix + "_" + "Ab1" * 8 for prefix in ("ghp", "gho", "ghu", "g
         ("Authorization: Bearer abc.def-ghi_jkl==", f"Authorization: Bearer {MASK}"),
         ("authorization: bearer abc123xyz", f"authorization: bearer {MASK}"),
         ("OPENAI_API_KEY=sk-proj_ABCDEFGHIJKLMNOPQRSTUV", f"OPENAI_API_KEY={MASK}"),
+        *[
+            (f"token={prefix}{'Ab1-_' * 5} end", f"token={MASK} end")
+            for prefix in ("echo_agt_", "echo_rnr_", "echo_run_")
+        ],
         (
             f"before\n{TEST_APP_PRIVATE_KEY_PEM.strip()}\nafter",
             f"before\n{MASK}\nafter",
@@ -86,3 +90,25 @@ def test_failed_line_uses_error_code_sentence() -> None:
         deploy_log_message(DeployLogCode.FAILED, DeployRequestErrorCode.DEPLOY_TIMEOUT)
         == ERROR_MESSAGES[DeployRequestErrorCode.DEPLOY_TIMEOUT]
     )
+
+
+def test_mask_secrets_keeps_short_echo_prefix_words() -> None:
+    assert mask_secrets("echo_run_ short echo_rnr_abc") == "echo_run_ short echo_rnr_abc"
+
+
+def test_mask_secrets_in_json_masks_each_string_and_keeps_structure() -> None:
+    token = "echo_run_" + "a" * 20
+    truncated_key = "-----BEGIN PRIVATE KEY-----\nMIIEv (truncated)"
+    value = {
+        "keep": [1, True, None, "plain"],
+        "nested": {"note": f"bearer {token}", token: "key is masked"},
+        "pem": truncated_key,
+        "after": "stays",
+    }
+
+    assert mask_secrets_in_json(value) == {
+        "keep": [1, True, None, "plain"],
+        "nested": {"note": f"bearer {MASK}", MASK: "key is masked"},
+        "pem": MASK,
+        "after": "stays",
+    }

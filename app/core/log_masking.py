@@ -5,6 +5,7 @@
 """
 
 import re
+from typing import Any
 
 MASK = "***"
 
@@ -20,6 +21,7 @@ _TOKENS = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{20,}"  # GitHub 토큰(설치 토큰 ghs_ 등)
     r"|AKIA[0-9A-Z]{16}"  # AWS 액세스 키
     r"|sk-[A-Za-z0-9_-]{20,}"  # API 비밀 키
+    r"|echo_(?:agt|rnr|run)_[A-Za-z0-9_-]{20,}"  # Echo 에이전트·러너·실행 토큰
 )
 
 
@@ -27,3 +29,18 @@ def mask_secrets(text: str) -> str:
     masked = _PRIVATE_KEY_BLOCK.sub(MASK, text)
     masked = _BEARER.sub(rf"\1 {MASK}", masked)
     return _TOKENS.sub(MASK, masked)
+
+
+def mask_secrets_in_json(value: Any) -> Any:
+    """JSON 값의 모든 문자열(키 포함)을 가린 사본.
+
+    직렬화한 글자 전체에 mask_secrets 를 걸면 잘린 개인 키 블록이 뒤따르는 JSON 구조까지 지워
+    다시 읽을 수 없게 되므로 문자열마다 건다.
+    """
+    if isinstance(value, str):
+        return mask_secrets(value)
+    if isinstance(value, list):
+        return [mask_secrets_in_json(item) for item in value]
+    if isinstance(value, dict):
+        return {mask_secrets(key): mask_secrets_in_json(item) for key, item in value.items()}
+    return value

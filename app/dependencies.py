@@ -31,6 +31,7 @@ from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_factory
 from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
+from app.services.agent_run_service import AgentRunService
 from app.services.agent_token_service import AgentTokenService
 from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
@@ -47,6 +48,7 @@ from app.services.invitation_service import InvitationService
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.precheck_service import PrecheckService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.security_matrix_service import SecurityMatrixService
@@ -463,3 +465,17 @@ def get_security_matrix_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityMatrixService:
     return SecurityMatrixService(session=session, clock=clock)
+
+
+def get_precheck_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> PrecheckService:
+    return PrecheckService(session, clock)
+
+
+def get_agent_run_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> AgentRunService:
+    return AgentRunService(session, clock)

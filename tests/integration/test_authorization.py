@@ -84,6 +84,7 @@ def _org_rule(min_role: OrganizationRole, *, human_only: bool, method: str) -> d
 
 HUMAN_ANYWHERE = {actor: _OK for actor in ACTORS} | {"anonymous": "401", "agent": "403"}
 LOGGED_IN_ANYWHERE = {actor: _OK for actor in ACTORS} | {"anonymous": "401"}
+RUNNER_ONLY = {actor: "403" for actor in ACTORS} | {"anonymous": "401"}
 V, D, A = OrganizationRole.VIEWER, OrganizationRole.DEVELOPER, OrganizationRole.ADMIN
 
 
@@ -157,8 +158,18 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/security/exceptions", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/approve", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/revoke", D, human_only=True),
+    # --- AI 러너 레인 A: 사전 점검(조회는 뷰어·에이전트, 만들기·취소는 개발자 이상 사람) ---
+    _org("GET", "/prechecks/{precheck_id}", V),
+    _org("GET", "/prechecks/{precheck_id}/logs", V),
+    _org("POST", "/prechecks", D, human_only=True),
+    _org("POST", "/prechecks/{precheck_id}/cancel", D, human_only=True),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
+    # 러너 경로는 러너·실행 토큰만 받는다(사람 쿠키·에이전트 토큰은 403).
+    ("POST", "/api/v1/runner/runs:claim", RUNNER_ONLY),
+    ("POST", "/api/v1/runner/runs/{run_id}/heartbeat", RUNNER_ONLY),
+    ("POST", "/api/v1/runner/runs/{run_id}/events", RUNNER_ONLY),
+    ("POST", "/api/v1/runner/runs/{run_id}/result", RUNNER_ONLY),
 ]
 
 

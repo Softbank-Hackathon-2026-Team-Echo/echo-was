@@ -560,13 +560,14 @@ stateDiagram-v2
 ### ④-6 AI 실행 상태 흐름 (`agent_runs.status`, WAS ↔ 러너 계약 v1)
 
 ```text
-QUEUED ──(러너가 가져감: 러너·실행 토큰 해시·임대)──▶ CLAIMED ──(시작)──▶ RUNNING ──▶ SUCCEEDED | FAILED
-   │                                                    │                       │
-   └──(사람이 취소)──▶ CANCELLED ◀──────────────────────┴───────────────────────┤
-                                       임대·마감이 지나면 ──────────────────────▶ TIMED_OUT
+QUEUED ──(러너가 가져감: 러너·실행 토큰 해시·임대)──▶ CLAIMED ──(첫 하트비트·이벤트)──▶ RUNNING ──▶ SUCCEEDED | FAILED
+   │                                                    │                                  │
+   └──(사람이 취소)──▶ CANCELLED ◀──────────────────────┴──────────────────────────────────┤
+                                       임대·마감이 지나면 ─────────────────────────────────▶ TIMED_OUT
 ```
 
-- 상태는 조건부 UPDATE 로만 바꾼다. 끝 상태에는 `finished_at` 이 있고 실행 토큰은 무효다. 자동 재시도는 없다(사람이 새 실행을 만든다).
+- 상태는 조건부 UPDATE 로만 바꾼다. 끝 상태에는 `finished_at` 이 있고 실행 토큰은 상태로 무효가 된다(해시는 남는다). 자동 재시도는 없다(사람이 새 실행을 만든다).
+- 결과는 `CLAIMED`·`RUNNING` 모두에서 받는다. 일꾼 루프가 없어 `TIMED_OUT` 은 누가 부를 때 바꾼다. API 계약은 [docs/api/prechecks.md](api/prechecks.md), [docs/agent-runner.md](agent-runner.md).
 
 ### ④-2 환경 접속 상태 흐름 (`environments.connection_status`)
 
