@@ -6,6 +6,7 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-04T00:13Z · app/models/finding.py (Write, 훅 미기록분 수기) · findings 표 신규(보안 증거, CHECK 12개·FK 4개·ix_findings_organization_id_control_id_collected_at) (revision eee7a6c8229f)
 - 2026-11-03T09:23Z · app/models/migration_plan.py (스크립트 편집, 훅 미기록분 수기) · mode 칸(String(16) NOT NULL 기본 'PLANNED', 맨 뒤) + ck_migration_plans_mode_valid 추가 (revision a83f2c1d9e47)
 - 2026-11-03T03:55Z · app/enums.py (Edit, 모델 파일 아님 — 훅 미기록분 수기) · MigrationErrorCode 에 TARGET_NOT_RECEIVING 추가 → ck_migration_plans_error_code_valid 넓힘 (revision 6d89c52e39a4)
 - 2026-11-02T13:22Z · app/models/migration_plan.py (Write) · 신규/동일

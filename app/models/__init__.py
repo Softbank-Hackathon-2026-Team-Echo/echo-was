@@ -7,6 +7,7 @@ from app.models.deploy_request import DeployRequest
 from app.models.deploy_request_log import DeployRequestLog
 from app.models.deployment import Deployment
 from app.models.environment import Environment
+from app.models.finding import Finding
 from app.models.invitation import Invitation
 from app.models.job import Job
 from app.models.migration_plan import MigrationPlan
@@ -26,6 +27,7 @@ __all__ = [
     "DeployRequestLog",
     "Deployment",
     "Environment",
+    "Finding",
     "Invitation",
     "Job",
     "MigrationPlan",

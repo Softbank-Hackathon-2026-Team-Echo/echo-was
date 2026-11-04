@@ -586,3 +586,5 @@ class SecurityFindingReason(StrEnum):
     # 시간 초과·연결 불가는 확인하지 못한 것이다(UNKNOWN).
     TLS_TIMEOUT = "TLS_TIMEOUT"
     TLS_UNREACHABLE = "TLS_UNREACHABLE"
+    # 사람 점검 기록. 결과는 점검자가 정한 값(result)이다.
+    MANUAL_REVIEW_RECORDED = "MANUAL_REVIEW_RECORDED"
