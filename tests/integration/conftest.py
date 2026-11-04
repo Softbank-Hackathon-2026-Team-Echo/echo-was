@@ -65,6 +65,12 @@ TABLES = (
     "jobs",
     # --- 보안·거버넌스 2: 보안 증거 ---
     "findings",
+    # --- 보안·AI 기반 스키마: 기한부 예외·AI 실행 ---
+    "security_exceptions",
+    "agent_patch_approvals",
+    "agent_run_events",
+    "agent_runs",
+    "agent_runners",
     # --- API 서버 8: 이전 계획 ---
     "migration_plan_logs",
     "migration_plans",

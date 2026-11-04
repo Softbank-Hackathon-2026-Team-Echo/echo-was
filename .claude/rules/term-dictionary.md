@@ -117,6 +117,11 @@
 | 고정 진입점 | Entrypoint | `app/executors/entrypoint.py`, 설정 `ENTRYPOINT_*` | echo-infra 인프라 5 의 Envoy + 가중치 API(`PUT /weights`·`GET /summary`, 누적 카운터 `GET /counters`). 진입점 환경 이름(`aws`·`gcp`)은 환경 종류와 같고, 다르면 `ENTRYPOINT_ENVIRONMENT_MAP` 으로 환경 id 를 잇는다 | F6·F7·F17, API 8-2 |
 | 진입점 업스트림 없음 | Entrypoint no hosts | `ENTRYPOINT_NO_HOSTS` (`CountsUnavailable.code`) | `GET /counters` 의 그 환경 항목 `hosts` 가 0(그 환경으로 갈 업스트림이 없음). 0건을 트래픽 적음으로 통과시키지 않으려고 판단 불가로 돌려준다(마감에 `METRICS_UNAVAILABLE` 롤백). `hosts` 키가 없으면 보지 않는다 | F7, API 8-2 |
 | 조직 열쇠 키 | Organization secret key | `organization_secret_key(slug)` | slug 의 `-` 를 `_` 로 바꾸고 대문자(`team-echo` → `TEAM_ECHO`). `env:` 비밀 참조는 `ECHO_SECRET_{키}__` 로 시작해야 한다 | F16 |
+| 기한부 예외 | Security exception | `SecurityException` / `security_exceptions` — 판정 입력 `security_rules.SecurityException` | 통제 하나를 범위 안에서 최대 7일 막지 않게 하는 기록. 사람이 요청·승인(둘 다 `users` FK)하고, 사유·만료가 있어야 하며 철회할 수 있다. 걸린 통제는 PASS 가 아니라 WARN. 자기 승인은 조직 스위치를 따른다 | F13, 보안 3 |
+| AI 러너 | Agent runner | `AgentRunner` / `agent_runners` | 샌드박스 VM 의 AI 러너 신원(조직에 묶이지 않음). 러너 토큰 `echo_rnr_…` 은 어드민 명령으로만 발급하고 SHA-256 만 둔다. 실행 가져가기만 한다 | F14, 러너 계약 v1 |
+| AI 실행 | Agent run | `AgentRun` / `agent_runs` | AI 가 샌드박스에서 하는 일 한 번(사전 점검 `PRECHECK`·승인한 패치 반영 `APPLY_PATCH`). 만들 때 입력(`input_snapshot`, 비밀 참조만)과 해시를 고정한다. 서비스당 열린 실행 하나, 마감 15분·임대 60초, 자동 재시도 없음. 실행 토큰(`echo_run_…`)은 그 실행 하나만 제출한다 | F14·F15, 러너 계약 v1 |
+| AI 실행 이벤트 | Agent run event | `AgentRunEvent` / `agent_run_events` | 러너가 낸 진행 줄(seq·단계·수준·고정 문장·data). 같은 seq 는 무시(멱등) | F14·F17, 러너 계약 v1 |
+| AI 패치 결정 | Agent patch approval | `AgentPatchApproval` / `agent_patch_approvals` | AI 수정안 하나에 대한 사람의 결정(승인·거절). 지문 = 패치 해시 + 검사 요약 + 정책 버전. 승인하면 반영 실행이 생긴다. 개발자 이상의 사람만 | F15, 러너 계약 v1 |
 
 ---
 
@@ -213,6 +218,15 @@
 | `CONTROL_FAILED` · `CONTROL_WARNING` · `EVIDENCE_UNKNOWN` · `EVIDENCE_MISSING` · `EVIDENCE_EXPIRED` · `EVIDENCE_SIMULATED` · `EVIDENCE_INCOMPLETE` · `SOURCE_NOT_ALLOWED` · `SCOPE_MISMATCH` · `POLICY_VERSION_MISMATCH` · `PRECHECK_MISSING` · `AI_UNCONFIRMED` · `AI_ESCALATED` · `EXCEPTION_APPLIED` · `EXCEPTION_EXPIRED` · `NOT_APPLICABLE` | 판정 사유 (`SecurityReasonCode`) | 게이트가 막으면 통제 ID 와 함께 돌려준다(기계 판독용) |
 | `NO_ISSUES` · `FIXABLE_HIGH_VULNERABILITY` · `VULNERABILITY_WARNING` · `SECRET_FOUND` · `MISCONFIGURATION_HIGH` · `MISCONFIGURATION_WARNING` · `ARTIFACT_MISMATCH` · `REPORT_INVALID` · `TLS_OK` · `TLS_CERT_INVALID` · `TLS_HOSTNAME_MISMATCH` · `TLS_EXPIRES_SOON` · `TLS_VERSION_TOO_LOW` · `TLS_HANDSHAKE_FAILED` · `TLS_TIMEOUT` · `TLS_UNREACHABLE` · `MANUAL_REVIEW_RECORDED` | 정규화 이유 (`findings.reason`, `SecurityFindingReason`, 보안 2, DB CHECK 없음) | 검사 원문을 증거로 바꾸며 정한 이유. 증거 한 건에 하나. 원문이 다른 대상 것이거나(`ARTIFACT_MISMATCH`) 모양이 틀리면(`REPORT_INVALID`) UNKNOWN, TLS 시간 초과·연결 불가도 UNKNOWN |
 
+### AI 실행 값 (러너 계약 v1)
+
+| 값 목록 | 표·칸 | 뜻 |
+|---|---|---|
+| `PRECHECK` · `APPLY_PATCH` · `CHANGE_PROPOSAL` | `agent_runs.kind` (`AgentRunKind`) | 사전 점검(차이 분석·점검·수정안 생성·검증) · 승인한 패치를 시나리오 사본에 반영 · (P1) 수정안만 |
+| `QUEUED` → `CLAIMED` → `RUNNING` → `SUCCEEDED`·`FAILED`·`TIMED_OUT`·`CANCELLED` | `agent_runs.status` (`AgentRunStatus`) | `CLAIMED`·`RUNNING` 은 러너·실행 토큰 해시·임대가 있다. 끝 상태는 `finished_at` 이 있다 |
+| `SANDBOX_CREATE` · `INPUT_LOAD` · `CONFIG_DIFF` · `ANALYZE` · `PATCH_PROPOSE` · `PATCH_VERIFY` · `SANDBOX_DELETE` | `agent_run_events.step` (`AgentRunStep`) | 러너 진행 단계(러너 `RunStep` 과 같은 값) |
+| `APPROVED` · `REJECTED` | `agent_patch_approvals.decision` (`AgentPatchDecision`) | 사람의 결정. `BLOCKED` 패치는 승인할 수 없다 |
+
 ### 환경 종류 (`environments.kind`)
 
 | 값 | 설정 양식 | `config` 필드 | 위치 |
@@ -284,14 +298,12 @@
 | 우리말 | 표준 영문 | 예정 표 | 뜻 | 근거 | 담당 |
 |---|---|---|---|---|---|
 | 감사 로그\* | Audit log | `audit_logs` (거부 기록만 API 서버 6 이 만듦) | 누가(사람·AI 에이전트) 무엇을 언제 했는지. 지우지 않는다. 거부 밖의 행위 기록·조회 API 가 후속 | F5, NFR-08 | API 서버 7 |
-| 승인(에이전트 변경)\* | Approval (agent change) | (에이전트 변경에 붙음) | AI 수정의 운영 반영을 개발자 이상의 사람이 허락한 기록. 이전 계획 승인은 §2 | F15 | AI 파트 |
 | 사전 점검\* | Preflight check | (미정) | 이전 전 점검 | F11 | API 서버 8 |
 | 정책 | Policy | 표 없음 — 코드 `app/services/security_rules.py::RULES`, 버전 `POLICY_VERSION`(`sec-rules-YYYY.MM.DD`) | 모든 환경에 같이 적용하는 **버전이 붙은 보안 규칙표**(통제마다 필수 여부·판정 시점·범위·받는 출처·유효기간). 저장소 안 코드 + 시험으로 관리하고 통제를 끄는 설정이 없다. 규칙을 바꾸면 버전을 올린다 | F13, 보안 3 | 보안 파트 |
 | finding\* | Finding | `findings` (보안 2) — 판정 입력 `SecurityFinding` | 클라우드별 보안 결과를 공통 스키마로 정규화한 한 건(통제·결과·모드·출처·범위·수집 시각·만료·정책 버전). 판정에서는 증거로 쓰여 사유 코드는 `EVIDENCE_*` 로 부른다 | F12, 보안 2·3 | 보안 파트 |
-| 기한부 예외\* | Security exception | `security_exceptions` (가칭) — 판정 입력 `SecurityException` | 통제 하나를 범위 안에서 최대 7일 막지 않게 하는 기록. 사유·사람 승인자·만료가 있어야 하고 AGENT 는 만들거나 승인할 수 없다. 걸린 통제는 PASS 가 아니라 WARN 으로 보인다 | F13, 보안 3 | 보안 파트 |
 | 보안 판정\* | Security decision | `security_decisions` (가칭) — `SecurityDecision` | 판정 한 번의 결과(정책 버전·시점·계획 종류·통제별 결과·사유·증거·예외 ID). 사람 승인 이전과 사전 승인 자동 DR 이 같은 함수·같은 표를 쓴다 | F13, 보안 3·5 | 보안 파트 |
-| 에이전트\* | Agent | (미정) | 플랫폼에 들어 있는 AI 에이전트. 샌드박스 쓰기 + 운영 읽기만 | F14·F16 | AI 파트 |
-| 샌드박스\* | Sandbox | (미정) | 에이전트가 점검·수정을 시험하는 격리 공간(별도 네임스페이스 또는 VM) | F14·F15 | AI 파트 |
+| 에이전트\* | Agent | 실행 `agent_runs`(§2 AI 실행) | 플랫폼에 들어 있는 AI 에이전트. 샌드박스 쓰기 + 운영 읽기만 | F14·F16 | AI 파트 |
+| 샌드박스\* | Sandbox | 표 없음 — echo-infra `gcp/ai-sandbox`(VM) · echo-ai-agent 러너 | 에이전트가 점검·수정을 시험하는 격리 공간(별도 네임스페이스 또는 VM) | F14·F15 | AI 파트 |
 | 측정 기록\* | Migration measurement | (미정) | 이전 중 오류율·지연 등 자동 기록 | F17 | 관측 담당 |
 
 ---

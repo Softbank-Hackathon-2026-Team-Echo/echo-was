@@ -588,3 +588,46 @@ class SecurityFindingReason(StrEnum):
     TLS_UNREACHABLE = "TLS_UNREACHABLE"
     # 사람 점검 기록. 결과는 점검자가 정한 값(result)이다.
     MANUAL_REVIEW_RECORDED = "MANUAL_REVIEW_RECORDED"
+
+
+# --- AI 에이전트 실행 (WAS ↔ 러너 계약 v1) ---
+# 원본: echo-ai-agent specs/ai-1-appendix-a-was-runner-contract.md
+
+
+class AgentRunKind(StrEnum):
+    """AI 실행 종류. CHANGE_PROPOSAL 은 P1."""
+
+    PRECHECK = "PRECHECK"
+    APPLY_PATCH = "APPLY_PATCH"
+    CHANGE_PROPOSAL = "CHANGE_PROPOSAL"
+
+
+class AgentRunStatus(StrEnum):
+    """QUEUED → CLAIMED → RUNNING → SUCCEEDED·FAILED·TIMED_OUT·CANCELLED. 자동 재시도 없음."""
+
+    QUEUED = "QUEUED"
+    CLAIMED = "CLAIMED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+    CANCELLED = "CANCELLED"
+
+
+class AgentRunStep(StrEnum):
+    """러너 진행 이벤트의 단계(러너 `RunStep` 과 같은 값)."""
+
+    SANDBOX_CREATE = "SANDBOX_CREATE"
+    INPUT_LOAD = "INPUT_LOAD"
+    CONFIG_DIFF = "CONFIG_DIFF"
+    ANALYZE = "ANALYZE"
+    PATCH_PROPOSE = "PATCH_PROPOSE"
+    PATCH_VERIFY = "PATCH_VERIFY"
+    SANDBOX_DELETE = "SANDBOX_DELETE"
+
+
+class AgentPatchDecision(StrEnum):
+    """AI 패치에 대한 사람의 결정. BLOCKED 패치는 승인할 수 없다(API 가 막는다)."""
+
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
