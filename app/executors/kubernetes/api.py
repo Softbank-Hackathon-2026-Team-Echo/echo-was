@@ -125,6 +125,20 @@ class KubeApi:
         _check(response)
         return True
 
+    async def replace(self, path: str, manifest: dict[str, Any]) -> bool:
+        """통째로 바꾼다(PUT). 그사이 바뀌었거나(409) 사라졌으면(404) False."""
+        response = await self._send(
+            "PUT",
+            path,
+            params={"fieldManager": FIELD_MANAGER},
+            content=json.dumps(manifest, separators=(",", ":"), sort_keys=True),
+            content_type="application/json",
+        )
+        if response.status_code in (404, 409):
+            return False
+        _check(response)
+        return True
+
     async def delete(self, path: str) -> bool:
         """지운다(백그라운드 전파). 없으면(404) False."""
         response = await self._send("DELETE", path, params={"propagationPolicy": "Background"})

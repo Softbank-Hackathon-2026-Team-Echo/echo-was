@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.enums import SecurityControlId
 from app.models import Base
-from tests.integration.conftest import run_alembic
+from tests.integration.conftest import PROJECT_ROOT, run_alembic
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import create_rollback_fixture
@@ -700,6 +702,25 @@ EXPECTED_CONSTRAINTS = {
         "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
     ),
     ("security_exceptions", "pk_security_exceptions"): "PRIMARY KEY (id)",
+    # API 서버 10: 고객 앱 환경 변수(값 칸 없음)
+    ("service_environment_variables", "ck_service_environment_variables_key_format"): (
+        "CHECK (((key)::text ~ '^[A-Z][A-Z0-9_]{0,63}$'::text))"
+    ),
+    ("service_environment_variables", "ck_service_environment_variables_latest_version_positive"): (
+        "CHECK ((latest_version > 0))"
+    ),
+    ("service_environment_variables", "ck_service_environment_variables_soft_delete_consistency"): (
+        "CHECK ((is_deleted = (deleted_at IS NOT NULL)))"
+    ),
+    ("service_environment_variables", "fk_service_environment_variables_connection"): (
+        "FOREIGN KEY (service_environment_id) REFERENCES service_environments(id) "
+        "ON DELETE RESTRICT"
+    ),
+    (
+        "service_environment_variables",
+        "fk_service_environment_variables_updated_by_user_id_users",
+    ): ("FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"),
+    ("service_environment_variables", "pk_service_environment_variables"): "PRIMARY KEY (id)",
 }
 
 EXPECTED_INDEXES = {
@@ -912,6 +933,20 @@ EXPECTED_INDEXES = {
         "(service_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, "
         "'CLAIMED'::character varying, 'RUNNING'::character varying])::text[]))"
     ),
+    # API 서버 10: 고객 앱 환경 변수
+    "ix_service_environment_variables_connection_key": (
+        "CREATE INDEX ix_service_environment_variables_connection_key ON "
+        "service_environment_variables USING btree (service_environment_id, key)"
+    ),
+    "pk_service_environment_variables": (
+        "CREATE UNIQUE INDEX pk_service_environment_variables ON service_environment_variables "
+        "USING btree (id)"
+    ),
+    "uq_service_environment_variables_connection_key_live": (
+        "CREATE UNIQUE INDEX uq_service_environment_variables_connection_key_live ON "
+        "service_environment_variables USING btree (service_environment_id, key) "
+        "WHERE (is_deleted = false)"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -959,8 +994,8 @@ ROLLBACK_COLUMNS = {"rollback_of_request_id", "rollback_base_deployment_id"}
 BEFORE_MIGRATION_PLANS = "33ad047a493c"
 BEFORE_TARGET_NOT_RECEIVING = "4cea1ec99f1b"
 BEFORE_PLAN_MODE = "6d89c52e39a4"
-# 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(보안·AI 기반 스키마 head) 시점.
-BEFORE_SECURITY_GATE_BLOCKED = "201cf5419f4d"
+# 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(앱 환경 변수 표 = API 서버 10 head) 시점.
+BEFORE_SECURITY_GATE_BLOCKED = "48b2126a9c37"
 HEAD_REVISION = "286d9ea982d6"
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
@@ -1120,6 +1155,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "organization_members",
         "organizations",
         "security_exceptions",
+        "service_environment_variables",
         "service_environments",
         "services",
         "sessions",
@@ -1627,6 +1663,64 @@ async def test_findings_revision_downgrade_removes_table_and_upgrade_restores(
         await transaction.rollback()
 
     assert (down, up) == (False, True)
+
+
+# 고객 앱 환경 변수 표(API 서버 10) 리비전과 그 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
+# 그 뒤에 보안 게이트 원인 코드 리비전(286d9ea982d6)이 이어진다.
+SERVICE_VARIABLES_REVISION = BEFORE_SECURITY_GATE_BLOCKED
+BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
+SERVICE_VARIABLES_TABLE = "service_environment_variables"
+
+
+def _table_names(connection: Connection) -> set[str]:
+    return set(inspect(connection).get_table_names())
+
+
+def test_service_variables_revision_is_single_head_after_security_ai_schema() -> None:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    scripts = ScriptDirectory.from_config(config)
+
+    assert scripts.get_heads() == [HEAD_REVISION]
+    service_variables = scripts.get_revision(SERVICE_VARIABLES_REVISION)
+    assert service_variables is not None
+    assert service_variables.down_revision == BEFORE_SERVICE_VARIABLES
+    gate = scripts.get_revision(HEAD_REVISION)
+    assert gate is not None and gate.down_revision == SERVICE_VARIABLES_REVISION
+
+
+async def test_service_variables_revision_only_adds_a_table_and_has_no_value_column(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        up = await connection.run_sync(_table_names)
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_SERVICE_VARIABLES))
+        )
+        down = await connection.run_sync(_table_names)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        columns = await connection.run_sync(
+            lambda sync: {
+                column["name"] for column in inspect(sync).get_columns(SERVICE_VARIABLES_TABLE)
+            }
+        )
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert up - down == {SERVICE_VARIABLES_TABLE}
+    assert down - up == set()
+    assert columns == {
+        "id",
+        "service_environment_id",
+        "key",
+        "secret_name",
+        "latest_version",
+        "updated_by_user_id",
+        "created_at",
+        "updated_at",
+        "is_deleted",
+        "deleted_at",
+    }
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

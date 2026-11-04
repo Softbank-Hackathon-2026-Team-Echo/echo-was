@@ -471,6 +471,22 @@ CREATE TABLE public.security_exceptions (
     CONSTRAINT ck_security_exceptions_revocation_consistency CHECK (((revoked_by_user_id IS NULL) = (revoked_at IS NULL)))
 );
 
+CREATE TABLE public.service_environment_variables (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_environment_id uuid NOT NULL,
+    key character varying(64) NOT NULL,
+    secret_name character varying(255) NOT NULL,
+    latest_version integer NOT NULL,
+    updated_by_user_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    is_deleted boolean DEFAULT false NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT ck_service_environment_variables_key_format CHECK (((key)::text ~ '^[A-Z][A-Z0-9_]{0,63}$'::text)),
+    CONSTRAINT ck_service_environment_variables_latest_version_positive CHECK ((latest_version > 0)),
+    CONSTRAINT ck_service_environment_variables_soft_delete_consistency CHECK ((is_deleted = (deleted_at IS NOT NULL)))
+);
+
 CREATE TABLE public.service_environments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_id uuid NOT NULL,
@@ -596,6 +612,9 @@ ALTER TABLE ONLY public.organizations
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT pk_security_exceptions PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT pk_service_environment_variables PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT pk_service_environments PRIMARY KEY (id);
 
@@ -674,6 +693,8 @@ CREATE INDEX ix_organization_members_user_id ON public.organization_members USIN
 
 CREATE INDEX ix_security_exceptions_organization_id_control_id_expires_at ON public.security_exceptions USING btree (organization_id, control_id, expires_at);
 
+CREATE INDEX ix_service_environment_variables_connection_key ON public.service_environment_variables USING btree (service_environment_id, key);
+
 CREATE INDEX ix_services_organization_id ON public.services USING btree (organization_id);
 
 CREATE UNIQUE INDEX uq_agent_runs_run_token_hash ON public.agent_runs USING btree (run_token_hash) WHERE (run_token_hash IS NOT NULL);
@@ -693,6 +714,8 @@ CREATE UNIQUE INDEX uq_invitations_organization_id_github_id_pending ON public.i
 CREATE UNIQUE INDEX uq_jobs_subject_id_open ON public.jobs USING btree (subject_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'RUNNING'::character varying])::text[]));
 
 CREATE UNIQUE INDEX uq_migration_plans_service_id_open ON public.migration_plans USING btree (service_id) WHERE ((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying])::text[]));
+
+CREATE UNIQUE INDEX uq_service_environment_variables_connection_key_live ON public.service_environment_variables USING btree (service_environment_id, key) WHERE (is_deleted = false);
 
 CREATE UNIQUE INDEX uq_service_environments_public_host_live ON public.service_environments USING btree (public_host) WHERE (is_deleted = false);
 
@@ -875,6 +898,12 @@ ALTER TABLE ONLY public.security_exceptions
 
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT fk_security_exceptions_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT fk_service_environment_variables_connection FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_environment_variables
+    ADD CONSTRAINT fk_service_environment_variables_updated_by_user_id_users FOREIGN KEY (updated_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.service_environments
     ADD CONSTRAINT fk_service_environments_current_deployment_id_id_deployments FOREIGN KEY (current_deployment_id, id) REFERENCES public.deployments(id, service_environment_id) ON DELETE RESTRICT;

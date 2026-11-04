@@ -28,6 +28,7 @@ erDiagram
     deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청·되돌리기 대상"
     deploy_requests ||--o{ deploy_request_logs : "배포 작업 로그"
     services ||--o{ migration_plans : "이전 계획(끝나지 않은 것 하나)"
+    service_environments ||--o{ service_environment_variables : "앱 환경 변수(값 없음)"
     service_environments ||--o{ migration_plans : "출발·도착"
     migration_plans ||--o{ migration_plan_logs : "이전 실행 로그"
 
@@ -194,6 +195,25 @@ erDiagram
 
 - **연결을 만드는 쪽(API 서버 3 배포 요청 접수)은 대상 환경 행을 `SELECT ... FOR SHARE` 로 잠근 뒤 연결을 만든다.** 환경 삭제는 같은 행을 `FOR UPDATE` 로 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 둘은 서로 기다려 "지운 환경에 새 연결"이 생기지 않는다. `FOR UPDATE` 가 아니라 `FOR SHARE` 인 이유: 일꾼이 서비스 행을 잡은 채 이 환경을 FK 로 가리키는 행을 쓰면 `FOR KEY SHARE` 를 잡는데, 접수가 `FOR UPDATE` 를 쥐고 서비스 행을 기다리면 교착이 생긴다(`FOR SHARE` 는 `FOR KEY SHARE` 와 부딪히지 않는다). API 서버 2 SPEC 의 "FOR UPDATE" 를 이렇게 바꿨다. 연결은 그 환경의 첫 배포 요청 때 자동으로 만든다(`traffic_weight = 0`).
 - **역할은 저장하지 않고 계산한다**: `traffic_weight > 0` 이면 서비스 중(SERVING), 0 이고 현재 배포가 있으면 예비(STANDBY), 현재 배포가 없으면 NONE. 첫 성공 연결은 가짜 대표 주소 라우터가 "적용했다"고 답한 뒤 `traffic_weight = 100` 이 된다.
+
+### `service_environment_variables` — 고객 앱 환경 변수 (API 서버 10)
+
+**값 칸이 없다.** 값은 비밀 보관함(GCP Secret Manager)에만 있고 여기에는 위치와 최신 버전 번호만 둔다(NFR-17). API 는 [api/variables.md](api/variables.md), 주입 규칙은 [executors.md](executors.md#앱-환경-변수-ns-env-api-서버-10).
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `service_environment_id` | uuid | N | FK `service_environments.id` RESTRICT | 어느 연결(서비스 × 환경)의 변수인가 |
+| `key` | varchar(64) | N | `^[A-Z][A-Z0-9_]{0,63}$` | 이름 |
+| `secret_name` | varchar(255) | N | | 보관함 비밀 id(프로젝트 제외) |
+| `latest_version` | integer | N | `> 0` | 보관함의 최신 버전 번호 |
+| `updated_by_user_id` | uuid | N | FK `users.id` RESTRICT | 마지막으로 넣은 사람 |
+| (유일성) | | | `uq_service_environment_variables_connection_key_live` | 같은 연결·키의 살아 있는 행은 하나 |
+| (조회) | | | `ix_service_environment_variables_connection_key` | 지운 행까지 찾기(이전 `secret_name`) |
+
+- 소프트 삭제 칸이 있다. 키 삭제·서비스 삭제는 행만 삭제 표시하고 보관함 비밀은 남긴다.
+- 같은 키를 지운 뒤 다시 넣으면 새 행이 **이전 행의 `secret_name` 을 그대로 쓰고** 보관함 버전이 이어진다. 그래서 옛 배포 기록의 `versions/<n>` 이 다른 값을 가리키지 않는다.
+- 배포 기록은 이 표를 다시 읽지 않는다. 배포 때 고른 버전을 `deployments.config_snapshot.envVars` 에 참조로 고정한다.
 
 ### `builds` — 빌드
 
@@ -391,7 +411,7 @@ erDiagram
 | `service_environment_id` | uuid | N | FK, 인덱스 `(service_environment_id, created_at)` | 어느 연결에 올렸나 |
 | `image_repository` | varchar(512) | N | | 저장소 URI(tag 없음) |
 | `image_digest` | varchar(71) | N | `^sha256:[0-9a-f]{64}$` | 배포 기준 이미지 |
-| `config_snapshot` | jsonb | N | 기본 `{}`, object CHECK | 배포 때 쓴 설정. 비밀값 없이 참조만 |
+| `config_snapshot` | jsonb | N | 기본 `{}`, object CHECK | 배포 때 쓴 설정. 비밀값 없이 참조만. `envVars` = 앱 환경 변수 `{KEY: "<참조>/versions/<n>"}`(API 서버 10, 키가 없으면 이 기능 이전 기록) |
 | `status` | varchar(16) | N | 기본 `PENDING`, 5개 값 CHECK | ④ 상태 흐름 |
 | `rollback_of_id` | uuid | Y | FK `deployments.id`, `rollback_of_id <> id` | 되돌리기라면 원본 배포 |
 | `started_at`·`finished_at` | timestamptz | Y | | 시작·끝 시각 |

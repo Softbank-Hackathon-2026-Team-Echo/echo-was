@@ -4,10 +4,13 @@
 SECURITY_GATE_BLOCKED 를 migration_plans.error_code CHECK 에 더한다. CHECK 를 넓히기만 한다
 (지우고 다시 만든다). 다른 칸은 바꾸지 않는다(게이트 판정은 실행 로그 줄 data 에 남는다).
 
+처음에는 201cf5419f4d 뒤에 만들었으나, 먼저 병합된 48b2126a9c37(앱 환경 변수 표, API 서버 10) 뒤로
+옮겼다(head 하나). 두 변경은 서로 다른 표라 순서와 상관없다.
+
 autogenerate 는 CHECK 정의 변경을 감지하지 못해 직접 적었다.
 
 Revision ID: 286d9ea982d6
-Revises: 201cf5419f4d
+Revises: 48b2126a9c37
 Create Date: 2026-11-04 21:19:43.604135
 
 """
@@ -19,7 +22,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "286d9ea982d6"
-down_revision: str | Sequence[str] | None = "201cf5419f4d"
+down_revision: str | Sequence[str] | None = "48b2126a9c37"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

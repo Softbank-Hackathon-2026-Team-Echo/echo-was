@@ -9,14 +9,20 @@
   버린다. 상태 진행은 로그 상한과 상관없이 계속된다.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import DeployLogCode, DeployRequestErrorCode
 from app.models import DeployRequest, DeployRequestLog
+from app.models.deploy_request_log import DEPLOY_LOG_MESSAGE_MAX_LENGTH
 from app.repositories.deploy_request_log_repository import DeployRequestLogRepository
-from app.services.deploy_log_messages import DEPLOY_LOG_ENTRIES, deploy_log_message
+from app.services.deploy_log_messages import (
+    DEPLOY_LOG_ENTRIES,
+    deploy_log_message,
+    env_vars_applied_message,
+)
 
 MAX_DEPLOY_LOG_LINES = 500
 
@@ -33,6 +39,7 @@ class DeployJobLog:
         now: datetime,
         *,
         error_code: DeployRequestErrorCode | None = None,
+        env_keys: Sequence[str] = (),
     ) -> None:
         last_seq = await self._logs.find_last_seq(request.id)
         if last_seq >= MAX_DEPLOY_LOG_LINES:
@@ -44,6 +51,8 @@ class DeployJobLog:
             code, level, message = DeployLogCode.LOG_TRUNCATED, truncated.level, truncated.message
         else:
             level, message = entry.level, deploy_log_message(code, error_code)
+            if code is DeployLogCode.ENV_VARS_APPLIED:
+                message = env_vars_applied_message(env_keys, DEPLOY_LOG_MESSAGE_MAX_LENGTH)
         self._logs.add(
             DeployRequestLog(
                 deploy_request_id=request.id,

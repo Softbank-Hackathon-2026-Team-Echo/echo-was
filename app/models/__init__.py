@@ -20,6 +20,7 @@ from app.models.organization import Organization, OrganizationMember
 from app.models.security_exception import SecurityException
 from app.models.service import Service
 from app.models.service_environment import ServiceEnvironment
+from app.models.service_environment_variable import ServiceEnvironmentVariable
 from app.models.user import User
 from app.models.user_session import UserSession
 
@@ -46,6 +47,7 @@ __all__ = [
     "SecurityException",
     "Service",
     "ServiceEnvironment",
+    "ServiceEnvironmentVariable",
     "User",
     "UserSession",
 ]

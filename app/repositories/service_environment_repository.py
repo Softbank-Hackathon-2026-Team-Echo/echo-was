@@ -46,6 +46,33 @@ class ServiceEnvironmentRepository:
         )
         return await self._session.scalar(statement)
 
+    async def find_live_by_service_and_environment(
+        self, service_id: uuid.UUID, environment_id: uuid.UUID
+    ) -> ServiceEnvironment | None:
+        return await self._session.scalar(
+            select(ServiceEnvironment)
+            .where(
+                ServiceEnvironment.service_id == service_id,
+                ServiceEnvironment.environment_id == environment_id,
+                _is_live(),
+            )
+            .execution_options(populate_existing=True)
+        )
+
+    async def lock_live_by_service_and_environment(
+        self, service_id: uuid.UUID, environment_id: uuid.UUID
+    ) -> ServiceEnvironment | None:
+        return await self._session.scalar(
+            select(ServiceEnvironment)
+            .where(
+                ServiceEnvironment.service_id == service_id,
+                ServiceEnvironment.environment_id == environment_id,
+                _is_live(),
+            )
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def search_live_by_service(self, service_id: uuid.UUID) -> list[ServiceEnvironment]:
         """서비스 상세용. 환경 행을 함께 읽는다(삭제된 환경도). 만든 순서."""
         statement = (

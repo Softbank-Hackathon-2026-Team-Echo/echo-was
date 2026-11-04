@@ -13,6 +13,7 @@ DEFAULT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS = 5.0
 # + 도메인이라 여유가 있고, 예전 두 단계 형식(63 + 1 + 63 + 1 + 125) 때 정한 값을 그대로 둔다.
 PUBLIC_BASE_DOMAIN_MAX_LENGTH = 125
 _GITHUB_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+_APP_SECRET_NAME_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _DOMAIN_PATTERN = re.compile(
     r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)+$"
 )
@@ -90,6 +91,13 @@ class EnvironmentAdapterMode(StrEnum):
     REAL = "real"
 
 
+class AppSecretStoreMode(StrEnum):
+    """고객 앱 환경 변수 보관함(API 서버 10). gcp 면 GCP Secret Manager, fake 면 프로세스 메모리."""
+
+    FAKE = "fake"
+    GCP = "gcp"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -150,6 +158,12 @@ class Settings(BaseSettings):
     kube_request_timeout_seconds: float = Field(default=15.0, gt=0)
     # GCE·GKE 메타데이터 서버(워크로드 신원 토큰). 시험에서 바꾼다.
     google_metadata_base_url: str = "http://metadata.google.internal"
+
+    # 고객 앱 환경 변수 보관함(API 서버 10). fake + executor_mode real 이면 쓰기 API 가 409 이고
+    # 실행기는 앱 Secret 을 건드리지 않는다. 이름 접두어는 보관함 IAM 조건과 같아야 한다.
+    app_secret_store_mode: AppSecretStoreMode = AppSecretStoreMode.FAKE
+    app_secret_project_id: str | None = None
+    app_secret_name_prefix: str = "echo-app-"
 
     # GitHub App(비공개 저장소). 서버에 두는 비밀값은 개인키 참조 하나다(값은 비밀 저장소에).
     github_app_id: str | None = None
@@ -315,6 +329,27 @@ class Settings(BaseSettings):
                 "health_checker_mode http: " + ", ".join(missing)
             )
         return self
+
+    @field_validator("app_secret_name_prefix")
+    @classmethod
+    def _check_app_secret_name_prefix(cls, value: str) -> str:
+        if not _APP_SECRET_NAME_PREFIX_PATTERN.fullmatch(value):
+            raise ValueError("app_secret_name_prefix must be lowercase letters, digits and hyphens")
+        return value
+
+    @model_validator(mode="after")
+    def _check_app_secret_settings(self) -> "Settings":
+        if self.app_secret_store_mode is AppSecretStoreMode.GCP and not self.app_secret_project_id:
+            raise ValueError("app_secret_project_id is required when app_secret_store_mode is gcp")
+        return self
+
+    @property
+    def is_app_secret_store_configured(self) -> bool:
+        """실제 실행기 + 가짜 보관함 조합이 아닌가. 그 조합이면 앱 Secret 을 건드리지 않는다."""
+        return not (
+            self.app_secret_store_mode is AppSecretStoreMode.FAKE
+            and self.executor_mode is ExecutorMode.REAL
+        )
 
     @field_validator("entrypoint_base_url")
     @classmethod

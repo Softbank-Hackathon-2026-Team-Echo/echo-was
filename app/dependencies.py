@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import State
 
 from app.adapters.registry import get_environment_adapter
+from app.clients.app_secret_store import AppSecretStore, build_app_secret_store
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
@@ -45,6 +46,7 @@ from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.service_service import ServiceService
+from app.services.service_variable_service import ServiceVariableService
 
 
 async def get_session(
@@ -272,6 +274,55 @@ def get_deploy_request_service(
         public_base_domain=settings.public_base_domain,
         executors=executors,
     )
+
+
+class AppSecretStoreHolder:
+    """API 프로세스의 고객 앱 환경 변수 보관함. 프로세스당 하나를 재사용하고 종료 때 닫는다.
+
+    만들 때 네트워크 호출이 없다. 설정 객체가 바뀌면(시험의 설정 교체) 옛 것을 닫고 새로 만든다.
+    """
+
+    def __init__(self) -> None:
+        self._settings: Settings | None = None
+        self._store: AppSecretStore | None = None
+
+    async def get(self, settings: Settings, clock: Clock) -> AppSecretStore:
+        if self._store is None or self._settings is not settings:
+            await self.aclose()
+            self._store = build_app_secret_store(settings, clock)
+            self._settings = settings
+        return self._store
+
+    async def aclose(self) -> None:
+        store, self._store, self._settings = self._store, None, None
+        if store is not None:
+            await store.aclose()
+
+
+def app_secret_store_holder(state: State) -> AppSecretStoreHolder:
+    """앱 state 의 보관함 보관소(없으면 만든다)."""
+    holder = getattr(state, "app_secret_store_holder", None)
+    if not isinstance(holder, AppSecretStoreHolder):
+        holder = AppSecretStoreHolder()
+        state.app_secret_store_holder = holder
+    return holder
+
+
+async def get_app_secret_store(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> AppSecretStore:
+    return await app_secret_store_holder(request.app.state).get(settings, clock)
+
+
+def get_service_variable_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    store: Annotated[AppSecretStore, Depends(get_app_secret_store)],
+) -> ServiceVariableService:
+    return ServiceVariableService(session=session, store=store, clock=clock, settings=settings)
 
 
 def get_github_user_client(
