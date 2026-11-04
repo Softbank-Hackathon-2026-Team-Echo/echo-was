@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.clock import Clock
@@ -43,6 +44,7 @@ class Worker:
         clock: Clock,
         executors: ExecutorSet,
         source_client: SourceRepositoryClient,
+        app_secret_store: AppSecretStore,
         owner: str,
         tls_checker: PublicHostTlsChecker | None = None,
     ) -> None:
@@ -51,6 +53,7 @@ class Worker:
         self._clock = clock
         self._executors = executors
         self._source_client = source_client
+        self._app_secret_store = app_secret_store
         self._owner = owner
         # 보안 게이트가 켜져 있을 때만 있다(build_public_tls_checker). None 이면 게이트 없음.
         self._tls_checker = tls_checker
@@ -130,6 +133,7 @@ class Worker:
                     self._clock,
                     self._executors,
                     self._source_client,
+                    self._app_secret_store,
                 ).advance()
             case JobKind.SERVICE_TEARDOWN:
                 return await ServiceTeardownProcessor(

@@ -24,6 +24,7 @@ deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown
 """
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -113,12 +114,18 @@ class EnvironmentLookup(Protocol):
 
 @dataclass(frozen=True)
 class DeploymentSpec:
-    """배포 기록 한 건. digest 로만 배포한다."""
+    """배포 기록 한 건. digest 로만 배포한다.
+
+    env_values 는 처리기가 호출 직전에 보관함에서 꺼낸 앱 환경 변수다(API 서버 10). None 이면
+    실행기는 앱 Secret 을 읽지도 쓰지도 않고, {} 면 echo-was 소유 Secret 만 비우고, 1개 이상이면
+    통째로 바꾼다. 메모리로만 넘기고 저장·로그하지 않는다.
+    """
 
     deployment_id: uuid.UUID
     image_repository: str
     image_digest: str
     config_snapshot: dict[str, Any]
+    env_values: Mapping[str, SecretValue] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

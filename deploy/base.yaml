@@ -158,6 +158,10 @@ data:
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
+  # 고객 앱 환경 변수·API 키 보관함(API 서버 10). GSA 는 echo-app- 접두어 비밀만 다룬다(조건부 secretmanager.admin,
+  # 11/4 운영 파드에서 만들기·버전 추가·읽기 200, 접두어 밖 만들기 403 확인). 되돌리려면 fake(쓰기 API 409, 이미 쓴 {ns}-env 는 남음).
+  APP_SECRET_STORE_MODE: gcp
+  APP_SECRET_PROJECT_ID: team-echo-final
   # 이전 계획의 데이터 확인 단계가 출발 PostgreSQL 의 pg_stat_replication 에서 도착 구독의 지연을 읽는다(인프라 7, #51).
   # <환경 종류>=<출발로 쓸 때 붙을 주소>/<그 환경이 도착일 때의 구독 이름>. A(도쿄)→B(서울) 구독은 B 의 echo_sub, 역방향은 A 의 echo_sub_rev.
   # 매핑이 없는 환경(온프레 등)이 낀 이전은 데이터 확인에서 실패한다. 되돌리려면 fake.

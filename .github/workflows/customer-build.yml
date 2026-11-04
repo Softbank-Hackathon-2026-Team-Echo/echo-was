@@ -4,6 +4,8 @@
 # - 자격은 echo-infra Terraform 의 echo-dev-ci-build(AWS OIDC 역할 · GCP Workload Identity 연합). 장기 키 없음.
 # - 비공개 고객 저장소는 Echoport Deploy App 의 설치 토큰으로 받는다(Actions secret ECHOPORT_DEPLOY_APP_ID · ECHOPORT_DEPLOY_APP_PRIVATE_KEY).
 #   토큰은 입력값으로 받지 않는다(실행 화면에 보이므로).
+# - 빌드 결과를 올린 뒤 같은 이미지·같은 커밋을 보안 검사해 `security-scan` 산출물로 남긴다(보안·거버넌스 11,
+#   specs/sec-11-build-scan.md). 검사가 실패해도 빌드는 성공 그대로이고, 판정은 echo-was 보안 규칙표가 한다.
 name: customer-build
 run-name: build ${{ inputs.build_id }}
 
@@ -100,6 +102,10 @@ jobs:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.CI_SA }}
           token_format: access_token
+          # 자격 파일(gha-creds-*.json, OIDC 요청 토큰 포함)을 만들지 않는다. 기본값이면 고객 소스 폴더
+          # (= docker build 입력)에 생겨 고객 이미지에 들어가거나 빌드 중 읽힐 수 있고, gitleaks 가
+          # 비밀로 잡는다. 뒤 단계는 access_token 출력(docker login)만 쓴다.
+          create_credentials_file: false
 
       - uses: docker/login-action@v3
         with:
@@ -157,5 +163,136 @@ jobs:
         with:
           name: build-result
           path: build-result.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # ---------- 보안 검사 (보안·거버넌스 11) ----------
+      # 방금 올린 그 이미지(AR digest)와 그 커밋의 소스를 검사해 원문을 산출물 `security-scan` 으로 남긴다.
+      # - 검사 단계는 continue-on-error 다. 실패해도 빌드 성공·build-result 는 그대로이고, 원문이 없으면
+      #   echo-was 가 그 증거를 UNKNOWN 으로 보고 이전을 막는다(판정은 echo-was 보안 규칙표).
+      # - 고객 코드를 실행하지 않는다. Trivy 는 레지스트리에서 이미지 층을 읽고, gitleaks 는 파일을 읽기만 한다.
+      # - 고객 저장소가 검사를 끄지 못하게 한다: Trivy 는 저장소 밖(runner.temp)에서 돌려 저장소의 .trivyignore·
+      #   trivy.yaml 을 읽지 않고, gitleaks 는 우리 설정(기본 규칙)·빈 ignore 파일을 넘기고 gitleaks:allow 주석을 무시한다.
+      # - 비밀값 원문은 남기지 않는다: gitleaks --redact, Trivy 비밀 결과의 Match·Code 는 지운다.
+      - name: 보안 검사 도구 설치 (Trivy·gitleaks, sha256 고정)
+        id: scan-tools
+        continue-on-error: true
+        env:
+          TRIVY_VERSION: "0.75.0"
+          # aquasecurity/trivy v0.75.0 trivy_0.75.0_Linux-64bit.tar.gz (릴리스 checksums.txt 값)
+          TRIVY_SHA256: "c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f"
+          GITLEAKS_VERSION: "8.30.1"
+          # gitleaks/gitleaks v8.30.1 gitleaks_8.30.1_linux_x64.tar.gz (릴리스 checksums.txt 값)
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/scan-bin"
+          mkdir -p "$bin" "$RUNNER_TEMP/security-scan"
+          get() { # <url> <sha256> <파일 이름> <꺼낼 실행 파일>
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/$3" "$1"
+            echo "$2  $RUNNER_TEMP/$3" | sha256sum -c -
+            tar -xzf "$RUNNER_TEMP/$3" -C "$bin" "$4"
+          }
+          get "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            "$TRIVY_SHA256" trivy.tar.gz trivy
+          get "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            "$GITLEAKS_SHA256" gitleaks.tar.gz gitleaks
+          # 우리 설정: gitleaks 기본 규칙 그대로. 이 파일을 넘기면 저장소의 .gitleaks.toml 을 읽지 않는다.
+          printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+          : > "$RUNNER_TEMP/empty.ignore"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: 이미지 검사 (Trivy 취약점·비밀)
+        id: scan-image
+        if: steps.scan-tools.outcome == 'success'
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        env:
+          BUILD_RESULT: ${{ github.workspace }}/build-result.json
+        run: |
+          set -euo pipefail
+          digest=$(jq -r '.image_digest' "$BUILD_RESULT")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build-result.json 의 image_digest 모양이 아니다"; exit 1; }
+          # 로컬 Docker 에는 이미지가 없다(push 만 함). 위 docker login 의 자격으로 AR 에서 digest 로 받는다.
+          trivy image --image-src remote --scanners vuln,secret --format json --exit-code 0 \
+            --quiet --skip-version-check --timeout 5m --ignorefile "$RUNNER_TEMP/empty.ignore" \
+            --output raw-trivy.json "${AR_REPO}@${digest}"
+          jq 'if .Results then .Results |= map(if .Secrets then .Secrets |= map(del(.Match, .Code)) else . end) else . end' \
+            raw-trivy.json > security-scan/trivy-image.json
+          rm -f raw-trivy.json
+          trivy version --format json > trivy-version.json
+
+      - name: 소스 비밀 검사 (gitleaks)
+        id: scan-source
+        if: steps.scan-tools.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # 찾아도 실패로 끝내지 않는다(--exit-code 0). .git 폴더는 읽지 않는다.
+          gitleaks dir . --no-banner --log-level warn --redact --exit-code 0 \
+            --config "$RUNNER_TEMP/gitleaks.toml" --gitleaks-ignore-path "$RUNNER_TEMP/empty.ignore" \
+            --ignore-gitleaks-allow --report-format json --report-path "$RUNNER_TEMP/security-scan/gitleaks.json"
+
+      - name: 보안 검사 기록 (meta.json)
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        env:
+          BUILD_RESULT: ${{ github.workspace }}/build-result.json
+          REPO: ${{ inputs.repo }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          TOOLS_OUTCOME: ${{ steps.scan-tools.outcome }}
+          IMAGE_OUTCOME: ${{ steps.scan-image.outcome }}
+          SOURCE_OUTCOME: ${{ steps.scan-source.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p security-scan
+          trivy_version=null; trivy_db=null; gitleaks_version=null
+          if [ -s trivy-version.json ]; then
+            trivy_version=$(jq '.Version' trivy-version.json)
+            trivy_db=$(jq '.VulnerabilityDB.UpdatedAt' trivy-version.json)
+          fi
+          if command -v gitleaks >/dev/null; then gitleaks_version=$(gitleaks version | jq -R .); fi
+          jq -n --slurpfile build "$BUILD_RESULT" \
+            --arg repo "$REPO" --arg commit "$COMMIT_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
+            --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg tools "$TOOLS_OUTCOME" --arg image "$IMAGE_OUTCOME" --arg source "$SOURCE_OUTCOME" \
+            --argjson trivy_version "$trivy_version" --argjson trivy_db "$trivy_db" --argjson gitleaks_version "$gitleaks_version" \
+            '{
+              schema_version: 1,
+              build_id: $build[0].build_id,
+              image_digest: $build[0].image_digest,
+              ar_repository: $build[0].ar_repository,
+              repository: $repo,
+              commit_sha: $commit,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              workflow_sha: $workflow_sha,
+              scanned_at: $scanned_at,
+              tools_outcome: $tools,
+              trivy: {version: $trivy_version, vulnerability_db_updated_at: $trivy_db, outcome: $image},
+              gitleaks: {version: $gitleaks_version, outcome: $source}
+            }' > security-scan/meta.json
+          cat security-scan/meta.json
+          {
+            echo "## 보안 검사 (판정은 echo-was)"
+            if [ -s security-scan/trivy-image.json ]; then
+              jq -r '"- Trivy: 수정 가능한 HIGH 이상 \([.Results[]?.Vulnerabilities[]? | select((.Severity == "HIGH" or .Severity == "CRITICAL") and .FixedVersion != null)] | length)건 · 이미지 비밀 \([.Results[]?.Secrets[]?] | length)건"' security-scan/trivy-image.json
+            else
+              echo "- Trivy: 결과 없음 (${IMAGE_OUTCOME})"
+            fi
+            if [ -s security-scan/gitleaks.json ]; then
+              jq -r '"- gitleaks: 소스 비밀 \(length)건"' security-scan/gitleaks.json
+            else
+              echo "- gitleaks: 결과 없음 (${SOURCE_OUTCOME})"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        # 보안 산출물 문제로 빌드(배포)를 실패시키지 않는다. 산출물이 없으면 echo-was 가 UNKNOWN 으로 본다.
+        continue-on-error: true
+        with:
+          name: security-scan
+          path: ${{ runner.temp }}/security-scan/
           if-no-files-found: error
           retention-days: 7
