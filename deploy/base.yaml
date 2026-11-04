@@ -31,6 +31,9 @@ spec:
       # 시연 조직 echo-demo 의 온프레 환경(k3s) 실행기 SA 토큰. echo-infra onprem/manifests/echo-executor.yaml 이 만든다.
       - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-onprem-executor-token/versions/latest"
         path: "onprem-executor-token"
+      # 데이터 확인(복제 지연) 읽기 전용 계정 echo_monitor 비밀번호(pg_monitor 만, A·B 같은 값). echo-infra replication/k8s/scripts/monitor-user.sh 가 만든다.
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-pg-monitor-password/versions/latest"
+        path: "data-sync-password"
 ---
 apiVersion: secret-sync.gke.io/v1
 kind: SecretSync
@@ -48,6 +51,7 @@ spec:
       - {sourcePath: "cloudflare-dns-token", targetKey: "ECHO_SECRET_CLOUDFLARE_DNS_TOKEN"}
       # SecretSync 키는 밑줄 두 개(조직 접두사 ECHO_SECRET_<조직>__)를 받지 않는다. 앱 이름으로는 app.yaml 의 env 가 옮긴다.
       - {sourcePath: "onprem-executor-token", targetKey: "ECHO_DEMO_ONPREM_EXECUTOR_TOKEN"}
+      - {sourcePath: "data-sync-password", targetKey: "ECHO_SECRET_DATA_SYNC_PASSWORD"}
 ---
 # echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
 # 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
@@ -154,6 +158,14 @@ data:
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
+  # 이전 계획의 데이터 확인 단계가 출발 PostgreSQL 의 pg_stat_replication 에서 도착 구독의 지연을 읽는다(인프라 7, #51).
+  # <환경 종류>=<출발로 쓸 때 붙을 주소>/<그 환경이 도착일 때의 구독 이름>. A(도쿄)→B(서울) 구독은 B 의 echo_sub, 역방향은 A 의 echo_sub_rev.
+  # 매핑이 없는 환경(온프레 등)이 낀 이전은 데이터 확인에서 실패한다. 되돌리려면 fake.
+  DATA_SYNC_CHECKER_MODE: postgres
+  DATA_SYNC_DATABASES: aws=echo-dev-pg-a-cb5bc23aab2d0c23.elb.ap-northeast-1.amazonaws.com:5432/echo_sub_rev,gcp=echo-pg.echo-data.svc.cluster.local:5432/echo_sub
+  DATA_SYNC_USER: echo_monitor
+  DATA_SYNC_PASSWORD_REF: env:ECHO_SECRET_DATA_SYNC_PASSWORD
+  DATA_SYNC_SSL_MODE: require
   # 시연 조직 echo-demo 의 aws·gcp 환경 secretRef 자리 표시(실제 비밀 아님). aws·gcp 실행기와 접속 확인
   # 어댑터는 워크로드 신원으로 붙어 이 값을 읽지 않는다. 환경 등록은 secretRef 가 필수이고 접속 확인
   # 서비스가 어댑터 호출 전에 비밀이 "있는지" 조회하므로 지우지 않는다(API 서버 12 결정).
