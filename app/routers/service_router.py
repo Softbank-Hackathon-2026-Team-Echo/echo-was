@@ -47,7 +47,8 @@ async def create_service(
             health_check_path=request.health_check_path,
             health_check_timeout_seconds=request.health_check_timeout_seconds,
             container_port=request.container_port,
-        )
+        ),
+        access.user.id,
     )
     return ApiResponse(data=ServiceDetailResponse.from_view(view))
 
@@ -88,6 +89,7 @@ async def update_service(
     view = await services.update_service(
         access.organization_id,
         service_id,
+        access.user.id,
         ServiceChanges(
             name=request.name,
             description=request.description,
@@ -109,7 +111,7 @@ async def update_service(
 async def delete_service(
     access: AdminAccess, service_id: uuid.UUID, services: Services
 ) -> ApiResponse[ServiceDetailResponse]:
-    view = await services.delete_service(access.organization_id, service_id)
+    view = await services.delete_service(access.organization_id, service_id, access.user.id)
     return ApiResponse(data=ServiceDetailResponse.from_view(view))
 
 
@@ -128,6 +130,7 @@ async def create_deploy_request(
     view = await deploy_requests.create_deploy_request(
         access.organization_id,
         service_id,
+        access.user.id,
         CreateDeployCommand(
             environment_id=request.environment_id,
             ref_type=ref_type,

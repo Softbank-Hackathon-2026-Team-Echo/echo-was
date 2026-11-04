@@ -41,6 +41,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditComponent
+from app.audit.lifecycle import record_migration_plan_finished
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.enums import (
@@ -231,6 +233,7 @@ class MigrationPlanProcessor:
                     },
                 ):
                     await self._log.append(plan, MigrationLogCode.CANCELLED, now)
+                    await self._record_finished(plan, MigrationPlanStatus.CANCELLED)
                 self._report("migration cancelled before start", plan)
                 return self._closed()
             current = await read_fingerprint(
@@ -255,6 +258,7 @@ class MigrationPlanProcessor:
                     await self._log.append(
                         plan, MigrationLogCode.STALE, now, data={"changed": changed}
                     )
+                    await self._record_finished(plan, MigrationPlanStatus.STALE)
                 self._report("migration plan stale at start", plan)
                 return self._closed()
             if await self._plans.transition(
@@ -360,6 +364,9 @@ class MigrationPlanProcessor:
                 [MigrationPlan.current_step == 0],
             ):
                 await self._log.append(plan, MigrationLogCode.PREFLIGHT_FAILED, now, step=0)
+                await self._record_finished(
+                    plan, MigrationPlanStatus.FAILED, MigrationErrorCode.PREFLIGHT_FAILED
+                )
         self._report("migration preflight failed", plan)
         return self._closed()
 
@@ -712,6 +719,7 @@ class MigrationPlanProcessor:
             ):
                 await self._log.append(plan, code, now, step=index, data=line_data)
                 await self._log.append(plan, MigrationLogCode.SUCCEEDED, now)
+                await self._record_finished(plan, MigrationPlanStatus.SUCCEEDED)
             return self._closed()
         following = index + 1
         next_phase = (
@@ -903,6 +911,9 @@ class MigrationPlanProcessor:
                         now,
                         data={"sourceWeight": 100, "targetWeight": 0},
                     )
+                    await self._record_finished(
+                        plan, MigrationPlanStatus.ROLLED_BACK, plan.error_code
+                    )
                 self._report("migration rolled back", plan, error_code=plan.error_code)
                 return self._closed()
             if attempt + 1 >= max_attempts:
@@ -954,6 +965,7 @@ class MigrationPlanProcessor:
             await self._log.append(
                 plan, MigrationLogCode.ROLLBACK_FAILED, now, data={"attempt": attempts}
             )
+            await self._record_finished(plan, MigrationPlanStatus.FAILED, plan.error_code)
         self._report("migration rollback failed", plan, error_code=plan.error_code)
 
     # --- 공통 ---
@@ -980,7 +992,24 @@ class MigrationPlanProcessor:
             },
         ):
             await self._log.append(plan, MigrationLogCode.FAILED, now, error_code=code)
+            await self._record_finished(plan, MigrationPlanStatus.FAILED, code)
         self._report("migration failed", plan, error_code=code)
+
+    async def _record_finished(
+        self,
+        plan: MigrationPlan,
+        status: MigrationPlanStatus,
+        error_code: MigrationErrorCode | str | None = None,
+    ) -> None:
+        """끝 상태 전환이 반영됐을 때만, 그 트랜잭션 안에서 부른다."""
+        await record_migration_plan_finished(
+            self._session,
+            self._clock,
+            plan,
+            status=status,
+            component=AuditComponent.MIGRATION_WORKER,
+            error_code=error_code,
+        )
 
     def _record_weights(
         self, locked: _Locked, source_weight: int, target_weight: int, result: TrafficApplied

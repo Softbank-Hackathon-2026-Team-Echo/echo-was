@@ -26,6 +26,8 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditComponent
+from app.audit.lifecycle import record_deploy_request_finished
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.config import Settings
@@ -225,6 +227,14 @@ class DeployRequestProcessor:
             },
         ):
             await self._job_log.append(request, log_code, now)
+            await record_deploy_request_finished(
+                self._session,
+                self._clock,
+                request,
+                status=DeployRequestStatus.CANCELLED,
+                component=AuditComponent.DEPLOY_WORKER,
+                cancel_reason=reason,
+            )
         logger.info(
             "deploy request cancelled",
             extra={
@@ -654,6 +664,13 @@ class DeployRequestProcessor:
                 return self._next_run_now()
             await self._job_log.append(request, DeployLogCode.HEALTH_PROBE_OK, now)
             await self._job_log.append(request, DeployLogCode.SUCCEEDED, now)
+            await record_deploy_request_finished(
+                self._session,
+                self._clock,
+                request,
+                status=DeployRequestStatus.SUCCEEDED,
+                component=AuditComponent.DEPLOY_WORKER,
+            )
             await self._deployments.transition(
                 request.deployment_id,
                 DeploymentStatus.IN_PROGRESS,
@@ -750,7 +767,14 @@ class DeployRequestProcessor:
             updated_at=now,
         )
         await enqueue_deploy_request(
-            self._session, self._requests, self._jobs, self._job_log, request, now
+            self._session,
+            self._requests,
+            self._jobs,
+            self._job_log,
+            request,
+            now,
+            self._clock,
+            AuditComponent.DEPLOY_WORKER,
         )
         await self._job_log.append(source, DeployLogCode.STANDBY_SYNC_REQUESTED, now)
         return request.id
@@ -776,6 +800,14 @@ class DeployRequestProcessor:
                 },
             ):
                 await self._job_log.append(request, DeployLogCode.FAILED, now, error_code=code)
+                await record_deploy_request_finished(
+                    self._session,
+                    self._clock,
+                    request,
+                    status=DeployRequestStatus.FAILED,
+                    component=AuditComponent.DEPLOY_WORKER,
+                    error_code=code,
+                )
             if request.deployment_id is not None:
                 await self._deployments.transition(
                     request.deployment_id,

@@ -26,6 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.actions import AuditAction, AuditComponent
+from app.audit.lifecycle import deploy_request_target
+from app.audit.recorder import AuditActor, AuditRecorder
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.config import ExecutorMode
@@ -149,9 +152,14 @@ class DeployRequestService:
         self._jobs = JobRepository(session)
         self._logs = DeployRequestLogRepository(session)
         self._job_log = DeployJobLog(session)
+        self._audit = AuditRecorder(session, clock)
 
     async def create_deploy_request(
-        self, organization_id: uuid.UUID, service_id: uuid.UUID, command: CreateDeployCommand
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        command: CreateDeployCommand,
     ) -> DeployRequestView:
         self._check_simulate_allowed(command.simulate_fail_at)
 
@@ -202,7 +210,25 @@ class DeployRequestService:
                 updated_at=now,
             )
             superseded_id = await enqueue_deploy_request(
-                self._session, self._deploy_requests, self._jobs, self._job_log, request, now
+                self._session,
+                self._deploy_requests,
+                self._jobs,
+                self._job_log,
+                request,
+                now,
+                self._clock,
+                AuditComponent.API,
+            )
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(actor_user_id),
+                action=AuditAction.DEPLOY_REQUESTED,
+                target=await deploy_request_target(self._session, request),
+                details={
+                    "environmentId": str(environment.id),
+                    "ref": command.ref_value,
+                    "commitSha": commit_sha,
+                },
             )
         _log_accepted("deploy request accepted", "create_deploy_request", request, superseded_id)
         return DeployRequestView(deploy_request=request, environment=environment, build=None)
@@ -211,6 +237,7 @@ class DeployRequestService:
         self,
         organization_id: uuid.UUID,
         deploy_request_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
         simulate_fail_at: SimulatedFailureStage | None,
     ) -> DeployRequestView:
         """이력에서 고른 성공 요청(deploy_request_id)의 이미지·설정으로 되돌리는 요청을 접수한다.
@@ -282,7 +309,21 @@ class DeployRequestService:
                 updated_at=now,
             )
             superseded_id = await enqueue_deploy_request(
-                self._session, self._deploy_requests, self._jobs, self._job_log, request, now
+                self._session,
+                self._deploy_requests,
+                self._jobs,
+                self._job_log,
+                request,
+                now,
+                self._clock,
+                AuditComponent.API,
+            )
+            self._audit.record(
+                organization_id=organization_id,
+                actor=AuditActor.user(actor_user_id),
+                action=AuditAction.ROLLBACK_REQUESTED,
+                target=await deploy_request_target(self._session, request),
+                details={"rollbackOfId": str(target.id), "environmentId": str(environment.id)},
             )
             view = (await self._views([request]))[0]
         _log_accepted("rollback accepted", "create_rollback", request, superseded_id)

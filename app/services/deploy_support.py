@@ -17,6 +17,9 @@ from app.adapters.base import (
     InvalidEnvironmentConfigError,
     UnknownEnvironmentKindError,
 )
+from app.audit.actions import AuditComponent
+from app.audit.lifecycle import record_deploy_request_finished
+from app.core.clock import Clock
 from app.enums import (
     DeployLogCode,
     DeployRequestCancelReason,
@@ -110,11 +113,14 @@ async def enqueue_deploy_request(
     job_log: DeployJobLog,
     request: DeployRequest,
     now: datetime,
+    clock: Clock,
+    component: AuditComponent,
 ) -> uuid.UUID | None:
     """새 요청과 할 일을 저장한다. 같은 연결의 대기 요청이 있으면 SUPERSEDED 로 취소한다.
 
     호출하는 쪽이 서비스 행 → 연결 행을 잠근 트랜잭션 안에서 부른다. 밀려난 요청의 id 를 돌려준다.
-    배포 작업 로그: 밀려난 요청에 CANCELLED_SUPERSEDED, 새 요청에 REQUEST_ACCEPTED.
+    배포 작업 로그: 밀려난 요청에 CANCELLED_SUPERSEDED, 새 요청에 REQUEST_ACCEPTED. 밀려난 요청의
+    끝 감사 줄은 component(접수 API 또는 예비 따라가기를 만든 일꾼) 이름으로 쓴다.
     대기 요청은 연결마다 하나뿐이므로(부분 unique), 먼저 취소하고 새 행을 넣은 뒤
     superseded_by_id 를 적는다. 취소한 요청의 할 일이 QUEUED 면 닫고, RUNNING 이면 그 일꾼이
     끝 상태를 보고 닫는다.
@@ -133,6 +139,14 @@ async def enqueue_deploy_request(
     ):
         superseded_id = queued.id
         await job_log.append(queued, DeployLogCode.CANCELLED_SUPERSEDED, now)
+        await record_deploy_request_finished(
+            session,
+            clock,
+            queued,
+            status=DeployRequestStatus.CANCELLED,
+            component=component,
+            cancel_reason=DeployRequestCancelReason.SUPERSEDED,
+        )
     deploy_requests.add(request)
     await session.flush()
     await job_log.append(request, DeployLogCode.REQUEST_ACCEPTED, now)

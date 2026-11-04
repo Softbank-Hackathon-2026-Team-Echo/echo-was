@@ -15,7 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
 from app.auth.guards import AUTH_GUARDS, ORGANIZATION_GUARDS
-from app.enums import ActorType, OrganizationRole
+from app.enums import ActorType, AuditResult, OrganizationRole
 from app.main import app
 from app.models import AuditLog, Organization
 from tests.integration.auth_support import (
@@ -97,6 +97,7 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     ("GET", "/api/v1/orgs", HUMAN_ANYWHERE),
     ("GET", "/api/v1/environment-kinds", LOGGED_IN_ANYWHERE),
     _org("GET", "", V),
+    _org("GET", "/audit-logs", V),
     _org("GET", "/members", V, human_only=True),
     _org("PATCH", "/members/{user_id}", A, human_only=True),
     # 본인 탈퇴는 누구나. 다른 사람(여기서는 없는 id)은 어드민만.
@@ -268,8 +269,17 @@ async def test_malformed_or_unknown_org_id_is_not_found(
 
 
 async def _audit_rows(harness: DeployHarness) -> list[AuditLog]:
+    """거부 줄만(성공 줄·에이전트 읽기 줄은 test_audit_logs.py 가 본다)."""
     async with harness.session_factory() as session:
-        return list((await session.scalars(select(AuditLog).order_by(AuditLog.created_at))).all())
+        return list(
+            (
+                await session.scalars(
+                    select(AuditLog)
+                    .where(AuditLog.result == AuditResult.DENIED)
+                    .order_by(AuditLog.created_at, AuditLog.seq)
+                )
+            ).all()
+        )
 
 
 async def test_cookie_write_requires_allowed_origin(harness: DeployHarness, actors: Actors) -> None:
@@ -420,7 +430,8 @@ async def test_agent_token_lifecycle_and_read_only(harness: DeployHarness) -> No
     rows = await _audit_rows(harness)
     assert rows[0].actor_type == ActorType.AGENT
     assert rows[0].actor_agent_token_id == uuid.UUID(data["id"])
-    assert rows[0].action == "POST /api/v1/orgs/{org_id}/services/{service_id}/deploy-requests"
+    assert rows[0].action == "DEPLOY_REQUESTED"
+    assert rows[0].route == "POST /api/v1/orgs/{org_id}/services/{service_id}/deploy-requests"
     assert [row.reason for row in rows] == ["AGENT_READ_ONLY"] * 5
 
 
@@ -510,7 +521,8 @@ async def test_denials_are_recorded_once_with_context_and_not_401_404(
         ActorType.USER,
         actors.members["viewer"].user.id,
     )
-    assert first.action == "DELETE /api/v1/orgs/{org_id}/services/{service_id}"
+    assert first.action == "SERVICE_DELETE_REQUESTED"
+    assert first.route == "DELETE /api/v1/orgs/{org_id}/services/{service_id}"
     assert first.path == service_path
     assert (first.reason, first.result, first.request_id) == (
         "ROLE_FORBIDDEN",

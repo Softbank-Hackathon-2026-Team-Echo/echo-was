@@ -30,6 +30,7 @@ async def create_environment(
 ) -> ApiResponse[EnvironmentDetailResponse]:
     view = await service.create_environment(
         access.organization,
+        access.user.id,
         name=request.name,
         kind=request.kind,
         config=request.config,
@@ -77,7 +78,9 @@ async def update_environment(
     changes = EnvironmentChanges(
         name=request.name, kind=request.kind, config=request.config, secret_ref=request.secret_ref
     )
-    view = await service.update_environment(access.organization, environment_id, changes)
+    view = await service.update_environment(
+        access.organization, environment_id, access.user.id, changes
+    )
     return ApiResponse(data=EnvironmentDetailResponse.from_detail_view(view))
 
 
@@ -85,7 +88,7 @@ async def update_environment(
 async def delete_environment(
     access: AdminAccess, environment_id: uuid.UUID, service: Service
 ) -> Response:
-    await service.delete_environment(access.organization_id, environment_id)
+    await service.delete_environment(access.organization_id, environment_id, access.user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -96,5 +99,7 @@ async def delete_environment(
 async def check_environment_connection(
     access: DeveloperAccess, environment_id: uuid.UUID, service: Service
 ) -> ApiResponse[EnvironmentDetailResponse]:
-    view = await service.check_environment_connection(access.organization_id, environment_id)
+    view = await service.check_environment_connection(
+        access.organization_id, environment_id, access.user.id
+    )
     return ApiResponse(data=EnvironmentDetailResponse.from_detail_view(view))

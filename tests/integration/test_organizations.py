@@ -9,7 +9,7 @@ from httpx import Response
 from sqlalchemy import func, select
 
 from app.clients.github_user import GithubUser
-from app.enums import InvitationStatus, OrganizationRole
+from app.enums import AuditResult, InvitationStatus, OrganizationRole
 from app.models import AuditLog, Invitation, Organization, OrganizationMember, User
 from app.services.organization_service import create_personal_organization
 from tests.integration.auth_support import (
@@ -43,7 +43,13 @@ async def _member_role(harness: DeployHarness, organization_id: Any, user_id: An
 
 async def _audit_reasons(harness: DeployHarness) -> list[str]:
     async with harness.session_factory() as session:
-        return list((await session.scalars(select(AuditLog.reason))).all())
+        return [
+            reason
+            for reason in await session.scalars(
+                select(AuditLog.reason).where(AuditLog.result == AuditResult.DENIED)
+            )
+            if reason is not None
+        ]
 
 
 async def _member(harness: DeployHarness, role: OrganizationRole, login: str) -> Member:
