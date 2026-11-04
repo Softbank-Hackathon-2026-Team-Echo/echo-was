@@ -211,6 +211,7 @@
 | `PREPARATION` · `EXECUTION` · `POST_SWITCH` | 판정 시점 (`SecurityCheckPhase`) | 준비(배포·설정 변경·주기 수집) · 실행(이전 승인·일꾼 시작, 준비 통제도 함께 본다) · 전환 직후 |
 | `IAM` · `ENCRYPTION` · `AUDIT_LOG` · `POLICY` | 매트릭스 칸 (`SecurityMatrixCell`, API `iam`·`encryption`·`auditLog`·`policy`) | 칸 결과는 그 칸 통제의 가장 나쁜 값: FAIL > 필수 UNKNOWN > WARN(예외 포함) > 선택 UNKNOWN > PASS |
 | `CONTROL_FAILED` · `CONTROL_WARNING` · `EVIDENCE_UNKNOWN` · `EVIDENCE_MISSING` · `EVIDENCE_EXPIRED` · `EVIDENCE_SIMULATED` · `EVIDENCE_INCOMPLETE` · `SOURCE_NOT_ALLOWED` · `SCOPE_MISMATCH` · `POLICY_VERSION_MISMATCH` · `PRECHECK_MISSING` · `AI_UNCONFIRMED` · `AI_ESCALATED` · `EXCEPTION_APPLIED` · `EXCEPTION_EXPIRED` · `NOT_APPLICABLE` | 판정 사유 (`SecurityReasonCode`) | 게이트가 막으면 통제 ID 와 함께 돌려준다(기계 판독용) |
+| `NO_ISSUES` · `FIXABLE_HIGH_VULNERABILITY` · `VULNERABILITY_WARNING` · `SECRET_FOUND` · `MISCONFIGURATION_HIGH` · `MISCONFIGURATION_WARNING` · `ARTIFACT_MISMATCH` · `REPORT_INVALID` · `TLS_OK` · `TLS_CERT_INVALID` · `TLS_HOSTNAME_MISMATCH` · `TLS_EXPIRES_SOON` · `TLS_VERSION_TOO_LOW` · `TLS_HANDSHAKE_FAILED` · `TLS_TIMEOUT` · `TLS_UNREACHABLE` | 정규화 이유 (`SecurityFindingReason`, 보안 2) | 검사 원문을 증거로 바꾸며 정한 이유. 증거 한 건에 하나. 원문이 다른 대상 것이거나(`ARTIFACT_MISMATCH`) 모양이 틀리면(`REPORT_INVALID`) UNKNOWN, TLS 시간 초과·연결 불가도 UNKNOWN |
 
 ### 환경 종류 (`environments.kind`)
 
