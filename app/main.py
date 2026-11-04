@@ -27,6 +27,7 @@ from app.routers import (
     invitation_router,
     migration_plan_router,
     organization_router,
+    security_router,
     service_router,
 )
 
@@ -73,6 +74,7 @@ app.include_router(environment_kind_router.router)
 app.include_router(service_router.router)
 app.include_router(deploy_request_router.router)
 app.include_router(migration_plan_router.router)
+app.include_router(security_router.router)
 
 
 @app.get("/healthz", status_code=status.HTTP_204_NO_CONTENT)

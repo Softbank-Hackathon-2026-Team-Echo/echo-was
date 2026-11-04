@@ -42,6 +42,7 @@ from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.security_matrix_service import SecurityMatrixService
 from app.services.service_service import ServiceService
 
 
@@ -352,3 +353,10 @@ def get_migration_plan_service(
         step_overhead_seconds=settings.migration_step_overhead_seconds,
         approval_ttl_seconds=settings.migration_plan_approval_ttl_seconds,
     )
+
+
+def get_security_matrix_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> SecurityMatrixService:
+    return SecurityMatrixService(session=session, clock=clock)
