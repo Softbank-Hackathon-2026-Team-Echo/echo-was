@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import func, select
 
 from app.enums import (
@@ -229,6 +230,30 @@ async def test_no_scan_records_nothing_and_deploy_succeeds(harness: DeployHarnes
     assert await harness.request_status(request["id"]) == DeployRequestStatus.SUCCEEDED
     assert len(executor.scan_reads) == 1
     assert await _findings(harness) == []
+
+
+class BrokenScanBuildExecutor(ScanningBuildExecutor):
+    """원문 읽기가 예상하지 못한 예외를 낸다(깨진 zip·암호 걸린 항목 등)."""
+
+    async def read_security_scan(self, external_ref: str) -> BuildSecurityScan | None:
+        self.scan_reads.append(external_ref)
+        raise RuntimeError("File is encrypted, password required")
+
+
+async def test_unexpected_scan_error_records_nothing_and_deploy_succeeds(
+    harness: DeployHarness, caplog: pytest.LogCaptureFixture
+) -> None:
+    executor = BrokenScanBuildExecutor(harness.clock, 0, scan=_scan())
+
+    _, request = await _deploy_and_finish(harness, executor)
+
+    assert await harness.request_status(request["id"]) == DeployRequestStatus.SUCCEEDED
+    assert len(executor.scan_reads) == 1
+    assert await _findings(harness) == []
+    warnings = [r for r in caplog.records if r.getMessage() == "security scan not collected"]
+    assert [getattr(r, "error_type", None) for r in warnings] == ["RuntimeError"]
+    # 원문·예외 메시지는 로그에 남기지 않는다.
+    assert all("password" not in r.getMessage() for r in caplog.records)
 
 
 async def test_fake_build_executor_records_nothing(harness: DeployHarness) -> None:

@@ -277,6 +277,7 @@ class FakeActions:
                         "id": artifact_id,
                         "name": name,
                         "expired": False,
+                        "size_in_bytes": len(content),
                         "archive_download_url": (
                             f"{API_BASE}/repos/{BUILD_REPOSITORY}/actions/artifacts/"
                             f"{artifact_id}/zip"
