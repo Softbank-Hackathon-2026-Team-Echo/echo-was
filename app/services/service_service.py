@@ -247,7 +247,9 @@ class ServiceService:
 
         실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다. 이미 DELETING 이면 재시도다.
         내리기에 실패해 남은 연결은 teardown_attempt 를 1 늘려 새 멱등 키로 다시 내린다.
-        감사 줄은 상태를 DELETING 으로 바꾼 요청만 쓴다(재시도는 쓰지 않는다).
+        감사 줄은 상태를 DELETING 으로 바꾼 요청과, 재시도 중 다시 내리기가 실제로 시작된 요청(실패
+        연결을 다시 내림·실패 표시를 지움·할 일을 새로 만듦, details.retry)만 쓴다. 이미 내리는
+        중이라 바뀐 것이 없는 재시도는 쓰지 않는다.
         """
         now = self._clock.now()
         async with self._session.begin():
@@ -255,13 +257,16 @@ class ServiceService:
             connections = await self._service_environments.lock_live_by_service(service.id)
             await check_no_migration_in_progress(self._session, service.id)
             is_retry = service.status == ServiceStatus.DELETING
+            is_teardown_restarted = False
             if is_retry:
+                is_teardown_restarted = service.delete_error is not None
                 for connection in connections:
                     if connection.teardown_error is not None:
                         connection.teardown_attempt += 1
                         connection.teardown_error = None
                         connection.teardown_requested_at = None
                         connection.teardown_external_ref = None
+                        is_teardown_restarted = True
             service.status = ServiceStatus.DELETING
             service.delete_error = None
             if not is_retry:
@@ -297,6 +302,11 @@ class ServiceService:
                         created_at=now,
                         updated_at=now,
                     )
+                )
+                is_teardown_restarted = True
+            if is_retry and is_teardown_restarted:
+                self._record_audit(
+                    AuditAction.SERVICE_DELETE_REQUESTED, service, actor_user_id, {"retry": True}
                 )
             await self._session.flush()
             view = await load_service_detail(self._session, service, self._clock.now())

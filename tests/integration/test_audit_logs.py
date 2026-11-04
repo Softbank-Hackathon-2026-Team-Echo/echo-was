@@ -28,7 +28,7 @@ from app.enums import (
     OrganizationRole,
 )
 from app.executors.base import HealthHttpError
-from app.executors.fake import FakeBuildExecutor
+from app.executors.fake import FakeBuildExecutor, FakeTeardownExecutor
 from app.main import app
 from app.models import AuditLog, Environment, Job, Service, User
 from app.services.service_variable_service import app_secret_name
@@ -41,7 +41,7 @@ from tests.integration.auth_support import (
     make_client,
     org_path,
 )
-from tests.integration.deploy_harness import DeployHarness, ScriptedHealthChecker
+from tests.integration.deploy_harness import DeployHarness, ScriptedHealthChecker, connection_of
 from tests.integration.factories import ENVIRONMENT_CONFIGS, secret_env_name, secret_ref_for
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import deploy_and_finish, request_rollback, rollback
@@ -853,6 +853,85 @@ async def test_service_delete_has_requested_and_deleted_lines(harness: DeployHar
     _assert_finished(rows[2], AuditAction.SERVICE_DELETED, "teardown-worker", AuditResult.SUCCEEDED)
     assert rows[2].organization_id == harness.organization.id
     assert rows[2].target_label == "shop-api"
+
+
+async def _delete_lines(harness: DeployHarness, service_id: str) -> list[dict[str, Any]]:
+    rows = await _rows(
+        harness,
+        AuditLog.target_id == uuid.UUID(service_id),
+        AuditLog.action == AuditAction.SERVICE_DELETE_REQUESTED,
+    )
+    return [row.details for row in rows]
+
+
+async def test_repeat_delete_records_retry_only_when_teardown_really_restarts(
+    harness: DeployHarness,
+) -> None:
+    service = await harness.create_service("shop-api")
+    aws = await harness.add_environment("aws-seoul")
+    await deploy_and_finish(harness, service["id"], aws.id, branch="main")
+    detail = await harness.get_service(service["id"])
+    link = uuid.UUID(connection_of(detail, "aws-seoul")["serviceEnvironmentId"])
+    teardown = FakeTeardownExecutor(harness.clock, 0, fail_service_environment_ids={link})
+    harness.replace_executors(teardown=teardown)
+    path = f"{harness.services}/{service['id']}"
+
+    await harness.client.delete(path)
+    # 내리는 중: 바뀐 것이 없어 줄이 없다.
+    await harness.client.delete(path)
+    assert await _delete_lines(harness, service["id"]) == [{}]
+
+    # 내리기 실패는 끝 상태가 아니라 끝 줄이 없다.
+    await harness.run_until_idle()
+    stuck = await harness.get_service(service["id"])
+    assert stuck["deleteError"] == "TEARDOWN_FAILED"
+    assert await _finish_rows(harness, service["id"]) == []
+    assert await _delete_lines(harness, service["id"]) == [{}]
+
+    # 다시 삭제: 실패한 연결을 다시 내리기 시작한다.
+    teardown.recover_service_environment(link)
+    retried = await harness.client.delete(path)
+    assert retried.status_code == 202
+    lines = await _rows(
+        harness,
+        AuditLog.target_id == uuid.UUID(service["id"]),
+        AuditLog.action == AuditAction.SERVICE_DELETE_REQUESTED,
+    )
+    assert [row.details for row in lines] == [{}, {"retry": True}]
+    assert (lines[1].actor_type, lines[1].actor_user_id) == (ActorType.USER, harness.admin.user.id)
+    assert lines[1].result == AuditResult.SUCCEEDED
+    assert lines[1].request_id == retried.headers["x-request-id"]
+
+    # 다시 내리는 중의 또 다른 요청은 바뀐 것이 없다.
+    await harness.client.delete(path)
+    assert await _delete_lines(harness, service["id"]) == [{}, {"retry": True}]
+
+    await harness.run_until_idle()
+    finished = await _finish_rows(harness, service["id"])
+    assert [row.action for row in finished] == [AuditAction.SERVICE_DELETED]
+
+
+@pytest.mark.parametrize("delete_error", [None, "WORKER_LOST"])
+async def test_repeat_delete_with_closed_job_records_retry(
+    harness: DeployHarness, delete_error: str | None
+) -> None:
+    """할 일이 닫혀 새로 만들거나(일꾼 상실 포함) 실패 표시를 지우면 다시 시작한 것이다."""
+    service = await harness.create_service("shop-api")
+    aws = await harness.add_environment("aws-seoul")
+    await deploy_and_finish(harness, service["id"], aws.id, branch="main")
+    path = f"{harness.services}/{service['id']}"
+    await harness.client.delete(path)
+    await _close_job(harness, service["id"], JobStatus.DONE)
+    async with harness.session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE services SET delete_error = :error WHERE id = :id"),
+            {"error": delete_error, "id": service["id"]},
+        )
+
+    response = await harness.client.delete(path)
+
+    assert response.status_code == 202
+    assert await _delete_lines(harness, service["id"]) == [{}, {"retry": True}]
 
 
 async def test_standby_sync_finish_line_carries_trigger(migration: Migration) -> None:
