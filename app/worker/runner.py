@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.config import Settings
@@ -41,6 +42,7 @@ class Worker:
         clock: Clock,
         executors: ExecutorSet,
         source_client: SourceRepositoryClient,
+        app_secret_store: AppSecretStore,
         owner: str,
     ) -> None:
         self._session_factory = session_factory
@@ -48,6 +50,7 @@ class Worker:
         self._clock = clock
         self._executors = executors
         self._source_client = source_client
+        self._app_secret_store = app_secret_store
         self._owner = owner
         self._lease = timedelta(seconds=settings.worker_lease_seconds)
 
@@ -125,6 +128,7 @@ class Worker:
                     self._clock,
                     self._executors,
                     self._source_client,
+                    self._app_secret_store,
                 ).advance()
             case JobKind.SERVICE_TEARDOWN:
                 return await ServiceTeardownProcessor(

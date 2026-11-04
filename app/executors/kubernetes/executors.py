@@ -3,7 +3,8 @@
 계약은 docs/executors.md 의 "쿠버네티스 직접 반영". 요약:
 
 - apply: (온프레) 앱 주소 DNS → 네임스페이스(없으면 만듦, echo-was 라벨이 없는 곳은 쓰지 않음) →
-  (온프레) RoleBinding·이미지 받기 자격 → Deployment·Service·Ingress 서버 측 apply.
+  (온프레) RoleBinding → 앱 환경 변수 Secret(env_values 가 None 이 아닐 때) →
+  (온프레) 이미지 받기 자격 → Deployment·Service·Ingress 서버 측 apply.
   external_ref = `k8s:{환경 id}:{네임스페이스}:{배포 기록 id}`.
 - poll: Deployment 어노테이션이 이 배포 번호이고 새 파드가 모두 준비되면 DeployApplied. 이미지 받기
   실패·CrashLoopBackOff 는 바로 실패 코드. 401·403 은 CLUSTER_UNAUTHORIZED, 닿지 못하면 진행 중.
@@ -18,15 +19,17 @@ external_ref·실패 코드·로그에 토큰·비밀값을 넣지 않는다.
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from http import HTTPStatus
 from typing import Any
 
 from app.adapters.aws import AwsEnvironmentConfig
 from app.adapters.onprem import OnpremEnvironmentConfig
 from app.core.clock import Clock
 from app.core.log_masking import mask_secrets
+from app.core.secrets import SecretValue
 from app.enums import DeployRequestErrorCode, LogLevel, TeardownErrorCode
 from app.executors.base import (
     ClusterEnvironment,
@@ -100,6 +103,8 @@ _LOG_CURSOR = re.compile(
     r"^([a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?)\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z)\|(\d{1,9})$"
 )
 _LOG_LIMIT_BYTES = "1048576"
+# 앱 Secret 을 쓰는 사이 다른 쪽이 바꾸면(409) GET 부터 다시 한다.
+ENV_SECRET_WRITE_ATTEMPTS = 3
 
 
 class _NamespaceNotManagedError(Exception):
@@ -180,7 +185,8 @@ class KubernetesDeployExecutor:
             namespace = app_namespace(target)
             spec = self._app_spec(deployment, target, namespace)
             await retry_transient(
-                lambda: self._apply_once(environment, target, spec), self._runtime.sleep
+                lambda: self._apply_once(environment, target, spec, deployment.env_values),
+                self._runtime.sleep,
             )
         except TransientError as exc:
             raise ExecutorUnavailableError(exc.code) from None
@@ -191,7 +197,11 @@ class KubernetesDeployExecutor:
         return f"{DEPLOY_REF_PREFIX}{target.environment_id}:{namespace}:{deployment.deployment_id}"
 
     async def _apply_once(
-        self, environment: ClusterEnvironment, target: DeployTarget, spec: manifests.AppSpec
+        self,
+        environment: ClusterEnvironment,
+        target: DeployTarget,
+        spec: manifests.AppSpec,
+        env_values: Mapping[str, SecretValue] | None,
     ) -> None:
         config = environment.config
         is_onprem = isinstance(config, OnpremEnvironmentConfig)
@@ -204,6 +214,8 @@ class KubernetesDeployExecutor:
             just_bound = await self._ensure_role_binding(api, environment, spec)
 
         async def apply_objects() -> None:
+            if env_values is not None:
+                await _write_env_secret(api, spec, env_values)
             if is_onprem:
                 await self._apply_pull_secret(api, spec)
             await api.apply(manifests.deployment_path(spec.namespace), _deployment(spec))
@@ -300,6 +312,7 @@ class KubernetesDeployExecutor:
             ingress_class=ingress_class,
             ingress_annotations=annotations,
             uses_pull_secret=isinstance(config, OnpremEnvironmentConfig),
+            env_revision=_env_revision(deployment),
         )
 
     def _repository(self, deployment: DeploymentSpec, target: DeployTarget) -> str:
@@ -359,7 +372,8 @@ class KubernetesDeployExecutor:
             if previous is not None:
                 spec = self._app_spec(previous, target, namespace)
                 await retry_transient(
-                    lambda: self._apply_once(environment, target, spec), self._runtime.sleep
+                    lambda: self._apply_once(environment, target, spec, previous.env_values),
+                    self._runtime.sleep,
                 )
                 kept = str(previous.deployment_id)
             else:
@@ -583,6 +597,49 @@ async def _ensure_namespace(api: KubeApi, namespace: str, service_id: uuid.UUID)
         raise TransientError(CLUSTER_UNREACHABLE)
     if not manifests.is_managed(existing):
         raise _NamespaceNotManagedError
+
+
+def _env_revision(deployment: DeploymentSpec) -> str | None:
+    """앱 환경 변수가 1개 이상일 때 파드 템플릿 어노테이션. 값이 아니라 키·버전 번호로 만든다."""
+    if not deployment.env_values:
+        return None
+    refs = deployment.config_snapshot.get("envVars")
+    pinned = refs if isinstance(refs, dict) else {}
+    return manifests.env_revision(
+        {key: str(pinned.get(key, "")).rsplit("/", 1)[-1] for key in deployment.env_values}
+    )
+
+
+async def _write_env_secret(
+    api: KubeApi, spec: manifests.AppSpec, values: Mapping[str, SecretValue]
+) -> None:
+    """앱 Secret `{ns}-env` 를 값으로 통째로 바꾼다.
+
+    서버 측 apply 는 다른 manager 의 키를 남겨서 쓰지 않는다(GET → 있으면 PUT, 없으면 POST).
+    값이 없으면(values = {}) echo-was 소유 Secret 만 비운다. 손으로 만든 Secret·없는 Secret 은
+    그대로 둔다. type 은 바꿀 수 없어 있던 값을 쓴다.
+    """
+    path = manifests.app_secret_path(spec.namespace)
+    for _ in range(ENV_SECRET_WRITE_ATTEMPTS):
+        current = await api.get(path)
+        if not values and (current is None or not manifests.is_managed(current)):
+            return
+        if current is None:
+            manifest = manifests.app_env_secret_manifest(spec.namespace, spec.service_id, values)
+            if await api.create(manifests.secrets_path(spec.namespace), manifest):
+                return
+            continue
+        metadata = current.get("metadata") or {}
+        manifest = manifests.app_env_secret_manifest(
+            spec.namespace,
+            spec.service_id,
+            values,
+            resource_version=metadata.get("resourceVersion"),
+            secret_type=current.get("type") or manifests.OPAQUE_SECRET_TYPE,
+        )
+        if await api.replace(path, manifest):
+            return
+    raise KubeRequestError(HTTPStatus.CONFLICT)
 
 
 async def _delete_app(api: KubeApi, namespace: str) -> None:

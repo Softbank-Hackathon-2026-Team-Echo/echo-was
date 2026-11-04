@@ -67,6 +67,11 @@
 | 빌드 | Build | `Build` / `builds` | 서비스·저장소·커밋으로 이미지 하나를 만드는 일. 빌드 1 : 배포 N. 같은 서비스·저장소·커밋은 재사용한다 | F1 |
 | 할 일 | Job | `Job` / `jobs` | 일꾼이 집어 갈 일(`DEPLOY_REQUEST`·`SERVICE_TEARDOWN`). 임대(`lease_token`)로 한 일꾼만 진행한다 | F1 |
 | 일꾼 | Worker | `app/worker/`, `python -m app.worker` | 할 일 표를 폴링해 배포 요청·서비스 내리기를 한 단계씩 진행하는 별도 프로세스 | F1 |
+| 앱 환경 변수 | App environment variable | `ServiceEnvironmentVariable` / `service_environment_variables`, 경로 `…/services/{id}/environments/{environmentId}/variables` | 고객 앱의 환경 변수·API 키 하나(서비스 × 환경 × 키). 이름·보관함 위치·최신 버전만 저장하고 **값 칸이 없다**. 환경 행의 `secret_ref`(클러스터 접속 열쇠)와 다르다 | F16, NFR-17, API 10 |
+| 보관함 | App secret store | `AppSecretStore` (`app/clients/app_secret_store.py`), 설정 `APP_SECRET_STORE_MODE` | 앱 환경 변수 값의 원본. GCP Secret Manager 한 곳(`gcp`), 기본은 프로세스 메모리 가짜(`fake`). 비밀을 지우는 메서드가 없다 | API 10 |
+| 고정 참조 | Pinned env reference | `config_snapshot.envVars` `{KEY: "gcp-sm:…/versions/<n>"}` · `fake-sm:<이름>/versions/<n>` | 배포 기록에 고정한 키별 버전. 되돌리기·재실행이 같은 값을 꺼낸다. 키가 없으면 이 기능 이전 기록(또는 보관함을 켜기 전 기록)이고 앱 Secret 을 건드리지 않는다 | API 10 |
+| 앱 Secret | App env secret | 쿠버네티스 Secret `{네임스페이스}-env`, `DeploymentSpec.env_values` | 앱 Deployment 가 `envFrom`(optional)으로 읽는 Secret. 값이 넣어진 연결은 실행기가 배포 때 통째로 쓴다(라벨 `managed-by=echo-was`). 변수가 없는 연결의 손으로 만든 것은 건드리지 않는다 | API 10 |
+| 다시 배포 필요 | Pending redeploy | 응답 `appliedVersion`·`pendingRedeploy` (저장 안 함) | 연결의 현재 배포 기록에 고정된 버전 ≠ 최신 버전. 값 변경은 다음 배포 때 반영된다 | API 10 |
 | 서비스 중 | Serving | `ServiceEnvironmentRole.SERVING` (저장 안 함) | `traffic_weight > 0` 인 연결. 첫 성공 연결이 서비스 중이 된다 | F1·D5 |
 | 예비 | Standby | `ServiceEnvironmentRole.STANDBY` (저장 안 함) | `traffic_weight = 0` 이고 현재 배포가 있는 연결. 재난·장애 때 이전(API 서버 8)이 넘어갈 곳 | F1·D5 |
 | 예비 따라가기 | Standby sync | `deploy_requests.trigger = STANDBY_SYNC` | 서비스 중 연결이 성공하면 예비 연결이 같은 빌드·같은 설정으로 자동 배포되는 요청. `source_request_id` 로 원본을 가리킨다 | F1·D11 |
@@ -74,7 +79,7 @@
 | 대표 주소 | Main URL | `services.public_host` / 응답 `url`·`urls.main` | `https://{서비스}-{suffix}.{public_base_domain}`(도메인 바로 아래 한 단계). 서비스 중 연결로 간다 | F1·D8, API 3-1 |
 | 환경별 주소 | Environment URL | `service_environments.public_host` / 응답 `url`·`urls.environment` | 환경 config 에 `ingressDomain` 이 있으면(클라우드) `https://{서비스}-{suffix}.{ingressDomain}`, 없으면(온프레·예전 환경) `https://{서비스}-{환경}-{suffix}.{public_base_domain}`(서비스의 suffix). 연결을 만들 때 정해 저장한다(환경 이름·`ingressDomain` 이 바뀌어도 그대로). 헬스체크 대상 | F1·D8, API 3-1·3-2 |
 | 환경 하위 도메인 | Environment ingress domain | `environments.config.ingress_domain` / API `ingressDomain`, `EnvironmentConfig.environment_host_domain()` | 클라우드 환경(aws·gcp)의 환경별 주소 도메인. `public_base_domain` 바로 아래 한 단계(`aws-tokyo.echoport.uk`)여야 하고, 그 아래 와일드카드 DNS·인증서가 덮는다 | API 3-2 |
-| 앱 네임스페이스 | App namespace | 대표 주소 첫 레이블 `{서비스}-{suffix}`, 라벨 `app.kubernetes.io/managed-by=echo-was` | 실제 배포 실행기가 고객 앱 한 연결을 올리는 쿠버네티스 네임스페이스. 실행기는 이 라벨이 붙은 네임스페이스 밖을 쓰지 않는다. 앱 비밀값은 환경 담당이 미리 둔 Secret `{네임스페이스}-env` 를 `envFrom`(optional)으로 읽기만 한다 | API 3-2 |
+| 앱 네임스페이스 | App namespace | 대표 주소 첫 레이블 `{서비스}-{suffix}`, 라벨 `app.kubernetes.io/managed-by=echo-was` | 실제 배포 실행기가 고객 앱 한 연결을 올리는 쿠버네티스 네임스페이스. 실행기는 이 라벨이 붙은 네임스페이스 밖을 쓰지 않는다. 앱 비밀값은 Secret `{네임스페이스}-env` 를 `envFrom`(optional)으로 읽는다(아래 앱 Secret) | API 3-2·10 |
 | 클러스터 접속기 | Cluster access provider | `ClusterAccessProvider` (`app/executors/kubernetes/access.py`) | 환경 종류별로 쿠버네티스 창구 주소·CA·토큰을 얻는다: gcp 메타데이터 토큰 + GKE API, aws Google ID 토큰 → STS → presigned EKS 토큰, onprem `apiUrl`(터널) + `secret_ref` 서비스 계정 토큰 | API 3-2 |
 | 이미지 받기 자격 | Image pull secret | Secret `echo-pull`, 어노테이션 `echo.pull-expires-at` | 온프레 앱 네임스페이스에 두는 Artifact Registry 자격(메타데이터 액세스 토큰). 일꾼이 5분마다 보고 남은 수명이 30분 미만이면 갱신한다 | API 3-2 |
 | 주소 suffix | Host suffix | `services.host_suffix` | 대표·환경별 주소 끝의 소문자·숫자 무작위 8자. 서비스를 만들 때 한 번 정하고 바꾸지 않는다(지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게). 레이블이 63자를 넘으면 앞부분을 54자로 자르고 suffix 는 남긴다 | API 3-1 |
@@ -163,7 +168,7 @@
 - 촉발(`trigger`): `MANUAL`(사람) · `STANDBY_SYNC`(예비 따라가기) · `ROLLBACK`(되돌리기, `rollback_of_request_id`·`rollback_base_deployment_id` 가 있다).
 - 취소 이유(`cancel_reason`, `CANCELLED` 일 때만): `SUPERSEDED`(새 요청이 밀어냄) · `SERVICE_DELETED` · `BASE_CHANGED`(되돌리기를 시작할 때 연결의 현재 배포가 접수 때와 달랐다).
 - 되돌리기의 가짜 실패 단계(`simulate.failAt`): `DEPLOYING` · `VERIFYING` 만(빌드 단계가 없다).
-- 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR` · 실제 실행기만(API 서버 3-2) `BUILD_DISPATCH_FAILED`(빌드 워크플로를 시작하지 못함) · `CLUSTER_UNAUTHORIZED`(클러스터·자격 거절) · `IMAGE_PULL_FAILED`(이미지 받기 실패) · `CONTAINER_START_FAILED`(컨테이너가 계속 죽음). 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
+- 실패 이유(`error_code`, `FAILED` 일 때만, DB CHECK 없음): `REPO_NOT_ACCESSIBLE` · `REF_NOT_FOUND` · `SOURCE_PROVIDER_UNAVAILABLE` · `BUILD_FAILED` · `BUILD_TIMEOUT` · `DEPLOY_FAILED` · `DEPLOY_TIMEOUT` · `HEALTH_CHECK_FAILED` · `HEALTH_CHECK_TIMEOUT` · `PUBLIC_URL_UNREACHABLE` · `WORKER_LOST` · `INTERNAL_ERROR` · 실제 실행기만(API 서버 3-2) `BUILD_DISPATCH_FAILED`(빌드 워크플로를 시작하지 못함) · `CLUSTER_UNAUTHORIZED`(클러스터·자격 거절) · `IMAGE_PULL_FAILED`(이미지 받기 실패) · `CONTAINER_START_FAILED`(컨테이너가 계속 죽음) · 앱 환경 변수(API 서버 10) `ENV_SECRET_UNAVAILABLE`(고정 버전을 보관함에서 영구히 꺼내지 못함). 뜻은 [docs/api/deploy-requests.md](../../docs/api/deploy-requests.md).
 - 되돌리기 결과(`revert_status`): `SUCCEEDED` · `FAILED` · NULL(필요 없었음).
 - 마지막 헬스 결과(`last_health_result`): `OK` · `HTTP_ERROR` · `UNREACHABLE`.
 - 가짜 실패 단계(`simulate.failAt`): `BUILDING` · `DEPLOYING` · `VERIFYING`.
@@ -175,7 +180,7 @@
 | `DEPLOY_JOB` · `BUILD` · `RUNTIME` | 로그 API `source` (`LogSource`) | 배포 작업 로그(DB) · 빌드 로그 · 실행 로그(실행기 즉석 조회) |
 | `INFO` · `WARN` · `ERROR` | `deploy_request_logs.level`, 응답 `level` (`LogLevel`) | `FAILED`·`REVERT_FAILED` 는 ERROR, 헬스 실패 줄은 WARN |
 | 요청 상태 7개 · `REVERT` | `deploy_request_logs.stage` (`DeployLogStage`) | 줄이 속한 단계 |
-| `REQUEST_ACCEPTED` · `STARTED` · `BUILD_ATTACHED` · `BUILD_REUSED` · `DEPLOYMENT_CREATED` · `DEPLOY_REQUESTED` · `DEPLOY_APPLIED` · `HEALTH_PROBE_OK` · `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` · `SUCCEEDED` · `STANDBY_SYNC_REQUESTED` · `FAILED` · `REVERT_SUCCEEDED` · `REVERT_FAILED` · `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` · `LOG_TRUNCATED` | `deploy_request_logs.code` (`DeployLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/deploy_log_messages.py` |
+| `REQUEST_ACCEPTED` · `STARTED` · `BUILD_ATTACHED` · `BUILD_REUSED` · `DEPLOYMENT_CREATED` · `DEPLOY_REQUESTED` · `ENV_VARS_APPLIED` · `DEPLOY_APPLIED` · `HEALTH_PROBE_OK` · `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` · `SUCCEEDED` · `STANDBY_SYNC_REQUESTED` · `FAILED` · `REVERT_SUCCEEDED` · `REVERT_FAILED` · `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` · `LOG_TRUNCATED` | `deploy_request_logs.code` (`DeployLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/deploy_log_messages.py` |
 
 ### 빌드·할 일·서비스 상태
 

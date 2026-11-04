@@ -26,11 +26,13 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.core.exceptions import RepoNotAccessibleError, SourceProviderUnavailableError
 from app.core.repo_url import parse_repo_url
+from app.core.secrets import SecretValue
 from app.enums import (
     BuildStatus,
     DeployLogCode,
@@ -55,6 +57,7 @@ from app.executors.base import (
     DeployApplyError,
     DeployFailed,
     DeployPending,
+    ExecutorUnavailableError,
     HealthHttpError,
     HealthOk,
     MainRoute,
@@ -69,10 +72,15 @@ from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_environment_variable_repository import (
+    ServiceEnvironmentVariableRepository,
+)
 from app.repositories.service_repository import ServiceRepository
+from app.services.app_env_values import AppEnvResolver, EnvSecretUnavailableError
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
+    SNAPSHOT_ENV_VARS,
     SNAPSHOT_ENVIRONMENT_URL,
     SNAPSHOT_HEALTH_CHECK_PATH,
     SNAPSHOT_HEALTH_CHECK_TIMEOUT_SECONDS,
@@ -117,6 +125,7 @@ class DeployRequestProcessor:
         clock: Clock,
         executors: ExecutorSet,
         source_client: SourceRepositoryClient,
+        app_secret_store: AppSecretStore,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -124,12 +133,15 @@ class DeployRequestProcessor:
         self._clock = clock
         self._executors = executors
         self._source_client = source_client
+        self._app_secret_store = app_secret_store
+        self._env_resolver = AppEnvResolver(app_secret_store, settings)
         self._services = ServiceRepository(session)
         self._connections = ServiceEnvironmentRepository(session)
         self._requests = DeployRequestRepository(session)
         self._builds = BuildRepository(session)
         self._deployments = DeploymentRepository(session)
         self._jobs = JobRepository(session)
+        self._variables = ServiceEnvironmentVariableRepository(session)
         self._job_log = DeployJobLog(session)
         self._request_id = lease.job.subject_id
 
@@ -455,7 +467,7 @@ class DeployRequestProcessor:
                 service_environment_id=locked.connection.id,
                 image_repository=build.image_repository,
                 image_digest=build.image_digest,
-                config_snapshot=dict(request.config_snapshot),
+                config_snapshot=await self._deployment_snapshot(request, locked.connection.id),
                 status=DeploymentStatus.IN_PROGRESS,
                 rollback_of_id=rollback_of_id,
                 started_at=now,
@@ -478,6 +490,32 @@ class DeployRequestProcessor:
                 await self._job_log.append(request, DeployLogCode.DEPLOYMENT_CREATED, now)
         self._log("deploy request deploying", request, DeployRequestStatus.DEPLOYING)
         return self._next_run_now()
+
+    async def _deployment_snapshot(
+        self, request: DeployRequest, service_environment_id: uuid.UUID
+    ) -> dict[str, Any]:
+        """배포 기록의 설정 사본. 앱 환경 변수는 키별 버전을 여기에 고정한다.
+
+        되돌리기는 대상 기록의 사본을 그대로 쓴다(이 기능 이전 기록이면 envVars 가 없고 앱 Secret 을
+        건드리지 않는다). 그 밖에는 이 연결의 지금 최신 버전이다. 변수가 없어도 envVars 를 둔다.
+
+        실제 실행기 + 가짜 보관함이면 키를 두지 않는다. 그동안 앱 Secret 은 echo-was 가 맡지
+        않았으니 보관함을 켠 뒤 그 기록으로 되돌려도 Secret 을 비우면 안 된다.
+        """
+        snapshot = dict(request.config_snapshot)
+        if (
+            request.trigger == DeployRequestTrigger.ROLLBACK
+            or not self._settings.is_app_secret_store_configured
+        ):
+            return snapshot
+        variables = await self._variables.search_live_by_connection(service_environment_id)
+        snapshot[SNAPSHOT_ENV_VARS] = {
+            variable.key: self._app_secret_store.secret_ref(
+                variable.secret_name, variable.latest_version
+            )
+            for variable in variables
+        }
+        return snapshot
 
     async def _rollback_target_deployment_id(self, request: DeployRequest) -> uuid.UUID | None:
         """되돌리기면 대상 요청이 만든 배포 기록(새 배포 기록의 rollback_of_id). 아니면 None.
@@ -521,8 +559,14 @@ class DeployRequestProcessor:
             assert deployment is not None
             await self._lease.extend()
             try:
+                env_values = await self._env_resolver.resolve(deployment.config_snapshot)
+            except EnvSecretUnavailableError as exc:
+                self._warn_env_secret(request, exc.keys)
+                return await self._fail(DeployRequestErrorCode.ENV_SECRET_UNAVAILABLE)
+            await self._lease.extend()
+            try:
                 external_ref = await self._executors.deploy.apply(
-                    deployment_spec(deployment),
+                    deployment_spec(deployment, env_values),
                     deploy_target(service, connection, environment),
                     idempotency_key=str(deployment.id),
                 )
@@ -532,14 +576,24 @@ class DeployRequestProcessor:
                 return await self._fail(exc.code)
             async with self._session.begin():
                 await self._lock()
-                await self._requests.update_if(
-                    request.id,
-                    [
-                        DeployRequest.status == DeployRequestStatus.DEPLOYING,
-                        DeployRequest.deploy_external_ref.is_(None),
-                    ],
-                    {"deploy_external_ref": external_ref, "updated_at": self._clock.now()},
-                )
+                saved_at = self._clock.now()
+                if (
+                    await self._requests.update_if(
+                        request.id,
+                        [
+                            DeployRequest.status == DeployRequestStatus.DEPLOYING,
+                            DeployRequest.deploy_external_ref.is_(None),
+                        ],
+                        {"deploy_external_ref": external_ref, "updated_at": saved_at},
+                    )
+                    and env_values
+                ):
+                    await self._job_log.append(
+                        request,
+                        DeployLogCode.ENV_VARS_APPLIED,
+                        saved_at,
+                        env_keys=sorted(env_values),
+                    )
             return self._next_run_now()
 
         await self._lease.extend()
@@ -740,8 +794,14 @@ class DeployRequestProcessor:
             status=DeployRequestStatus.QUEUED,
             build_id=source.build_id,
             build_reused=True,
+            # 앱 환경 변수는 연결마다 다르다. 되돌리기 원본의 참조를 옮기지 않고 배포 기록을 만들 때
+            # 예비 연결의 값으로 고정한다.
             config_snapshot={
-                **source.config_snapshot,
+                **{
+                    key: value
+                    for key, value in source.config_snapshot.items()
+                    if key != SNAPSHOT_ENV_VARS
+                },
                 SNAPSHOT_ENVIRONMENT_URL: public_url(standby.public_host),
             },
             simulate=None,
@@ -821,9 +881,15 @@ class DeployRequestProcessor:
                 else None
             )
         await self._lease.extend()
+        previous_spec = (
+            deployment_spec(previous, await self._revert_env_values(request, previous))
+            if previous is not None
+            else None
+        )
+        await self._lease.extend()
         result = await self._executors.deploy.revert(
             deploy_target(service, connection, environment),
-            deployment_spec(previous) if previous is not None else None,
+            previous_spec,
             idempotency_key=str(request.deployment_id),
         )
         revert_status = (
@@ -856,6 +922,31 @@ class DeployRequestProcessor:
                 "action": "revert_deploy_request",
                 "deploy_request_id": str(request.id),
                 "revert_status": revert_status,
+            },
+        )
+
+    async def _revert_env_values(
+        self, request: DeployRequest, previous: Deployment
+    ) -> dict[str, SecretValue] | None:
+        """직전 버전의 값. 못 꺼내면 None 이라 앱 Secret 은 그대로 두고 Deployment 만 되돌린다."""
+        try:
+            return await self._env_resolver.resolve(previous.config_snapshot)
+        except EnvSecretUnavailableError as exc:
+            self._warn_env_secret(request, exc.keys)
+        except ExecutorUnavailableError:
+            pinned = previous.config_snapshot.get(SNAPSHOT_ENV_VARS) or {}
+            self._warn_env_secret(request, tuple(sorted(pinned)))
+        return None
+
+    @staticmethod
+    def _warn_env_secret(request: DeployRequest, keys: tuple[str, ...]) -> None:
+        logger.warning(
+            "app environment variable unavailable",
+            extra={
+                "action": "resolve_env_values",
+                "deploy_request_id": str(request.id),
+                "error_code": DeployRequestErrorCode.ENV_SECRET_UNAVAILABLE,
+                "env_keys": list(keys),
             },
         )
 

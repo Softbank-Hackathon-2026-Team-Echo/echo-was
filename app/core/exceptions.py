@@ -442,3 +442,91 @@ class MigrationInProgressError(ConflictError):
             "a migration plan is in progress for this service",
             details=[ErrorField(field="planId", reason="MIGRATION_IN_PROGRESS", value=plan_id)],
         )
+
+
+# --- 고객 앱 환경 변수 (API 서버 10) ---
+
+
+class ServiceEnvironmentNotFoundError(NotFoundError):
+    """서비스가 그 환경에 연결돼 있지 않다(연결은 그 환경의 첫 배포 요청 때 생긴다)."""
+
+    code = "SERVICE_ENVIRONMENT_NOT_FOUND"
+
+    def __init__(self) -> None:
+        super().__init__("service is not connected to this environment")
+
+
+class EnvVarNotFoundError(NotFoundError):
+    code = "ENV_VAR_NOT_FOUND"
+
+    def __init__(self) -> None:
+        super().__init__("environment variable not found")
+
+
+class EnvVarKeyInvalidError(InvalidInputError):
+    code = "ENV_VAR_KEY_INVALID"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "environment variable name must match ^[A-Z][A-Z0-9_]{0,63}$",
+            details=[ErrorField(field="key", reason="ENV_VAR_KEY_INVALID")],
+        )
+
+
+class EnvVarKeyReservedError(InvalidInputError):
+    """플랫폼이 쓰는 이름(PORT, ECHO_ 로 시작하는 이름)이다."""
+
+    code = "ENV_VAR_KEY_RESERVED"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "environment variable name is reserved by the platform",
+            details=[ErrorField(field="key", reason="ENV_VAR_KEY_RESERVED")],
+        )
+
+
+class EnvVarValueInvalidError(InvalidInputError):
+    """값이 비었거나 16,384바이트를 넘는다. 값·길이는 응답·로그에 넣지 않는다."""
+
+    code = "ENV_VAR_VALUE_INVALID"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "environment variable value must be 1 to 16384 bytes of UTF-8",
+            details=[ErrorField(field="value", reason="ENV_VAR_VALUE_INVALID")],
+        )
+
+
+class EnvVarLimitExceededError(InvalidInputError):
+    code = "ENV_VAR_LIMIT_EXCEEDED"
+
+    def __init__(self) -> None:
+        super().__init__("a connection can have at most 40 environment variables")
+
+
+class SecretStoreNotConfiguredError(ConflictError):
+    """실제 실행기인데 보관함이 가짜다(APP_SECRET_STORE_MODE=fake). 값도 행도 받지 않는다."""
+
+    code = "SECRET_STORE_NOT_CONFIGURED"
+
+    def __init__(self) -> None:
+        super().__init__("the app secret store is not configured")
+
+
+class SecretStoreUnavailableError(ExternalError):
+    """보관함 장애·시간 초과. 응답·로그에 값·비밀 이름을 넣지 않는다."""
+
+    code = "SECRET_STORE_UNAVAILABLE"
+
+    def __init__(self) -> None:
+        super().__init__("the app secret store is unavailable")
+
+
+class SecretStoreForbiddenError(ExternalError):
+    """보관함이 권한 없음으로 거절했다(IAM). 다시 불러도 같다."""
+
+    code = "SECRET_STORE_FORBIDDEN"
+    retryable = False
+
+    def __init__(self) -> None:
+        super().__init__("the app secret store denied access")

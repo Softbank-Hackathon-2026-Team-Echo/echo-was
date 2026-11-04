@@ -18,6 +18,7 @@
 """
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -68,6 +69,8 @@ from app.executors.base import (
     WeightedTarget,
     check_weights_total,
 )
+
+logger = logging.getLogger(__name__)
 
 FAKE_REGISTRY = "registry.echo.test"
 _SEPARATOR = "|"
@@ -218,6 +221,15 @@ def _fake_digest(service_id: str, commit_sha: str) -> str:
     return "sha256:" + hashlib.sha256(f"{service_id}{commit_sha}".encode()).hexdigest()
 
 
+def _record_env_keys(deployment: DeploymentSpec, action: str) -> tuple[str, ...] | None:
+    """앱 환경 변수의 키 이름만 남긴다."""
+    if deployment.env_values is None:
+        return None
+    keys = tuple(sorted(deployment.env_values))
+    logger.info("fake deploy env keys", extra={"action": action, "env_keys": list(keys)})
+    return keys
+
+
 class FakeDeployExecutor:
     def __init__(
         self,
@@ -235,6 +247,9 @@ class FakeDeployExecutor:
         self._fail_revert = fail_revert
         self._log_injections = tuple(log_injections)
         self.reverts: list[FakeCall] = []
+        # 호출마다 받은 앱 환경 변수의 키 이름(값은 담지 않는다). env_values=None 이면 None.
+        self.applied_env_keys: list[tuple[str, ...] | None] = []
+        self.reverted_env_keys: list[tuple[str, ...] | None] = []
 
     @property
     def simulated(self) -> bool:
@@ -254,6 +269,7 @@ class FakeDeployExecutor:
     async def apply(
         self, deployment: DeploymentSpec, target: DeployTarget, idempotency_key: str
     ) -> str:
+        self.applied_env_keys.append(_record_env_keys(deployment, "fake_deploy_apply"))
         return self._operations.start("apply", idempotency_key, str(target.service_environment_id))
 
     async def poll(self, external_ref: str) -> DeployPollResult:
@@ -268,6 +284,9 @@ class FakeDeployExecutor:
         self, target: DeployTarget, previous: DeploymentSpec | None, idempotency_key: str
     ) -> RevertResult:
         self.reverts.append(FakeCall("revert", idempotency_key))
+        self.reverted_env_keys.append(
+            _record_env_keys(previous, "fake_deploy_revert") if previous is not None else None
+        )
         if self._fail_revert:
             return RevertFailed()
         return Reverted(external_ref=f"fake-revert{_SEPARATOR}{idempotency_key}")

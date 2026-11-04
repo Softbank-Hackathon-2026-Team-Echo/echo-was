@@ -31,6 +31,21 @@
 - 환경 접속 확인 어댑터는 `ENVIRONMENT_ADAPTER_MODE: real`(API 서버 12)이다. aws·gcp는 배포 실행기와 같은 워크로드 신원으로 붙고(저장 비밀 없음), 온프레는 위 k3s 실행기 토큰으로 붙는다. 온프레 노드 수를 읽으려면 `echo-executor` ClusterRole에 `nodes get,list`가 필요하다(없으면 환경은 `CONNECTED`, 클러스터 정보만 `AUTH_FAILED`). 되돌리려면 이 값을 `simulated`로 바꾼다.
 - `SecretSync`가 이 값을 Kubernetes Secret `echo-was-env`(`DATABASE_URL`·`ECHO_SECRET_GITHUB_APP_PRIVATE_KEY`·`ECHO_SECRET_GITHUB_APP_CLIENT_SECRET`·`ECHO_SECRET_ENTRYPOINT_TOKEN`·`ECHO_SECRET_CLOUDFLARE_DNS_TOKEN`·`ECHO_DEMO_ONPREM_EXECUTOR_TOKEN`·`ECHO_SECRET_DATA_SYNC_PASSWORD`)로 옮기고 API·일꾼·마이그레이션이 `envFrom`으로 읽는다. 값을 바꾸면 새 version을 추가한다(`gcloud secrets versions add <id> --data-file=-`). 동기화는 약 2분 간격이다.
 
+## 고객 앱 환경 변수 보관함 (API 서버 10)
+
+고객 앱의 환경 변수·API 키는 관리 평면 DB 가 아니라 GCP Secret Manager(이름 접두어 `echo-app-`)에 둔다. 실행기가 배포 때 꺼내 앱 네임스페이스 Secret `{ns}-env` 에 쓴다([docs/executors.md](../docs/executors.md#앱-환경-변수-ns-env-api-서버-10)).
+
+| 설정 | 기본 | 뜻 |
+|---|---|---|
+| `APP_SECRET_STORE_MODE` | `fake` | `gcp` 면 Secret Manager. `fake` + `EXECUTOR_MODE=real`(지금 운영)이면 쓰기 API 가 409 `SECRET_STORE_NOT_CONFIGURED` 이고 실행기는 `{ns}-env` 를 건드리지 않는다 |
+| `APP_SECRET_PROJECT_ID` | 없음 | 보관함 프로젝트 id. `gcp` 면 필수 |
+| `APP_SECRET_NAME_PREFIX` | `echo-app-` | IAM 조건의 접두어와 같아야 한다 |
+
+- **`base.yaml` 은 아직 `fake` 다.** 켜기 전에 GSA `echo-dev-echo-was` 에 `roles/secretmanager.admin` + 조건 `resource.name.startsWith("projects/<프로젝트 번호>/secrets/echo-app-")` 를 주고 운영 파드에서 만들기·버전 추가·읽기를 시험한 뒤, `APP_SECRET_STORE_MODE: gcp`·`APP_SECRET_PROJECT_ID` 를 올린다.
+- 되돌리려면 `fake` 로 바꾼다. 쓰기 API 가 409 가 되고, 이미 쓴 `{ns}-env` 는 그대로 남는다.
+- 지금 손으로 만든 시연 앱 `demo-y6cz3jrc-env` 는 값을 API 로 넣고 다시 배포하기 전까지 그대로 쓰인다(변수가 없는 연결은 손 Secret 을 건드리지 않는다). 넣고 배포하면 통째로 echo-was 소유로 바뀐다.
+- echo-was 는 보관함 비밀을 지우지 않는다. 정리는 라벨(`managed-by=echo-was`, `echo-service`)로 찾는 후속 일이다.
+
 ## 손으로 만들어 두는 것 (저장소에 넣지 않는다)
 
 - 네임스페이스 `echo-was`, Secret `echo-was-db`(DB 비밀번호, `DATABASE_URL`과 같은 값)

@@ -13,6 +13,7 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.config import Settings
 from app.enums import ConnectionErrorCode, DeployRequestStatus, JobStatus
@@ -142,6 +143,7 @@ class DeployHarness:
     organization: Organization
     admin: Member
     github_users: FakeGithubUserClient
+    app_secret_store: AppSecretStore
     responses: list[str] = field(default_factory=list)
     host_suffixes: ScriptedHostSuffixGenerator = field(default_factory=ScriptedHostSuffixGenerator)
 
@@ -165,6 +167,7 @@ class DeployHarness:
             clock=self.clock,
             executors=self.executors.as_set(),
             source_client=self.source_client,
+            app_secret_store=self.app_secret_store,
             owner=owner,
         )
 

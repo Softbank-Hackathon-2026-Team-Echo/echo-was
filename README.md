@@ -34,6 +34,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 비밀값 조회기 | 있음 | `secretRef` 형식 4종. `env:` 만 실제 조회, 나머지는 형식만 |
 | 서비스 API | 있음 | 등록·목록·단건·수정·삭제(모든 환경에서 내린 뒤) ([docs/api/services.md](docs/api/services.md)) |
 | 원터치 배포 API | 있음 | 접수·목록·단건. 서비스 중·예비, 예비 자동 따라가기, 실행 1 + 대기 1 ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
+| 앱 환경 변수 | 있음(운영 보관함은 설정 전) | 서비스 × 환경 단위 쓰기 전용 API. 값은 GCP Secret Manager 에만 두고 배포 기록에 버전을 고정해 앱 Secret 으로 주입(`APP_SECRET_STORE_MODE`, 기본 `fake`) ([docs/api/variables.md](docs/api/variables.md)) |
 | 배포 이력·되돌리기·로그 | 있음 | 이력 필터·`isCurrent`·`rollbackable`, 이력에서 고른 성공 버전으로 되돌리기(`trigger = ROLLBACK`, 예비 따라가기), 배포 작업 로그(DB)·빌드·실행 로그(실행기, 가짜) ([docs/api/deploy-requests.md](docs/api/deploy-requests.md)) |
 | 일꾼 | 있음 | `python -m app.worker`. 할 일 표 + 임대 + 멱등 키로 복구 |
 | 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜 + 실제) | 실제 구현: GitHub Actions 빌드 + 쿠버네티스 직접 반영·내리기(`EXECUTOR_MODE=real`, API 서버 3-2, 운영 기본값은 `fake`), HTTP 헬스체커, 고정 진입점 실행기(트래픽 비율·대표 주소·지표, `ENTRYPOINT_EXECUTOR_MODE=http`), 복제 지연 확인(`DATA_SYNC_CHECKER_MODE=postgres`, 인프라 7) ([docs/executors.md](docs/executors.md)) |
@@ -126,7 +127,7 @@ alembic/           # 마이그레이션 (공통 모델 표, 환경 접속 상태
 scripts/           # dump_schema.sh (db-schema.sql 생성)
 tests/             # 단위 테스트, adapter_contract.py·executor_contract.py(공통 계약), integration/ (실제 PostgreSQL)
 docs/schema.md     # 스키마 설명 원본
-docs/api/          # API 계약 문서 (auth · organizations · environments · services · deploy-requests · migration-plans)
+docs/api/          # API 계약 문서 (auth · organizations · environments · services · variables · deploy-requests · migration-plans)
 docs/executors.md  # 실행기 계약(멱등 키·호출 순서·실패 코드)
 .claude/           # 규칙 문서·훅·write-pr 스킬
 ```
@@ -308,6 +309,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 내부 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
 | `ENTRYPOINT_ENVIRONMENT_MAP`·`ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | (비움) · `5` | 환경 id → 진입점 환경 이름(비면 환경 종류 그대로), 요청 제한 시간 |
+| `APP_SECRET_STORE_MODE`·`APP_SECRET_PROJECT_ID`·`APP_SECRET_NAME_PREFIX` | `fake` · (비움) · `echo-app-` | 고객 앱 환경 변수 보관함. `gcp` 면 GCP Secret Manager(프로젝트 필수). `fake` + `EXECUTOR_MODE=real` 이면 쓰기 API 409, 실행기는 앱 Secret 을 건드리지 않는다 ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_CHECKER_MODE`·`DATA_SYNC_DATABASES`·`DATA_SYNC_PASSWORD_REF` | `fake` · (비움) · `env:ECHO_SECRET_DATA_SYNC_PASSWORD` | `postgres` 면 이전 계획 데이터 확인이 출발 PostgreSQL 의 `pg_stat_replication` 복제 지연을 읽는다. 매핑은 `<환경 id 또는 종류>=<host>:<port>/<구독 이름>` ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_USER`·`DATA_SYNC_DATABASE`·`DATA_SYNC_SSL_MODE`·`DATA_SYNC_TIMEOUT_SECONDS` | `echo_monitor` · `postgres` · `require` · `3` | `pg_monitor` 권한 계정, 접속 DB, TLS(`require`·`verify-full`·`disable`), 제한 시간 |
 | `SOURCE_CLIENT_MODE` | `fake` | `fake`(owner 이름 규칙) · `github`(GitHub App, 위 설정 자리) |

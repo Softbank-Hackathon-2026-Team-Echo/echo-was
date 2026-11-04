@@ -6,11 +6,15 @@ Deployment 어노테이션과 파드 라벨 `echo.deployment-id` 에 둔다.
 """
 
 import base64
+import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from app.core.secrets import SecretValue
 
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "echo-was"
@@ -18,6 +22,9 @@ NAME_LABEL = "app.kubernetes.io/name"
 SERVICE_ID_LABEL = "echo.service-id"
 DEPLOYMENT_ID_KEY = "echo.deployment-id"
 PULL_EXPIRES_AT_ANNOTATION = "echo.pull-expires-at"
+ENV_REVISION_ANNOTATION = "echo.env-revision"
+ENV_REVISION_LENGTH = 16
+OPAQUE_SECRET_TYPE = "Opaque"
 APP_NAME = "app"
 CONTAINER_NAME = "app"
 PULL_SECRET_NAME = "echo-pull"
@@ -37,7 +44,7 @@ ALB_PREFIX = "alb.ingress.kubernetes.io/"
 
 @dataclass(frozen=True)
 class AppSpec:
-    """연결 하나의 반영 값. 비밀값은 없다(앱 비밀값은 미리 둔 `{ns}-env` Secret 을 읽기만 한다)."""
+    """연결 하나의 반영 값. 비밀값은 없다(앱 비밀값은 `{ns}-env` Secret 에 따로 쓴다)."""
 
     namespace: str
     service_id: uuid.UUID
@@ -50,6 +57,8 @@ class AppSpec:
     ingress_class: str
     ingress_annotations: dict[str, str]
     uses_pull_secret: bool
+    # 앱 환경 변수가 있을 때 파드 템플릿 어노테이션 값(키·버전의 해시, 값 아님).
+    env_revision: str | None = None
 
 
 def labels(service_id: uuid.UUID) -> dict[str, str]:
@@ -71,8 +80,42 @@ def namespace_manifest(namespace: str, service_id: uuid.UUID) -> dict[str, Any]:
 
 
 def app_secret_name(namespace: str) -> str:
-    """환경 담당이 미리 두는 앱 비밀값 Secret 이름."""
+    """앱 비밀값 Secret 이름. echo-was 가 쓰거나(앱 환경 변수) 환경 담당이 손으로 둔다."""
     return f"{namespace}-env"
+
+
+def env_revision(versions: Mapping[str, str]) -> str:
+    """정렬한 `KEY=version` 목록의 SHA-256 앞 16자. 값은 들어가지 않는다."""
+    lines = "\n".join(f"{key}={versions[key]}" for key in sorted(versions))
+    return hashlib.sha256(lines.encode()).hexdigest()[:ENV_REVISION_LENGTH]
+
+
+def app_env_secret_manifest(
+    namespace: str,
+    service_id: uuid.UUID,
+    values: Mapping[str, SecretValue],
+    *,
+    resource_version: str | None = None,
+    secret_type: str = OPAQUE_SECRET_TYPE,
+) -> dict[str, Any]:
+    """`{ns}-env` 전체. 이 내용으로 통째로 바꾼다(다른 manager 의 키를 남기지 않으려고 PUT)."""
+    metadata: dict[str, Any] = {
+        "name": app_secret_name(namespace),
+        "namespace": namespace,
+        "labels": labels(service_id),
+    }
+    if resource_version is not None:
+        metadata["resourceVersion"] = resource_version
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "type": secret_type,
+        "metadata": metadata,
+        "data": {
+            key: base64.b64encode(value.get_secret_value().encode()).decode()
+            for key, value in values.items()
+        },
+    }
 
 
 def deployment_manifest(spec: AppSpec) -> dict[str, Any]:
@@ -105,6 +148,15 @@ def deployment_manifest(spec: AppSpec) -> dict[str, Any]:
     }
     if spec.uses_pull_secret:
         pod_spec["imagePullSecrets"] = [{"name": PULL_SECRET_NAME}]
+    template_metadata: dict[str, Any] = {
+        "labels": {
+            **labels(spec.service_id),
+            NAME_LABEL: APP_NAME,
+            DEPLOYMENT_ID_KEY: deployment_id,
+        }
+    }
+    if spec.env_revision is not None:
+        template_metadata["annotations"] = {ENV_REVISION_ANNOTATION: spec.env_revision}
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -117,16 +169,7 @@ def deployment_manifest(spec: AppSpec) -> dict[str, Any]:
         "spec": {
             "replicas": 1,
             "selector": {"matchLabels": {NAME_LABEL: APP_NAME}},
-            "template": {
-                "metadata": {
-                    "labels": {
-                        **labels(spec.service_id),
-                        NAME_LABEL: APP_NAME,
-                        DEPLOYMENT_ID_KEY: deployment_id,
-                    }
-                },
-                "spec": pod_spec,
-            },
+            "template": {"metadata": template_metadata, "spec": pod_spec},
         },
     }
 
@@ -288,6 +331,14 @@ def role_bindings_path(namespace: str) -> str:
 
 def pull_secret_path(namespace: str) -> str:
     return f"/api/v1/namespaces/{namespace}/secrets/{PULL_SECRET_NAME}"
+
+
+def secrets_path(namespace: str) -> str:
+    return f"/api/v1/namespaces/{namespace}/secrets"
+
+
+def app_secret_path(namespace: str) -> str:
+    return f"{secrets_path(namespace)}/{app_secret_name(namespace)}"
 
 
 def pods_path(namespace: str) -> str:
