@@ -41,6 +41,7 @@ from tests.integration.auth_support import (
     make_client,
     org_path,
 )
+from tests.integration.deploy_harness import DeployHarness, connection_of
 from tests.integration.factories import (
     DEFAULT_ORG_SLUG,
     ShopApiExample,
@@ -59,6 +60,7 @@ SUMMARY_KEYS = {
     "name",
     "kind",
     "location",
+    "coordinates",
     "config",
     "secretRef",
     "connectionStatus",
@@ -234,6 +236,7 @@ async def test_new_kind_file_registers_lists_and_passes_contract(
     items = listed.json()["data"]["items"]
     assert [set(item) for item in items] == [SUMMARY_KEYS, SUMMARY_KEYS]
     assert items[1]["location"] == "koreacentral"
+    assert items[1]["coordinates"] is None
     assert [k["kind"] for k in kinds.json()["data"]] == ["aws", "azure", "gcp", "onprem"]
     await assert_adapter_contract(
         "azure", {"subscription_id": "sub-1", "location": "koreacentral", "cluster_name": "aks"}
@@ -961,6 +964,7 @@ async def test_unreadable_stored_config_does_not_break_list_and_check_fails(
     items = {item["name"]: item for item in listed.json()["data"]["items"]}
     assert set(items["broken-aws"]) == SUMMARY_KEYS
     assert (items["broken-aws"]["location"], items["broken-aws"]["config"]) == (None, None)
+    assert items["broken-aws"]["coordinates"] is None
     assert items["aws-seoul"]["location"] == "ap-northeast-2"
     assert detail.status_code == 200
     assert detail.json()["data"]["clusterInfoError"] == "CONFIG_INVALID"
@@ -1065,3 +1069,107 @@ async def test_session_objects_written_by_service_keep_constraints(
 
     assert [(row.name, row.connection_status) for row in rows] == [("aws-seoul", "CONNECTED")]
     assert created["id"] == str(rows[0].id)
+
+
+# --- 좌표 (SPEC api-5 AC-3·AC-4·AC-8) ---
+
+
+async def test_search_environments_known_locations_return_coordinates(
+    client: AsyncClient, secrets_env: dict[str, str]
+) -> None:
+    await _create(
+        client,
+        name="aws-tokyo",
+        kind="aws",
+        config={"region": "ap-northeast-1", "clusterName": "echo-eks"},
+    )
+    await _create(
+        client,
+        name="gcp-seoul",
+        kind="gcp",
+        config={**GCP_CONFIG, "clusterLocation": "asia-northeast3-a"},
+        secret_ref=f"env:{GCP_SECRET_ENV}",
+    )
+    await _create(
+        client,
+        name="onprem-k3s",
+        kind="onprem",
+        config={"location": "Seoul", "kubeContext": "k3d-echo"},
+        secret_ref=f"env:{ONPREM_SECRET_ENV}",
+    )
+
+    response = await client.get(BASE)
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [(i["name"], i["location"], i["coordinates"]) for i in items] == [
+        ("aws-tokyo", "ap-northeast-1", {"lat": 35.68, "lng": 139.69}),
+        ("gcp-seoul", "asia-northeast3", {"lat": 37.57, "lng": 126.98}),
+        ("onprem-k3s", "Seoul", {"lat": 37.57, "lng": 126.98}),
+    ]
+
+
+async def test_search_environments_unknown_locations_return_null_coordinates(
+    client: AsyncClient, secrets_env: dict[str, str]
+) -> None:
+    await _create(
+        client,
+        name="aws-singapore",
+        kind="aws",
+        config={"region": "ap-southeast-1", "clusterName": "echo-eks"},
+    )
+    await _create(
+        client,
+        name="onprem-k3s",
+        kind="onprem",
+        config=ONPREM_CONFIG,
+        secret_ref=f"env:{ONPREM_SECRET_ENV}",
+    )
+
+    response = await client.get(BASE)
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert [(i["name"], i["location"], i["coordinates"]) for i in items] == [
+        ("aws-singapore", "ap-southeast-1", None),
+        ("onprem-k3s", "team-laptop", None),
+    ]
+
+
+async def test_update_environment_location_changes_coordinates_in_every_detail_response(
+    client: AsyncClient, secrets_env: dict[str, str]
+) -> None:
+    created = await _create(
+        client,
+        name="onprem-k3s",
+        kind="onprem",
+        config=ONPREM_CONFIG,
+        secret_ref=f"env:{ONPREM_SECRET_ENV}",
+    )
+    environment_path = f"{BASE}/{created['id']}"
+
+    patched = await client.patch(
+        environment_path, json={"config": {**ONPREM_CONFIG, "location": "seoul"}}
+    )
+    fetched = await client.get(environment_path)
+    checked = await client.post(f"{environment_path}/connection-check")
+
+    seoul = {"lat": 37.57, "lng": 126.98}
+    assert created["coordinates"] is None
+    assert patched.json()["data"]["coordinates"] == seoul
+    assert fetched.json()["data"]["coordinates"] == seoul
+    assert checked.json()["data"]["coordinates"] == seoul
+
+
+async def test_service_and_deploy_request_environment_ref_has_no_coordinates(
+    harness: DeployHarness,
+) -> None:
+    service = await harness.create_service("shop-api")
+    aws = await harness.add_environment("aws-seoul")
+
+    accepted = await harness.deploy(service["id"], aws.id, branch="main")
+    detail = await harness.get_service(service["id"])
+
+    ref_keys = {"id", "name", "kind"}
+    assert set(accepted["environment"]) == ref_keys
+    assert set(connection_of(detail, "aws-seoul")["environment"]) == ref_keys

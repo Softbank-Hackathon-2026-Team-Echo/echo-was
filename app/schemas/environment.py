@@ -8,6 +8,7 @@ from pydantic import Field, StringConstraints, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.adapters.base import ClusterInfo, EnvironmentConfig
+from app.core.places import Coordinates
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
 from app.enums import ConnectionErrorCode, EnvironmentConnectionStatus
 from app.models.base import RESOURCE_NAME_MAX_LENGTH, RESOURCE_NAME_PATTERN
@@ -87,10 +88,22 @@ class ClusterInfoResponse(ApiModel):
         )
 
 
+class CoordinatesResponse(ApiModel):
+    """지도·재난 판정용 좌표. 저장하지 않고 config 의 위치 글자로 서버 표에서 찾은 값이다."""
+
+    lat: float
+    lng: float
+
+    @classmethod
+    def from_coordinates(cls, coordinates: Coordinates) -> Self:
+        return cls(lat=coordinates.lat, lng=coordinates.lng)
+
+
 class EnvironmentSummaryResponse(ApiModel):
     """환경 목록 한 항목. 저장된 값만 담는다.
 
-    location·config 는 저장된 config 를 지금 양식으로 읽지 못하면 null 이다.
+    location·coordinates·config 는 저장된 config 를 지금 양식으로 읽지 못하면 null 이다.
+    coordinates 는 위치가 서버 표에 없어도 null 이다.
     다른 파트는 환경을 id 로만 가리킨다. name 은 표시용이며 바뀔 수 있다.
     """
 
@@ -98,6 +111,7 @@ class EnvironmentSummaryResponse(ApiModel):
     name: str
     kind: str
     location: str | None
+    coordinates: CoordinatesResponse | None
     config: dict[str, Any] | None
     secret_ref: str | None
     connection_status: EnvironmentConnectionStatus
@@ -148,11 +162,15 @@ class EnvironmentKindResponse(ApiModel):
 
 def _summary_fields(view: EnvironmentView) -> dict[str, Any]:
     environment = view.environment
+    coordinates = view.config.coordinates() if view.config is not None else None
     return {
         "id": environment.id,
         "name": environment.name,
         "kind": environment.kind,
         "location": view.config.display_location() if view.config is not None else None,
+        "coordinates": (
+            CoordinatesResponse.from_coordinates(coordinates) if coordinates is not None else None
+        ),
         "config": (
             view.config.model_dump(mode="json", by_alias=True, exclude_none=True)
             if view.config is not None

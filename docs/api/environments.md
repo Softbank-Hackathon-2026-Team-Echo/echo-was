@@ -53,7 +53,9 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 |---|---|---|
 | `aws` | `region`(예 `ap-northeast-2`), `clusterName` | `region` |
 | `gcp` | `projectId`(예 `echo-hack-123`), `region`(예 `asia-northeast3`), `clusterName` | `region` |
-| `onprem` | `location`(예 `team-laptop`), `kubeContext` | `location` |
+| `onprem` | `location`(예 `seoul`, `team-laptop`), `kubeContext` | `location` |
+
+온프레 `location` 은 자유 문구다. [좌표 표](#좌표-coordinates)의 도시 코드를 넣으면 지도에 표시되고, 그 밖의 글자는 좌표 없는 이름표로 남는다.
 
 **선택 칸(실제 실행기, API 서버 3-2)** — 비워도 되고, 기존 행·요청은 그대로 유효하다. 실제 실행기(`EXECUTOR_MODE=real`)가 반영할 때 쓴다.
 
@@ -117,7 +119,7 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 
 ### 다시 확인 `POST /api/v1/orgs/{orgId}/environments/{id}/connection-check`
 
-커밋된 값으로 접속을 확인하고 `connectionStatus`·`connectionCheckedAt`·`connectionError` 를 저장한다. 같은 상태여도 시각은 새로 적는다. 자동 주기 확인은 없다(API 서버 5 에서 정한다).
+커밋된 값으로 접속을 확인하고 `connectionStatus`·`connectionCheckedAt`·`connectionError` 를 저장한다. 같은 상태여도 시각은 새로 적는다. 자동 주기 확인은 하지 않는다(API 서버 5, 11/5 결정).
 
 - 확인 도중 다른 요청이 `config`·`secretRef` 를 바꾸면 이 확인의 결과는 버리고, 응답은 그 시점 DB 값이다(이때 `clusterInfo`·`clusterInfoError` 는 null).
 - 확인 도중 환경이 삭제되면 404.
@@ -140,6 +142,7 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
 | `name` | string | 표시용, 바뀔 수 있다 |
 | `kind` | string | `aws`·`gcp`·`onprem`… |
 | `location` | string \| null | 환경 카드의 위치. 저장된 config 를 지금 양식으로 읽지 못하면 null |
+| `coordinates` | `{lat: number, lng: number}` \| null | 지도·재난 판정용 좌표([찾는 규칙](#좌표-coordinates)). 표에 없거나 config 를 읽지 못하면 null |
 | `config` | object \| null | camelCase 키. 읽지 못하면 null |
 | `secretRef` | string \| null | 저장 값 그대로(형식이 틀린 옛 값도 그대로 보인다) |
 | `connectionStatus` | `UNCHECKED`·`CONNECTED`·`FAILED` | 마지막 접속 확인 결과 |
@@ -164,6 +167,7 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
     "name": "aws-seoul",
     "kind": "aws",
     "location": "ap-northeast-2",
+    "coordinates": {"lat": 37.57, "lng": 126.98},
     "config": {"region": "ap-northeast-2", "clusterName": "echo-eks"},
     "secretRef": "env:ECHO_SECRET_TEAM_ECHO__AWS_SEOUL_KUBECONFIG",
     "connectionStatus": "CONNECTED",
@@ -176,6 +180,39 @@ SPEC §8.2 의 이름과 코드 클래스 이름: `EnvironmentCreate` = `CreateE
   }
 }
 ```
+
+## 좌표 (`coordinates`)
+
+목록 항목과 단건(등록·단건·수정·다시 확인) 응답에 항상 있다. **저장하지 않고** 응답 때 `config` 의 위치 글자로 서버 표(`app/core/places.py`)에서 찾는다. 네트워크 호출은 없다.
+
+| kind | 찾는 값 | 표 |
+|---|---|---|
+| `aws` | `config.region` | AWS 리전 |
+| `gcp` | `config.region` (`clusterLocation` 존은 쓰지 않는다) | GCP 리전 |
+| `onprem` | `config.location` 을 소문자로 바꾼 값 | 온프레 도시 |
+
+| 표 | 키 | lat | lng |
+|---|---|---|---|
+| AWS 리전 | `ap-northeast-1` | 35.68 | 139.69 |
+| AWS 리전 | `ap-northeast-2` | 37.57 | 126.98 |
+| AWS 리전 | `ap-northeast-3` | 34.69 | 135.5 |
+| AWS 리전 | `us-east-1` | 38.9 | -77.4 |
+| AWS 리전 | `us-west-2` | 45.6 | -121.2 |
+| AWS 리전 | `eu-west-1` | 53.3 | -6.3 |
+| GCP 리전 | `asia-northeast1` | 35.68 | 139.69 |
+| GCP 리전 | `asia-northeast2` | 34.69 | 135.5 |
+| GCP 리전 | `asia-northeast3` | 37.57 | 126.98 |
+| 온프레 도시 | `tokyo` | 35.68 | 139.69 |
+| 온프레 도시 | `osaka` | 34.69 | 135.5 |
+| 온프레 도시 | `fukuoka` | 33.59 | 130.4 |
+| 온프레 도시 | `seoul` | 37.57 | 126.98 |
+| 온프레 도시 | `busan` | 35.18 | 129.08 |
+
+- 표는 종류별로 따로 본다. 온프레 `location: "ap-northeast-1"` 은 리전 표를 보지 않아 null 이다. aws·gcp `region` 은 양식 패턴이 도시 글자(`tokyo`)를 등록 단계에서 거부한다.
+- 표에 없는 값(aws `ap-southeast-1`, 온프레 `team-laptop`), 표가 없는 종류, 저장된 config 를 지금 양식으로 읽지 못하는 행은 null 이다.
+- 좌표를 바꾸려면 `PATCH` 로 위치 글자를 고친다(`config` 는 전체 교체다). 직접 좌표를 넣는 칸은 없다.
+- 새 리전·도시는 표에 한 줄 더한다. 프론트 표(echo-frontend `src/lib/geo.ts`)는 서버 값이 null 이거나 없을 때만 쓰이므로, 둘이 어긋나면 서버 값이 이긴다.
+- 서비스 상세·배포 요청 응답의 `environment` 참조(`{id, name, kind}`)에는 좌표가 없다. 환경 `id` 로 이 응답과 합친다.
 
 ## 접속 상태 흐름
 

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from pydantic import StringConstraints
+from pydantic import Field, StringConstraints
 
 from app.adapters.base import (
     ClusterBackedEnvironmentAdapter,
@@ -11,6 +11,7 @@ from app.adapters.base import (
     register_environment_adapter,
     register_environment_kind,
 )
+from app.core.places import ONPREM_CITY_COORDINATES, Coordinates, find_onprem_city_coordinates
 
 # 공개 인증서가 붙은 https 주소(경로 없음). 예: https://k3s-k2f6xje5.echoport.uk
 HttpsUrl = Annotated[
@@ -24,13 +25,25 @@ HttpsUrl = Annotated[
 
 @register_environment_kind("onprem")
 class OnpremEnvironmentConfig(EnvironmentConfig):
-    """온프레미스(k3s 등) 환경. location 은 사람이 읽는 설치 위치(예: team-laptop)다.
+    """온프레미스(k3s 등) 환경. location 은 사람이 읽는 설치 위치(예: seoul, team-laptop)다.
 
+    location 이 도시 표에 있는 코드면 좌표가 나오고, 그 밖의 글자는 좌표 없는 이름표로 남는다.
     선택 칸(실제 실행기): api_url(터널로 연 쿠버네티스 창구), tunnel_target(앱 주소 CNAME 대상
     `<터널 id>.cfargotunnel.com`), ingress_class(비면 traefik). 창구 토큰은 환경 행의 secret_ref 다.
     """
 
-    location: NonEmptyStr
+    location: Annotated[
+        NonEmptyStr,
+        Field(
+            description=(
+                "Install location. A city code "
+                f"({', '.join(ONPREM_CITY_COORDINATES)}; case-insensitive) "
+                "places the environment on the map. "
+                "Any other text is kept as a label without coordinates."
+            ),
+            examples=["seoul", "team-laptop"],
+        ),
+    ]
     kube_context: NonEmptyStr
     api_url: HttpsUrl | None = None
     tunnel_target: DomainName | None = None
@@ -38,6 +51,9 @@ class OnpremEnvironmentConfig(EnvironmentConfig):
 
     def display_location(self) -> str:
         return self.location
+
+    def coordinates(self) -> Coordinates | None:
+        return find_onprem_city_coordinates(self.location)
 
 
 @register_environment_adapter("onprem")
