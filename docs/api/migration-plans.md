@@ -372,7 +372,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `MIGRATION_STEP_OVERHEAD_SECONDS` | 2 | 단계 예상 시간에 더하는 여유(0~60) |
 | `MIGRATION_PLAN_APPROVAL_TTL_SECONDS` | 86400 | 승인 대기 만료 |
 | `MIGRATION_ROLLBACK_MAX_ATTEMPTS` | 3 | 롤백 비율 적용 최대 시도 |
-| `SECURITY_GATE_ENABLED` | `false` | 보안 게이트(승인·일꾼 시작 판정, 실행 직전 TLS 시험). API·일꾼 모두 같은 값 |
+| `SECURITY_GATE_ENABLED` | `false` | 보안 게이트(승인·일꾼 시작 판정, 실행 직전 TLS 시험). API·일꾼 모두 같은 값. 운영 켜짐 11/5(`deploy/base.yaml`, `WAS_VERSION=2026.11.05`) |
 | `WAS_VERSION` | (없음) | 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 두 통제는 확인 불가 |
 | `CUTOVER_RUNS_DATABASE` | `app` | 컷오버 결과 표가 있는 고객 DB 이름. 빈 값이면 읽지 않는다(`result` 칸 전부 null) |
 | `CUTOVER_RESULTS_NOT_BEFORE` | (없음) | 이보다 먼저 끝난 계획은 읽지 않는다(시간대가 있는 ISO 8601, 없으면 시작 때 설정 오류). 표가 생기기 전 계획에 나중 행이 붙지 않게 한다. 운영 `2026-11-04T13:30:00Z` |
