@@ -682,13 +682,17 @@ class MigrationPlanProcessor:
     async def _check_data_sync(self, plan: MigrationPlan) -> JobOutcome | None:
         index = plan.current_step
         max_lag = float(plan.rollback_conditions[CONDITION_MAX_REPLICATION_LAG])
+        reason: str | None = None
         if _simulated_failure(plan, index) is MigrationSimulateReason.DATA_LAG:
             lag: float | None = SIMULATED_REPLICATION_LAG_SECONDS
         else:
             targets = await self._targets(plan)
             await self._lease.extend()
             result = await self._executors.data_sync.replication_lag(targets.source, targets.target)
-            lag = result.seconds if isinstance(result, DataSyncLag) else None
+            if isinstance(result, DataSyncLag):
+                lag, reason = result.seconds, result.reason
+            else:
+                lag = None
         failure: MigrationErrorCode | None = None
         if lag is None:
             failure = MigrationErrorCode.METRICS_UNAVAILABLE
@@ -702,7 +706,15 @@ class MigrationPlanProcessor:
             if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.JUDGE):
                 return None
             if failure is None:
-                return await self._pass_step(plan, metrics_json, MigrationLogCode.DATA_SYNC_OK, now)
+                return await self._pass_step(
+                    plan,
+                    metrics_json,
+                    MigrationLogCode.DATA_SYNC_OK,
+                    now,
+                    log_data=(
+                        None if reason is None else {**_numbers(metrics_json), "reason": reason}
+                    ),
+                )
             await self._fail_step(
                 plan, index, metrics_json, failure, MigrationLogCode.DATA_SYNC_FAILED, now
             )

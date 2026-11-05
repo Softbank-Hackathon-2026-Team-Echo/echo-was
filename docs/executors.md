@@ -174,9 +174,10 @@ class MetricsProvider(Protocol):
 
 - 출발 → 도착 데이터 복제 지연(초). 읽을 수 없으면 `DataSyncUnavailable`(판정 `METRICS_UNAVAILABLE`).
 - 실제 구현(`DATA_SYNC_CHECKER_MODE=postgres`, 인프라 7): `PostgresDataSyncChecker`. **출발(발행 쪽)** PostgreSQL 에 `pg_monitor` 권한 계정(`DATA_SYNC_USER`, 기본 `echo_monitor`)으로 붙어 `pg_stat_replication` 에서 **도착 구독 이름**(= walsender `application_name`)의 `replay_lag` 를 읽는다. echo-infra `replication/k8s/scripts/lag.sh` 와 같은 질의다. 쓰기가 멈춰 `replay_lag` 가 NULL 이면 남은 WAL 바이트가 0 일 때만 0초로 본다.
+- **도착이 이미 쓰기 담당이면 통과한다**(API 서버 8-5, 트래픽만 이전하고 DB 컷오버를 하지 않은 뒤의 복귀). 출발에 그 walsender 행이 없을 때 ① 같은 출발 연결에서 `pg_subscription` 에 출발 구독 이름이 enabled 로 있거나 ② 도착 DB `pg_stat_replication` 에 출발 구독 이름의 행이 있으면(상태 무관) `DataSyncLag(seconds=0.0, reason="TARGET_IS_WRITER")` 다. 처리기는 `DATA_SYNC_OK` 로그 data 에 `reason` 을 더한다(단계 metrics·응답 모양은 그대로). 출발에 행이 있으면 ①·② 를 보지 않고 지금처럼 지연을 잰다. 접속은 최대 2번(각각 제한 시간 적용).
 - 접속처는 `DATA_SYNC_DATABASES`(`<환경 id 또는 종류>=<host>:<port>/<그 환경이 구독자일 때의 구독 이름>`, 쉼표 구분). 환경 id → 환경 종류 순서로 찾는다(진입점 매핑과 같다). 예: `aws=<A NLB>:5432/echo_sub_rev,gcp=echo-pg.echo-data.svc.cluster.local:5432/echo_sub` — 정방향(aws→gcp)은 A 에서 `echo_sub`, 역방향은 B 에서 `echo_sub_rev` 를 본다.
 - 비밀번호는 비밀 참조(`DATA_SYNC_PASSWORD_REF`)로만 받아 호출마다 읽는다. TLS 는 `DATA_SYNC_SSL_MODE`(`require` 기본 = 암호화만·자체 서명 허용, `verify-full`, 로컬 PoC 용 `disable`).
-- 매핑 없음·비밀값 없음·접속 실패(시간 초과 `DATA_SYNC_TIMEOUT_SECONDS`, 기본 3초)·구독 없음/streaming 아님은 예외 대신 `DataSyncUnavailable` 이고, 경고 로그에는 코드(`DATA_SYNC_ENV_UNMAPPED`·`DATA_SYNC_SECRET_MISSING`·`DATA_SYNC_UNREACHABLE`·`DATA_SYNC_NOT_STREAMING`)와 환경 id 만 남긴다(주소·비밀값 없음).
+- 매핑 없음·비밀값 없음·출발 접속 실패(시간 초과 `DATA_SYNC_TIMEOUT_SECONDS`, 기본 3초)·출발 구독자가 streaming 아님·도착이 쓰기 담당이라는 근거 없음(도착 접속 실패 포함)은 예외 대신 `DataSyncUnavailable` 이고, 경고 로그에는 코드(`DATA_SYNC_ENV_UNMAPPED`·`DATA_SYNC_SECRET_MISSING`·`DATA_SYNC_UNREACHABLE`·`DATA_SYNC_NOT_STREAMING`)와 환경 id 만 남긴다(주소·비밀값 없음).
 - 이전 계획의 `simulated` 는 지금처럼 `EXECUTOR_MODE` 로만 정한다(이 실행기를 켜도 바뀌지 않는다).
 
 ### 컷오버 결과 읽기 (`CutoverRunReader`, API 서버 16)

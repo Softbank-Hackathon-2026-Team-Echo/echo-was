@@ -307,7 +307,10 @@ type CountsResult = RequestCounts | CountsUnavailable
 
 @dataclass(frozen=True)
 class DataSyncLag:
+    """복제 지연(초). reason 은 지연을 재지 않고 통과한 이유(도착이 이미 쓰기 담당 등)."""
+
     seconds: float
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

@@ -11,8 +11,15 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.enums import JobKind, JobStatus, MigrationErrorCode, MigrationLogCode
-from app.executors.base import HealthHttpError, MainRoute, TrafficResult, WeightedTarget
-from app.executors.fake import FakeTrafficExecutor
+from app.executors.base import (
+    DataSyncLag,
+    DataSyncResult,
+    HealthHttpError,
+    MainRoute,
+    TrafficResult,
+    WeightedTarget,
+)
+from app.executors.fake import FAKE_REPLICATION_LAG_SECONDS, FakeTrafficExecutor
 from app.models import Job, MigrationPlan, MigrationPlanLog
 from app.services.migration_log_messages import MIGRATION_ERROR_MESSAGES
 from app.services.migration_plan_log import MAX_MIGRATION_LOG_LINES, MigrationPlanLogWriter
@@ -145,6 +152,40 @@ async def test_unavailable_counts_or_replication_lag_rolls_back(
     assert (final["status"], final["errorCode"]) == ("ROLLED_BACK", "METRICS_UNAVAILABLE")
     assert final["steps"][failed_step]["result"]["failureCode"] == "METRICS_UNAVAILABLE"
     assert await migration.weights() == (100, 0)
+
+
+async def test_data_sync_target_is_writer_passes_step_and_logs_reason(
+    migration: Migration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def target_is_writer(*_: Any) -> DataSyncResult:
+        return DataSyncLag(seconds=0.0, reason="TARGET_IS_WRITER")
+
+    monkeypatch.setattr(migration.harness.executors.data_sync, "replication_lag", target_is_writer)
+    plan = await _approved(migration)
+
+    await migration.harness.run_until_idle()
+    final = await migration.get_plan(plan["id"])
+    rows = await migration.log_rows(plan["id"])
+
+    assert final["status"] == "SUCCEEDED"
+    assert _step_statuses(final) == ["PASSED"] * 5
+    assert final["steps"][3]["result"]["metrics"]["replicationLagSeconds"] == 0.0
+    assert "reason" not in final["steps"][3]["result"]["metrics"]
+    [line] = [row for row in rows if row.code == "DATA_SYNC_OK"]
+    assert line.step == 3
+    assert line.data == {"replicationLagSeconds": 0.0, "reason": "TARGET_IS_WRITER"}
+    assert await migration.weights() == (0, 100)
+    assert [row.code for row in rows] == SUCCESS_LOG_CODES
+
+
+async def test_data_sync_lag_without_reason_logs_numbers_only(migration: Migration) -> None:
+    plan = await _approved(migration)
+
+    await migration.harness.run_until_idle()
+    rows = await migration.log_rows(plan["id"])
+
+    [line] = [row for row in rows if row.code == "DATA_SYNC_OK"]
+    assert line.data == {"replicationLagSeconds": FAKE_REPLICATION_LAG_SECONDS}
 
 
 def test_error_codes_have_distinct_fixed_messages() -> None:

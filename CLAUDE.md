@@ -81,7 +81,7 @@ app/
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)
-│                     #   postgres_data_sync(데이터 확인: 출발 pg_stat_replication 복제 지연, DATA_SYNC_CHECKER_MODE=postgres)
+│                     #   postgres_data_sync(데이터 확인: 출발 pg_stat_replication 복제 지연, 도착이 이미 쓰기 담당이면 TARGET_IS_WRITER 로 통과, DATA_SYNC_CHECKER_MODE=postgres)
 ├─ worker/            # python -m app.worker: 할 일 폴링(SKIP LOCKED + 임대), run_once(), SIGTERM 처리
 ├─ adapters/          # 환경 종류별 어댑터: 설정 양식 + 동작 클래스(기본 가짜, `ENVIRONMENT_ADAPTER_MODE=real` 이면 실제 클러스터)
 │   ├─ base.py        #   EnvironmentConfig, EnvironmentAdapter, ClusterInfo, 등록 데코레이터 2개
