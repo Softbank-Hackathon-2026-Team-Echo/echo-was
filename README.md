@@ -298,7 +298,8 @@ uv run --env-file .env python -m app.scripts.issue_runner_token --revoke echo-sa
 ```bash
 uv run ruff check . && uv run ruff format --check .   # 린트·포맷
 uv run mypy app                                       # 타입 검사 (strict)
-uv run pytest                                         # 테스트 (DB 가 없으면 통합 테스트는 이유를 출력하고 건너뜀)
+uv run pytest                                         # 테스트, 기본 병렬 (DB 가 없으면 통합 테스트는 이유를 출력하고 건너뜀)
+uv run pytest -n 0                                    # 테스트를 직렬로 (파일 하나만 돌리거나 디버깅할 때)
 uv run alembic check                                  # 모델과 DB 차이 확인
 scripts/dump_schema.sh                                # .claude/rules/db-schema.sql 다시 뽑기
 docker compose down                                   # DB 끄기 (데이터는 볼륨에 남음, 지우려면 -v)
@@ -309,7 +310,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | 이름 | 예 | 설명 |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo` | 앱·Alembic 이 쓰는 DB |
-| `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 실제로는 작업 폴더마다 `echo_<폴더 해시 8자>_test` 를 쓰고, 없으면 테스트가 만든다 |
+| `TEST_DATABASE_URL` | `postgresql+asyncpg://echo:echo@localhost:55432/echo_test` | 통합 테스트 DB. 이름이 `_test` 로 끝나야 한다(테스트가 스키마를 지우고 다시 만든다). 실제로는 작업 폴더마다 `echo_<폴더 해시 8자>_test`(병렬이면 워커마다 `echo_<폴더 해시 8자>_<gwN>_test`)를 쓰고, 없으면 테스트가 만든다 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`·`INFO`·`WARNING`·`ERROR` |
 | `ENVIRONMENT_CHECK_TIMEOUT_SECONDS` | `5.0` | 환경 접속 확인 전체 제한 시간(초) |
 | `ENVIRONMENT_ADAPTER_MODE` | `simulated` | `real` 이면 환경 접속 확인이 실제 클러스터(`/version`·노드 수)를 읽는다. 기본은 고정 값(`simulated: true`) |

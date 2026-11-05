@@ -58,7 +58,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy app
-      - run: uv run pytest
+      # 워커마다 시험 DB 를 따로 쓴다(tests/integration/conftest.py 가 만든다).
+      - run: uv run pytest -n auto --dist worksteal
 
   deploy:
     needs: test

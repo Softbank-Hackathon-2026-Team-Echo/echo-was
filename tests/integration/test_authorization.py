@@ -289,7 +289,9 @@ async def test_every_org_route_hides_other_organizations_and_needs_login(
     assert set(anonymous.values()) == {401}
 
 
-@pytest.mark.parametrize("org_id", ["not-a-uuid", str(uuid.uuid4())])
+@pytest.mark.parametrize(
+    "org_id", ["not-a-uuid", str(uuid.uuid4())], ids=["not-a-uuid", "unknown-uuid"]
+)
 async def test_malformed_or_unknown_org_id_is_not_found(
     harness: DeployHarness, org_id: str
 ) -> None:

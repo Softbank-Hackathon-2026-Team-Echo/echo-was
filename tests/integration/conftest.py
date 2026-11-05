@@ -3,12 +3,18 @@
 - TEST_DATABASE_URL(환경변수 또는 .env)이 가리키는 서버를 쓴다. DB 이름은 `_test` 로 끝나야 하고,
   실제로는 작업 폴더마다 다른 이름(`echo_test` → `echo_<폴더 경로 해시 8자>_test`)을 쓴다.
   같은 기기의 다른 작업 폴더(다른 세션·worktree)가 한 DB 잠금에서 서로 기다리지 않게 하기 위해서다.
+- pytest-xdist 로 병렬로 돌면 워커마다 자기 DB(`echo_<폴더 해시 8자>_<gwN>_test`)를 쓴다.
+  직렬(`-n 0`)이면 워커가 없어 위 이름 그대로다.
 - 세션 시작 때 DB 가 없으면 만들고, public 스키마를 비운 뒤 `alembic upgrade head` 를 실행한다.
+- 시험 DB 는 커밋 때 디스크 fsync 를 기다리지 않는다(`synchronous_commit = off`). 시험 DB 에만 걸고
+  서버 설정과 공용 DB 는 건드리지 않는다.
 - DB 에 최대 10초 재시도해도 붙지 못하면 이유를 남기고 이 폴더의 테스트를 모두 건너뛴다.
 - 테스트마다 모든 표를 TRUNCATE 한다(배포·배포 요청 삭제 금지 트리거는 행 DELETE 에만 걸려
   TRUNCATE 와 무관).
-- 같은 테스트 DB 를 쓰는 pytest 가 동시에 돌면(예: git add·commit 훅이 함께 실행) 서로 표를
-  지우므로, 세션 동안 PostgreSQL advisory lock 을 잡아 한 번에 하나만 돌게 한다.
+- 같은 테스트 DB 를 쓰는 pytest 가 동시에 돌면(예: 훅과 손으로 돌린 실행이 겹침) 서로 표를 지우므로,
+  세션 동안 DB 이름을 키로 PostgreSQL advisory lock 을 잡는다. 키가 DB 이름이라 한 실행의 워커끼리는
+  서로 기다리지 않고, 같은 폴더의 두 실행은 같은 워커끼리 기다린다. 두 실행이 잠금을 나눠 가져도
+  `--dist worksteal` 이 막힌 워커의 일을 옮기고 일 없는 워커를 내려 잠금을 풀므로 멈추지 않는다.
 """
 
 import asyncio
@@ -102,6 +108,8 @@ class _TestDatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
 
     test_database_url: str | None = None
+    # pytest-xdist 가 워커 프로세스에 넣는 값(gw0, gw1, …). 직렬 실행에는 없다.
+    pytest_xdist_worker: str | None = None
 
 
 class DatabaseUnavailableError(Exception):
@@ -174,6 +182,12 @@ class _TestDatabaseSession:
         )
         if not exists:
             await self._lock_connection.execute(text(f'CREATE DATABASE "{self._url.database}"'))
+        # 커밋마다 디스크 fsync 를 기다리지 않게 한다. 가시성·잠금·롤백 의미는 같고 서버가 죽었을
+        # 때의 내구성만 달라지는데, 시험 DB 는 세션마다 스키마를 다시 만들어 잃을 것이 없다.
+        # 이후 새 연결부터 적용된다.
+        await self._lock_connection.execute(
+            text(f'ALTER DATABASE "{self._url.database}" SET synchronous_commit = off')
+        )
         await self._reset_schema_to_head()
 
     async def _connect_with_retry(self) -> AsyncConnection:
@@ -207,13 +221,16 @@ class _TestDatabaseSession:
 
 @pytest.fixture(scope="session")
 def test_database_url() -> Iterator[str]:
-    raw_url = _TestDatabaseSettings().test_database_url
+    settings = _TestDatabaseSettings()
+    raw_url = settings.test_database_url
     if not raw_url:
         pytest.skip("TEST_DATABASE_URL 이 없어 DB 통합 테스트를 건너뜀 (.env.example 참고)")
     url = make_url(raw_url)
     if not (url.database or "").endswith("_test"):
         pytest.fail("TEST_DATABASE_URL 의 DB 이름은 _test 로 끝나야 한다 (스키마를 지운다)")
-    url = url.set(database=checkout_database_name(url.database or ""))
+    url = url.set(
+        database=checkout_database_name(url.database or "", worker_id=settings.pytest_xdist_worker)
+    )
     raw_url = url.render_as_string(hide_password=False)
 
     database_session = _TestDatabaseSession(url)
