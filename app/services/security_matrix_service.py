@@ -10,6 +10,7 @@
 - 예외는 게이트와 같은 입력(승인·미철회 예외, 서버 WAS 버전, 조직 자기 승인 스위치)으로 규칙표
   `evaluate_control` 이 판정한다. 게이트가 막는지는 `gate_status`(BLOCKED·WAIVED·PASS)로 따로 준다.
 - 실행 때만 보는 통제(C-DB-1·C-DST-1·C-AI-1·C-IMG-3)는 줄이 없어 그 예외도 나타나지 않는다.
+- 이전 전후 비교(보안 5-2)는 `get_rows` 로 고른 환경의 행을 같은 계산으로 받는다.
 """
 
 import uuid
@@ -35,6 +36,7 @@ from app.repositories.finding_repository import FindingConditions, FindingReposi
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.security_exception_repository import SecurityExceptionRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import to_security_finding
@@ -168,6 +170,7 @@ class SecurityMatrixService:
         self._exceptions = SecurityExceptionRepository(session)
         self._organizations = OrganizationRepository(session)
         self._users = UserRepository(session)
+        self._services = ServiceRepository(session)
 
     async def get_matrix(self, organization_id: uuid.UUID) -> SecurityMatrixView:
         """조직의 환경 × 4칸. 칸마다 판정 근거(통제·사유·증거 id·모드·시각)를 함께 준다."""
@@ -176,19 +179,51 @@ class SecurityMatrixService:
             environments = await self._environments.search_live(
                 organization_id, kind=None, offset=0, limit=MATRIX_ENVIRONMENT_LIMIT
             )
-            connections = await self._connections.search_live_current_by_organization(
-                organization_id
-            )
-            models = await self._findings.search_unexpired_by_organization(organization_id, now)
-            organization = await self._organizations.find_by_id(organization_id)
-            exception_models = await self._exceptions.search_for_judgement(
-                organization_id, now - EXCEPTION_MAX_DURATION
-            )
-            approvers = await self._users.search_by_ids(
-                model.approved_by_user_id
-                for model in exception_models
-                if model.approved_by_user_id is not None
-            )
+            connections, judgement = await self._read_judgement(organization_id, now)
+        rows = _evaluate_rows(environments, connections, judgement)
+        return SecurityMatrixView(POLICY_VERSION, MATRIX_PHASE, now, rows)
+
+    async def get_rows(
+        self,
+        organization_id: uuid.UUID,
+        environment_ids: Sequence[uuid.UUID],
+        *,
+        service_id: uuid.UUID | None = None,
+    ) -> SecurityMatrixView:
+        """고른 환경들의 매트릭스 행(준 순서대로). 칸 계산은 `get_matrix` 와 같다.
+
+        환경·서비스는 이 조직의 살아 있는 것만(아니면 404). `service_id` 를 주면 서비스 단위 통제는
+        그 서비스의 현재 배포만 센다(그 환경에 배포가 없으면 세지 않는다).
+        """
+        now = self._clock.now()
+        async with self._session.begin():
+            environments = [
+                await self._environments.get_live_by_id(organization_id, environment_id)
+                for environment_id in environment_ids
+            ]
+            if service_id is not None:
+                await self._services.get_live_by_id(organization_id, service_id)
+            connections, judgement = await self._read_judgement(organization_id, now)
+        if service_id is not None:
+            connections = [c for c in connections if c.service_id == service_id]
+        rows = _evaluate_rows(environments, connections, judgement)
+        return SecurityMatrixView(POLICY_VERSION, MATRIX_PHASE, now, rows)
+
+    async def _read_judgement(
+        self, organization_id: uuid.UUID, now: datetime
+    ) -> tuple[list[ServiceEnvironment], _JudgementInput]:
+        """열린 읽기 트랜잭션 안에서: 현재 배포가 있는 연결과 판정 입력(게이트와 같은 값)."""
+        connections = await self._connections.search_live_current_by_organization(organization_id)
+        models = await self._findings.search_unexpired_by_organization(organization_id, now)
+        organization = await self._organizations.find_by_id(organization_id)
+        exception_models = await self._exceptions.search_for_judgement(
+            organization_id, now - EXCEPTION_MAX_DURATION
+        )
+        approvers = await self._users.search_by_ids(
+            model.approved_by_user_id
+            for model in exception_models
+            if model.approved_by_user_id is not None
+        )
         judgement = _JudgementInput(
             organization_id=organization_id,
             was_version=self._was_version,
@@ -200,15 +235,7 @@ class SecurityMatrixService:
             exception_views=_exception_views(exception_models, approvers),
             now=now,
         )
-        rows = tuple(
-            _evaluate_row(
-                environment,
-                [c for c in connections if c.environment_id == environment.id],
-                judgement,
-            )
-            for environment in environments
-        )
-        return SecurityMatrixView(POLICY_VERSION, MATRIX_PHASE, now, rows)
+        return list(connections), judgement
 
     async def search_findings(
         self,
@@ -236,6 +263,21 @@ class SecurityMatrixService:
             )
             total = await self._findings.count_by_organization(organization_id, conditions)
         return FindingPage(items=items, total=total)
+
+
+def _evaluate_rows(
+    environments: Sequence[Environment],
+    connections: Sequence[ServiceEnvironment],
+    judgement: _JudgementInput,
+) -> tuple[MatrixRowView, ...]:
+    return tuple(
+        _evaluate_row(
+            environment,
+            [c for c in connections if c.environment_id == environment.id],
+            judgement,
+        )
+        for environment in environments
+    )
 
 
 def _exception_views(
@@ -364,6 +406,15 @@ def _cell_view(
             default=None,
         ),
     )
+
+
+def build_cell_view(
+    cell: SecurityMatrixCell,
+    decisions: Iterable[tuple[SecurityControlDecision, uuid.UUID | None]],
+    exception_views: dict[uuid.UUID, MatrixExceptionView] | None = None,
+) -> MatrixCellView:
+    """판정(통제 판정, 서비스 id) → 매트릭스 칸 하나. 행 계산과 같은 함수다(비교 시험이 쓴다)."""
+    return _cell_view(cell, list(decisions), exception_views or {})
 
 
 def _control_gate_status(decision: SecurityControlDecision) -> SecurityGateStatus:

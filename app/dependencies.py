@@ -56,6 +56,7 @@ from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
 from app.services.precheck_patch_service import PrecheckPatchService
 from app.services.precheck_service import PrecheckService
+from app.services.security_compare_service import SecurityCompareService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.security_matrix_service import SecurityMatrixService
@@ -490,6 +491,12 @@ def get_security_matrix_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityMatrixService:
     return SecurityMatrixService(session=session, clock=clock, was_version=settings.was_version)
+
+
+def get_security_compare_service(
+    matrix: Annotated[SecurityMatrixService, Depends(get_security_matrix_service)],
+) -> SecurityCompareService:
+    return SecurityCompareService(matrix)
 
 
 def get_cost_service(
