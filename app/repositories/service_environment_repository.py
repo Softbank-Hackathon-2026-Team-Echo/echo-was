@@ -122,6 +122,26 @@ class ServiceEnvironmentRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_live_current(self) -> list[ServiceEnvironment]:
+        """모든 조직의 살아 있는 연결 중 현재 배포가 있는 것(살아 있는 서비스·환경만).
+
+        서비스를 함께 읽는다. 공개 경로 TLS 주기 시험이 쓴다.
+        """
+        statement = (
+            select(ServiceEnvironment)
+            .join(Environment, Environment.id == ServiceEnvironment.environment_id)
+            .join(Service, Service.id == ServiceEnvironment.service_id)
+            .where(
+                _is_live(),
+                ServiceEnvironment.current_deployment_id.is_not(None),
+                Service.is_deleted.is_(False),
+                Environment.is_deleted.is_(False),
+            )
+            .options(selectinload(ServiceEnvironment.service))
+            .order_by(ServiceEnvironment.id)
+        )
+        return list((await self._session.scalars(statement)).all())
+
     async def search_live_current_by_organization(
         self, organization_id: uuid.UUID
     ) -> list[ServiceEnvironment]:
