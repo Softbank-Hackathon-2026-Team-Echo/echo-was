@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 31개 경로(기한부 예외 3개·AI 사전 점검 2개·재난 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 33개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -122,6 +122,8 @@
 | `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |
 | `PRECHECK_REQUESTED` | `POST /prechecks` | `agent_run`(이름표 = 서비스 이름) | `{serviceId, targetEnvironmentId}` |
 | `PRECHECK_CANCELLED` | `POST /prechecks/{id}/cancel` | `agent_run` | `{serviceId, targetEnvironmentId}` |
+| `AGENT_PATCH_APPROVED` | `POST /prechecks/{id}/patches/{patchId}/approve`(같은 승인을 다시 보낸 200 은 기록 안 함) | `agent_run`(부모 실행) | `{patchId, patchHash, applyRunId}`(`applyRunId` 는 null 가능, 사유 원문은 결정 행에만) |
+| `AGENT_PATCH_REJECTED` | `POST /prechecks/{id}/patches/{patchId}/reject`(같은 거절을 다시 보낸 200 은 기록 안 함) | `agent_run`(부모 실행) | `{patchId, patchHash}` |
 | `DISASTER_DECLARED` | `POST /disasters` | `disaster`(이름표 `EARTHQUAKE M7.2`) | `{type, magnitude, radiusKm, meetsThreshold, affectedEnvironmentIds}`. 건너뛴 서비스가 있으면 같은 대상에 둘째 줄 `{skippedPlans: [{serviceId, planId, reason}]}`([disasters.md](disasters.md#감사)) |
 | `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName}` |

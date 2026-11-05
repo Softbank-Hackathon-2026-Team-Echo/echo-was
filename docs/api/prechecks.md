@@ -14,11 +14,13 @@
 | `GET /prechecks/{id}` | 200 `PrecheckDetail` | 404 `PRECHECK_NOT_FOUND` | 뷰어 |
 | `GET /prechecks/{id}/logs?after=&size=` | 200 `{items, nextAfter}` | 404 `PRECHECK_NOT_FOUND`, 422 | 뷰어 |
 | `POST /prechecks/{id}/cancel` | 200 `PrecheckDetail`(`CANCELLED`) | 404, 409 `RUN_NOT_ACTIVE` | 개발자(사람) |
+| `POST /prechecks/{id}/patches/{patchId}/approve` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
+| `POST /prechecks/{id}/patches/{patchId}/reject` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 
 - 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행과 `PRECHECK` 가 아닌 실행은 404 다.
 - 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다.
-- 패치 승인·거절과 `APPLY_PATCH` 는 아직 없다(2차).
-- 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`.
+- 러너가 반영 실행(`APPLY_PATCH`)을 가져가는 길과 반영 결과 받기는 아직 없다(별도 작업).
+- 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
 
 ## 만들기 `POST /prechecks`
 
@@ -62,8 +64,7 @@
  configDiff: [{key, source, target, origin, severity}],
  featureGaps: [{source, target, gap, action, hasReplacement, severity, origin}],
  findings: [{control, environmentId, result, title, reason, origin, suggestedFix, confirmation}],
- patches: [{id, patchHash, files[], diff, reason, touchesProtectedFiles, checks[],
-            status, blockReason, verification: {passed, total}}],
+ patches: [PrecheckPatch],
  blockedAttempts: [{action, target, at, reason, auditLogId, confirmed}]}
 ```
 
@@ -76,11 +77,82 @@
 | `sandboxId` | 결과 `sandbox.id`. 샌드박스 밖에서 돌았으면 null |
 | `steps` | 이벤트에서 계산한다. 단계마다 처음·마지막 시각과 가장 나쁜 `level`, 시작 순. 이벤트가 없으면 빈 배열 |
 | `findings[].confirmation` | AI finding 은 `UNCONFIRMED`, 규칙 finding 은 null. **`findings` 표에는 넣지 않는다**(매트릭스·게이트 영향 없음, 2차) |
-| `patches[].status` | WAS 가 다시 계산한다. 보호 파일(`PROTECTED_FILES_TOUCHED`), 검사 없음(`CHECKS_MISSING`), PASS 아닌 검사(`CHECK_NOT_PASSED`)면 `BLOCKED` + `blockReason`, 그 밖은 `PROPOSED` |
-| `patches[].verification` | `checks` 중 PASS 수와 전체 수(저장 안 함) |
+| `patches[]` | [`PrecheckPatch`](#precheckpatch) |
 | `blockedAttempts` | 러너가 보낸 시도. 감사 줄과 맞추지 않아 늘 `auditLogId: null`, `confirmed: false`("확인 안 됨")다 |
 
 결과가 없는 상태(`QUEUED`·`CLAIMED`·`RUNNING`·`TIMED_OUT`·`CANCELLED`)면 결과 칸은 빈 배열·null 이다. 단계 이름은 러너 값(`SANDBOX_CREATE`…) 그대로이고 화면 단계와의 대응은 프론트 몫이다.
+
+## `PrecheckPatch`
+
+상세의 `patches[]` 원소이자 승인·거절 응답이다. 화면은 응답으로 그 원소를 바꿔 끼우면 된다.
+
+```text
+{id, patchHash, files[], diff, reason, touchesProtectedFiles, checks[],
+ origin, status, blockReason, verification: {passed, total},
+ approval: {decision, decidedByUserId, decidedAt, reason} | null,
+ apply: {runId, status, failureCode, finishedAt} | null}
+```
+
+| 칸 | 뜻 |
+|---|---|
+| `origin` | `RULE`·`AI`. 러너가 정한 패치의 출처. 저장된 패치에 없으면 `AI` |
+| `status` | 저장하지 않고 아래 표로 계산한다. 승인·거절 버튼은 `status === 'PROPOSED'` 일 때 보인다(`BLOCKED` 는 거절만 된다) |
+| `blockReason` | 보호 파일(`PROTECTED_FILES_TOUCHED`), 검사 없음(`CHECKS_MISSING`), PASS 아닌 검사(`CHECK_NOT_PASSED`). 러너 값을 받지 않고 결과를 저장할 때 다시 계산한 값이다 |
+| `verification` | `checks` 중 PASS 수와 전체 수(저장 안 함) |
+| `approval` | 사람의 결정. 없으면 null |
+| `apply` | 반영 실행. `status` 는 그 실행의 상태(`QUEUED`…`TIMED_OUT`)다. 실행이 없으면 null(스위치 꺼짐·거절) |
+
+상태 계산(`compute_patch_status`, 위에서부터 처음 맞는 것):
+
+| 결과 JSON 상태 | 결정 | 반영 실행 | `status` |
+|---|---|---|---|
+| 아무거나 | `REJECTED` | — | `REJECTED` |
+| `BLOCKED` | 없음 | — | `BLOCKED` |
+| `PROPOSED` | 없음 | — | `PROPOSED` |
+| `PROPOSED` | `APPROVED` | 없음(스위치 꺼짐) 또는 `QUEUED`·`CLAIMED`·`RUNNING` | `APPROVED` |
+| `PROPOSED` | `APPROVED` | `SUCCEEDED` | `APPLIED` |
+| `PROPOSED` | `APPROVED` | `FAILED`·`TIMED_OUT`·`CANCELLED` | `APPLY_FAILED` |
+
+결과 JSON 에는 `PROPOSED`·`BLOCKED` 만 저장한다.
+
+## 패치 승인·거절
+
+`POST /prechecks/{id}/patches/{patchId}/approve`·`reject`, 본문 `{patchHash, reason?}`.
+
+- `patchHash`: 화면이 본 값(`^sha256:[0-9a-f]{64}$`). `reason`: 선택, 1~2,000자. 모르는 칸·형식 오류는 422 `VALIDATION_ERROR`.
+- 결정은 패치마다 한 번이고 지우지 않는다(`agent_patch_approvals`). 패치 원문은 부모 실행의 결과 JSON 그대로다.
+- 지문: `patchHash` + `checksDigest`(`sha256:` + `checks` 의 정렬 JSON 해시) + `policyVersion`(코드 상수 `PATCH_POLICY_VERSION`).
+
+거절 순서(위에서부터 처음 맞는 것):
+
+| 순서 | 경우 | 응답 |
+|---|---|---|
+| — | 에이전트 토큰 · 뷰어 | 403 `AGENT_READ_ONLY` · `ROLE_FORBIDDEN` |
+| 1 | 실행 없음·다른 조직·`PRECHECK` 아님 | 404 `PRECHECK_NOT_FOUND` |
+| 2 | 결과에 그 패치 없음. **결과가 없는 실행(`QUEUED`·`CLAIMED`·`RUNNING`·`TIMED_OUT`·`CANCELLED`)도 여기다** | 404 `PATCH_NOT_FOUND` |
+| 3 | 부모 실행이 `SUCCEEDED` 아님. 결과가 있는 실패 실행(`FAILED`)이다 | 409 `RUN_NOT_SUCCEEDED` |
+| 4 | 패치가 `BLOCKED`(승인만. 거절은 된다) | 409 `PATCH_BLOCKED`, `details: [{field: "blockReason", reason: "PATCH_BLOCKED", value: "<막힌 이유>"}]` |
+| 5 | 이미 결정됨. **같은 결정이면 200**(새 행·감사 줄 없음, 지금 패치 그대로, 뒤쪽 검사도 안 함), 다른 결정이면 409 | 409 `PATCH_ALREADY_DECIDED`, `details: [{field: "decision", reason: "PATCH_ALREADY_DECIDED", value: "<먼저 난 결정>"}]` |
+| 6 | `patchHash` 가 저장 값과 다름, 또는 부모 `finishedAt` 이 24시간 넘게 지남 | 409 `PATCH_STALE`, `details: [{field: "patchHash", reason: "PATCH_HASH_MISMATCH"}]` 또는 `[{field: "finishedAt", reason: "PRECHECK_EXPIRED"}]` |
+| 7 | 승인자 = 점검을 요청한 사람이고 조직 `allowSelfApproval` 이 꺼짐(승인만) | 403 `SELF_APPROVAL_FORBIDDEN` + 거부 감사 줄 |
+| 8 | 스위치 켜짐 + 승인 + 그 서비스에 열린 실행 있음(임대·마감이 지난 실행은 먼저 `TIMED_OUT`) | 409 `PRECHECK_IN_PROGRESS`, `details.runId` |
+
+동시 요청은 부모 실행 행 `FOR UPDATE` 로 줄 선다. 어느 경우든 결정 행과 USER 감사 줄은 하나다. 잠금을 지나쳐 `(run_id, patch_id)` unique 를 어기면 다시 읽어 5번 규칙을 적용한다(반영 실행도 같은 savepoint 라 함께 되돌린다).
+
+### 스위치 `PATCH_APPLY_ENABLED` (기본 꺼짐)
+
+| | 꺼짐(기본) | 켜짐 |
+|---|---|---|
+| 승인 | 결정 행만. 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기") | 결정 행 + 반영 실행(`APPLY_PATCH`, `QUEUED`, 마감 15분, `parentRunId` = 부모). `apply.runId`·`apply.status` 가 찬다 |
+| 서비스 영향 | 없음 | 반영 실행이 열려 있는 동안 그 서비스의 새 사전 점검·다음 승인이 409 `PRECHECK_IN_PROGRESS` |
+
+**러너가 반영 실행을 가져가는 길이 생기기 전에는 켜지 않는다.** 실행이 `QUEUED` 로 15분 머문 뒤 `TIMED_OUT` 이 되고(패치는 `APPLY_FAILED`) 그동안 위 409 가 난다. 반영 실행은 `GET /prechecks/{id}` 로 직접 열리지 않는다(404). 입력 사본:
+
+```json
+{"schemaVersion": 1, "parentRunId": "<부모 id>",
+ "patch": {"id": "p1", "patchHash": "sha256:…", "files": ["…"], "diff": "--- a/…", "origin": "RULE"},
+ "repo": "Softbank-Hackathon-2026-Team-Echo/echo-ai-agent", "branch": "applied/<반영 실행 id>"}
+```
 
 ## 이벤트 `GET /prechecks/{id}/logs`
 
@@ -100,4 +172,4 @@
 
 ## 감사
 
-`PRECHECK_REQUESTED`·`PRECHECK_CANCELLED` 는 USER 줄(대상 `agent_run`, 이름표 = 서비스 이름, `details: {serviceId, targetEnvironmentId}`)이다. 러너 쪽 줄은 [audit-logs.md](audit-logs.md) 를 본다.
+`PRECHECK_REQUESTED`·`PRECHECK_CANCELLED` 는 USER 줄(대상 `agent_run`, 이름표 = 서비스 이름, `details: {serviceId, targetEnvironmentId}`)이다. `AGENT_PATCH_APPROVED`(`{patchId, patchHash, applyRunId}`, `applyRunId` 는 null 가능)·`AGENT_PATCH_REJECTED`(`{patchId, patchHash}`)도 USER 줄이고 대상은 부모 실행이다. 멱등 200 은 줄을 쓰지 않고, 사유 원문은 결정 행에만 있다. 러너 쪽 줄은 [audit-logs.md](audit-logs.md) 를 본다.

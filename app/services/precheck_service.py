@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -31,8 +32,16 @@ from app.core.exceptions import (
 )
 from app.core.log_masking import mask_secrets_in_json
 from app.enums import AgentRunKind, AgentRunStep, LogLevel, ServiceStatus
-from app.models import AgentRun, AgentRunEvent, Environment, Service, ServiceEnvironment
+from app.models import (
+    AgentPatchApproval,
+    AgentRun,
+    AgentRunEvent,
+    Environment,
+    Service,
+    ServiceEnvironment,
+)
 from app.models.agent_run import OPEN_RUN_UNIQUE_INDEX, OPEN_STATUSES
+from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
 from app.repositories.agent_run_event_repository import AgentRunEventRepository
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.deployment_repository import DeploymentRepository
@@ -67,9 +76,33 @@ class PrecheckStep:
 
 
 @dataclass(frozen=True)
+class PrecheckPatchView:
+    """결과 JSON 의 패치 하나 + 그 결정 행 + 반영 실행. 응답의 패치 상태를 계산하는 입력이다."""
+
+    stored: Mapping[str, Any]
+    approval: AgentPatchApproval | None
+    apply_run: AgentRun | None
+
+
+@dataclass(frozen=True)
+class PatchDecisions:
+    """한 실행의 패치 결정들. 패치마다 따로 읽지 않으려고 한 번에 읽어 둔다."""
+
+    approvals_by_patch_id: Mapping[str, AgentPatchApproval]
+    apply_runs_by_id: Mapping[uuid.UUID, AgentRun]
+
+    def patch_view(self, stored: Mapping[str, Any]) -> PrecheckPatchView:
+        approval = self.approvals_by_patch_id.get(stored["id"])
+        apply_run_id = approval.apply_run_id if approval is not None else None
+        apply_run = self.apply_runs_by_id.get(apply_run_id) if apply_run_id else None
+        return PrecheckPatchView(stored, approval, apply_run)
+
+
+@dataclass(frozen=True)
 class PrecheckView:
     run: AgentRun
     steps: list[PrecheckStep]
+    decisions: PatchDecisions
 
 
 @dataclass(frozen=True)
@@ -78,9 +111,44 @@ class PrecheckLogPage:
     next_after: int
 
 
-def compute_input_hash(snapshot: dict[str, Any]) -> str:
-    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def _hash_canonical_json(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def compute_input_hash(snapshot: dict[str, Any]) -> str:
+    return _hash_canonical_json(snapshot)
+
+
+def compute_checks_digest(checks: list[Any]) -> str:
+    """결정 지문의 검사 요약 해시. 입력 해시와 직렬화가 같다."""
+    return _hash_canonical_json(checks)
+
+
+async def load_patch_decisions(
+    approvals: AgentPatchApprovalRepository, runs: AgentRunRepository, run_id: uuid.UUID
+) -> PatchDecisions:
+    """결정 행을 한 번, 반영 실행을 한 번 읽는다."""
+    rows = await approvals.search_by_run(run_id)
+    apply_runs = await runs.search_by_ids(
+        [row.apply_run_id for row in rows if row.apply_run_id is not None]
+    )
+    return PatchDecisions(
+        {row.patch_id: row for row in rows}, {apply_run.id: apply_run for apply_run in apply_runs}
+    )
+
+
+async def insert_agent_run(session: AsyncSession, runs: AgentRunRepository, run: AgentRun) -> None:
+    """부분 unique 위반(동시 생성)이면 먼저 들어간 실행을 담아 409."""
+    try:
+        async with session.begin_nested():
+            runs.add(run)
+            await session.flush()
+    except IntegrityError as exc:
+        if violated_constraint_name(exc) != OPEN_RUN_UNIQUE_INDEX:
+            raise
+        existing = await runs.find_open_for_service(run.service_id)
+        raise PrecheckInProgressError(str(existing.id) if existing else None) from None
 
 
 class PrecheckService:
@@ -88,6 +156,7 @@ class PrecheckService:
         self._session = session
         self._clock = clock
         self._runs = AgentRunRepository(session)
+        self._approvals = AgentPatchApprovalRepository(session)
         self._events = AgentRunEventRepository(session)
         self._services = ServiceRepository(session)
         self._environments = EnvironmentRepository(session)
@@ -138,7 +207,7 @@ class PrecheckService:
                 created_at=now,
                 updated_at=now,
             )
-            await self._insert(run)
+            await insert_agent_run(self._session, self._runs, run)
             self._record_user_action(AuditAction.PRECHECK_REQUESTED, run, actor_user_id)
             view = await self._view(run)
         _log_run("precheck requested", "create_precheck", run)
@@ -183,20 +252,12 @@ class PrecheckService:
             raise PrecheckNotFoundError(str(precheck_id))
         return run
 
-    async def _insert(self, run: AgentRun) -> None:
-        """부분 unique 위반(동시 생성)이면 먼저 들어간 실행을 담아 409."""
-        try:
-            async with self._session.begin_nested():
-                self._runs.add(run)
-                await self._session.flush()
-        except IntegrityError as exc:
-            if violated_constraint_name(exc) != OPEN_RUN_UNIQUE_INDEX:
-                raise
-            existing = await self._runs.find_open_for_service(run.service_id)
-            raise PrecheckInProgressError(str(existing.id) if existing else None) from None
-
     async def _view(self, run: AgentRun) -> PrecheckView:
-        return PrecheckView(run, await self._steps(run.id))
+        return PrecheckView(
+            run,
+            await self._steps(run.id),
+            await load_patch_decisions(self._approvals, self._runs, run.id),
+        )
 
     async def _steps(self, run_id: uuid.UUID) -> list[PrecheckStep]:
         steps: dict[AgentRunStep, PrecheckStep] = {}

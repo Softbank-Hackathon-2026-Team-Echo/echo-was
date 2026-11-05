@@ -241,6 +241,9 @@ class Settings(BaseSettings):
     # 보안 게이트(보안·거버넌스 5). 켜면 이전 승인과 일꾼 실행 시작 때 필수 보안 통제를 판정해
     # 막는다(실행 직전 TLS 접속 시험 포함). 기본은 꺼짐이고, 꺼져 있으면 판정·기록을 하지 않는다.
     security_gate_enabled: bool = False
+    # 켜면 패치 승인이 반영 실행(APPLY_PATCH)을 만든다. 러너가 그 실행을 가져가는 길이 생기기 전에는
+    # 켜지 않는다(실행이 QUEUED 로 마감까지 머물고 그동안 그 서비스의 새 사전 점검이 409 다).
+    patch_apply_enabled: bool = False
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
 

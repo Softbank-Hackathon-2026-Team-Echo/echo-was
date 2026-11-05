@@ -109,7 +109,7 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `severity` | `INFO`·`WARN`·`FAIL` |
 | finding `result` | `PASS`·`WARN`·`FAIL`·`UNKNOWN`. **`AI` 면 PASS 금지(422)**, `RULE` 의 PASS 는 받는다 |
 | `configDiff[].source·target` | 아무 JSON 값(문자열·숫자·배열·null). 값마다 JSON 2,000자까지 |
-| 패치 | `{id(유일), patchHash(sha256:…), files[], diff, reason, touchesProtectedFiles, checks[]}`. `status` 를 보내면 모르는 칸(422)이다. WAS 가 다시 계산한다. `checks[]`: `{name, result, toolVersion?, policyVersion?, summary?}`. `result` 가 `PASS` 가 아니면 막는다 |
+| 패치 | `{id(유일), patchHash(sha256:…), files[], diff, reason, touchesProtectedFiles, checks[], origin?}`. `origin` 은 선택(`RULE`·`AI`, 빠지면 `AI` 로 저장, 다른 값 422). `status` 를 보내면 모르는 칸(422)이다. WAS 가 다시 계산한다. `checks[]`: `{name, result, toolVersion?, policyVersion?, summary?}`. `result` 가 `PASS` 가 아니면 막는다 |
 | 상한 | findings 100 · patches 10 · diff 하나 200KB · configDiff 200 · featureGaps 100 · blockedAttempts 50 · 문자열 2,000자 · 본문 1MB |
 | 거부 | 모르는 칸·snake_case 이름·NUL 문자·JSON 아님 → 422 `RESULT_INVALID`(`details` 에 칸 경로와 이유만) |
 | 저장 | 모든 문자열의 비밀값 모양을 `***` 로 바꾼 뒤 저장한다(`mask_secrets`). `status`·`failureCode`·`simulated` 는 표의 칸으로만 둔다 |
@@ -144,6 +144,8 @@ python -m app.scripts.issue_runner_token --revoke echo-sandbox-runner # 철회(�
 | `simulated` | `RunResult` 에 칸 없음, "실제 샌드박스·실제 모델이면 false" | 필수 칸 `simulated: bool`, 뜻은 "값을 지어냈는가". `model: null` 허용, 응답 `aiReviewed` |
 | `CLAIMED → RUNNING` | 만드는 호출이 없음 | 첫 하트비트·이벤트. 결과는 `CLAIMED` 에서도 받는다 |
 | 이벤트 message | 2KB | 200자(DB 칸) |
-| GET 상세 | 계약 4-5 모양 | `sandboxId`·`steps`·`patches[].verification`·`simulated`·`aiReviewed` 추가 |
+| GET 상세 | 계약 4-5 모양 | `sandboxId`·`steps`·`patches[].verification`·`origin`·`approval`·`apply`·`simulated`·`aiReviewed` 추가 |
 | `blockedAttempts` 확인 | 감사 줄과 맞춰 `auditLogId` | 2차. 늘 `auditLogId: null`, `confirmed: false` |
-| 패치 승인·`APPLY_PATCH` | 있음 | 2차 |
+| 패치 승인 | 있음 | 사람 쪽 승인·거절 API 가 있다([prechecks.md](api/prechecks.md#패치-승인거절)). 스위치 `PATCH_APPLY_ENABLED`(기본 꺼짐)를 켜야 반영 실행을 만든다 |
+| `APPLY_PATCH` 가져가기·반영 결과 | 있음 | 아직 없다. `:claim` 은 `PRECHECK` 만 주고 `ApplyPatchResult` 를 받지 않는다 |
+| 패치 `origin` | 없음 | 선택 칸 하나 추가(기본 `AI`). `patchHash` 재계산 검사는 아직 없다 |

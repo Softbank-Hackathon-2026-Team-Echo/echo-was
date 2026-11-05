@@ -140,7 +140,7 @@
 | AI 사전 점검 | AI precheck | `agent_runs.kind = PRECHECK` | 이전 대상(서비스 → 도착 환경)에 대해 AI 가 샌드박스에서 차이 분석·점검·수정안 생성·검증을 하는 실행. 24시간 안에 성공한 것이 C-AI-1 의 증거다(가짜 실행은 쓰지 않는다). "이전 사전 점검"(F11, API 서버 8)과 다르다 | F14, 러너 계약 v1, 보안 5 (AI 파트) |
 | 보안 게이트 | Security gate | `app/services/security_gate.py`, 설정 `SECURITY_GATE_ENABLED`(기본 꺼짐) | 이전 승인 때와 일꾼 시작 때 같은 규칙표로 실행 판정을 하고, 필수 통제가 FAIL·UNKNOWN 이고 유효한 예외가 없으면 막는 곳(승인 409 `SECURITY_GATE_BLOCKED`, 시작 `FAILED(SECURITY_GATE_BLOCKED)`). 판정 직전에 C-IMG-3·C-TLS-1 을 새로 확인한다 | F13·F7, 보안 5 |
 | AI 실행 이벤트 | Agent run event | `AgentRunEvent` / `agent_run_events` | 러너가 낸 진행 줄(seq·단계·수준·고정 문장·data). 같은 seq 는 무시(멱등) | F14·F17, 러너 계약 v1 |
-| AI 패치 결정 | Agent patch approval | `AgentPatchApproval` / `agent_patch_approvals` | AI 수정안 하나에 대한 사람의 결정(승인·거절). 지문 = 패치 해시 + 검사 요약 + 정책 버전. 승인하면 반영 실행이 생긴다. 개발자 이상의 사람만 | F15, 러너 계약 v1 |
+| AI 패치 결정 | Agent patch approval | `AgentPatchApproval` / `agent_patch_approvals` | AI 수정안 하나에 대한 사람의 결정(승인·거절). 지문 = 패치 해시 + 검사 요약 + 정책 버전. 승인하면 스위치 `PATCH_APPLY_ENABLED` 가 켜져 있을 때만 반영 실행이 생긴다. 개발자 이상의 사람만 | F15, 러너 계약 v1 |
 | 러너 토큰 · 실행 토큰 | Runner token · Run token | `echo_rnr_…`(`require_runner`) · `echo_run_…`(`require_run_token`) | 러너 토큰은 실행 가져가기만, 실행 토큰은 그 실행 하나의 하트비트·이벤트·결과만 한다. 둘 다 SHA-256 만 저장하고 모델에게 주지 않는다. 사람 쿠키·에이전트 토큰은 러너 경로에서 403 `RUNNER_FORBIDDEN` | F14, 러너 계약 v1 |
 | 입력 사본 | Input snapshot | `agent_runs.input_snapshot`, 응답 `inputSnapshot`·`inputHash` | 실행을 만들 때 고정한 입력(서비스·두 환경 설정·이미지·변수 이름·최근 증거). 비밀값·`secretRef`·변수 값이 없다. 같은 상태면 해시가 같다 | F14, 러너 계약 v1 |
 | 부를 때 만료 | Expire on call | `expire_overdue_runs`, `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 열린 실행을 일꾼 루프 없이 누가 부를 때 `TIMED_OUT` 으로 바꾸는 것(사전 점검 만들기·가져가기·실행 토큰 호출·취소). `GET` 은 쓰지 않는다 | 러너 계약 v1 |
@@ -260,7 +260,7 @@
 | `DEADLINE` · `LEASE_EXPIRED` · `DEADLINE_EXCEEDED` | `agent_runs.failure_code` (`AgentRunFailureCode`, 자유 문자열 칸) | 러너가 마감 전에 끝내지 못해 낸 실패 · WAS: 임대 끊김 · WAS: 마감 지남. 러너는 `^[A-Z][A-Z0-9_]{0,31}$` 인 다른 코드(`RUNNER_ERROR` 등)도 낼 수 있다 |
 | `RULE` · `AI` | 결과 `origin` (`AgentRunOrigin`) | 고정 규칙 비교 · 모델 판단. `AI` finding 은 PASS 를 낼 수 없고 `UNCONFIRMED` 로 저장한다 |
 | `INFO` · `WARN` · `FAIL` | 결과 `severity` (`AgentRunSeverity`) | 설정 차이·기능 차이의 심각도 |
-| `PROPOSED` · `BLOCKED` | 결과 `patches[].status` (`AgentPatchStatus`) | WAS 가 다시 계산한 패치 상태. 러너 값은 받지 않는다 |
+| `PROPOSED` · `BLOCKED` · `REJECTED` · `APPROVED` · `APPLIED` · `APPLY_FAILED` | 결과 `patches[].status` (`AgentPatchStatus`) | WAS 가 계산한 패치 상태. 러너 값은 받지 않는다. 결과 JSON 에는 앞의 둘만 저장하고 나머지는 결정 행·반영 실행으로 응답 때 계산한다(API 서버 10) |
 | `PROTECTED_FILES_TOUCHED` · `CHECKS_MISSING` · `CHECK_NOT_PASSED` | 결과 `patches[].blockReason` (`AgentPatchBlockReason`) | `BLOCKED` 인 이유 |
 
 ### 환경 종류 (`environments.kind`)

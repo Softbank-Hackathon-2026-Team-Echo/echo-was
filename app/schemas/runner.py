@@ -291,6 +291,7 @@ class RunPatchRequest(ApiRequestModel):
     reason: Text
     touches_protected_files: bool
     checks: list[RunPatchCheckRequest]
+    origin: AgentRunOrigin = AgentRunOrigin.AI
 
     @field_validator("diff")
     @classmethod

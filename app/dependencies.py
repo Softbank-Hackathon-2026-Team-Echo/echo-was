@@ -49,6 +49,7 @@ from app.services.invitation_service import InvitationService
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.precheck_patch_service import PrecheckPatchService
 from app.services.precheck_service import PrecheckService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
@@ -490,6 +491,14 @@ def get_precheck_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> PrecheckService:
     return PrecheckService(session, clock)
+
+
+def get_precheck_patch_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> PrecheckPatchService:
+    return PrecheckPatchService(session, clock, patch_apply_enabled=settings.patch_apply_enabled)
 
 
 def get_agent_run_service(
