@@ -3,7 +3,8 @@
 DB·시계·설정을 모른다. 숫자는 이 파일의 상수이고 환경 변수로 바꾸지 않는다.
 
 - 지진은 규모 7.0 이상이면 이전 대상, 태풍은 규모와 상관없이 대상이다.
-- 반경은 `50 · e^(0.9 · (M − 5.2))` km 를 10km 단위로 반올림한 값이다(M7.2 → 300km).
+- 반경은 `50 · e^(0.9 · (M − 5.2))` km 를 정수 km 로 반올림한 값이다(M7.0 → 253km, M7.2 → 302km).
+  0.5 는 올린다. 프론트 `Math.round` 와 같은 값이 나와야 화면 원과 판정이 같다.
 - 거리는 하버사인(지구 반지름 6371km, 프론트 `geo.ts` 의 distanceKm 와 같은 식)이고, 거리가 반경과
   같으면 피해다. 좌표를 모르는 환경은 피해·안전 어느 쪽도 아니다.
 """
@@ -22,7 +23,6 @@ EARTH_RADIUS_KM = 6371.0
 _RADIUS_BASE_KM = 50.0
 _RADIUS_GROWTH = 0.9
 _RADIUS_BASE_MAGNITUDE = 5.2
-_RADIUS_ROUND_UNIT_KM = 10
 DISTANCE_LOG_DIGITS = 1
 
 
@@ -35,7 +35,12 @@ def meets_threshold(disaster_type: DisasterType, magnitude: Decimal) -> bool:
 
 def radius_km(magnitude: Decimal) -> int:
     raw = _RADIUS_BASE_KM * math.exp(_RADIUS_GROWTH * (float(magnitude) - _RADIUS_BASE_MAGNITUDE))
-    return round(raw / _RADIUS_ROUND_UNIT_KM) * _RADIUS_ROUND_UNIT_KM
+    return round_half_up(raw)
+
+
+def round_half_up(value: float) -> int:
+    """JavaScript `Math.round` 와 같은 반올림. 파이썬 round() 는 0.5 를 짝수 쪽으로 보낸다."""
+    return math.floor(value + 0.5)
 
 
 def distance_km(a: Coordinates, b: Coordinates) -> float:

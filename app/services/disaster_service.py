@@ -144,7 +144,7 @@ class _TriggerContext:
     epicenter: Coordinates
     environments: dict[uuid.UUID, _EnvironmentFacts]
     affected_environment_ids: frozenset[uuid.UUID]
-    # 이 재난의 안전 환경에서 다른 ACTIVE 재난의 피해 환경을 뺀 것.
+    # 이 재난의 안전 환경에서 복귀를 막는 다른 재난(ACTIVE·기준 넘음)의 피해 환경을 뺀 것.
     safe_environment_ids: frozenset[uuid.UUID]
     allow_self_approval: bool
 
@@ -269,11 +269,13 @@ class DisasterService:
             service_ids = await self._connections.search_serving_service_ids(
                 organization_id, classification.affected
             )
-            active_disasters = await self._disasters.search_active_by_organization(organization_id)
+            blocking_disasters = await self._disasters.search_blocking_by_organization(
+                organization_id
+            )
             blocked_environment_ids = {
                 uuid.UUID(environment_id)
-                for active in active_disasters
-                for environment_id in active.affected_environment_ids
+                for blocking in blocking_disasters
+                for environment_id in blocking.affected_environment_ids
             }
             organization = await self._organizations.find_by_id(organization_id)
             allow_self_approval = organization is not None and organization.allow_self_approval

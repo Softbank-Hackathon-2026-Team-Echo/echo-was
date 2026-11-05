@@ -345,7 +345,7 @@ class DisasterSource(StrEnum):
 
 
 class DisasterStatus(StrEnum):
-    """ACTIVE 인 재난의 피해 환경은 이전 도착으로 고를 수 없다(복귀 차단)."""
+    """ACTIVE 이고 기준을 넘은 재난의 피해 환경은 이전 도착으로 고를 수 없다(복귀 차단)."""
 
     ACTIVE = "ACTIVE"
     ENDED = "ENDED"

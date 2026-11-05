@@ -121,9 +121,9 @@
 | 계획 종류 | Migration plan mode | `migration_plans.mode` (`MigrationPlanMode`), 응답 `mode` | 계획을 만들 때 서버가 한 번 판정해 저장하는 종류. 같은 서비스의 가장 늦게 끝난 `SUCCEEDED` 계획을 출발·도착만 바꿔 거꾸로 하면 복귀(`FAILBACK`, 그 계획이 이미 복귀면 아님), 그 밖은 `PLANNED`. `EMERGENCY` 는 재난 트리거(API 서버 9)만 만든다. 클라이언트는 정할 수 없다 | F10, API 8-3·9 |
 | 재난 | Disaster | `Disaster` / `disasters`, 경로 `/api/v1/orgs/{orgId}/disasters` | 사람이 버튼으로 낸 지진·태풍 이벤트 한 건(`source = SIMULATED`). 서버가 반경과 피해·안전·모름 환경(만든 순간 스냅숏)을 계산해 저장한다. 지우지 않고 끝낼 수만 있다 | F7, API 9 |
 | 피해 · 안전 · 모름 환경 | Affected · Safe · Unknown environment | `disasters.affected_environment_ids`·`safe_environment_ids`·`unknown_environment_ids` | 진원지에서 거리 ≤ 반경 · 그보다 멂 · 좌표를 모름. 모름은 도착 후보가 아니다 | F7, API 9 |
-| 이전 대상 기준 | Meets threshold | `disasters.meets_threshold` / 응답 `meetsThreshold` | 지진 규모 7.0 이상, 태풍은 늘 참. 거짓이면 재난만 저장하고 계획을 만들지 않는다 | API 9 |
+| 이전 대상 기준 | Meets threshold | `disasters.meets_threshold` / 응답 `meetsThreshold` | 지진 규모 7.0 이상, 태풍은 늘 참. 거짓이면 재난만 저장하고 계획을 만들지 않으며 복귀 차단에도 쓰지 않는다 | API 9 |
 | 재난 트리거 | Disaster trigger | `DisasterService.declare_disaster`, `DisasterTrigger`, 칸 `migration_plans.disaster_id`, 응답 `disasterId`·`plans[]` | 재난 한 건이 피해 서비스마다 `EMERGENCY` 계획을 만드는 것(도착 = 진원지에서 가장 먼 안전 예비). 누른 사람이 만든 사람이고, 조직이 허용하면 같은 요청에서 자기 승인까지 한다 | F7, API 9 |
-| 복귀 차단 | Failback lock | 409 `DISASTER_ACTIVE`, 응답 `failback` | ACTIVE 재난의 피해 환경으로는 계획을 만들 수 없는 것. 재난을 끝내면 풀린다. 복귀는 사람이 만든다 | F9, API 9 |
+| 복귀 차단 | Failback lock | 409 `DISASTER_ACTIVE`, 응답 `failback` | ACTIVE 이고 기준을 넘은 재난의 피해 환경으로는 계획을 만들 수 없는 것. 재난을 끝내면 풀린다. 복귀는 사람이 만든다 | F9, API 9 |
 | 지문 | Fingerprint | `migration_plans.fingerprint` | 계획을 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경 설정 해시·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 낡은 계획(`STALE`) | API 8 |
 | 승인 | Approval | `approved_by_user_id`·`approved_at`, `POST …/approve` | 개발자 이상의 사람이 실행을 허락한 것. 승인이 곧 실행 시작이다. 에이전트는 할 수 없다 | F10, API 8 |
 | 자기 승인 | Self approval | `self_approved`, 조직 `allow_self_approval` | 계획을 만든 사람이 스스로 승인하는 것. 조직 스위치가 꺼져 있으면(기본) 403 `SELF_APPROVAL_FORBIDDEN`. 어드민만 켠다 | F10, API 8 |
@@ -219,7 +219,7 @@
 | `PLANNED` · `EMERGENCY` · `FAILBACK` | `migration_plans.mode` (`MigrationPlanMode`, 기본 `PLANNED`) | 보통 이전 · 재난 트리거가 만든 긴급 이전(API 서버 9) · 앞선 성공 이전을 거꾸로 하는 복귀. 만들 때 정해 저장하고 바꾸지 않는다(API 서버 8-3) |
 | `EARTHQUAKE` · `TYPHOON` | `disasters.type` (`DisasterType`) | 지진 · 태풍. 지진만 규모 기준이 있다(API 서버 9) |
 | `SIMULATED` | `disasters.source` (`DisasterSource`) | 사람이 버튼으로 낸 시뮬레이션. 재난 응답 `simulated` 는 늘 true 이고, 이전 계획의 `simulated` 와 따로 본다 |
-| `ACTIVE` → `ENDED` | `disasters.status` (`DisasterStatus`) | ACTIVE 재난의 피해 환경은 이전 도착이 될 수 없다 |
+| `ACTIVE` → `ENDED` | `disasters.status` (`DisasterStatus`) | ACTIVE 이고 기준을 넘은 재난의 피해 환경은 이전 도착이 될 수 없다 |
 | `APPROVED` · `PENDING_APPROVAL` · `SKIPPED` | 응답 `plans[].outcome` (`DisasterPlanOutcome`, 저장 안 함) | 서비스 하나의 트리거 결과 요약. 실제 상태는 `planStatus` |
 | `NO_SAFE_TARGET` · `SELF_APPROVAL_DISABLED` · `SOURCE_NOT_AFFECTED` | 응답 `plans[].reason` (`DisasterPlanReason`) | 도착 후보 없음 · 조직이 자기 승인을 막아 승인 대기 · 트래픽이 피해 환경 밖으로 옮겨 감. 그 밖의 reason 은 계획 API 오류 코드 그대로 |
 | `CUTOVER` · `ROLLBACK` | `result.kind` (`CutoverKind`, 고객 DB 표 값 그대로) | `cutover.sh` · `rollback.sh` 가 쓴 행. 복귀(`FAILBACK`) 계획은 `ROLLBACK`, 그 밖은 `CUTOVER` 를 찾는다(API 서버 16) |

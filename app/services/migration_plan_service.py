@@ -151,7 +151,7 @@ class MigrationPlanView:
     plan: MigrationPlan
     users_by_id: dict[uuid.UUID, User]
     environment_id_by_connection: dict[uuid.UUID, uuid.UUID]
-    # 이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 막는 ACTIVE 재난.
+    # 이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 막는 재난(ACTIVE·기준 넘음).
     failback_blocking_disaster_id: uuid.UUID | None = None
 
     def user(self, user_id: uuid.UUID | None) -> User | None:
@@ -251,7 +251,7 @@ class MigrationPlanService:
     ) -> MigrationPlanView:
         """출발(지금 100% 연결) → 도착(같은 이미지의 예비 연결) 계획을 PENDING_APPROVAL 로 만든다.
 
-        거절 순서: 서비스·환경(404·409) → 열린 계획 → 출발 → 같은 환경 → 도착의 ACTIVE 재난 →
+        거절 순서: 서비스·환경(404·409) → 열린 계획 → 출발 → 같은 환경 → 도착을 막는 재난 →
         열린 배포 요청 → 도착. disaster 를 넘기면 재난 트리거의 EMERGENCY 계획이다.
         """
         if (
@@ -405,8 +405,11 @@ class MigrationPlanService:
             raise MigrationPlanOpenError(str(existing.id) if existing else None) from None
 
     async def _check_target_not_in_active_disaster(self, environment_id: uuid.UUID) -> None:
-        """끝나지 않은 재난의 피해 환경으로는 옮기지 않는다(수동 복귀 포함). 최신 재난을 싣는다."""
-        blocking = await self._disasters.search_active_affecting([environment_id])
+        """끝나지 않은 재난의 피해 환경으로는 옮기지 않는다(수동 복귀 포함). 최신 재난을 싣는다.
+
+        기준 미달 재난은 이전을 일으키지 않으므로 막지 않는다.
+        """
+        blocking = await self._disasters.search_blocking_affecting([environment_id])
         if blocking:
             raise DisasterActiveError(str(blocking[0].id))
 
@@ -853,7 +856,7 @@ class MigrationPlanService:
         return (await self._views([plan]))[0]
 
     async def _views(self, plans: list[MigrationPlan]) -> list[MigrationPlanView]:
-        """계획 수와 상관없이 쿼리 3번(사용자·연결·ACTIVE 재난)으로 응답 값을 채운다."""
+        """계획 수와 상관없이 쿼리 3번(사용자·연결·복귀를 막는 재난)으로 응답 값을 채운다."""
         user_ids = {
             user_id
             for plan in plans
@@ -881,7 +884,7 @@ class MigrationPlanService:
         source_environment_ids = {
             environment_id_by_connection[plan.source_service_environment_id] for plan in plans
         }
-        active_disasters = await self._disasters.search_active_affecting(source_environment_ids)
+        blocking_disasters = await self._disasters.search_blocking_affecting(source_environment_ids)
         return [
             MigrationPlanView(
                 plan=plan,
@@ -890,7 +893,7 @@ class MigrationPlanService:
                 failback_blocking_disaster_id=next(
                     (
                         disaster.id
-                        for disaster in active_disasters
+                        for disaster in blocking_disasters
                         if str(environment_id_by_connection[plan.source_service_environment_id])
                         in disaster.affected_environment_ids
                     ),

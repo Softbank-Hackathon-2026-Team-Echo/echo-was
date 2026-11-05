@@ -649,7 +649,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         {
             "type": "EARTHQUAKE",
             "magnitude": 6.0,
-            "radiusKm": 100,
+            "radiusKm": 103,
             "meetsThreshold": False,
             "affectedEnvironmentIds": [],
         },

@@ -19,6 +19,7 @@ from app.services.disaster_rules import (
     distance_km,
     meets_threshold,
     radius_km,
+    round_half_up,
     summarize_plan,
 )
 
@@ -33,17 +34,26 @@ DIGEST_B = "sha256:" + "b" * 64
 @pytest.mark.parametrize(
     ("magnitude", "expected"),
     [
-        # 식 값 302.48 을 10km 단위로 반올림한다(계약 예시·AC-1 의 300).
-        ("7.2", 300),
-        ("7.0", 250),
-        ("6.9", 230),
+        # 결정한 식 그대로 정수 km 다(프론트 Math.round 와 같다). 7.2 는 식 값 302.48.
+        ("7.2", 302),
+        ("7.0", 253),
+        ("6.9", 231),
+        ("6.0", 103),
         ("5.2", 50),
-        ("10.0", 3760),
+        ("10.0", 3759),
         ("0.0", 0),
     ],
 )
-def test_radius_km_rounds_formula_to_ten_km(magnitude: str, expected: int) -> None:
+def test_radius_km_rounds_formula_to_whole_km(magnitude: str, expected: int) -> None:
     assert radius_km(Decimal(magnitude)) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0.5, 1), (1.5, 2), (2.5, 3), (302.49, 302), (302.5, 303), (0.49, 0)],
+)
+def test_round_half_up_matches_javascript_math_round(value: float, expected: int) -> None:
+    assert round_half_up(value) == expected
 
 
 @pytest.mark.parametrize(

@@ -55,12 +55,14 @@ class DisasterRepository:
         )
         return await self._session.scalar(statement) or 0
 
-    async def search_active_affecting(
+    async def search_blocking_affecting(
         self, environment_ids: Collection[uuid.UUID]
     ) -> list[Disaster]:
-        """environment_ids 중 하나라도 피해 환경으로 가진 ACTIVE 재난. 최신순.
+        """environment_ids 중 하나라도 피해 환경으로 가진, 복귀를 막는 재난. 최신순.
 
-        환경 id 는 조직 하나에만 속하므로 다른 조직 재난이 섞이지 않는다.
+        복귀를 막는 재난 = ACTIVE 이고 이전 대상 기준을 넘은 재난. 기준 미달 재난은 이전을 일으키지
+        않으므로 그 지역으로 돌아가는 것도 막지 않는다. 환경 id 는 조직 하나에만 속하므로 다른 조직
+        재난이 섞이지 않는다.
         """
         if not environment_ids:
             return []
@@ -70,6 +72,7 @@ class DisasterRepository:
                     select(Disaster)
                     .where(
                         Disaster.status == DisasterStatus.ACTIVE,
+                        Disaster.meets_threshold.is_(True),
                         Disaster.affected_environment_ids.op("?|")(
                             cast([str(item) for item in environment_ids], ARRAY(Text))
                         ),
@@ -80,11 +83,13 @@ class DisasterRepository:
             ).all()
         )
 
-    async def search_active_by_organization(self, organization_id: uuid.UUID) -> list[Disaster]:
-        """그 조직의 ACTIVE 재난 전부(트리거가 도착 후보를 거를 때 쓴다)."""
-        statement = _filter_by_organization(
-            select(Disaster), organization_id, DisasterStatus.ACTIVE
-        ).execution_options(populate_existing=True)
+    async def search_blocking_by_organization(self, organization_id: uuid.UUID) -> list[Disaster]:
+        """그 조직의 복귀를 막는 재난 전부(트리거가 도착 후보를 거를 때 쓴다)."""
+        statement = (
+            _filter_by_organization(select(Disaster), organization_id, DisasterStatus.ACTIVE)
+            .where(Disaster.meets_threshold.is_(True))
+            .execution_options(populate_existing=True)
+        )
         return list((await self._session.scalars(statement)).all())
 
     async def end(self, disaster_id: uuid.UUID, values: dict[str, Any]) -> bool:

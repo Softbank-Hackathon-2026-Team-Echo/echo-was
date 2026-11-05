@@ -34,13 +34,13 @@
 | 항목 | 규칙 |
 |---|---|
 | 이전 대상 기준 `meetsThreshold` | 지진은 규모 7.0 이상, 태풍은 규모와 상관없이 true |
-| 반경 `radiusKm` | `50 · e^(0.9 · (M − 5.2))` km 를 **10km 단위로 반올림**(M7.0 → 250, M7.2 → 300). 태풍도 같은 식이다 |
+| 반경 `radiusKm` | `round(50 · e^(0.9 · (M − 5.2)))` km, 정수 km 로 반올림하고 0.5 는 올린다(M7.0 → 253, M7.2 → 302). 태풍도 같은 식이다 |
 | 거리 | 하버사인, 지구 반지름 6371km(프론트 `geo.ts` 의 `distanceKm` 와 같은 식) |
 | 피해 · 안전 · 모름 | 거리 ≤ 반경이면 피해(같으면 피해), 그보다 멀면 안전, 좌표를 모르면(`coordinates` 가 null, 설정을 읽지 못하는 환경 포함) 모름. 모름은 도착 후보에서 빠진다 |
 
-프론트의 브라우저 흉내는 1km 단위 반올림(M7.2 → 302)이다. `DISASTER_API_READY` 를 켜면 서버 값을 쓴다.
+반경은 프론트 `radiusForMagnitude`(`Math.round`)와 같은 값이다. 그래서 화면 원과 서버 판정이 같다. SPEC AC-1 의 "M7.2 → 300km" 는 조사 때의 계산 착오다(식 값 302.48).
 
-기준 미달 지진도 재난 행은 `ACTIVE` 로 저장하고(`meetsThreshold: false`, `plans: []`), 피해 환경 목록이 있으므로 끝낼 때까지 그 환경으로의 계획을 막는다(아래 "복귀 차단"). 환경 id 목록은 만든 순간의 스냅숏이라 환경이 나중에 바뀌어도 고치지 않는다.
+기준 미달 지진도 재난 행은 `ACTIVE` 로 저장하지만(`meetsThreshold: false`, `plans: []`) 이전을 일으키지 않으므로 복귀 차단·`failback`·도착 후보 제외에 쓰지 않는다(아래 "복귀 차단"). 환경 id 목록은 만든 순간의 스냅숏이라 환경이 나중에 바뀌어도 고치지 않는다.
 
 ## `POST /disasters` 한 요청의 흐름
 
@@ -59,7 +59,7 @@
 
 후보 = 그 서비스의 예비 연결(비율 0, 현재 배포 있음) 중 환경이 다음을 모두 만족하는 것.
 
-- 이 재난의 안전 환경이고, **다른 ACTIVE 재난의 피해 환경이 아니다**.
+- 이 재난의 안전 환경이고, **복귀를 막는 다른 재난(아래 "복귀 차단")의 피해 환경이 아니다**.
 - 마지막 접속 확인이 `FAILED` 가 아니다.
 - 진입점 이름이 있다: 환경 종류가 `aws`·`gcp` 이거나, 환경 id 또는 종류가 `ENTRYPOINT_ENVIRONMENT_MAP` 에 있다(진입점은 그 밖의 이름을 모른다).
 
@@ -70,7 +70,7 @@
 `DisasterPreview`:
 
 ```json
-{"radiusKm": 300, "meetsThreshold": true, "affected": ["e1…"], "safe": ["e2…"], "unknown": ["e3…"]}
+{"radiusKm": 302, "meetsThreshold": true, "affected": ["e1…"], "safe": ["e2…"], "unknown": ["e3…"]}
 ```
 
 `Disaster`:
@@ -83,7 +83,7 @@
   "simulated": true,
   "magnitude": 7.2,
   "epicenter": {"lat": 35.2, "lng": 139.4},
-  "radiusKm": 300,
+  "radiusKm": 302,
   "meetsThreshold": true,
   "status": "ACTIVE",
   "affectedEnvironmentIds": ["e1…"],
@@ -121,9 +121,9 @@
 
 ## 복귀 차단
 
-재난이 끝나기 전에는 피해 환경으로 트래픽을 옮기지 않는다. 복귀는 자동이 아니고 사람이 계획을 만든다.
+재난이 끝나기 전에는 피해 환경으로 트래픽을 옮기지 않는다. 복귀는 자동이 아니고 사람이 계획을 만든다. 막는 재난은 `status = ACTIVE` 이고 `meetsThreshold = true` 인 것이다. 기준 미달 재난은 이전을 일으키지 않으므로 그 지역으로 가는 것도 막지 않는다.
 
-- `POST /services/{id}/migration-plans` 의 도착 환경이 ACTIVE 재난의 피해 환경이면 409 `DISASTER_ACTIVE`, `details = [{field: "disasterId", reason: "DISASTER_ACTIVE", value: <최신 재난 id>}]`. 재난이 여럿이면 전부 끝나야 풀린다.
+- `POST /services/{id}/migration-plans` 의 도착 환경이 막는 재난의 피해 환경이면 409 `DISASTER_ACTIVE`, `details = [{field: "disasterId", reason: "DISASTER_ACTIVE", value: <최신 재난 id>}]`. 재난이 여럿이면 전부 끝나야 풀린다.
 - 계획 상세의 `failback {allowed, reason, disasterId}` 가 "이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 만들 수 있는가"를 미리 보여 준다.
 - `POST /disasters/{id}/end` 로 재난을 끝내면 풀린다. 진행 중인 이전 계획은 건드리지 않는다.
 

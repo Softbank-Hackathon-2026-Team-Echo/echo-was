@@ -309,7 +309,7 @@ class MigrationPlanResultResponse(ApiModel):
 class MigrationFailbackResponse(ApiModel):
     """이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 만들 수 있는가.
 
-    출발 환경이 ACTIVE 재난의 피해 환경이면 allowed=false 이고 그 재난을 싣는다.
+    출발 환경이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 allowed=false 이고 그 재난을 싣는다.
     """
 
     allowed: bool

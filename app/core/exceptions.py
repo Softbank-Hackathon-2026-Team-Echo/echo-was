@@ -659,7 +659,7 @@ class DisasterNotActiveError(ConflictError):
 
 
 class DisasterActiveError(ConflictError):
-    """도착 환경이 끝나지 않은 재난의 피해 환경이다. details.disasterId 가 그 재난이다."""
+    """도착 환경이 복귀를 막는 재난의 피해 환경이다. details.disasterId 가 그 재난이다."""
 
     code = "DISASTER_ACTIVE"
 

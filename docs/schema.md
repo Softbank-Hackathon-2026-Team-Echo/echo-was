@@ -350,8 +350,8 @@ erDiagram
 | `magnitude` | numeric(3,1) | N | 0~10 | 규모 |
 | `epicenter_lat`·`epicenter_lng` | double precision | N | −90~90 · −180~180 | 진원지 |
 | `radius_km` | int | N | `>= 0` | 서버가 계산한 반경 |
-| `meets_threshold` | bool | N | | 이전 대상 기준을 넘었나(미달이면 계획 없음) |
-| `status` | varchar(16) | N | `ACTIVE`·`ENDED`, `(status = 'ENDED') = (ended_at IS NOT NULL)` | ACTIVE 재난의 피해 환경은 도착이 될 수 없다 |
+| `meets_threshold` | bool | N | | 이전 대상 기준을 넘었나(미달이면 계획을 만들지 않고 복귀도 막지 않는다) |
+| `status` | varchar(16) | N | `ACTIVE`·`ENDED`, `(status = 'ENDED') = (ended_at IS NOT NULL)` | ACTIVE 이고 기준을 넘은 재난의 피해 환경은 도착이 될 수 없다 |
 | `affected_environment_ids`·`safe_environment_ids`·`unknown_environment_ids` | jsonb | N | 배열 | 환경 id 문자열. **만든 순간의 스냅숏**이고 고치지 않는다 |
 | `created_by_user_id`(N)·`ended_by_user_id` | uuid | | FK `users.id` RESTRICT | 누른 사람 · 끝낸 사람 |
 | `started_at`(N)·`ended_at` | timestamptz | | | 주입 시계 |

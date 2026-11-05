@@ -123,7 +123,7 @@ async def test_preview_near_tokyo_m72_returns_radius_and_classification_without_
 
     assert response.status_code == 200, response.text
     assert response.json()["data"] == {
-        "radiusKm": 300,
+        "radiusKm": 302,
         "meetsThreshold": True,
         "affected": [str(tokyo.aws.id)],
         "safe": [str(tokyo.gcp.id)],
@@ -154,7 +154,7 @@ async def test_create_returns_same_classification_as_preview_and_disaster_shape(
         "simulated": True,
         "magnitude": 7.2,
         "epicenter": {"lat": 35.2, "lng": 139.4},
-        "radiusKm": 300,
+        "radiusKm": 302,
         "meetsThreshold": True,
         "status": "ACTIVE",
         "affectedEnvironmentIds": [str(tokyo.aws.id)],
@@ -353,7 +353,7 @@ async def test_earthquake_below_threshold_saves_disaster_without_plans(tokyo: Mi
     disaster = await declare_disaster(tokyo, magnitude=6.9)
 
     assert disaster["meetsThreshold"] is False
-    assert disaster["radiusKm"] == 230
+    assert disaster["radiusKm"] == 231
     assert disaster["status"] == "ACTIVE"
     assert disaster["affectedEnvironmentIds"] == [str(tokyo.aws.id)]
     assert disaster["plans"] == []
@@ -372,7 +372,7 @@ async def test_typhoon_is_target_regardless_of_magnitude(tokyo: Migration) -> No
     disaster = await declare_disaster(tokyo, magnitude=6.0, type_="TYPHOON")
 
     assert disaster["meetsThreshold"] is True
-    assert disaster["radiusKm"] == 100
+    assert disaster["radiusKm"] == 103
     plan = await tokyo.get_plan(_only_plan(disaster)["planId"])
     assert plan["mode"] == "EMERGENCY"
 
@@ -502,6 +502,17 @@ async def test_environment_in_other_active_disaster_is_not_a_target(tokyo: Migra
 
     result = _only_plan(disaster)
     assert (result["outcome"], result["reason"]) == ("SKIPPED", "NO_SAFE_TARGET")
+
+
+async def test_environment_in_below_threshold_disaster_can_be_target(tokyo: Migration) -> None:
+    below = await declare_disaster(tokyo, magnitude=6.9, epicenter=NEAR_SEOUL)
+    assert below["affectedEnvironmentIds"] == [str(tokyo.gcp.id)]
+
+    disaster = await declare_disaster(tokyo)
+
+    result = _only_plan(disaster)
+    assert result["outcome"] == "PENDING_APPROVAL"
+    assert result["targetEnvironmentId"] == str(tokyo.gcp.id)
 
 
 async def test_rejected_service_does_not_block_later_service_after_rollback(
@@ -682,7 +693,9 @@ async def test_failback_stays_blocked_while_any_active_disaster_affects_target(
 
 
 async def test_active_disaster_check_runs_after_same_environment_check(tokyo: Migration) -> None:
-    await declare_disaster(tokyo, magnitude=6.9)
+    pending = _only_plan(await declare_disaster(tokyo))
+    cancelled = await tokyo.act(pending["planId"], "cancel", tokyo.author_client)
+    assert cancelled.status_code == 200, cancelled.text
 
     same = await tokyo.request_plan(targetEnvironmentId=str(tokyo.aws.id))
 
@@ -690,17 +703,23 @@ async def test_active_disaster_check_runs_after_same_environment_check(tokyo: Mi
     assert same.json()["details"][0]["reason"] == "SAME_ENVIRONMENT"
 
 
-async def test_below_threshold_active_disaster_also_blocks_target(tokyo: Migration) -> None:
-    """미달이어도 ACTIVE 재난의 피해 환경이다(문구 그대로). 끝내면 풀린다."""
-    disaster = await declare_disaster(tokyo, magnitude=6.9, epicenter=NEAR_SEOUL)
+async def test_below_threshold_active_disaster_does_not_block_plan_or_failback(
+    tokyo: Migration,
+) -> None:
+    """기준 미달 재난은 이전을 일으키지 않으므로 그 지역으로 가는 것도 막지 않는다."""
+    near_target = await declare_disaster(tokyo, magnitude=6.9, epicenter=NEAR_SEOUL)
+    near_source = await declare_disaster(tokyo, magnitude=6.9)
+    assert (near_target["status"], near_target["meetsThreshold"]) == ("ACTIVE", False)
+    assert near_target["affectedEnvironmentIds"] == [str(tokyo.gcp.id)]
+    assert (near_source["status"], near_source["meetsThreshold"]) == ("ACTIVE", False)
+    assert near_source["affectedEnvironmentIds"] == [str(tokyo.aws.id)]
 
-    blocked = await tokyo.request_plan()
+    created = await tokyo.request_plan()
 
-    assert blocked.status_code == 409, blocked.text
-    assert blocked.json()["code"] == "DISASTER_ACTIVE"
-    ended = await tokyo.author_client.post(disasters_path(tokyo.harness, f"/{disaster['id']}/end"))
-    assert ended.status_code == 200, ended.text
-    assert (await tokyo.request_plan()).status_code == 201
+    assert created.status_code == 201, created.text
+    plan = created.json()["data"]
+    assert plan["failback"] == {"allowed": True, "reason": None, "disasterId": None}
+    assert (await tokyo.get_plan(plan["id"]))["failback"]["allowed"] is True
 
 
 async def test_end_twice_returns_409_not_active_and_unknown_returns_404(tokyo: Migration) -> None:
@@ -820,7 +839,7 @@ async def test_audit_records_declared_and_ended_user_lines_and_disaster_details_
     assert declared.details == {
         "type": "EARTHQUAKE",
         "magnitude": 7.2,
-        "radiusKm": 300,
+        "radiusKm": 302,
         "meetsThreshold": True,
         "affectedEnvironmentIds": [str(tokyo.aws.id)],
     }
