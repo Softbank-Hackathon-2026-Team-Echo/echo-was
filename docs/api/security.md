@@ -84,5 +84,6 @@
 ## 다음 (같은 이슈)
 
 - `GET …/security/compare?source=&target=`(이전 전후 비교, 통제마다 양쪽 값 + 막는 사유) — 이전 게이트(#29)와 같은 판정을 쓴다
-- WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거, TLS 주기 시험(C-TLS-1) — 지금은 UNKNOWN
+- WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거 — 지금은 UNKNOWN
+- (11/5 됨) C-TLS-1 주기 시험: 보안 게이트가 켜진 일꾼이 `SECURITY_TLS_PROBE_INTERVAL_SECONDS`(기본 1800, 최대 3000)마다 현재 배포가 있는 연결의 대표 주소·환경별 주소를 게이트와 같은 시험기로 시험해 서비스 + 환경 범위 증거(`sourceRef = tls-probe:periodic`, 유효 1시간)를 남긴다(`app/services/periodic_tls_probe.py`). 그전에는 이전 게이트가 실행 직전에 만든 증거뿐이라 이전 뒤 1시간이 지나면 encryption 칸이 `EVIDENCE_MISSING`으로 막혔다. 게이트 판정은 그대로(실행 직전 증거만 쓴다)
 - (11/5 됨) C-SEC-1(비밀 전달 경로, 조직 범위)은 빌드 비밀 검사에서 C-IMG-2 와 함께 생긴다: 원문 없음 PASS, 발견 WARN(그 이미지는 C-IMG-2 FAIL), 원문을 못 읽으면 만들지 않음. 새 빌드부터 보인다

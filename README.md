@@ -349,6 +349,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `MIGRATION_COUNT_POLL_SECONDS`·`MIGRATION_COUNTS_STALE_SECONDS`·`MIGRATION_P95_REFERENCE_WINDOW_SECONDS` | `1`·`5`·`30` | 카운터 읽기 주기·마감 때 오래된 읽기 기준·p95 참고 창 |
 | `MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `2`·`86400`·`3` | 단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
 | `SECURITY_GATE_ENABLED`·`WAS_VERSION` | `false`·(없음) | 보안 게이트(이전 승인·일꾼 시작 판정, 실행 직전 TLS 시험. API·일꾼 같은 값)·판정 범위의 WAS 버전([docs/api/migration-plans.md](docs/api/migration-plans.md) "보안 게이트") |
+| `SECURITY_TLS_PROBE_INTERVAL_SECONDS` | `1800` | 게이트가 켜진 일꾼의 공개 경로 TLS 주기 시험 간격(60~3000초, C-TLS-1 증거 유효 1시간보다 짧게, [docs/api/security.md](docs/api/security.md)) |
 | `PATCH_APPLY_ENABLED` | `false` | AI 패치 승인이 반영 실행을 만드는가. 러너가 그 실행을 가져가는 길이 생기기 전에는 켜지 않는다([docs/api/prechecks.md](docs/api/prechecks.md) "패치 승인·거절") |
 
 `echo`/`echo` 는 로컬 compose 용 더미 계정이다. 실제 비밀값은 커밋하지 않는다.
