@@ -1,6 +1,8 @@
 """실제 데이터 확인 실행기 시험(인프라 7). 접속은 가짜 connect 로 바꿔 네트워크를 쓰지 않는다."""
 
+import asyncio
 import dataclasses
+import logging
 import ssl
 import uuid
 from collections.abc import Mapping
@@ -16,7 +18,12 @@ from app.executors import build_executor_set
 from app.executors.base import DataSyncLag, DataSyncUnavailable
 from app.executors.fake import FakeDataSyncChecker
 from app.executors.postgres_data_sync import (
+    DATA_SYNC_NOT_STREAMING,
+    DATA_SYNC_UNREACHABLE,
     REPLICATION_LAG_QUERY,
+    SOURCE_SUBSCRIPTION_QUERY,
+    TARGET_WALSENDER_QUERY,
+    Connect,
     PostgresDataSyncChecker,
     ReplicationEndpoint,
     parse_replication_endpoint,
@@ -75,11 +82,12 @@ def _row(
 
 
 def _checker(
-    connector: _Connector,
+    connector: Connect,
     *,
     endpoints: Mapping[str, ReplicationEndpoint] = ENDPOINTS,
     secrets: dict[str, str] | None = None,
     ssl_mode: str = "require",
+    timeout_seconds: float = 3.0,
 ) -> PostgresDataSyncChecker:
     return PostgresDataSyncChecker(
         endpoints,
@@ -90,6 +98,7 @@ def _checker(
             {"ECHO_SECRET_DATA_SYNC_PASSWORD": PASSWORD} if secrets is None else secrets
         ),
         ssl_mode=ssl_mode,
+        timeout_seconds=timeout_seconds,
         connect=connector,
     )
 
@@ -214,6 +223,335 @@ async def test_ssl_disable_is_plain() -> None:
     await _checker(connector, ssl_mode="disable").replication_lag(SOURCE, DESTINATION)
 
     assert connector.calls[0]["ssl"] is False
+
+
+class _Database:
+    """PostgreSQL 한 대의 복제 상태. 질의 상수와 인자로 행을 고른다."""
+
+    def __init__(
+        self,
+        *,
+        walsenders: Mapping[str, Mapping[str, Any]] | None = None,
+        subscriptions: Mapping[str, bool] | None = None,
+        connect_error: Exception | None = None,
+        subscription_error: Exception | None = None,
+        walsender_error: Exception | None = None,
+    ) -> None:
+        self.walsenders = walsenders or {}
+        self.subscriptions = subscriptions or {}
+        self.connect_error = connect_error
+        self.subscription_error = subscription_error
+        self.walsender_error = walsender_error
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+        self.close_count = 0
+
+    async def fetchrow(self, query: str, *args: Any) -> Mapping[str, Any] | None:
+        self.queries.append((query, args))
+        [name] = args
+        if query == REPLICATION_LAG_QUERY:
+            return self.walsenders.get(name)
+        if query == SOURCE_SUBSCRIPTION_QUERY:
+            if self.subscription_error is not None:
+                raise self.subscription_error
+            # 질의가 enabled 를 거르지 않게 되면 꺼진 구독도 행으로 돌아가 시험이 실패한다.
+            is_visible = self.subscriptions.get(name, False) or (
+                name in self.subscriptions and "subenabled" not in query
+            )
+            return {"subname": name} if is_visible else None
+        assert query == TARGET_WALSENDER_QUERY
+        if self.walsender_error is not None:
+            raise self.walsender_error
+        return {"application_name": name} if name in self.walsenders else None
+
+    async def close(self) -> None:
+        self.close_count += 1
+
+
+class _Cluster:
+    """호스트별로 다른 PostgreSQL 에 붙는 가짜 connect."""
+
+    def __init__(self, databases: Mapping[str, _Database]) -> None:
+        self.databases = databases
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def hosts(self) -> list[str]:
+        return [call["host"] for call in self.calls]
+
+    async def __call__(self, **kwargs: Any) -> _Database:
+        self.calls.append(kwargs)
+        database = self.databases[kwargs["host"]]
+        if database.connect_error is not None:
+            raise database.connect_error
+        return database
+
+
+AWS_HOST = ENDPOINTS["aws"].host
+GCP_HOST = ENDPOINTS["gcp"].host
+TARGET_IS_WRITER = DataSyncLag(seconds=0.0, reason="TARGET_IS_WRITER")
+DATABASE_ERRORS = [
+    OSError("connection refused"),
+    TimeoutError(),
+    asyncpg.InvalidPasswordError("bad password"),
+    asyncpg.InterfaceError("closed"),
+]
+DATABASE_ERROR_IDS = ["os-error", "timeout", "invalid-password", "interface-error"]
+
+
+def _cluster(source: _Database, target: _Database) -> _Cluster:
+    """SOURCE(aws, 구독 echo_sub_rev) → DESTINATION(gcp, 구독 echo_sub) 방향."""
+    return _Cluster({AWS_HOST: source, GCP_HOST: target})
+
+
+def _warning_codes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.__dict__["error_code"]
+        for record in caplog.records
+        if record.message == "data sync lag unavailable"
+    ]
+
+
+# --- 규칙 2: 출발이 발행자면 지금 그대로 지연을 잰다 ---
+
+
+async def test_source_publisher_streaming_returns_lag_without_writer_checks() -> None:
+    source = _Database(walsenders={"echo_sub": _row(lag=0.07)})
+    target = _Database()
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncLag(seconds=0.07)
+    assert isinstance(result, DataSyncLag)
+    assert result.reason is None
+    assert cluster.hosts == [AWS_HOST]
+    assert source.queries == [(REPLICATION_LAG_QUERY, ("echo_sub",))]
+    assert source.close_count == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [_row(state="catchup"), _row(state="startup", lag=None), _row(lag=None, behind=1024)],
+    ids=["catchup", "startup", "wal-remaining"],
+)
+async def test_source_row_not_streaming_is_unavailable_even_if_target_looks_like_writer(
+    row: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    source = _Database(walsenders={"echo_sub": row}, subscriptions={"echo_sub_rev": True})
+    target = _Database(walsenders={"echo_sub_rev": _row()})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_NOT_STREAMING]
+    assert cluster.hosts == [AWS_HOST]
+    assert source.queries == [(REPLICATION_LAG_QUERY, ("echo_sub",))]
+
+
+async def test_both_sides_publishing_measures_lag_from_source() -> None:
+    source = _Database(walsenders={"echo_sub": _row(lag=0.2)}, subscriptions={"echo_sub_rev": True})
+    target = _Database(walsenders={"echo_sub_rev": _row()})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncLag(seconds=0.2)
+    assert cluster.hosts == [AWS_HOST]
+
+
+# --- 규칙 3·4: 도착이 이미 쓰기 담당이면 지연 0 으로 통과한다 ---
+
+
+async def test_source_subscription_enabled_passes_without_connecting_to_target(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.executors.postgres_data_sync")
+    source = _Database(subscriptions={"echo_sub_rev": True})
+    target = _Database()
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == TARGET_IS_WRITER
+    assert cluster.hosts == [AWS_HOST]
+    assert source.queries == [
+        (REPLICATION_LAG_QUERY, ("echo_sub",)),
+        (SOURCE_SUBSCRIPTION_QUERY, ("echo_sub_rev",)),
+    ]
+    assert source.close_count == 1
+    [record] = [r for r in caplog.records if r.message == "data sync target is writer"]
+    assert record.__dict__["evidence"] == "SOURCE_SUBSCRIPTION"
+    assert record.__dict__["reason"] == "TARGET_IS_WRITER"
+    assert record.__dict__["source_environment_id"] == str(SOURCE.environment_id)
+    assert record.__dict__["target_environment_id"] == str(DESTINATION.environment_id)
+    assert AWS_HOST not in caplog.text
+    assert PASSWORD not in caplog.text
+
+
+async def test_target_walsender_passes_with_target_mapping_and_source_subscription_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.executors.postgres_data_sync")
+    source = _Database()
+    # 도착이 발행자라는 근거만 보므로 walsender 상태는 streaming 이 아니어도 된다.
+    target = _Database(walsenders={"echo_sub_rev": _row(state="catchup")})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == TARGET_IS_WRITER
+    assert cluster.hosts == [AWS_HOST, GCP_HOST]
+    target_call = cluster.calls[1]
+    assert (target_call["host"], target_call["port"]) == (GCP_HOST, 5432)
+    assert (target_call["user"], target_call["database"]) == ("echo_monitor", "postgres")
+    assert target_call["password"] == PASSWORD
+    assert target_call["ssl"] is cluster.calls[0]["ssl"]
+    assert target_call["timeout"] == cluster.calls[0]["timeout"]
+    assert target.queries == [(TARGET_WALSENDER_QUERY, ("echo_sub_rev",))]
+    assert (source.close_count, target.close_count) == (1, 1)
+    [record] = [r for r in caplog.records if r.message == "data sync target is writer"]
+    assert record.__dict__["evidence"] == "TARGET_WALSENDER"
+    assert GCP_HOST not in caplog.text
+    assert PASSWORD not in caplog.text
+
+
+async def test_measured_failback_layout_passes_on_source_subscription() -> None:
+    # 11:54 실측: 트래픽만 aws → gcp 로 옮긴 뒤 복귀(출발 gcp/B → 도착 aws/A). 쓰기는 A 그대로다.
+    # A 에 walsender echo_sub 가 streaming, B 에 구독 echo_sub 가 enabled, B 에 walsender 없음.
+    node_a = _Database(walsenders={"echo_sub": _row()})
+    node_b = _Database(subscriptions={"echo_sub": True})
+    cluster = _Cluster({AWS_HOST: node_a, GCP_HOST: node_b})
+
+    result = await _checker(cluster).replication_lag(DESTINATION, SOURCE)
+
+    assert result == TARGET_IS_WRITER
+    assert cluster.hosts == [GCP_HOST]
+    assert node_b.queries == [
+        (REPLICATION_LAG_QUERY, ("echo_sub_rev",)),
+        (SOURCE_SUBSCRIPTION_QUERY, ("echo_sub",)),
+    ]
+    assert node_a.queries == []
+
+
+async def test_measured_failback_layout_passes_on_target_walsender_without_subscription() -> None:
+    # 같은 배치에서 B 의 구독을 읽어도 없을 때 A 의 walsender 로 판단한다.
+    node_a = _Database(walsenders={"echo_sub": _row()})
+    node_b = _Database()
+    cluster = _Cluster({AWS_HOST: node_a, GCP_HOST: node_b})
+
+    result = await _checker(cluster).replication_lag(DESTINATION, SOURCE)
+
+    assert result == TARGET_IS_WRITER
+    assert cluster.hosts == [GCP_HOST, AWS_HOST]
+    assert node_a.queries == [(TARGET_WALSENDER_QUERY, ("echo_sub",))]
+
+
+# --- 규칙 1·5: 근거가 없으면 지금 그대로 판단 불가다 ---
+
+
+@pytest.mark.parametrize(
+    "subscriptions", [{}, {"echo_sub_rev": False}], ids=["no-subscription", "disabled-subscription"]
+)
+async def test_no_writer_evidence_is_unavailable(
+    subscriptions: dict[str, bool], caplog: pytest.LogCaptureFixture
+) -> None:
+    source = _Database(subscriptions=subscriptions)
+    # 다른 구독의 walsender 는 근거가 아니다(질의 인자가 출발 구독 이름이어야 한다).
+    target = _Database(walsenders={"echo_sub": _row()})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_NOT_STREAMING]
+    assert cluster.hosts == [AWS_HOST, GCP_HOST]
+    assert target.queries == [(TARGET_WALSENDER_QUERY, ("echo_sub_rev",))]
+
+
+@pytest.mark.parametrize(
+    "subscriptions", [{}, {"echo_sub_rev": False}], ids=["no-subscription", "disabled-subscription"]
+)
+@pytest.mark.parametrize("error", DATABASE_ERRORS, ids=DATABASE_ERROR_IDS)
+async def test_target_connection_failure_is_not_streaming(
+    subscriptions: dict[str, bool], error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = _Database(subscriptions=subscriptions)
+    target = _Database(connect_error=error)
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_NOT_STREAMING]
+    assert cluster.hosts == [AWS_HOST, GCP_HOST]
+    assert GCP_HOST not in caplog.text
+    assert PASSWORD not in caplog.text
+
+
+@pytest.mark.parametrize("error", DATABASE_ERRORS, ids=DATABASE_ERROR_IDS)
+async def test_target_query_failure_is_not_streaming_and_closes_connection(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    target = _Database(walsender_error=error)
+
+    result = await _checker(_cluster(_Database(), target)).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_NOT_STREAMING]
+    assert target.close_count == 1
+
+
+async def test_hanging_target_is_cut_by_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    class _HangingCluster(_Cluster):
+        async def __call__(self, **kwargs: Any) -> _Database:
+            if kwargs["host"] == GCP_HOST:
+                self.calls.append(kwargs)
+                await asyncio.Event().wait()
+            return await super().__call__(**kwargs)
+
+    cluster = _HangingCluster({AWS_HOST: _Database()})
+    checker = _checker(cluster, timeout_seconds=0.01)
+
+    result = await checker.replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_NOT_STREAMING]
+
+
+@pytest.mark.parametrize("error", DATABASE_ERRORS, ids=DATABASE_ERROR_IDS)
+async def test_source_connection_failure_is_unreachable_without_checking_target(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = _Database(connect_error=error)
+    target = _Database(walsenders={"echo_sub_rev": _row()})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_UNREACHABLE]
+    assert cluster.hosts == [AWS_HOST]
+
+
+async def test_source_subscription_query_failure_is_unreachable_without_checking_target(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = _Database(subscription_error=asyncpg.InsufficientPrivilegeError("denied"))
+    target = _Database(walsenders={"echo_sub_rev": _row()})
+    cluster = _cluster(source, target)
+
+    result = await _checker(cluster).replication_lag(SOURCE, DESTINATION)
+
+    assert result == DataSyncUnavailable()
+    assert _warning_codes(caplog) == [DATA_SYNC_UNREACHABLE]
+    assert cluster.hosts == [AWS_HOST]
+    assert source.close_count == 1
+
+
+def test_data_sync_lag_reason_defaults_to_none() -> None:
+    assert DataSyncLag(seconds=0.07).reason is None
+    assert DataSyncLag(seconds=0.07) != DataSyncLag(seconds=0.07, reason="TARGET_IS_WRITER")
 
 
 def test_postgres_data_sync_is_not_simulated() -> None:
