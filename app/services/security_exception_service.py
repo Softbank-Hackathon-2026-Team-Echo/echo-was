@@ -36,7 +36,7 @@ from app.core.exceptions import (
     SecurityExceptionNotPendingError,
     SelfApprovalForbiddenError,
 )
-from app.enums import SecurityControlId, SecurityExceptionStatus
+from app.enums import ActorType, SecurityControlId, SecurityExceptionStatus
 from app.models import SecurityException, User
 from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.organization_repository import OrganizationRepository
@@ -47,7 +47,13 @@ from app.repositories.security_exception_repository import (
 )
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
-from app.services.security_rules import EXCEPTION_MAX_DURATION, ScopeKey, get_rule
+from app.services.security_rules import (
+    EXCEPTION_MAX_DURATION,
+    ScopeKey,
+    SecurityScope,
+    get_rule,
+)
+from app.services.security_rules import SecurityException as SecurityExceptionInput
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,29 @@ NOT_ALLOWED_FOR_CONTROL_REASON = "NOT_ALLOWED_FOR_CONTROL"
 EXPIRES_NOT_AFTER_NOW_REASON = "NOT_AFTER_NOW"
 EXPIRES_TOO_LATE_REASON = "MAX_7_DAYS"
 EXPIRES_AT_FIELD = "expiresAt"
+
+
+def to_security_exception(model: SecurityException) -> SecurityExceptionInput:
+    """DB 행 → 판정 입력(게이트·매트릭스 공용). 요청·승인은 users FK 라 사람(USER)이다."""
+    return SecurityExceptionInput(
+        exception_id=model.id,
+        control_id=SecurityControlId(model.control_id),
+        scope=SecurityScope(
+            organization_id=model.organization_id,
+            service_id=model.service_id,
+            environment_id=model.environment_id,
+            image_digest=model.image_digest,
+            config_commit=model.config_commit,
+            was_version=model.was_version,
+        ),
+        reason=model.reason,
+        requested_by_user_id=model.requested_by_user_id,
+        requested_by_actor_type=ActorType.USER,
+        approved_by_user_id=model.approved_by_user_id,
+        approved_by_actor_type=ActorType.USER if model.approved_by_user_id else None,
+        created_at=model.created_at,
+        expires_at=model.expires_at,
+    )
 
 
 @dataclass(frozen=True)
