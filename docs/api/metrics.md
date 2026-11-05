@@ -115,7 +115,7 @@
 |---|---|---|
 | `ENTRYPOINT_PROMETHEUS_URL` | `http://10.60.0.6:9090` | 진입점 VM a 의 Prometheus(VPC 내부 주소). 비면 `NOT_CONFIGURED` |
 | `ENTRYPOINT_PROMETHEUS_BASIC_AUTH_USER` | `echo-otel`(기본) | basic auth 사용자 |
-| `ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF` | (비움) → 인증이 켜지면 `env:ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD` | 비밀번호의 비밀 참조. **비면 인증 없이** 읽는다(진입점 `entrypoint_prometheus_remote_write = false` 와 호환). 값은 호출마다 비밀 조회기에서 읽고 저장·로그·응답에 넣지 않는다 |
+| `ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF` | `env:ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD`(11/5 진입점 basic auth 켬) | 비밀번호의 비밀 참조. **비면 인증 없이** 읽는다(진입점 `entrypoint_prometheus_remote_write = false` 와 호환). 값은 호출마다 비밀 조회기에서 읽고 저장·로그·응답에 넣지 않는다 |
 | `SERVICE_METRICS_CACHE_SECONDS` | `5` | 캐시 초 |
 
 진입점이 basic auth 를 켜면(echo-infra 인프라 9) 쿼리도 인증이 필요하다. 그때 할 일: GSA `echo-dev-echo-was` 에 Secret Manager `echo-dev-entry-prometheus-remote-write`(값 = 비밀번호만) 읽기 권한 → `deploy/base.yaml` `SecretProviderClass` 경로 + `SecretSync` `targetKey: ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD` → ConfigMap `ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF`. **권한 없이 SecretSync 에 넣으면 동기화 전체가 실패한다**(deploy/README.md) — 권한을 먼저 준다. 그 전까지 응답은 `UNAVAILABLE`/`PROMETHEUS_UNAUTHORIZED` 다.
