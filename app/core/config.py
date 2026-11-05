@@ -248,6 +248,9 @@ class Settings(BaseSettings):
     # 보안 게이트(보안·거버넌스 5). 켜면 이전 승인과 일꾼 실행 시작 때 필수 보안 통제를 판정해
     # 막는다(실행 직전 TLS 접속 시험 포함). 기본은 꺼짐이고, 꺼져 있으면 판정·기록을 하지 않는다.
     security_gate_enabled: bool = False
+    # 게이트가 켜진 일꾼이 공개 경로 TLS 를 주기로 시험해 C-TLS-1 준비 증거(유효 1시간)를
+    # 남기는 간격. 증거가 비지 않게 유효기간보다 짧아야 한다(최대 50분).
+    security_tls_probe_interval_seconds: int = Field(default=1800, ge=60, le=3000)
     # 켜면 패치 승인이 반영 실행(APPLY_PATCH)을 만든다. 러너가 그 실행을 가져가는 길이 생기기 전에는
     # 켜지 않는다(실행이 QUEUED 로 마감까지 머물고 그동안 그 서비스의 새 사전 점검이 409 다).
     patch_apply_enabled: bool = False
