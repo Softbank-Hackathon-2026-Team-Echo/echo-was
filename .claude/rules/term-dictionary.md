@@ -145,6 +145,8 @@
 | 입력 사본 | Input snapshot | `agent_runs.input_snapshot`, 응답 `inputSnapshot`·`inputHash` | 실행을 만들 때 고정한 입력(서비스·두 환경 설정·이미지·변수 이름·최근 증거). 비밀값·`secretRef`·변수 값이 없다. 같은 상태면 해시가 같다 | F14, 러너 계약 v1 |
 | 부를 때 만료 | Expire on call | `expire_overdue_runs`, `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 열린 실행을 일꾼 루프 없이 누가 부를 때 `TIMED_OUT` 으로 바꾸는 것(사전 점검 만들기·가져가기·실행 토큰 호출·취소). `GET` 은 쓰지 않는다 | 러너 계약 v1 |
 | AI 검토 여부 | AI reviewed | 응답 `aiReviewed` (저장 안 함, `model_id` 유무) | 결과에 모델이 있는가. false 는 "AI 검토 없음 · 규칙 비교만"이다. `simulated`(값을 지어냈는가)와 따로 본다. 실제 입력으로 규칙 비교만 한 러너는 `simulated = false` + `aiReviewed = false` 이고 C-AI-1 증거가 된다 | F14, D-1 |
+| 비용 항목 종류 | Cost component kind | `CostComponentKind`, 응답 `components[].kind` | 비용 자원 항목의 묶음: `COMPUTE` · `DATABASE` · `NETWORK` · `STORAGE` · `OTHER`. 값은 `app/data/cloud_inventory.toml` 에 있고 DB 칸이 아니다 | 운영 1 |
+| 비용 출처 | Cost source | `CostSource`, 응답 `source` | `ESTIMATE`(자원 목록 × 공개 목록가, 환경·공용 항목) · `BILLING`(클라우드 청구 데이터, 공급자 계정 단위 `billing[]`). 청구 값을 환경 값으로 쓰지 않는다 | 운영 1 |
 
 ---
 

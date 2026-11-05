@@ -1,0 +1,189 @@
+# 환경별·공용 자원 목록(운영 1). 손으로 박은 표다(자동 인벤터리 없음). 자원 수가 바뀌면 이 파일을 고친다.
+# 환경 항목은 환경 kind + config region 으로 맞춘다(환경 id 는 DB 마다 달라 파일에 박을 수 없다).
+# price 는 cloud_prices.toml 의 key, quantity 는 0 이상의 정수다.
+
+[[environments]]
+key = "aws-tokyo"
+name = "aws-tokyo"
+provider = "aws"
+region = "ap-northeast-1"
+match_kind = "aws"
+match_region = "ap-northeast-1"
+note = "목록가 추정. 데이터 전송·LB 용량 단위·NAT 처리량 제외. 계정이 무료 플랜이라 실제 사용 금액은 더 작을 수 있음(청구 실측 참고)"
+
+[[environments.components]]
+name = "EKS 컨트롤 플레인 (echo-dev-eks)"
+kind = "COMPUTE"
+price = "aws.ap-northeast-1.eks-cluster"
+quantity = 1
+unit_label = "클러스터"
+
+[[environments.components]]
+name = "EC2 노드 m7i-flex.large (온디맨드)"
+kind = "COMPUTE"
+price = "aws.ap-northeast-1.ec2.m7i-flex.large"
+quantity = 2
+unit_label = "대"
+
+[[environments.components]]
+name = "PostgreSQL 볼륨 gp3 (클러스터 안 DB)"
+kind = "DATABASE"
+price = "aws.ap-northeast-1.ebs.gp3"
+quantity = 10
+unit_label = "GiB"
+
+[[environments.components]]
+name = "PostgreSQL 복제 노출 NLB (echo-dev-pg-a)"
+kind = "NETWORK"
+price = "aws.ap-northeast-1.nlb"
+quantity = 1
+unit_label = "개"
+
+[[environments.components]]
+name = "NAT 게이트웨이"
+kind = "NETWORK"
+price = "aws.ap-northeast-1.nat-gateway"
+quantity = 1
+unit_label = "개"
+
+[[environments.components]]
+name = "앱 ALB (echo-dev-apps)"
+kind = "NETWORK"
+price = "aws.ap-northeast-1.alb"
+quantity = 1
+unit_label = "개"
+
+[[environments.components]]
+name = "공인 IPv4 주소"
+kind = "NETWORK"
+price = "aws.ap-northeast-1.public-ipv4"
+quantity = 5
+unit_label = "개"
+
+[[environments.components]]
+name = "노드 루트 볼륨 gp3"
+kind = "STORAGE"
+price = "aws.ap-northeast-1.ebs.gp3"
+quantity = 40
+unit_label = "GiB"
+
+[[environments]]
+key = "gcp-seoul"
+name = "gcp-seoul"
+provider = "gcp"
+region = "asia-northeast3"
+match_kind = "gcp"
+match_region = "asia-northeast3"
+note = "목록가 추정. GKE 관리비는 무료 크레딧으로 상쇄될 수 있음. 관제(echo-was)도 같은 노드에서 돈다. 데이터 전송·NAT 처리량 제외. GCP 청구 내보내기 없음"
+
+[[environments.components]]
+name = "GKE 존 클러스터 관리비 (echo-dev-gke)"
+kind = "COMPUTE"
+price = "gcp.gke-zonal-cluster"
+quantity = 1
+unit_label = "클러스터"
+
+[[environments.components]]
+name = "GKE 노드 e2-standard-2"
+kind = "COMPUTE"
+price = "gcp.asia-northeast3.e2-standard-2"
+quantity = 2
+unit_label = "대"
+
+[[environments.components]]
+name = "PostgreSQL 볼륨 pd-balanced (echo-pg)"
+kind = "DATABASE"
+price = "gcp.asia-northeast3.pd-balanced"
+quantity = 10
+unit_label = "GiB"
+
+[[environments.components]]
+name = "지역 전달 규칙 (DB 외부 노출·인그레스 내부 LB)"
+kind = "NETWORK"
+price = "gcp.forwarding-rules-first-5"
+quantity = 1
+unit_label = "묶음(규칙 2개)"
+
+[[environments.components]]
+name = "Cloud NAT 게이트웨이 (노드 2대)"
+kind = "NETWORK"
+price = "gcp.cloud-nat-vm"
+quantity = 2
+unit_label = "VM"
+
+[[environments.components]]
+name = "Cloud NAT 외부 IP"
+kind = "NETWORK"
+price = "gcp.cloud-nat-ip"
+quantity = 1
+unit_label = "개"
+
+[[environments.components]]
+name = "노드 부트 디스크 pd-balanced"
+kind = "STORAGE"
+price = "gcp.asia-northeast3.pd-balanced"
+quantity = 100
+unit_label = "GiB"
+
+[[shared]]
+key = "gcp-platform"
+name = "공용 플랫폼 (고정 진입점·관제 DB·AI 샌드박스)"
+provider = "gcp"
+region = "asia-northeast3"
+note = "특정 환경에 속하지 않는 GCP 공용 자원"
+
+[[shared.components]]
+name = "고정 진입점 VM e2-small (entry, entry-b)"
+kind = "COMPUTE"
+price = "gcp.asia-northeast3.e2-small"
+quantity = 2
+unit_label = "대"
+
+[[shared.components]]
+name = "AI 샌드박스 VM e2-standard-2 (echo-sandbox-runner)"
+kind = "COMPUTE"
+price = "gcp.asia-northeast3.e2-standard-2"
+quantity = 1
+unit_label = "대"
+
+[[shared.components]]
+name = "관제 DB 볼륨 pd-balanced (echo-db)"
+kind = "DATABASE"
+price = "gcp.asia-northeast3.pd-balanced"
+quantity = 10
+unit_label = "GiB"
+
+[[shared.components]]
+name = "관제 API 전역 전달 규칙 (http·https)"
+kind = "NETWORK"
+price = "gcp.forwarding-rules-first-5"
+quantity = 1
+unit_label = "묶음(규칙 2개)"
+
+[[shared.components]]
+name = "진입점 외부 IP"
+kind = "NETWORK"
+price = "gcp.external-ip-standard-vm"
+quantity = 2
+unit_label = "개"
+
+[[shared.components]]
+name = "샌드박스 Cloud NAT 게이트웨이"
+kind = "NETWORK"
+price = "gcp.cloud-nat-vm"
+quantity = 1
+unit_label = "VM"
+
+[[shared.components]]
+name = "샌드박스 Cloud NAT 외부 IP"
+kind = "NETWORK"
+price = "gcp.cloud-nat-ip"
+quantity = 1
+unit_label = "개"
+
+[[shared.components]]
+name = "진입점·샌드박스 부트 디스크 pd-balanced"
+kind = "STORAGE"
+price = "gcp.asia-northeast3.pd-balanced"
+quantity = 70
+unit_label = "GiB"

@@ -35,6 +35,8 @@ from app.services.agent_run_service import AgentRunService
 from app.services.agent_token_service import AgentTokenService
 from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
+from app.services.cost_catalog import CostCatalog, get_cost_catalog
+from app.services.cost_service import CostService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.disaster_service import DisasterService
@@ -482,6 +484,14 @@ def get_security_matrix_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityMatrixService:
     return SecurityMatrixService(session=session, clock=clock)
+
+
+def get_cost_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    catalog: Annotated[CostCatalog, Depends(get_cost_catalog)],
+) -> CostService:
+    return CostService(session, clock, catalog)
 
 
 def get_precheck_service(

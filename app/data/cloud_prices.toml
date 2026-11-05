@@ -1,0 +1,157 @@
+# 공개 목록가 단가표(운영 1). 사람이 고치는 표이고, 값을 바꾸면 checked_at 도 함께 고친다.
+# unit 은 hour(시간당) 또는 GiB-month(GiB·월, 시간 단가는 ÷ 730). 데이터 전송 같은 사용량 요금은 넣지 않는다.
+# verified = false 는 우리 리전 값을 확인하지 못한 단가다(응답 priceVerified).
+
+[[prices]]
+key = "aws.ap-northeast-1.eks-cluster"
+unit_price_usd = 0.10
+unit = "hour"
+description = "EKS 클러스터 1개, 도쿄"
+source = "AWS Price List API AmazonEKS APN1-AmazonEKS-Hours:perCluster · https://aws.amazon.com/eks/pricing/"
+effective_date = "2026-10-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.ec2.m7i-flex.large"
+unit_price_usd = 0.12369
+unit = "hour"
+description = "EC2 m7i-flex.large 온디맨드 1대, 도쿄"
+source = "AWS Price List API AmazonEC2 APN1-BoxUsage:m7i-flex.large (Linux, Shared) · https://aws.amazon.com/ec2/pricing/on-demand/"
+effective_date = "2026-11-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.ebs.gp3"
+unit_price_usd = 0.096
+unit = "GiB-month"
+description = "EBS gp3 용량, 도쿄"
+source = "APN1-EBS:VolumeUsage.gp3 · https://aws.amazon.com/ebs/pricing/"
+effective_date = "2026-11-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.nat-gateway"
+unit_price_usd = 0.062
+unit = "hour"
+description = "NAT 게이트웨이 1개, 도쿄"
+source = "APN1-NatGateway-Hours · https://aws.amazon.com/vpc/pricing/ (처리량 $0.062/GB 별도)"
+effective_date = "2026-11-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.alb"
+unit_price_usd = 0.0243
+unit = "hour"
+description = "Application Load Balancer 1개, 도쿄"
+source = "AWSELB APN1-LoadBalancerUsage Application · https://aws.amazon.com/elasticloadbalancing/pricing/ (LCU $0.008 별도)"
+effective_date = "2026-08-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.nlb"
+unit_price_usd = 0.0243
+unit = "hour"
+description = "Network Load Balancer 1개, 도쿄"
+source = "AWSELB APN1-LoadBalancerUsage Network (NLCU $0.006 별도)"
+effective_date = "2026-08-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "aws.ap-northeast-1.public-ipv4"
+unit_price_usd = 0.005
+unit = "hour"
+description = "공인 IPv4 주소 1개, 도쿄"
+source = "AmazonVPC APN1-PublicIPv4:InUseAddress · https://aws.amazon.com/vpc/pricing/"
+effective_date = "2026-11-01"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "gcp.gke-zonal-cluster"
+unit_price_usd = 0.10
+unit = "hour"
+description = "GKE 존 클러스터 관리비 1개"
+source = "Cloud Billing Catalog CCD8-9BF1-090E \"Zonal Kubernetes Clusters\" · https://cloud.google.com/kubernetes-engine/pricing"
+effective_date = "2026-11-04"
+checked_at = "2026-11-05"
+verified = true
+note = "결제 계정당 월 $74.40 무료 크레딧 — 존 클러스터 1개는 사실상 0"
+
+[[prices]]
+key = "gcp.asia-northeast3.e2-standard-2"
+unit_price_usd = 0.085964
+unit = "hour"
+description = "e2-standard-2 1대(2 vCPU, 8 GiB), 서울"
+source = "Catalog 6F81-5844-456A \"E2 Instance Core running in Seoul\" 0.028026/vCPU·h ×2 + \"E2 Instance Ram running in Seoul\" 0.003739/GiB·h ×8"
+effective_date = "2026-11-04"
+checked_at = "2026-11-05"
+verified = true
+
+# "같은 SKU" = 바로 위 e2-standard-2 항목의 E2 코어·메모리 SKU.
+[[prices]]
+key = "gcp.asia-northeast3.e2-small"
+unit_price_usd = 0.021491
+unit = "hour"
+description = "e2-small 1대(0.5 vCPU, 2 GiB), 서울"
+source = "같은 SKU, 0.5 vCPU(공유 코어) + 2 GiB"
+effective_date = "2026-11-04"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "gcp.asia-northeast3.pd-balanced"
+unit_price_usd = 0.13
+unit = "GiB-month"
+description = "pd-balanced 용량, 서울"
+source = "Catalog \"Balanced PD Capacity in Seoul\""
+effective_date = "2026-11-04"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "gcp.external-ip-standard-vm"
+unit_price_usd = 0.005
+unit = "hour"
+description = "표준 VM 외부 IP 1개"
+source = "Catalog \"External IP Charge on a Standard VM\""
+effective_date = "2026-11-04"
+checked_at = "2026-11-05"
+verified = true
+note = "SKU 계층상 결제 계정 월 720시간까지 0"
+
+[[prices]]
+key = "gcp.cloud-nat-vm"
+unit_price_usd = 0.0014
+unit = "hour"
+description = "Cloud NAT VM 1대"
+source = "https://cloud.google.com/nat/pricing — VM 1대·시간(32대 이하), 처리량 $0.045/GiB 별도"
+effective_date = "2026-11-05"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "gcp.cloud-nat-ip"
+unit_price_usd = 0.005
+unit = "hour"
+description = "Cloud NAT 외부 IP 1개"
+source = "https://cloud.google.com/nat/pricing — NAT 외부 IP"
+effective_date = "2026-11-05"
+checked_at = "2026-11-05"
+verified = true
+
+[[prices]]
+key = "gcp.forwarding-rules-first-5"
+unit_price_usd = 0.025
+unit = "hour"
+description = "전달 규칙 첫 5개 묶음"
+source = "https://cloud.google.com/vpc/network-pricing — 첫 5개 묶음 값(전역 표·미국 지역 표)"
+effective_date = "2026-11-05"
+checked_at = "2026-11-05"
+verified = false
+note = "서울 지역 표 값 미확인"
