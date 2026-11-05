@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 29개 경로(기한부 예외 3개·AI 사전 점검 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 31개 경로(기한부 예외 3개·AI 사전 점검 2개·재난 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -112,8 +112,8 @@
 | `SERVICE_VARIABLE_DELETED` | `DELETE /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
 | `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests` | `deploy_request` | `{environmentId, ref, commitSha}` |
 | `ROLLBACK_REQUESTED` | `POST /deploy-requests/{id}/rollback` | `deploy_request` | `{rollbackOfId, environmentId}` |
-| `MIGRATION_PLAN_CREATED` | `POST /services/{id}/migration-plans` | `migration_plan` | `{sourceEnvironmentId, targetEnvironmentId}` |
-| `MIGRATION_PLAN_APPROVED` | `POST /migration-plans/{id}/approve` | `migration_plan` | `{selfApproved}` |
+| `MIGRATION_PLAN_CREATED` | `POST /services/{id}/migration-plans`, 재난 트리거 | `migration_plan` | `{sourceEnvironmentId, targetEnvironmentId}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |
+| `MIGRATION_PLAN_APPROVED` | `POST /migration-plans/{id}/approve`, 재난 트리거의 자기 승인 | `migration_plan` | `{selfApproved}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |
 | `MIGRATION_PLAN_REJECTED` | `POST /migration-plans/{id}/reject` | `migration_plan` | `{}` |
 | `MIGRATION_PLAN_CANCELLED` | `POST /migration-plans/{id}/cancel` | `migration_plan` | `{}` |
 | `MIGRATION_ABORT_REQUESTED` | `POST /migration-plans/{id}/abort` | `migration_plan` | `{}` |
@@ -122,6 +122,8 @@
 | `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |
 | `PRECHECK_REQUESTED` | `POST /prechecks` | `agent_run`(이름표 = 서비스 이름) | `{serviceId, targetEnvironmentId}` |
 | `PRECHECK_CANCELLED` | `POST /prechecks/{id}/cancel` | `agent_run` | `{serviceId, targetEnvironmentId}` |
+| `DISASTER_DECLARED` | `POST /disasters` | `disaster`(이름표 `EARTHQUAKE M7.2`) | `{type, magnitude, radiusKm, meetsThreshold, affectedEnvironmentIds}`. 건너뛴 서비스가 있으면 같은 대상에 둘째 줄 `{skippedPlans: [{serviceId, planId, reason}]}`([disasters.md](disasters.md#감사)) |
+| `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName}` |
 | `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{status, failureCode?, simulated, aiReviewed}` |
 | `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
@@ -132,7 +134,7 @@
 
 거부 줄의 `action` 은 위 이름이고(`route` 에 `METHOD 경로 틀`), 표에 없는 경로(사람만 읽는 GET 등)는 `METHOD 경로 틀` 문자열이다.
 
-대상 이름: 배포 요청은 `서비스 · 환경 · 커밋 7자`, 이전 계획은 `서비스 · 출발 → 도착`, 앱 환경 변수는 `서비스 · 환경 · 키 이름`, 그 밖은 그 행의 이름이다.
+대상 이름: 배포 요청은 `서비스 · 환경 · 커밋 7자`, 이전 계획은 `서비스 · 출발 → 도착`, 앱 환경 변수는 `서비스 · 환경 · 키 이름`, 재난은 `종류 M규모`, 그 밖은 그 행의 이름이다.
 
 **앱 환경 변수 줄(API 서버 10)에는 누가 어떤 키를 바꿨는지만 적는다.** 값·비밀 참조(`secretRef`)·버전 번호는 어느 칸에도 넣지 않는다. 값을 다시 읽지 않으므로(쓰기 전용) 같은 값의 재저장도 새 버전이 생긴 변경이라 한 줄을 쓴다. 이 두 경로와 `details.retry` 는 SPEC(`specs/api-7-audit-logs.md`) 확정 뒤 더했다.
 

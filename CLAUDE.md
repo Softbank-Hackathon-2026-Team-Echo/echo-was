@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기), AI 사전 점검 API + 러너 계약(만들기·가져가기·이벤트·결과, C-AI-1 증거)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 재난 버튼 → 피해 서비스 긴급 이전 계획 자동 생성 API, 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기), AI 사전 점검 API + 러너 계약(만들기·가져가기·이벤트·결과, C-AI-1 증거)까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -31,6 +31,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/variables.md](docs/api/variables.md) | 고객 앱 환경 변수 API(쓰기 전용·권한·오류·`pendingRedeploy`)를 바꾸거나 쓸 때. 주입 규칙은 [docs/executors.md](docs/executors.md) "앱 환경 변수" |
 | [docs/api/security-exceptions.md](docs/api/security-exceptions.md) | 기한부 예외 API(통제별 범위 칸·7일 상한·자기 승인·상태)를 바꾸거나 쓸 때 |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
+| [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
@@ -43,7 +44,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·audit_log·security·security_exception·precheck 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·disaster·audit_log·security·security_exception·precheck 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나) + runner 라우터(/api/v1/runner/runs, 러너·실행 토큰)
 ├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표·러너 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · runner_guards(require_runner·require_run_token) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
@@ -60,6 +61,7 @@ app/
 │                     #   SecurityMatrixService(환경 × 4칸 매트릭스·증거 목록, 서비스 단위 통제는 지금 이미지로, 보안 4)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
+│                     #   DisasterService(재난 미리보기·만들기·종료, 피해 서비스 긴급 계획 트리거) · disaster_rules(반경·거리·분류·도착 고르기, 순수 계산)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
@@ -67,7 +69,7 @@ app/
 │                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
-│                     #   MigrationPlan·MigrationPlanLog Repository · Finding Repository(보안 증거, 조직 조건 필수)
+│                     #   MigrationPlan·MigrationPlanLog Repository · Disaster Repository · Finding Repository(보안 증거, 조직 조건 필수)
 │                     #   ServiceEnvironmentVariable Repository(앱 환경 변수 행, 값 없음)
 │                     #   SecurityException Repository(판정용: 승인·미철회만) · AgentRun Repository(AI 실행 조회·조건부 전이, 최근 성공한 AI 사전 점검)
 │                     #   AgentRunner·AgentRunEvent Repository(러너 신원, 이벤트 ON CONFLICT 무시)
@@ -87,7 +89,7 @@ app/
 │   └─ aws.py · gcp.py · onprem.py   # 종류마다 파일 하나
 ├─ models/            # SQLAlchemy: services, environments, service_environments, deployments, builds, deploy_requests, deploy_request_logs, jobs
 │                     #   users, organizations, organization_members, invitations, sessions(UserSession), agent_tokens, audit_logs
-│                     #   migration_plans, migration_plan_logs, findings(보안 증거, 보안 2)
+│                     #   migration_plans, migration_plan_logs, disasters(재난, API 서버 9), findings(보안 증거, 보안 2)
 │                     #   security_exceptions(기한부 예외) · agent_runners·agent_runs·agent_run_events·agent_patch_approvals(AI 실행, 러너 계약 v1)
 │                     #   service_environment_variables(앱 환경 변수 이름·참조·버전, 값 칸 없음)
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
@@ -179,7 +181,8 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **비율은 트래픽 실행기가 적용했다고 답했을 때만** 두 연결에 한 트랜잭션에서 함께 적는다(합계 100). 외부 호출은 "요청함 시각(`traffic_requested_at`·`rollback_requested_at`) 저장·커밋 → 호출(키 `{plan}:{step}`·`{plan}:rollback:{n}`) → 결과 저장".
 - 실행 중(`APPROVED`·`RUNNING`·`ROLLING_BACK`) 그 서비스의 배포 요청·되돌리기·서비스 삭제는 서비스 행을 잠근 뒤 `check_no_migration_in_progress` 로 409 `MIGRATION_IN_PROGRESS`. 승인 대기 계획은 막지 않는다.
 - 임대 상실(`lease.is_exhausted`, 한 번 참이면 계속 참)이어도 롤백 시도는 남은 횟수만큼 한다. `simulate` 는 처리기가 실패 값을 만들고 실행기를 부르지 않는다.
-- **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 API 서버 9 부터.
+- **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 재난 트리거만 만든다(`create_plan` 의 `disaster` 인자).
+- **재난 트리거는 서비스마다 `create_plan`·`approve_plan` 을 그대로 부른다**(API 서버 9, `DisasterService`). 둘이 각자 트랜잭션을 열므로 열린 트랜잭션 없이 부르고, 실패의 롤백이 세션 객체를 전부 만료시키므로 서비스 사이에 ORM 객체를 들고 있지 않는다(값만 넘긴다). 한 서비스의 실패는 그 서비스의 결과만 바꾼다. 일꾼은 바뀌지 않는다. 도착이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 409 `DISASTER_ACTIVE`(만들기만, 승인은 다시 보지 않는다). 재난 행의 환경 id 목록은 만든 순간 스냅숏이다.
 - **비율 단계 판정은 "도착이 요청 N건을 5xx 허용 안에서 처리했나"**(API 서버 8-1, `migration_counting`). `OBSERVE` 한 번 실행 = 카운터(`MetricsProvider.read_counts`, 트랜잭션 밖) 한 번 읽기, 센 값은 `step_results[i].counting` 에 조건부 UPDATE 로 적고 진행 갱신은 로그 줄을 남기지 않는다. 세기를 끝내면 `judgeReason` 을 같은 트랜잭션에 적고 `JUDGE` 는 저장값으로만 판정한다(카운터 재읽기 금지). p95 는 판정에 쓰지 않는다(참고 값만). API 에 `observeSeconds` 는 없고 DB `observe_seconds` 칸 = 최대 대기다.
 - **보안 게이트는 `SECURITY_GATE_ENABLED` 일 때만 주입한다**(보안 5, `SecurityGate`, API 는 `get_public_tls_checker`, 일꾼은 `Worker(tls_checker=)`). 승인·일꾼 시작 모두 **잠금 전·트랜잭션 밖에서 판정**(TLS 시험은 네트워크)하고, 잠금 안에서 지문이 같을 때 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 줄을 남긴다. 막힌 승인은 계획을 그대로 두고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`, 막힌 시작은 `FAILED(SECURITY_GATE_BLOCKED)`(트래픽 그대로). TLS 시험은 `PublicHostTlsChecker` 로만 한다(공개 도메인 주소·443·확인한 공인 IP). 기한부 예외는 승인·미철회만 읽는다.
 

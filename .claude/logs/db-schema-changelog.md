@@ -6,6 +6,12 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가
+- 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가
+- 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가
+- 2026-11-05T00:51Z · app/models/__init__.py (Edit) · +2 −0
+- 2026-11-05T00:51Z · app/models/__init__.py (Edit) · +1 −0
+- 2026-11-05T00:51Z · app/models/disaster.py (Write) · 신규/동일
 - 2026-11-04T13:30Z · alembic/versions/20261104_2100_b7d41e6f2a93_extend_audit_logs.py (Edit, 훅 미기록분 수기) · audit_logs 확장 revision 의 down_revision 을 48b2126a9c37(앱 환경 변수 표) 뒤로 옮김. 칸·제약 변경 없음 (revision b7d41e6f2a93)
 - 2026-11-04T12:32Z · app/models/service_environment_variable.py (Write) · 신규/동일
 - 2026-11-04T12:19Z · app/enums.py (스크립트 편집, 모델 파일 아님 — 훅 미기록분 수기) · MigrationErrorCode 에 SECURITY_GATE_BLOCKED 추가 → ck_migration_plans_error_code_valid 넓힘(보안 5 게이트) (revision 286d9ea982d6)

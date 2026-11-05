@@ -49,9 +49,10 @@
 2. 끝나지 않은 계획(`PENDING_APPROVAL`·`APPROVED`·`RUNNING`·`ROLLING_BACK`)이 있으면 409 `MIGRATION_PLAN_OPEN` + `details = [{field: "planId", reason: "MIGRATION_PLAN_OPEN", value: <id>}]`. 동시에 두 건이 와도 하나만 201(부분 unique).
 3. 출발 = 비율 100 인 연결 하나. 서비스 중 연결이 정확히 하나가 아니거나 100 이 아니면(없음·이전 중간 비율) 409 `SOURCE_NOT_SINGLE`.
 4. 도착 환경이 출발과 같으면 422 `VALIDATION_ERROR`(`{field: "targetEnvironmentId", reason: "SAME_ENVIRONMENT"}`).
-5. 서비스의 **어느 연결이든** 열린(대기·실행 중) 배포 요청이 있으면: 도착 연결의 `STANDBY_SYNC` 면 409 `TARGET_SYNCING`(`{field: "deployRequestId", reason: "TARGET_SYNCING", value}` — 예비가 아직 새 버전을 따라가는 중, 끝나면 다시), 그 밖은 409 `DEPLOY_IN_PROGRESS`(`{field: "deployRequestId", reason: "DEPLOY_IN_PROGRESS", value}`). 그래서 계획을 만든 순간 열린 요청은 늘 0개다.
-6. 도착 연결이 없거나 현재 배포가 없으면 409 `TARGET_NOT_READY`(`{field: "targetEnvironmentId", reason: "NO_DEPLOYMENT"}`). 도착의 현재 이미지 digest 가 출발과 다르면 409 `TARGET_NOT_READY`(`reason: "VERSION_MISMATCH"`, 그 연결의 마지막 `STANDBY_SYNC` 가 실패했으면 `{field: "lastSyncError", reason: "LAST_SYNC_FAILED", value: <에러 코드>}` 를 더함).
-7. 지문·단계·종류(`mode`, 아래)를 계산해 `PENDING_APPROVAL` 로 저장하고(`expiresAt = 지금 + 24시간`, `simulated` = 가짜 모드인가) 로그 `PLAN_CREATED` → 201.
+5. 도착 환경이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 409 `DISASTER_ACTIVE`(`{field: "disasterId", reason: "DISASTER_ACTIVE", value: <최신 재난 id>}`, 수동 복귀도 같다. [disasters.md](disasters.md#복귀-차단)).
+6. 서비스의 **어느 연결이든** 열린(대기·실행 중) 배포 요청이 있으면: 도착 연결의 `STANDBY_SYNC` 면 409 `TARGET_SYNCING`(`{field: "deployRequestId", reason: "TARGET_SYNCING", value}` — 예비가 아직 새 버전을 따라가는 중, 끝나면 다시), 그 밖은 409 `DEPLOY_IN_PROGRESS`(`{field: "deployRequestId", reason: "DEPLOY_IN_PROGRESS", value}`). 그래서 계획을 만든 순간 열린 요청은 늘 0개다.
+7. 도착 연결이 없거나 현재 배포가 없으면 409 `TARGET_NOT_READY`(`{field: "targetEnvironmentId", reason: "NO_DEPLOYMENT"}`). 도착의 현재 이미지 digest 가 출발과 다르면 409 `TARGET_NOT_READY`(`reason: "VERSION_MISMATCH"`, 그 연결의 마지막 `STANDBY_SYNC` 가 실패했으면 `{field: "lastSyncError", reason: "LAST_SYNC_FAILED", value: <에러 코드>}` 를 더함).
+8. 지문·단계·종류(`mode`, 아래)를 계산해 `PENDING_APPROVAL` 로 저장하고(`expiresAt = 지금 + 24시간`, `simulated` = 가짜 모드인가) 로그 `PLAN_CREATED` → 201.
 
 ### 계획 종류 `mode` (8-3)
 
@@ -61,9 +62,9 @@
 |---|---|
 | `PLANNED` | 사람이 만든 보통 이전(기본값). 이 칸이 생기기 전 계획도 `PLANNED` |
 | `FAILBACK` | 앞선 성공 이전을 거꾸로 하는 복귀 |
-| `EMERGENCY` | 재난 자동 이전. 값만 정해 두었고 API 서버 9(재난 자동 이전)가 계획을 만들 때부터 쓴다. 지금 API 로는 만들어지지 않는다 |
+| `EMERGENCY` | 재난 트리거가 만든 긴급 이전([disasters.md](disasters.md), API 서버 9). 이 경로로는 만들어지지 않는다 |
 
-판정: 같은 서비스의 `SUCCEEDED` 계획 중 `finishedAt` 이 가장 늦은 것(같으면 `createdAt`, 그다음 `id` 가 큰 것) 하나를 기준으로 삼는다. 그 계획의 출발 연결 = 새 계획의 도착 연결이고, 그 계획의 도착 연결 = 새 계획의 출발 연결이고, 그 계획이 `FAILBACK` 이 아니면 `FAILBACK`, 그 밖은 `PLANNED`.
+판정(사람이 만든 계획): 같은 서비스의 `SUCCEEDED` 계획 중 `finishedAt` 이 가장 늦은 것(같으면 `createdAt`, 그다음 `id` 가 큰 것) 하나를 기준으로 삼는다. 그 계획의 출발 연결 = 새 계획의 도착 연결이고, 그 계획의 도착 연결 = 새 계획의 출발 연결이고, 그 계획이 `FAILBACK` 이 아니면 `FAILBACK`, 그 밖은 `PLANNED`.
 
 - 성공한 계획만 본다. 롤백·실패·취소·거절·만료된 계획은 트래픽을 옮기지 않았다.
 - 복귀의 복귀(aws→gcp 성공, gcp→aws 복귀 성공, 다시 aws→gcp)는 새 이전이라 `PLANNED` 다.
@@ -248,10 +249,11 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 ## 응답
 
-`MigrationPlanSummary`: `id`, `serviceId`, `sourceEnvironmentId`·`targetEnvironmentId`(환경 id), `sourceServiceEnvironmentId`·`targetServiceEnvironmentId`(연결 id), `status`, `currentStep`, `expectedSeconds`, `createdBy{id, login}`, `approvedBy`, `selfApproved`, `errorCode`, `rollbackStatus`, `simulated`, `mode`(`PLANNED`·`EMERGENCY`·`FAILBACK`, 위 "계획 종류"), `createdAt`·`approvedAt`·`startedAt`·`finishedAt`·`expiresAt`.
+`MigrationPlanSummary`: `id`, `serviceId`, `sourceEnvironmentId`·`targetEnvironmentId`(환경 id), `sourceServiceEnvironmentId`·`targetServiceEnvironmentId`(연결 id), `status`, `currentStep`, `expectedSeconds`, `createdBy{id, login}`, `approvedBy`, `selfApproved`, `errorCode`, `rollbackStatus`, `simulated`, `mode`(`PLANNED`·`EMERGENCY`·`FAILBACK`, 위 "계획 종류"), `disasterId`(이 계획을 만든 재난, 재난 트리거가 아니면 null), `createdAt`·`approvedAt`·`startedAt`·`finishedAt`·`expiresAt`.
 
-`MigrationPlanDetail` = Summary + `rollbackConditions{…, healthCheck: true, p95Advisory: true}`, `maxWaitSeconds`, `steps[]`(계획 값과 실제 결과를 나란히), `progress`, `rejectedBy`·`cancelledBy`·`abortedBy`, `abortRequestedAt`, `errorMessage`, `result`(위 "컷오버 결과").
+`MigrationPlanDetail` = Summary + `rollbackConditions{…, healthCheck: true, p95Advisory: true}`, `maxWaitSeconds`, `steps[]`(계획 값과 실제 결과를 나란히), `progress`, `rejectedBy`·`cancelledBy`·`abortedBy`, `abortRequestedAt`, `errorMessage`, `result`(위 "컷오버 결과"), `failback{allowed, reason, disasterId}`.
 
+- `failback`: 이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 만들 수 있는가. 출발 환경이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 `{allowed: false, reason: "DISASTER_ACTIVE", disasterId}`, 아니면 `{allowed: true, reason: null, disasterId: null}`. 모든 계획에 같은 규칙이다([disasters.md](disasters.md#복귀-차단)).
 - `maxWaitSeconds` 는 계획 행의 `observe_seconds` 칸이다(새 계획은 단계 최대 대기, 8-1 전 계획은 그 계획의 지켜보기 초). 8-1 에서 `observeSeconds` 칸을 뺐다.
 - `steps[i]`: `requiredRequests`·`maxWaitSeconds` 는 비율 단계만 값이 있다(8-1 전 계획의 `requiredRequests` 는 null).
 - `steps[i].result.metrics`: 비율 단계는 `requestCount`(도착 센 요청)·`errors5xx`·`allowedErrors5xx`·`errorRatePercent`(5xx ÷ 요청 × 100, 최대 100, 요청 0이면 null)·`sourceRequestCount`·`lowTraffic`·`p95Ms`(참고)·`healthStatus`. 데이터 확인 단계는 `replicationLagSeconds`, 사전 확인은 `healthStatus`. 재지 않은 값은 null. `p95Ms` 는 p95 를 못 읽었으면 null 이다(진입점 `/summary` 의 그 환경 `p95_ms` 가 null 인 경우 포함, 0 으로 바꾸지 않는다).
@@ -269,6 +271,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "targetServiceEnvironmentId": "b2…",
     "status": "RUNNING",
     "mode": "PLANNED",
+    "disasterId": null,
     "currentStep": 2,
     "expectedSeconds": 17,
     "createdBy": {"id": "u1…", "login": "dev-a"},
@@ -309,7 +312,8 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "abortedBy": null,
     "abortRequestedAt": null,
     "errorMessage": null,
-    "result": null
+    "result": null,
+    "failback": {"allowed": true, "reason": null, "disasterId": null}
   }
 }
 ```
@@ -320,6 +324,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 | code | level | step | data |
 |---|---|---|---|
+| `DISASTER_TRIGGERED` | WARN | — | `disasterId`, `magnitude`, `distanceKm`(진원지 → 출발 환경). 재난이 만든 계획만, `PLAN_CREATED` 앞 |
 | `PLAN_CREATED` | INFO | — | `expectedSeconds`, `requiredRequests`(3개), `maxWaitSeconds`, `mode`(8-3 부터) |
 | `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` | INFO | — | |
 | `STALE` | WARN | — | `changed`(항목 이름 목록) |
@@ -352,6 +357,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | 서비스 삭제 중 · 도착 환경 접속 실패 | 409 | `SERVICE_DELETING` · `ENVIRONMENT_UNHEALTHY` |
 | 끝나지 않은 계획 있음 | 409 | `MIGRATION_PLAN_OPEN`(+`planId`) |
 | 출발이 하나(100%)가 아님 | 409 | `SOURCE_NOT_SINGLE` |
+| 도착이 ACTIVE 이고 기준을 넘은 재난의 피해 환경 | 409 | `DISASTER_ACTIVE`(+`disasterId`) |
 | 도착 예비가 따라가는 중 · 그 밖의 열린 배포 요청 | 409 | `TARGET_SYNCING` · `DEPLOY_IN_PROGRESS`(+`deployRequestId`) |
 | 도착에 앱 없음·다른 버전 | 409 | `TARGET_NOT_READY`(+`NO_DEPLOYMENT`·`VERSION_MISMATCH`·`lastSyncError`) |
 | 승인 대기가 아님 · 실행 중이 아님 | 409 | `PLAN_NOT_PENDING` · `PLAN_NOT_RUNNING` |

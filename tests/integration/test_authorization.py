@@ -163,6 +163,12 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/prechecks/{precheck_id}/logs", V),
     _org("POST", "/prechecks", D, human_only=True),
     _org("POST", "/prechecks/{precheck_id}/cancel", D, human_only=True),
+    # --- API 서버 9: 재난(조회·미리보기는 뷰어·에이전트, 만들기·종료는 개발자 이상 사람) ---
+    _org("GET", "/disasters/preview", V),
+    _org("GET", "/disasters", V),
+    _org("GET", "/disasters/{disaster_id}", V),
+    _org("POST", "/disasters", D, human_only=True),
+    _org("POST", "/disasters/{disaster_id}/end", D, human_only=True),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
     # 러너 경로는 러너·실행 토큰만 받는다(사람 쿠키·에이전트 토큰은 403).

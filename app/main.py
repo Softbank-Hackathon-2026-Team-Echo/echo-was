@@ -23,6 +23,7 @@ from app.routers import (
     audit_log_router,
     auth_router,
     deploy_request_router,
+    disaster_router,
     environment_kind_router,
     environment_router,
     invitation_router,
@@ -81,6 +82,7 @@ app.include_router(service_router.router)
 app.include_router(service_variable_router.router)
 app.include_router(deploy_request_router.router)
 app.include_router(migration_plan_router.router)
+app.include_router(disaster_router.router)
 app.include_router(audit_log_router.router)
 app.include_router(security_router.router)
 app.include_router(security_exception_router.router)

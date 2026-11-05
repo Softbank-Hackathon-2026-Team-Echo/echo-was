@@ -10,6 +10,7 @@ from app.models.build import Build
 from app.models.deploy_request import DeployRequest
 from app.models.deploy_request_log import DeployRequestLog
 from app.models.deployment import Deployment
+from app.models.disaster import Disaster
 from app.models.environment import Environment
 from app.models.finding import Finding
 from app.models.invitation import Invitation
@@ -36,6 +37,7 @@ __all__ = [
     "DeployRequest",
     "DeployRequestLog",
     "Deployment",
+    "Disaster",
     "Environment",
     "Finding",
     "Invitation",

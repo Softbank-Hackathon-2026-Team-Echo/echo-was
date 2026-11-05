@@ -143,11 +143,11 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 29
+    assert len(WRITE_ROUTE_ACTIONS) == 31
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 29개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 2개) ---
+# --- AC-2: 쓰기 31개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 2개 + 재난 2개) ---
 
 
 @dataclass
@@ -631,7 +631,40 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         precheck_details,
     )
 
-    # 29개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # 재난(API 서버 9): 태평양 한가운데의 기준 미달 지진이라 계획이 생기지 않고 재난 줄 하나다.
+    disasters_path = org_path(team_id, "/disasters")
+    disaster = await migration.author_client.post(
+        disasters_path,
+        json={"type": "EARTHQUAKE", "epicenter": {"lat": 0, "lng": -150}, "magnitude": 6.0},
+    )
+    disaster_id = _data(disaster)["id"]
+    await ledger.expect_one(
+        disaster,
+        AuditAction.DISASTER_DECLARED,
+        migration.author.user,
+        team_id,
+        "disaster",
+        disaster_id,
+        "EARTHQUAKE M6.0",
+        {
+            "type": "EARTHQUAKE",
+            "magnitude": 6.0,
+            "radiusKm": 103,
+            "meetsThreshold": False,
+            "affectedEnvironmentIds": [],
+        },
+    )
+    await ledger.expect_one(
+        await migration.author_client.post(f"{disasters_path}/{disaster_id}/end"),
+        AuditAction.DISASTER_ENDED,
+        migration.author.user,
+        team_id,
+        "disaster",
+        disaster_id,
+        "EARTHQUAKE M6.0",
+    )
+
+    # 31개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(

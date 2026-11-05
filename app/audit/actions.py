@@ -39,6 +39,8 @@ class AuditAction(StrEnum):
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
     PRECHECK_REQUESTED = "PRECHECK_REQUESTED"
     PRECHECK_CANCELLED = "PRECHECK_CANCELLED"
+    DISASTER_DECLARED = "DISASTER_DECLARED"
+    DISASTER_ENDED = "DISASTER_ENDED"
     # --- 서버(SYSTEM): 끝 상태 ---
     DEPLOY_FINISHED = "DEPLOY_FINISHED"
     ROLLBACK_FINISHED = "ROLLBACK_FINISHED"
@@ -65,6 +67,7 @@ class AuditTargetType(StrEnum):
     MIGRATION_PLAN = "migration_plan"
     SECURITY_EXCEPTION = "security_exception"
     AGENT_RUN = "agent_run"
+    DISASTER = "disaster"
 
 
 class AuditComponent(StrEnum):
@@ -122,6 +125,8 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ),
     ("POST", f"{_ORG}/prechecks"): AuditAction.PRECHECK_REQUESTED,
     ("POST", f"{_ORG}/prechecks/{{precheck_id}}/cancel"): AuditAction.PRECHECK_CANCELLED,
+    ("POST", f"{_ORG}/disasters"): AuditAction.DISASTER_DECLARED,
+    ("POST", f"{_ORG}/disasters/{{disaster_id}}/end"): AuditAction.DISASTER_ENDED,
 }
 
 _RUNNER = "/api/v1/runner/runs"

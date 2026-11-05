@@ -56,6 +56,9 @@ _INFO, _WARN, _ERROR = LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR
 _C = MigrationLogCode
 
 MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
+    _C.DISASTER_TRIGGERED: MigrationLogEntry(
+        _WARN, "A disaster affected the serving environment. Emergency migration plan requested."
+    ),
     _C.PLAN_CREATED: MigrationLogEntry(_INFO, "Migration plan created. Waiting for approval."),
     _C.APPROVED: MigrationLogEntry(_INFO, "Migration plan approved. Execution starts now."),
     _C.SELF_APPROVED: MigrationLogEntry(

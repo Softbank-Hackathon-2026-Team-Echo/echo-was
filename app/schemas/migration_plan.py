@@ -306,11 +306,29 @@ class MigrationPlanResultResponse(ApiModel):
         return cls.from_run(run) if run is not None else cls.empty()
 
 
+class MigrationFailbackResponse(ApiModel):
+    """이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 만들 수 있는가.
+
+    출발 환경이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 allowed=false 이고 그 재난을 싣는다.
+    """
+
+    allowed: bool
+    reason: Literal["DISASTER_ACTIVE"] | None
+    disaster_id: uuid.UUID | None
+
+    @classmethod
+    def from_view(cls, view: MigrationPlanView) -> Self:
+        disaster_id = view.failback_blocking_disaster_id
+        if disaster_id is None:
+            return cls(allowed=True, reason=None, disaster_id=None)
+        return cls(allowed=False, reason="DISASTER_ACTIVE", disaster_id=disaster_id)
+
+
 class MigrationPlanSummaryResponse(ApiModel):
     """이전 계획 목록 한 항목. simulated=true 면 가짜 실행기로 진행하는 계획이다.
 
-    mode 는 서버가 만들 때 판정해 저장한 계획 종류다(PLANNED·FAILBACK. EMERGENCY 는 API 서버 9
-    부터 쓴다).
+    mode 는 서버가 만들 때 판정해 저장한 계획 종류다(EMERGENCY 는 재난 트리거만 만든다).
+    disasterId 는 이 계획을 만든 재난이다(재난 트리거가 아니면 null).
     """
 
     id: uuid.UUID
@@ -321,6 +339,7 @@ class MigrationPlanSummaryResponse(ApiModel):
     target_service_environment_id: uuid.UUID
     status: MigrationPlanStatus
     mode: MigrationPlanMode
+    disaster_id: uuid.UUID | None
     current_step: int
     expected_seconds: int
     created_by: UserRefResponse
@@ -356,6 +375,7 @@ class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
     abort_requested_at: datetime | None
     error_message: str | None
     result: MigrationPlanResultResponse | None
+    failback: MigrationFailbackResponse
 
     @classmethod
     def from_view(cls, view: MigrationPlanView, cutover_run: CutoverRun | None = None) -> Self:
@@ -381,6 +401,7 @@ class MigrationPlanDetailResponse(MigrationPlanSummaryResponse):
             abort_requested_at=plan.abort_requested_at,
             error_message=MIGRATION_ERROR_MESSAGES[error_code] if error_code else None,
             result=MigrationPlanResultResponse.from_plan(plan, cutover_run),
+            failback=MigrationFailbackResponse.from_view(view),
         )
 
 
@@ -397,6 +418,7 @@ def _summary_fields(view: MigrationPlanView) -> dict[str, object]:
         "target_service_environment_id": plan.target_service_environment_id,
         "status": plan.status,
         "mode": plan.mode,
+        "disaster_id": plan.disaster_id,
         "current_step": plan.current_step,
         "expected_seconds": plan.expected_seconds,
         "created_by": created_by,

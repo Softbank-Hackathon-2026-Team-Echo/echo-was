@@ -1,5 +1,5 @@
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -145,6 +145,25 @@ class ServiceEnvironmentRepository:
                 selectinload(ServiceEnvironment.current_deployment),
             )
             .order_by(ServiceEnvironment.id)
+        )
+        return list((await self._session.scalars(statement)).all())
+
+    async def search_serving_service_ids(
+        self, organization_id: uuid.UUID, environment_ids: Collection[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """environment_ids 중 한 곳에서 서비스 중(비율 > 0)인 살아 있는 서비스 id. id 오름차순."""
+        statement = (
+            select(ServiceEnvironment.service_id)
+            .join(Service, Service.id == ServiceEnvironment.service_id)
+            .where(
+                _is_live(),
+                ServiceEnvironment.traffic_weight > 0,
+                ServiceEnvironment.environment_id.in_(environment_ids),
+                Service.organization_id == organization_id,
+                Service.is_deleted.is_(False),
+            )
+            .distinct()
+            .order_by(ServiceEnvironment.service_id)
         )
         return list((await self._session.scalars(statement)).all())
 

@@ -320,12 +320,51 @@ class MigrationPlanMode(StrEnum):
     """이전 계획 종류. 서버가 만들 때 한 번 판정해 저장한다(클라이언트가 정하지 않는다).
 
     FAILBACK 은 같은 서비스의 가장 늦게 끝난 성공 계획을 출발·도착만 바꿔 거꾸로 하는 계획이다(그
-    계획이 FAILBACK 이면 아니다). EMERGENCY 는 재난 자동 이전(API 서버 9)이 만들 때부터 쓴다.
+    계획이 FAILBACK 이면 아니다). EMERGENCY 는 재난 트리거(API 서버 9)만 만든다.
     """
 
     PLANNED = "PLANNED"
     EMERGENCY = "EMERGENCY"
     FAILBACK = "FAILBACK"
+
+
+# --- 재난 (API 서버 9) ---
+
+
+class DisasterType(StrEnum):
+    """재난 종류. 지진은 규모 기준이 있고, 태풍은 규모와 상관없이 대상이다."""
+
+    EARTHQUAKE = "EARTHQUAKE"
+    TYPHOON = "TYPHOON"
+
+
+class DisasterSource(StrEnum):
+    """재난 정보 출처. 지금은 사람이 버튼으로 낸 시뮬레이션뿐이다."""
+
+    SIMULATED = "SIMULATED"
+
+
+class DisasterStatus(StrEnum):
+    """ACTIVE 이고 기준을 넘은 재난의 피해 환경은 이전 도착으로 고를 수 없다(복귀 차단)."""
+
+    ACTIVE = "ACTIVE"
+    ENDED = "ENDED"
+
+
+class DisasterPlanOutcome(StrEnum):
+    """재난 응답 plans[] 한 줄의 요약. 실제 상태는 planStatus 와 계획 API 로 본다."""
+
+    APPROVED = "APPROVED"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    SKIPPED = "SKIPPED"
+
+
+class DisasterPlanReason(StrEnum):
+    """plans[].reason 중 재난 트리거만 쓰는 값. 그 밖은 계획 API 오류 코드를 그대로 쓴다."""
+
+    NO_SAFE_TARGET = "NO_SAFE_TARGET"
+    SELF_APPROVAL_DISABLED = "SELF_APPROVAL_DISABLED"
+    SOURCE_NOT_AFFECTED = "SOURCE_NOT_AFFECTED"
 
 
 class CutoverKind(StrEnum):
@@ -466,6 +505,8 @@ class MigrationLogCode(StrEnum):
     # 보안 게이트 판정(승인 때·실행 시작 때). data 에 정책 버전·막은 통제·증거·예외 ID.
     SECURITY_GATE_PASSED = "SECURITY_GATE_PASSED"
     SECURITY_GATE_BLOCKED = "SECURITY_GATE_BLOCKED"
+    # 재난 트리거가 만든 계획의 첫 줄(PLAN_CREATED 앞). data 에 재난 id·규모·출발 거리.
+    DISASTER_TRIGGERED = "DISASTER_TRIGGERED"
 
 
 # --- 보안 판정 (보안·거버넌스 3) ---

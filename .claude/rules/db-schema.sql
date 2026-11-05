@@ -275,6 +275,39 @@ CREATE TABLE public.deployments (
     CONSTRAINT ck_deployments_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'IN_PROGRESS'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
 );
 
+CREATE TABLE public.disasters (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    type character varying(16) NOT NULL,
+    source character varying(16) DEFAULT 'SIMULATED'::character varying NOT NULL,
+    magnitude numeric(3,1) NOT NULL,
+    epicenter_lat double precision NOT NULL,
+    epicenter_lng double precision NOT NULL,
+    radius_km integer NOT NULL,
+    meets_threshold boolean NOT NULL,
+    status character varying(16) NOT NULL,
+    affected_environment_ids jsonb NOT NULL,
+    safe_environment_ids jsonb NOT NULL,
+    unknown_environment_ids jsonb NOT NULL,
+    created_by_user_id uuid NOT NULL,
+    ended_by_user_id uuid,
+    started_at timestamp with time zone NOT NULL,
+    ended_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_disasters_affected_environment_ids_is_array CHECK ((jsonb_typeof(affected_environment_ids) = 'array'::text)),
+    CONSTRAINT ck_disasters_ended_at_consistency CHECK ((((status)::text = 'ENDED'::text) = (ended_at IS NOT NULL))),
+    CONSTRAINT ck_disasters_epicenter_lat_range CHECK (((epicenter_lat >= ('-90'::integer)::double precision) AND (epicenter_lat <= (90)::double precision))),
+    CONSTRAINT ck_disasters_epicenter_lng_range CHECK (((epicenter_lng >= ('-180'::integer)::double precision) AND (epicenter_lng <= (180)::double precision))),
+    CONSTRAINT ck_disasters_magnitude_range CHECK (((magnitude >= (0)::numeric) AND (magnitude <= (10)::numeric))),
+    CONSTRAINT ck_disasters_radius_km_non_negative CHECK ((radius_km >= 0)),
+    CONSTRAINT ck_disasters_safe_environment_ids_is_array CHECK ((jsonb_typeof(safe_environment_ids) = 'array'::text)),
+    CONSTRAINT ck_disasters_source_valid CHECK (((source)::text = 'SIMULATED'::text)),
+    CONSTRAINT ck_disasters_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'ENDED'::character varying])::text[]))),
+    CONSTRAINT ck_disasters_type_valid CHECK (((type)::text = ANY ((ARRAY['EARTHQUAKE'::character varying, 'TYPHOON'::character varying])::text[]))),
+    CONSTRAINT ck_disasters_unknown_environment_ids_is_array CHECK ((jsonb_typeof(unknown_environment_ids) = 'array'::text))
+);
+
 CREATE TABLE public.environments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     name character varying(63) NOT NULL,
@@ -427,6 +460,7 @@ CREATE TABLE public.migration_plans (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     mode character varying(16) DEFAULT 'PLANNED'::character varying NOT NULL,
+    disaster_id uuid,
     CONSTRAINT ck_migration_plans_approved_consistency CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL))),
     CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 4))),
     CONSTRAINT ck_migration_plans_error_code_consistency CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying])::text[])) = (error_code IS NOT NULL))),
@@ -611,6 +645,9 @@ ALTER TABLE ONLY public.deploy_requests
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT pk_deployments PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.disasters
+    ADD CONSTRAINT pk_disasters PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT pk_environments PRIMARY KEY (id);
 
@@ -709,11 +746,15 @@ CREATE INDEX ix_deploy_requests_service_id_created_at ON public.deploy_requests 
 
 CREATE INDEX ix_deployments_service_environment_id_created_at ON public.deployments USING btree (service_environment_id, created_at);
 
+CREATE INDEX ix_disasters_organization_id_status_created_at ON public.disasters USING btree (organization_id, status, created_at);
+
 CREATE INDEX ix_findings_organization_id_control_id_collected_at ON public.findings USING btree (organization_id, control_id, collected_at);
 
 CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_id);
 
 CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
+
+CREATE INDEX ix_migration_plans_disaster_id ON public.migration_plans USING btree (disaster_id);
 
 CREATE INDEX ix_migration_plans_service_id_created_at ON public.migration_plans USING btree (service_id, created_at);
 
@@ -762,6 +803,8 @@ CREATE TRIGGER trg_deploy_request_logs_prevent_delete BEFORE DELETE ON public.de
 CREATE TRIGGER trg_deploy_requests_prevent_delete BEFORE DELETE ON public.deploy_requests FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_deployments_prevent_delete BEFORE DELETE ON public.deployments FOR EACH ROW EXECUTE FUNCTION public.prevent_deployment_delete();
+
+CREATE TRIGGER trg_disasters_prevent_delete BEFORE DELETE ON public.disasters FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
 CREATE TRIGGER trg_migration_plan_logs_prevent_delete BEFORE DELETE ON public.migration_plan_logs FOR EACH ROW EXECUTE FUNCTION public.prevent_append_only_delete();
 
@@ -854,6 +897,15 @@ ALTER TABLE ONLY public.deployments
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT fk_deployments_service_environment_id_service_environments FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY public.disasters
+    ADD CONSTRAINT fk_disasters_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.disasters
+    ADD CONSTRAINT fk_disasters_ended_by_user_id_users FOREIGN KEY (ended_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.disasters
+    ADD CONSTRAINT fk_disasters_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY public.environments
     ADD CONSTRAINT fk_environments_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
 
@@ -889,6 +941,9 @@ ALTER TABLE ONLY public.migration_plans
 
 ALTER TABLE ONLY public.migration_plans
     ADD CONSTRAINT fk_migration_plans_created_by_user_id_users FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.migration_plans
+    ADD CONSTRAINT fk_migration_plans_disaster_id_disasters FOREIGN KEY (disaster_id) REFERENCES public.disasters(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.migration_plans
     ADD CONSTRAINT fk_migration_plans_rejected_by_user_id_users FOREIGN KEY (rejected_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;

@@ -85,6 +85,7 @@ TABLES = (
     # --- API 서버 8: 이전 계획 ---
     "migration_plan_logs",
     "migration_plans",
+    "disasters",
     # --- API 서버 4: 배포 작업 로그 ---
     "deploy_request_logs",
     "deploy_requests",
