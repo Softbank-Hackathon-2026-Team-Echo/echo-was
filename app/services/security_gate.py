@@ -31,7 +31,6 @@ from app.core.clock import Clock
 from app.core.config import Settings
 from app.core.exceptions import ErrorField, MigrationPlanNotFoundError, SecurityGateBlockedError
 from app.enums import (
-    ActorType,
     MigrationPlanMode,
     SecurityCheckPhase,
     SecurityControlId,
@@ -40,7 +39,6 @@ from app.enums import (
     SecurityResult,
 )
 from app.models import AgentRun
-from app.models import SecurityException as SecurityExceptionModel
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.deployment_repository import DeploymentRepository
 from app.repositories.finding_repository import FindingRepository
@@ -49,6 +47,7 @@ from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.security_exception_repository import SecurityExceptionRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import SecurityFindingService, to_security_finding
 from app.services.security_normalizers import normalize_image_match, normalize_tls_probes
 from app.services.security_rules import (
@@ -244,7 +243,7 @@ class SecurityGate:
                     if host
                 ),
                 findings=findings,
-                exceptions=[_to_exception(model) for model in exception_models],
+                exceptions=[to_security_exception(model) for model in exception_models],
             )
 
 
@@ -267,29 +266,6 @@ def _precheck_finding(
         collected_at=finished_at,
         expires_at=finished_at + rule.max_age,
         policy_version=POLICY_VERSION,
-    )
-
-
-def _to_exception(model: SecurityExceptionModel) -> SecurityException:
-    """DB 행 → 판정 입력. 요청·승인은 users FK 라 사람(USER)이다."""
-    return SecurityException(
-        exception_id=model.id,
-        control_id=SecurityControlId(model.control_id),
-        scope=SecurityScope(
-            organization_id=model.organization_id,
-            service_id=model.service_id,
-            environment_id=model.environment_id,
-            image_digest=model.image_digest,
-            config_commit=model.config_commit,
-            was_version=model.was_version,
-        ),
-        reason=model.reason,
-        requested_by_user_id=model.requested_by_user_id,
-        requested_by_actor_type=ActorType.USER,
-        approved_by_user_id=model.approved_by_user_id,
-        approved_by_actor_type=ActorType.USER if model.approved_by_user_id else None,
-        created_at=model.created_at,
-        expires_at=model.expires_at,
     )
 
 

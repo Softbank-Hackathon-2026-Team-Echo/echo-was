@@ -45,6 +45,7 @@ from tests.integration.deploy_harness import DeployHarness, ScriptedHealthChecke
 from tests.integration.factories import ENVIRONMENT_CONFIGS, secret_env_name, secret_ref_for
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import deploy_and_finish, request_rollback, rollback
+from tests.integration.runner_support import add_runner, finish_precheck, run_patch
 from tests.integration.test_auth_login import _login
 from tests.integration.test_authorization import iter_api_routes
 from tests.integration.test_environment_api import _start_gated_check
@@ -143,11 +144,11 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 31
+    assert len(WRITE_ROUTE_ACTIONS) == 33
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 31개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 2개 + 재난 2개) ---
+# --- AC-2: 쓰기 33개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개) ---
 
 
 @dataclass
@@ -631,6 +632,45 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         precheck_details,
     )
 
+    # 패치 승인·거절(API 서버 10): 러너가 낸 패치 둘을 만든 사람이 아닌 개발자가 결정한다.
+    runner = await add_runner(harness.session_factory)
+    patched_id = (
+        await finish_precheck(migration, runner, patches=[run_patch("p1"), run_patch("p2")])
+    )["id"]
+    await ledger.skip()
+    await ledger.expect_one(
+        await migration.approver_client.post(
+            f"{prechecks_path}/{patched_id}/patches/p1/approve",
+            json={"patchHash": run_patch("p1")["patchHash"]},
+        ),
+        AuditAction.AGENT_PATCH_APPROVED,
+        migration.approver.user,
+        team_id,
+        "agent_run",
+        patched_id,
+        migration.service["name"],
+        {"patchId": "p1", "patchHash": run_patch("p1")["patchHash"], "applyRunId": None},
+    )
+    await ledger.expect_one(
+        await migration.approver_client.post(
+            f"{prechecks_path}/{patched_id}/patches/p2/reject",
+            json={"patchHash": run_patch("p2")["patchHash"]},
+        ),
+        AuditAction.AGENT_PATCH_REJECTED,
+        migration.approver.user,
+        team_id,
+        "agent_run",
+        patched_id,
+        migration.service["name"],
+        {"patchId": "p2", "patchHash": run_patch("p2")["patchHash"]},
+    )
+    await ledger.expect_none(
+        await migration.approver_client.post(
+            f"{prechecks_path}/{patched_id}/patches/p1/approve",
+            json={"patchHash": run_patch("p1")["patchHash"]},
+        )
+    )
+
     # 재난(API 서버 9): 태평양 한가운데의 기준 미달 지진이라 계획이 생기지 않고 재난 줄 하나다.
     disasters_path = org_path(team_id, "/disasters")
     disaster = await migration.author_client.post(
@@ -664,7 +704,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 31개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # 33개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(

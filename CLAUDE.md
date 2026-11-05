@@ -34,6 +34,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
+| [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
 | [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약(계산 표·민감 등급 판정·정책 위반·기본 정책)을 바꾸거나 쓸 때. 러너 칸 규칙은 [docs/agent-runner.md](docs/agent-runner.md) |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
@@ -94,6 +95,7 @@ app/
 │                     #   migration_plans, migration_plan_logs, disasters(재난, API 서버 9), findings(보안 증거, 보안 2)
 │                     #   security_exceptions(기한부 예외) · agent_runners·agent_runs·agent_run_events·agent_patch_approvals(AI 실행, 러너 계약 v1)
 │                     #   service_environment_variables(앱 환경 변수 이름·참조·버전, 값 칸 없음)
+├─ data/              # 클라우드 비용 데이터(운영 1): cloud_prices.toml·cloud_inventory.toml(손으로 고침) · cloud_billing.json(scripts/import_billing 이 씀). 읽는 곳 services/cost_catalog·cost_service, API routers/cost_router
 ├─ schemas/           # API 요청·응답 (공통 봉투 ApiResponse[T], 환경·서비스·배포 요청·조직 스키마)
 ├─ scripts/           # python -m app.scripts.demo_seed (데모 조직·멤버·에이전트 토큰) · issue_runner_token (러너 토큰 발급·철회)
 ├─ core/              # config, database, exceptions, exception_handlers, logging, middleware, secrets, clock, repo_url, log_masking

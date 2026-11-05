@@ -1,6 +1,6 @@
 # 기한부 예외 API — 요청 · 승인 · 철회 · 조회 (보안·거버넌스 3)
 
-**기한부 예외**는 보안 통제 하나를 정해진 범위 안에서 최대 7일 동안 막지 않게 하는 기록이다. 보안 판정(이전 게이트·매트릭스)에서 예외가 걸린 FAIL·UNKNOWN 은 PASS 가 아니라 **WARN("예외 적용 중")** 으로 보인다. 사람만 요청·승인하고, 사유·만료가 있어야 하며, 철회할 수 있고 지우지 않는다. 근거: SPEC [specs/sec-3-2-security-exceptions-api.md](../../specs/sec-3-2-security-exceptions-api.md), 판정 규칙 `app/services/security_rules.py`.
+**기한부 예외**는 보안 통제 하나를 정해진 범위 안에서 최대 7일 동안 막지 않게 하는 기록이다. 규칙표 판정에서 예외가 걸린 FAIL·UNKNOWN 은 PASS 가 아니라 **WARN("예외 적용 중")** 이고 이전 게이트를 막지 않는다. 보안 매트릭스는 증거 값(`result`)을 그대로 두고 `gateStatus: WAIVED`·`hasException`·`exception` 으로 보인다([보안 매트릭스 API](security.md)). 사람만 요청·승인하고, 사유·만료가 있어야 하며, 철회할 수 있고 지우지 않는다. 근거: SPEC [specs/sec-3-2-security-exceptions-api.md](../../specs/sec-3-2-security-exceptions-api.md), 판정 규칙 `app/services/security_rules.py`.
 
 모든 경로는 `/api/v1/orgs/{orgId}` 아래, 응답은 공통 봉투 `ApiResponse`(성공 `data`, 실패 `code`·`message`·`details`)다.
 
@@ -64,13 +64,13 @@
 |---|---|---|
 | `REVOKED` | 철회함 | 아니오 |
 | `EXPIRED` | `expiresAt <= 지금`. 승인 대기(`PENDING`)인 채로 기한이 지난 것도 `EXPIRED` | 아니오(판정 사유에 "예외 만료"가 붙는다) |
-| `ACTIVE` | 승인됨 | 예(범위가 맞는 FAIL·UNKNOWN 을 WARN 으로) |
+| `ACTIVE` | 승인됨 | 예(범위가 맞는 FAIL·UNKNOWN 을 막지 않는다. 매트릭스는 `gateStatus: WAIVED`) |
 | `PENDING` | 승인 전 | 아니오 |
 
 ## 응답 `SecurityException`
 
 `id`, `controlId`, `status`, `serviceId`, `environmentId`, `imageDigest`, `configCommit`, `wasVersion`(범위 칸, 없으면 null), `reason`, `requestedBy{id, login}`, `approvedBy`·`approvedAt`, `revokedBy`·`revokedAt`, `createdAt`, `expiresAt`. 목록은 `createdAt` 역순, `size` 기본 20·최대 100, `status`·`controlId` 는 여러 번 줄 수 있다.
 
-## 지금 없는 것
+## 매트릭스에 보이는 범위
 
-- 매트릭스 칸의 "예외 적용 중"(`hasException`)은 매트릭스 API(#59)가 이 표를 읽게 붙인 뒤 보인다.
+- 매트릭스는 준비 시점 통제만 줄이 있다. 실행 전용 통제(C-DB-1·C-DST-1·C-AI-1·C-IMG-3)의 예외는 이전 게이트에만 쓰이고 매트릭스에는 나타나지 않는다. 이 API 로 본다.

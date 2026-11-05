@@ -429,7 +429,7 @@ erDiagram
 
 ### `agent_patch_approvals` — AI 패치 결정
 
-패치 하나에 대한 사람의 결정(`APPROVED`·`REJECTED`). `(run_id, patch_id)` unique. 지문 = `patch_hash`·`checks_digest`(둘 다 `sha256:` 64자) + `policy_version`. 승인했을 때만 반영 실행 `apply_run_id` 가 있다.
+패치 하나에 대한 사람의 결정(`APPROVED`·`REJECTED`). `(run_id, patch_id)` unique. 지문 = `patch_hash`·`checks_digest`(둘 다 `sha256:` 64자) + `policy_version`. 승인했을 때만 반영 실행 `apply_run_id` 가 있을 수 있다(스위치 `PATCH_APPLY_ENABLED` 가 켜져 있을 때만 만든다, 기본 꺼짐). 패치 상태는 저장하지 않고 결과 JSON·이 행·반영 실행으로 계산한다([docs/api/prechecks.md](api/prechecks.md#precheckpatch)).
 
 ### `deployments` — 배포 (지우지 않는 이력)
 

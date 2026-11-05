@@ -1,0 +1,59 @@
+{
+    "GroupDefinitions": [
+        {
+            "Type": "DIMENSION",
+            "Key": "RECORD_TYPE"
+        }
+    ],
+    "ResultsByTime": [
+        {
+            "TimePeriod": {
+                "Start": "2026-11-04",
+                "End": "2026-11-05"
+            },
+            "Total": {},
+            "Groups": [
+                {
+                    "Keys": [
+                        "Credit"
+                    ],
+                    "Metrics": {
+                        "NetUnblendedCost": {
+                            "Amount": "-6.737445721",
+                            "Unit": "USD"
+                        },
+                        "UnblendedCost": {
+                            "Amount": "-6.737445721",
+                            "Unit": "USD"
+                        },
+                        "UsageQuantity": {
+                            "Amount": "0",
+                            "Unit": "N/A"
+                        }
+                    }
+                },
+                {
+                    "Keys": [
+                        "Usage"
+                    ],
+                    "Metrics": {
+                        "NetUnblendedCost": {
+                            "Amount": "6.7374457177",
+                            "Unit": "USD"
+                        },
+                        "UnblendedCost": {
+                            "Amount": "6.737445717",
+                            "Unit": "USD"
+                        },
+                        "UsageQuantity": {
+                            "Amount": "228.2228233648",
+                            "Unit": "N/A"
+                        }
+                    }
+                }
+            ],
+            "Estimated": true
+        }
+    ],
+    "DimensionValueAttributes": []
+}

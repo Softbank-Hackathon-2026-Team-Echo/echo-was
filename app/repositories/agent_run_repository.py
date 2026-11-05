@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -63,9 +64,14 @@ class AgentRunRepository:
             select(AgentRun).where(AgentRun.id == run_id).execution_options(populate_existing=True)
         )
 
-    async def find_precheck(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> AgentRun | None:
-        """그 조직의 사전 점검 실행. 다른 조직 것과 다른 종류는 없는 것과 같다."""
-        return await self._session.scalar(
+    async def find_precheck(
+        self, organization_id: uuid.UUID, run_id: uuid.UUID, *, lock: bool = False
+    ) -> AgentRun | None:
+        """그 조직의 사전 점검 실행. 다른 조직 것과 다른 종류는 없는 것과 같다.
+
+        lock=True 는 `FOR UPDATE` 다. 그 실행의 패치 결정을 한 번에 하나씩 처리한다.
+        """
+        statement = (
             select(AgentRun)
             .where(
                 AgentRun.id == run_id,
@@ -74,6 +80,19 @@ class AgentRunRepository:
             )
             .execution_options(populate_existing=True)
         )
+        if lock:
+            statement = statement.with_for_update()
+        return await self._session.scalar(statement)
+
+    async def search_by_ids(self, run_ids: Sequence[uuid.UUID]) -> list[AgentRun]:
+        if not run_ids:
+            return []
+        statement = (
+            select(AgentRun)
+            .where(AgentRun.id.in_(run_ids))
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(statement)).all())
 
     async def search_finished_for_residency(
         self, organization_id: uuid.UUID, from_at: datetime, to_at: datetime, limit: int

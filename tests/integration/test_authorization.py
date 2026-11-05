@@ -133,6 +133,7 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/migration-plans/{plan_id}/logs", V),
     _org("GET", "/security/matrix", V),
     _org("GET", "/security/findings", V),
+    _org("GET", "/costs", V),
     _org("POST", "/services/{service_id}/migration-plans", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/approve", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/reject", D, human_only=True),
@@ -163,6 +164,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/prechecks/{precheck_id}/logs", V),
     _org("POST", "/prechecks", D, human_only=True),
     _org("POST", "/prechecks/{precheck_id}/cancel", D, human_only=True),
+    _org("POST", "/prechecks/{precheck_id}/patches/{patch_id}/approve", D, human_only=True),
+    _org("POST", "/prechecks/{precheck_id}/patches/{patch_id}/reject", D, human_only=True),
     # --- AI 3: 데이터 레지던시 요약(읽기만이라 뷰어·에이전트) ---
     _org("GET", "/ai/residency", V),
     # --- API 서버 9: 재난(조회·미리보기는 뷰어·에이전트, 만들기·종료는 개발자 이상 사람) ---

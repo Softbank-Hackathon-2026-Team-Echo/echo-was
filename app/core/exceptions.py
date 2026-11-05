@@ -668,3 +668,59 @@ class DisasterActiveError(ConflictError):
             "target environment is affected by an active disaster",
             details=[ErrorField(field="disasterId", reason="DISASTER_ACTIVE", value=disaster_id)],
         )
+
+
+# --- AI 패치 결정 (API 서버 10) ---
+
+
+class PatchNotFoundError(NotFoundError):
+    """사전 점검 결과에 그 패치가 없다. 결과가 없거나 패치가 하나도 없는 실행도 같다."""
+
+    code = "PATCH_NOT_FOUND"
+
+    def __init__(self, patch_id: str) -> None:
+        super().__init__("patch not found", patch_id=patch_id)
+
+
+class RunNotSucceededError(ConflictError):
+    """패치를 낸 사전 점검이 성공으로 끝나지 않아 결정할 수 없다."""
+
+    code = "RUN_NOT_SUCCEEDED"
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__("precheck run has not succeeded", run_id=run_id)
+
+
+class PatchBlockedError(ConflictError):
+    """검증을 통과하지 못한 패치는 승인할 수 없다. details 에 막힌 이유를 싣는다."""
+
+    code = "PATCH_BLOCKED"
+
+    def __init__(self, block_reason: str | None) -> None:
+        super().__init__(
+            "patch is blocked",
+            details=[ErrorField(field="blockReason", reason=self.code, value=block_reason)],
+        )
+
+
+class PatchAlreadyDecidedError(ConflictError):
+    """이미 다른 결정이 났다. details 에 먼저 난 결정을 싣는다."""
+
+    code = "PATCH_ALREADY_DECIDED"
+
+    def __init__(self, decision: str) -> None:
+        super().__init__(
+            "patch is already decided",
+            details=[ErrorField(field="decision", reason=self.code, value=decision)],
+        )
+
+
+class PatchStaleError(ConflictError):
+    """화면이 본 패치와 저장 값이 다르거나 사전 점검이 오래됐다. details 의 reason 으로 가른다."""
+
+    code = "PATCH_STALE"
+    HASH_MISMATCH_REASON = "PATCH_HASH_MISMATCH"
+    EXPIRED_REASON = "PRECHECK_EXPIRED"
+
+    def __init__(self, field: str, reason: str) -> None:
+        super().__init__("patch is stale", details=[ErrorField(field=field, reason=reason)])

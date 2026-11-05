@@ -36,6 +36,8 @@ from app.services.agent_token_service import AgentTokenService
 from app.services.ai_residency_service import AiResidencyService
 from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
+from app.services.cost_catalog import CostCatalog, get_cost_catalog
+from app.services.cost_service import CostService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.disaster_service import DisasterService
@@ -50,6 +52,7 @@ from app.services.invitation_service import InvitationService
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
+from app.services.precheck_patch_service import PrecheckPatchService
 from app.services.precheck_service import PrecheckService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
@@ -480,9 +483,18 @@ def get_disaster_service(
 
 def get_security_matrix_service(
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityMatrixService:
-    return SecurityMatrixService(session=session, clock=clock)
+    return SecurityMatrixService(session=session, clock=clock, was_version=settings.was_version)
+
+
+def get_cost_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    catalog: Annotated[CostCatalog, Depends(get_cost_catalog)],
+) -> CostService:
+    return CostService(session, clock, catalog)
 
 
 def get_precheck_service(
@@ -497,6 +509,14 @@ def get_ai_residency_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> AiResidencyService:
     return AiResidencyService(session, clock)
+
+
+def get_precheck_patch_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> PrecheckPatchService:
+    return PrecheckPatchService(session, clock, patch_apply_enabled=settings.patch_apply_enabled)
 
 
 def get_agent_run_service(

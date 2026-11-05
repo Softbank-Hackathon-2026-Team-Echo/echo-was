@@ -613,6 +613,15 @@ class SecurityMatrixCell(StrEnum):
     POLICY = "POLICY"
 
 
+class SecurityGateStatus(StrEnum):
+    """매트릭스의 게이트 관점(저장 안 함): 게이트가 이 통제·칸을 막는가."""
+
+    PASS = "PASS"
+    BLOCKED = "BLOCKED"
+    # 증거는 FAIL·UNKNOWN 이지만 유효한 기한부 예외가 걸려 막지 않는다.
+    WAIVED = "WAIVED"
+
+
 class SecurityReasonCode(StrEnum):
     """통제 판정 사유(기계 판독용). 게이트가 막으면 이 값을 통제 ID 와 함께 돌려준다."""
 
@@ -733,10 +742,18 @@ class AgentRunSeverity(StrEnum):
 
 
 class AgentPatchStatus(StrEnum):
-    """AI 수정안 상태. 러너 값을 믿지 않고 WAS 가 검사 결과로 다시 계산한다."""
+    """AI 수정안 상태. 러너 값을 믿지 않고 WAS 가 계산한다.
+
+    결과 JSON 에는 검사 결과로 다시 계산한 PROPOSED·BLOCKED 만 저장한다. 나머지는 결정 행과 반영
+    실행을 더해 응답 때 계산한다(compute_patch_status).
+    """
 
     PROPOSED = "PROPOSED"
     BLOCKED = "BLOCKED"
+    REJECTED = "REJECTED"
+    APPROVED = "APPROVED"
+    APPLIED = "APPLIED"
+    APPLY_FAILED = "APPLY_FAILED"
 
 
 class AgentPatchBlockReason(StrEnum):
@@ -798,3 +815,20 @@ class AiResidencyViolationReason(StrEnum):
 
     MODEL_REGION_NOT_ALLOWED = "MODEL_REGION_NOT_ALLOWED"
     FORBIDDEN_CLASS_SENT_EXTERNALLY = "FORBIDDEN_CLASS_SENT_EXTERNALLY"
+
+
+class CostComponentKind(StrEnum):
+    """비용 자원 항목의 묶음(운영 1)."""
+
+    COMPUTE = "COMPUTE"
+    DATABASE = "DATABASE"
+    NETWORK = "NETWORK"
+    STORAGE = "STORAGE"
+    OTHER = "OTHER"
+
+
+class CostSource(StrEnum):
+    """비용 값의 출처. ESTIMATE = 사용량 × 단가 추정, BILLING = 청구 실측(운영 1)."""
+
+    ESTIMATE = "ESTIMATE"
+    BILLING = "BILLING"

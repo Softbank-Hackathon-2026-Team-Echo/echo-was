@@ -10,8 +10,10 @@ from app.core.exceptions import ResultInvalidError
 from app.core.log_masking import MASK
 from app.enums import (
     AgentPatchBlockReason,
+    AgentPatchDecision,
     AgentPatchStatus,
     AgentRunDataClass,
+    AgentRunOrigin,
     AgentRunStatus,
 )
 from app.schemas.runner import (
@@ -24,7 +26,7 @@ from app.schemas.runner import (
     openapi_request_body,
     parse_runner_payload,
 )
-from app.services.run_result import NormalizedRunResult
+from app.services.run_result import NormalizedRunResult, compute_patch_status, patch_origin
 
 ENVIRONMENT_ID = "11111111-1111-1111-1111-111111111111"
 PATCH_HASH = "sha256:" + "a" * 64
@@ -228,6 +230,82 @@ def test_processing_rejects_snake_case_names() -> None:
     body["model_provider"] = body.pop("modelProvider")
 
     assert _rejected(_result(processing=body))
+
+
+@pytest.mark.parametrize(
+    "stored_status",
+    [AgentPatchStatus.PROPOSED, AgentPatchStatus.BLOCKED],
+    ids=["proposed", "blocked"],
+)
+def test_patch_status_rejected_comes_first(stored_status: AgentPatchStatus) -> None:
+    status = compute_patch_status(stored_status, AgentPatchDecision.REJECTED, None)
+
+    assert status is AgentPatchStatus.REJECTED
+
+
+def test_patch_status_blocked_without_decision_is_blocked() -> None:
+    status = compute_patch_status(AgentPatchStatus.BLOCKED, None, None)
+
+    assert status is AgentPatchStatus.BLOCKED
+
+
+def test_patch_status_proposed_without_decision_is_proposed() -> None:
+    status = compute_patch_status(AgentPatchStatus.PROPOSED, None, None)
+
+    assert status is AgentPatchStatus.PROPOSED
+
+
+@pytest.mark.parametrize(
+    "apply_status",
+    [None, AgentRunStatus.QUEUED, AgentRunStatus.CLAIMED, AgentRunStatus.RUNNING],
+    ids=["no-run", "queued", "claimed", "running"],
+)
+def test_patch_status_approved_without_finished_apply_is_approved(
+    apply_status: AgentRunStatus | None,
+) -> None:
+    status = compute_patch_status(
+        AgentPatchStatus.PROPOSED, AgentPatchDecision.APPROVED, apply_status
+    )
+
+    assert status is AgentPatchStatus.APPROVED
+
+
+def test_patch_status_approved_with_succeeded_apply_is_applied() -> None:
+    status = compute_patch_status(
+        AgentPatchStatus.PROPOSED, AgentPatchDecision.APPROVED, AgentRunStatus.SUCCEEDED
+    )
+
+    assert status is AgentPatchStatus.APPLIED
+
+
+@pytest.mark.parametrize(
+    "apply_status",
+    [AgentRunStatus.FAILED, AgentRunStatus.TIMED_OUT, AgentRunStatus.CANCELLED],
+    ids=["failed", "timed-out", "cancelled"],
+)
+def test_patch_status_approved_with_unsuccessful_apply_is_apply_failed(
+    apply_status: AgentRunStatus,
+) -> None:
+    status = compute_patch_status(
+        AgentPatchStatus.PROPOSED, AgentPatchDecision.APPROVED, apply_status
+    )
+
+    assert status is AgentPatchStatus.APPLY_FAILED
+
+
+def test_patch_origin_defaults_to_ai_when_absent() -> None:
+    assert patch_origin({}) is AgentRunOrigin.AI
+    assert patch_origin({"origin": "RULE"}) is AgentRunOrigin.RULE
+
+
+def test_result_patch_origin_missing_is_stored_as_ai_and_status_stays_recalculated() -> None:
+    normalized = _normalize(_result(patches=[_patch(), _patch(id="p2", origin="RULE")]))
+
+    patches = normalized.result["patches"]
+    assert [(item["origin"], item["status"]) for item in patches] == [
+        ("AI", "PROPOSED"),
+        ("RULE", "PROPOSED"),
+    ]
 
 
 def test_result_validation_accepts_contract_shape_and_null_model() -> None:
