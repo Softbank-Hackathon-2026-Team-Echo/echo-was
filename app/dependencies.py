@@ -479,9 +479,10 @@ def get_disaster_service(
 
 def get_security_matrix_service(
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityMatrixService:
-    return SecurityMatrixService(session=session, clock=clock)
+    return SecurityMatrixService(session=session, clock=clock, was_version=settings.was_version)
 
 
 def get_precheck_service(

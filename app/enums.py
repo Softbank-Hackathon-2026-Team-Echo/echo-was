@@ -613,6 +613,15 @@ class SecurityMatrixCell(StrEnum):
     POLICY = "POLICY"
 
 
+class SecurityGateStatus(StrEnum):
+    """매트릭스의 게이트 관점(저장 안 함): 게이트가 이 통제·칸을 막는가."""
+
+    PASS = "PASS"
+    BLOCKED = "BLOCKED"
+    # 증거는 FAIL·UNKNOWN 이지만 유효한 기한부 예외가 걸려 막지 않는다.
+    WAIVED = "WAIVED"
+
+
 class SecurityReasonCode(StrEnum):
     """통제 판정 사유(기계 판독용). 게이트가 막으면 이 값을 통제 ID 와 함께 돌려준다."""
 

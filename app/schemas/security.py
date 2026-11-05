@@ -10,15 +10,18 @@ from app.enums import (
     SecurityControlId,
     SecurityFindingMode,
     SecurityFindingSource,
+    SecurityGateStatus,
     SecurityMatrixCell,
     SecurityReasonCode,
     SecurityResult,
 )
 from app.models import Finding
+from app.schemas.migration_plan import UserRefResponse
 from app.schemas.response import ApiModel
 from app.services.security_matrix_service import (
     MatrixCellView,
     MatrixControlView,
+    MatrixExceptionView,
     MatrixRowView,
     SecurityMatrixView,
 )
@@ -26,11 +29,38 @@ from app.services.security_matrix_service import (
 type FindingOrigin = Literal["RULE", "HUMAN", "AI"]
 
 
+class SecurityMatrixExceptionResponse(ApiModel):
+    """칸·통제에 적용된 기한부 예외 요약. 범위·요청자는 예외 API 에서 본다."""
+
+    id: uuid.UUID
+    control_id: SecurityControlId
+    reason: str
+    expires_at: datetime
+    approved_by: UserRefResponse | None
+
+    @classmethod
+    def from_view(cls, view: MatrixExceptionView) -> "SecurityMatrixExceptionResponse":
+        return cls(
+            id=view.exception_id,
+            control_id=view.control_id,
+            reason=view.reason,
+            expires_at=view.expires_at,
+            approved_by=UserRefResponse.from_model(view.approved_by),
+        )
+
+
+def _exception_response(
+    view: MatrixExceptionView | None,
+) -> SecurityMatrixExceptionResponse | None:
+    return SecurityMatrixExceptionResponse.from_view(view) if view is not None else None
+
+
 class SecurityControlResponse(ApiModel):
     """칸 안의 통제 하나의 판정. 서비스 단위 통제는 서비스마다 한 줄이다."""
 
     control_id: SecurityControlId
     title: str
+    # 예외 반영 전 증거 값. 게이트가 막는지는 gate_status 로 본다.
     result: SecurityResult
     is_mandatory: bool
     reasons: list[SecurityReasonCode]
@@ -39,6 +69,8 @@ class SecurityControlResponse(ApiModel):
     checked_at: datetime | None
     expires_at: datetime | None
     service_id: uuid.UUID | None
+    gate_status: SecurityGateStatus
+    exception: SecurityMatrixExceptionResponse | None
 
     @classmethod
     def from_view(cls, view: MatrixControlView) -> "SecurityControlResponse":
@@ -53,10 +85,13 @@ class SecurityControlResponse(ApiModel):
             checked_at=view.checked_at,
             expires_at=view.expires_at,
             service_id=view.service_id,
+            gate_status=view.gate_status,
+            exception=_exception_response(view.exception),
         )
 
 
 class SecurityCellResponse(ApiModel):
+    # 예외 반영 전 증거 값의 최악값. 게이트가 막는지는 gate_status 로 본다.
     result: SecurityResult
     finding_count: int
     has_exception: bool
@@ -64,6 +99,9 @@ class SecurityCellResponse(ApiModel):
     checked_at: datetime | None
     expires_at: datetime | None
     controls: list[SecurityControlResponse]
+    gate_status: SecurityGateStatus
+    # 칸에 적용된 예외 중 가장 먼저 만료되는 것.
+    exception: SecurityMatrixExceptionResponse | None
 
     @classmethod
     def from_view(cls, view: MatrixCellView) -> "SecurityCellResponse":
@@ -75,6 +113,8 @@ class SecurityCellResponse(ApiModel):
             checked_at=view.checked_at,
             expires_at=view.expires_at,
             controls=[SecurityControlResponse.from_view(control) for control in view.controls],
+            gate_status=view.gate_status,
+            exception=_exception_response(view.exception),
         )
 
 

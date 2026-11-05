@@ -4,14 +4,17 @@
 - 환경 단위 통제(범위가 환경·WAS 버전·없음)는 환경마다 한 번 판정한다.
 - 서비스 단위 통제(범위에 서비스·이미지·설정 커밋)는 그 환경에 현재 배포가 있는 서비스마다
   지금 도는 이미지 digest 로 판정한다. 서비스가 없는 환경은 이 통제를 세지 않는다.
-- 칸 결과는 그 칸 통제들의 가장 나쁜 값이다(규칙표 `summarize_cell`). 그 칸에 셀 통제가 없으면 NA.
+- 칸 결과는 그 칸 통제들의 **예외 반영 전 증거 값** 중 가장 나쁜 값이다(규칙표 `summarize_cell`).
+  그 칸에 셀 통제가 없으면 NA.
 - 미수집·만료·범위 불일치는 PASS 가 아니라 UNKNOWN 이다(빈칸 없음).
-- 기한부 예외 표는 아직 없어 예외 없이 판정한다.
+- 예외는 게이트와 같은 입력(승인·미철회 예외, 서버 WAS 버전, 조직 자기 승인 스위치)으로 규칙표
+  `evaluate_control` 이 판정한다. 게이트가 막는지는 `gate_status`(BLOCKED·WAIVED·PASS)로 따로 준다.
+- 실행 때만 보는 통제(C-DB-1·C-DST-1·C-AI-1·C-IMG-3)는 줄이 없어 그 예외도 나타나지 않는다.
 """
 
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,16 +24,22 @@ from app.enums import (
     SecurityCheckPhase,
     SecurityControlId,
     SecurityFindingMode,
+    SecurityGateStatus,
     SecurityMatrixCell,
     SecurityReasonCode,
     SecurityResult,
 )
-from app.models import Environment, Finding, ServiceEnvironment
+from app.models import Environment, Finding, SecurityException, ServiceEnvironment, User
 from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.finding_repository import FindingConditions, FindingRepository
+from app.repositories.organization_repository import OrganizationRepository
+from app.repositories.security_exception_repository import SecurityExceptionRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.user_repository import UserRepository
+from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import to_security_finding
 from app.services.security_rules import (
+    EXCEPTION_MAX_DURATION,
     POLICY_VERSION,
     RULES,
     ScopeKey,
@@ -43,6 +52,7 @@ from app.services.security_rules import (
     is_evaluated_in,
     summarize_cell,
 )
+from app.services.security_rules import SecurityException as SecurityExceptionInput
 
 MATRIX_PHASE = SecurityCheckPhase.PREPARATION
 CELL_ORDER = (
@@ -60,10 +70,22 @@ FINDING_IDS_LIMIT = 100
 
 
 @dataclass(frozen=True)
+class MatrixExceptionView:
+    """칸·통제에 적용된 기한부 예외 요약."""
+
+    exception_id: uuid.UUID
+    control_id: SecurityControlId
+    reason: str
+    expires_at: datetime
+    # 사용자 행을 못 찾으면 None.
+    approved_by: User | None
+
+
+@dataclass(frozen=True)
 class MatrixControlView:
     control_id: SecurityControlId
     title: str
-    # 화면에 보일 값(예외 반영 뒤). 미수집은 UNKNOWN.
+    # 예외 반영 전 증거 값. 미수집은 UNKNOWN. 게이트가 막는지는 gate_status 로 본다.
     result: SecurityResult
     is_mandatory: bool
     reasons: tuple[SecurityReasonCode, ...]
@@ -73,6 +95,8 @@ class MatrixControlView:
     expires_at: datetime | None
     # 서비스 단위 통제면 그 서비스, 환경 단위면 None.
     service_id: uuid.UUID | None
+    gate_status: SecurityGateStatus
+    exception: MatrixExceptionView | None
 
 
 @dataclass(frozen=True)
@@ -85,6 +109,9 @@ class MatrixCellView:
     checked_at: datetime | None
     expires_at: datetime | None
     controls: tuple[MatrixControlView, ...]
+    gate_status: SecurityGateStatus
+    # 칸에 적용된 예외 중 가장 먼저 만료되는 것.
+    exception: MatrixExceptionView | None
 
 
 @dataclass(frozen=True)
@@ -117,13 +144,30 @@ class FindingPage:
     total: int
 
 
+@dataclass(frozen=True)
+class _JudgementInput:
+    """환경마다 같은 판정 입력(읽기 트랜잭션에서 한 번에 읽은 것). 게이트와 같은 값이다."""
+
+    organization_id: uuid.UUID
+    was_version: str | None
+    allow_self_approval: bool
+    findings: Sequence[SecurityFinding]
+    exceptions: Sequence[SecurityExceptionInput]
+    exception_views: dict[uuid.UUID, MatrixExceptionView]
+    now: datetime
+
+
 class SecurityMatrixService:
-    def __init__(self, session: AsyncSession, clock: Clock) -> None:
+    def __init__(self, session: AsyncSession, clock: Clock, was_version: str | None) -> None:
         self._session = session
         self._clock = clock
+        self._was_version = was_version
         self._environments = EnvironmentRepository(session)
         self._connections = ServiceEnvironmentRepository(session)
         self._findings = FindingRepository(session)
+        self._exceptions = SecurityExceptionRepository(session)
+        self._organizations = OrganizationRepository(session)
+        self._users = UserRepository(session)
 
     async def get_matrix(self, organization_id: uuid.UUID) -> SecurityMatrixView:
         """조직의 환경 × 4칸. 칸마다 판정 근거(통제·사유·증거 id·모드·시각)를 함께 준다."""
@@ -136,14 +180,31 @@ class SecurityMatrixService:
                 organization_id
             )
             models = await self._findings.search_unexpired_by_organization(organization_id, now)
-        findings = [to_security_finding(model) for model in models]
+            organization = await self._organizations.find_by_id(organization_id)
+            exception_models = await self._exceptions.search_for_judgement(
+                organization_id, now - EXCEPTION_MAX_DURATION
+            )
+            approvers = await self._users.search_by_ids(
+                model.approved_by_user_id
+                for model in exception_models
+                if model.approved_by_user_id is not None
+            )
+        judgement = _JudgementInput(
+            organization_id=organization_id,
+            was_version=self._was_version,
+            allow_self_approval=(
+                organization.allow_self_approval if organization is not None else False
+            ),
+            findings=[to_security_finding(model) for model in models],
+            exceptions=[to_security_exception(model) for model in exception_models],
+            exception_views=_exception_views(exception_models, approvers),
+            now=now,
+        )
         rows = tuple(
             _evaluate_row(
-                organization_id,
                 environment,
                 [c for c in connections if c.environment_id == environment.id],
-                findings,
-                now,
+                judgement,
             )
             for environment in environments
         )
@@ -177,28 +238,53 @@ class SecurityMatrixService:
         return FindingPage(items=items, total=total)
 
 
+def _exception_views(
+    models: Sequence[SecurityException], approvers: Sequence[User]
+) -> dict[uuid.UUID, MatrixExceptionView]:
+    approver_by_id = {user.id: user for user in approvers}
+    return {
+        model.id: MatrixExceptionView(
+            exception_id=model.id,
+            control_id=SecurityControlId(model.control_id),
+            reason=model.reason,
+            expires_at=model.expires_at,
+            approved_by=(
+                approver_by_id.get(model.approved_by_user_id)
+                if model.approved_by_user_id is not None
+                else None
+            ),
+        )
+        for model in models
+    }
+
+
 def _evaluate_row(
-    organization_id: uuid.UUID,
     environment: Environment,
     connections: list[ServiceEnvironment],
-    findings: Sequence[SecurityFinding],
-    now: datetime,
+    judgement: _JudgementInput,
 ) -> MatrixRowView:
     environment_target = SecurityTarget(
-        scope=SecurityScope(organization_id=organization_id, environment_id=environment.id),
+        scope=SecurityScope(
+            organization_id=judgement.organization_id,
+            environment_id=environment.id,
+            was_version=judgement.was_version,
+        ),
         environment_kind=environment.kind,
+        allow_self_approval=judgement.allow_self_approval,
     )
-    service_targets = [
+    service_targets: list[tuple[uuid.UUID | None, SecurityTarget]] = [
         (
             connection.service_id,
             SecurityTarget(
                 scope=SecurityScope(
-                    organization_id=organization_id,
+                    organization_id=judgement.organization_id,
                     service_id=connection.service_id,
                     environment_id=environment.id,
                     image_digest=_image_digest(connection),
+                    was_version=judgement.was_version,
                 ),
                 environment_kind=environment.kind,
+                allow_self_approval=judgement.allow_self_approval,
             ),
         )
         for connection in connections
@@ -207,13 +293,16 @@ def _evaluate_row(
     for rule in RULES:
         if rule.cell is None or not is_evaluated_in(rule, MATRIX_PHASE):
             continue
-        if rule.scope_keys & SERVICE_SCOPE_KEYS:
-            for service_id, target in service_targets:
-                decision = evaluate_control(rule, target, MATRIX_PHASE, findings, (), now)
-                decisions.append((decision, service_id))
-        else:
-            decision = evaluate_control(rule, environment_target, MATRIX_PHASE, findings, (), now)
-            decisions.append((decision, None))
+        targets = (
+            service_targets
+            if rule.scope_keys & SERVICE_SCOPE_KEYS
+            else [(None, environment_target)]
+        )
+        for service_id, target in targets:
+            decision = evaluate_control(
+                rule, target, MATRIX_PHASE, judgement.findings, judgement.exceptions, judgement.now
+            )
+            decisions.append((decision, service_id))
     return MatrixRowView(
         environment_id=environment.id,
         environment_name=environment.name,
@@ -222,17 +311,43 @@ def _evaluate_row(
             MatrixServiceView(c.service_id, c.service.name, _image_digest(c) or "")
             for c in connections
         ),
-        cells=tuple(_cell_view(cell, decisions) for cell in CELL_ORDER),
+        cells=tuple(_cell_view(cell, decisions, judgement.exception_views) for cell in CELL_ORDER),
     )
 
 
 def _cell_view(
-    cell: SecurityMatrixCell, decisions: list[tuple[SecurityControlDecision, uuid.UUID | None]]
+    cell: SecurityMatrixCell,
+    decisions: list[tuple[SecurityControlDecision, uuid.UUID | None]],
+    exception_views: dict[uuid.UUID, MatrixExceptionView],
 ) -> MatrixCellView:
     in_cell = [
         (decision, service_id) for decision, service_id in decisions if decision.cell == cell
     ]
-    summary = summarize_cell(cell, (decision for decision, _ in in_cell))
+    # 칸 결과는 예외 반영 전 증거 값이다. 같은 순서 규칙을 쓰려고 증거 값을 넘긴다.
+    summary = summarize_cell(
+        cell, (replace(decision, effective_result=decision.result) for decision, _ in in_cell)
+    )
+    controls = tuple(
+        MatrixControlView(
+            control_id=decision.control_id,
+            title=get_rule(decision.control_id).title,
+            result=decision.result,
+            is_mandatory=decision.is_mandatory,
+            reasons=decision.reasons,
+            finding_ids=decision.finding_ids,
+            mode=decision.mode,
+            checked_at=decision.checked_at,
+            expires_at=decision.expires_at,
+            service_id=service_id,
+            gate_status=_control_gate_status(decision),
+            exception=(
+                exception_views.get(decision.exception_id)
+                if decision.exception_id is not None
+                else None
+            ),
+        )
+        for decision, service_id in in_cell
+    )
     return MatrixCellView(
         cell=cell,
         result=summary.result,
@@ -241,22 +356,31 @@ def _cell_view(
         mode=summary.mode,
         checked_at=summary.checked_at,
         expires_at=summary.expires_at,
-        controls=tuple(
-            MatrixControlView(
-                control_id=decision.control_id,
-                title=get_rule(decision.control_id).title,
-                result=decision.effective_result,
-                is_mandatory=decision.is_mandatory,
-                reasons=decision.reasons,
-                finding_ids=decision.finding_ids,
-                mode=decision.mode,
-                checked_at=decision.checked_at,
-                expires_at=decision.expires_at,
-                service_id=service_id,
-            )
-            for decision, service_id in in_cell
+        controls=controls,
+        gate_status=_cell_gate_status(control.gate_status for control in controls),
+        exception=min(
+            (control.exception for control in controls if control.exception is not None),
+            key=lambda exception: exception.expires_at,
+            default=None,
         ),
     )
+
+
+def _control_gate_status(decision: SecurityControlDecision) -> SecurityGateStatus:
+    if decision.is_blocking:
+        return SecurityGateStatus.BLOCKED
+    if decision.exception_id is not None:
+        return SecurityGateStatus.WAIVED
+    return SecurityGateStatus.PASS
+
+
+def _cell_gate_status(statuses: Iterable[SecurityGateStatus]) -> SecurityGateStatus:
+    seen = set(statuses)
+    if SecurityGateStatus.BLOCKED in seen:
+        return SecurityGateStatus.BLOCKED
+    if SecurityGateStatus.WAIVED in seen:
+        return SecurityGateStatus.WAIVED
+    return SecurityGateStatus.PASS
 
 
 def _image_digest(connection: ServiceEnvironment) -> str | None:
