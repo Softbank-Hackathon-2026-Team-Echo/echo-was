@@ -802,6 +802,16 @@ class AiResidencyPolicySource(StrEnum):
     DEFAULT = "DEFAULT"
 
 
+class AiResidencyRegionlessCondition(StrEnum):
+    """리전 없이(modelRegion null) 허용하는 제공자의 조건(AD-12).
+
+    NO_FORBIDDEN_CLASSES: dataClasses 가 정책 금지 등급(forbidExternalForClasses)과
+    겹치지 않을 때만.
+    """
+
+    NO_FORBIDDEN_CLASSES = "NO_FORBIDDEN_CLASSES"
+
+
 class AiResidencyVerdict(StrEnum):
     """민감 등급 외부 전송 판정. 기록이 없는 실행이 있으면 0건이라고 단정하지 않는다."""
 

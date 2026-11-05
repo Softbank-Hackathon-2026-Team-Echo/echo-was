@@ -148,7 +148,8 @@
 | 데이터 레지던시 기록 | Processing record | `agent_runs.processing` / `RunResult.processing`·응답 `processing` | 러너가 끝 보고에 밝힌 "어디서 처리했고, 어느 제공자·모델·리전으로, 어떤 자료가 밖으로 나갔나". WAS 는 검사만 하고 다시 계산하지 않는다. `model_id` 와 맞추지 않는다. 없으면 "기록 없음"(나가지 않았다는 뜻이 아니다) | AI 3 |
 | 외부 전송 | External transfer | `processing.externalTransfer`·`externalTransferBytes` | 처리 위치(`location`·샌드박스) 밖으로 자료가 나갔는가(모델 API 호출 포함, WAS 호출은 제외). 거절·실패여도 호출했으면 true | AI 3 |
 | 데이터 등급 | Data class | `processing.dataClasses` (`AgentRunDataClass`) | 모델에 넘긴 자료 종류. 변수 이름·digest·규칙 결과는 `CONFIG` 다 | AI 3 |
-| 레지던시 정책 | Residency policy | `ResidencyPolicy`, 상수 `DEFAULT_RESIDENCY_POLICY` (`app/services/ai_residency.py`), 응답 `policy` | 허용 모델 리전과 외부 전송 금지 등급. 지금은 서버 상수(`source = DEFAULT`)이고 조직별 저장은 후속이다. 보안 규칙표(`RULES`)와 다르고 게이트에 쓰지 않는다 | AI 3 |
+| 레지던시 정책 | Residency policy | `ResidencyPolicy`, 상수 `DEFAULT_RESIDENCY_POLICY` (`app/services/ai_residency.py`), 응답 `policy` | 허용 모델 리전, 외부 전송 금지 등급, 리전 없는 제공자 조건부 허용(`allowedRegionlessProviders`). 지금은 서버 상수(`source = DEFAULT`)이고 조직별 저장은 후속이다. 보안 규칙표(`RULES`)와 다르고 게이트에 쓰지 않는다 | AI 3 |
+| 리전 없는 제공자 조건부 허용 | Regionless provider allowance | `RegionlessProvider`, 정책 `allowed_regionless_providers`, 응답 `policy.allowedRegionlessProviders`·`recentRuns[].regionlessAllowed` | 리전을 고를 수 없는 제공자(Anthropic 1P)를 `modelRegion` null 이어도 조건(금지 등급을 안 넘김)을 채우면 리전 위반에서 빼는 것. 리전 목록에 null 을 넣지 않는다 | AI 3 AD-12 |
 | 레지던시 요약 | Residency summary | `GET /api/v1/orgs/{orgId}/ai/residency`, `summarize_residency` | 기간 안에 끝난 실행의 기록을 조직 단위로 센 것(외부 전송·민감 등급 판정·정책 위반·최근 실행). 계약은 [docs/api/ai-residency.md](../../docs/api/ai-residency.md) | AI 3 |
 | 비용 항목 종류 | Cost component kind | `CostComponentKind`, 응답 `components[].kind` | 비용 자원 항목의 묶음: `COMPUTE` · `DATABASE` · `NETWORK` · `STORAGE` · `OTHER`. 값은 `app/data/cloud_inventory.toml` 에 있고 DB 칸이 아니다 | 운영 1 |
 | 비용 출처 | Cost source | `CostSource`, 응답 `source` | `ESTIMATE`(자원 목록 × 공개 목록가, 환경·공용 항목) · `BILLING`(클라우드 청구 데이터, 공급자 계정 단위 `billing[]`). 청구 값을 환경 값으로 쓰지 않는다 | 운영 1 |
@@ -277,8 +278,9 @@
 | `NONE` · `LOCAL` · `GOOGLE_VERTEX` · `AWS_BEDROCK` · `OPENAI` · `ANTHROPIC` | `processing.modelProvider` (`AgentRunModelProvider`) | 모델 제공자. `NONE` 은 모델을 부르지 않음, `LOCAL` 은 처리 위치 안 모델(리전 규칙을 보지 않는다) |
 | `CONFIG` · `FINDINGS` · `SOURCE_CODE` · `LOGS` · `SECRETS` | `processing.dataClasses` (`AgentRunDataClass`) | 모델에 넘긴 자료 등급. 저장은 이 순서로 정렬한다 |
 | `ZERO` · `ZERO_WITH_UNRECORDED` · `DETECTED` | 응답 `sensitiveExternalTransfer.verdict` (`AiResidencyVerdict`, 저장 안 함) | 금지 등급 외부 전송 0건 · 기록에서는 0건이지만 기록 없는 실행이 있어(또는 상한을 넘어) 단정하지 않음 · 1건 이상 |
-| `MODEL_REGION_NOT_ALLOWED` · `FORBIDDEN_CLASS_SENT_EXTERNALLY` | 응답 `violations[].reasons` (`AiResidencyViolationReason`, 저장 안 함) | 제공자가 `NONE`·`LOCAL` 이 아닌데 리전이 모름·허용 목록 밖 · 금지 등급을 밖으로 보냄 |
+| `MODEL_REGION_NOT_ALLOWED` · `FORBIDDEN_CLASS_SENT_EXTERNALLY` | 응답 `violations[].reasons` (`AiResidencyViolationReason`, 저장 안 함) | 제공자가 `NONE`·`LOCAL` 이 아닌데 리전이 모름·허용 목록 밖(조건부 허용 통과는 제외) · 금지 등급을 밖으로 보냄 |
 | `DEFAULT` | 응답 `policy.source` (`AiResidencyPolicySource`) | 서버 코드 상수 정책 |
+| `NO_FORBIDDEN_CLASSES` | 응답 `policy.allowedRegionlessProviders[].condition` (`AiResidencyRegionlessCondition`, 저장 안 함) | `dataClasses` 가 금지 등급과 겹치지 않을 때만 리전 없이 허용 |
 
 ### 환경 종류 (`environments.kind`)
 
