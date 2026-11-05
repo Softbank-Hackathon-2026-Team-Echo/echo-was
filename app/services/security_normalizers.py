@@ -11,6 +11,9 @@
 - C-IMG-1(이미지 취약점): HIGH 이상 + 수정 버전 있음 → FAIL.
   그 밖의 취약점이 있으면 WARN. 없으면 PASS.
 - C-IMG-2(시크릿 노출, gitleaks·Trivy secret): 하나라도 있으면 FAIL. 없으면 PASS.
+- C-SEC-1(비밀 전달 경로, 조직 범위): 같은 비밀 검사에서 만든다. 없으면 PASS, 있으면 WARN,
+  원문을 못 읽었으면 만들지 않는다. 조직 범위라 FAIL·UNKNOWN 하나가 조직 전체를 막기 때문이고,
+  그 이미지는 같은 원문의 C-IMG-2(digest 범위)가 막는다.
 - C-CFG-1(설정 위반): 실패한 HIGH 이상 → FAIL. 그 밖의 실패 → WARN. 없으면 PASS.
 - C-TLS-1(공개 경로 TLS): 주소마다 접속 시험 결과의 가장 나쁜 값. 시간 초과·연결 불가는 UNKNOWN.
   사설 대역만 나온 주소는 NA(공개 경로가 아님), 의심 주소·Echo 가 만들지 않은 주소는 UNKNOWN.
@@ -19,7 +22,7 @@
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -206,6 +209,37 @@ def normalize_gitleaks(
         for leak in report
     ]
     return _secret_finding(control, source, scope, collected_at, mode, tool_version, items)
+
+
+_SECRET_SOURCES = frozenset({SecurityFindingSource.GITLEAKS, SecurityFindingSource.TRIVY_SECRET})
+
+_DELIVERY_PATH_RESULT = {
+    SecurityResult.PASS: SecurityResult.PASS,
+    SecurityResult.FAIL: SecurityResult.WARN,
+}
+
+
+def derive_delivery_path_finding(secret: NormalizedFinding) -> NormalizedFinding | None:
+    """비밀 검사로 만든 C-IMG-2 증거 → 같은 원문의 C-SEC-1 증거.
+
+    원문을 못 읽은 결과(UNKNOWN)나 비밀 검사의 C-IMG-2 가 아닌 증거면 None.
+    출처·범위 칸·근거 줄·도구 버전은 그대로 두고 증거 id·통제·결과·만료만 바꾼다.
+    """
+    finding = secret.finding
+    if finding.control_id != SecurityControlId.IMG_2 or finding.source not in _SECRET_SOURCES:
+        return None
+    result = _DELIVERY_PATH_RESULT.get(finding.result)
+    if result is None:
+        return None
+    control = SecurityControlId.SEC_1
+    derived = replace(
+        finding,
+        finding_id=uuid4(),
+        control_id=control,
+        result=result,
+        expires_at=finding.collected_at + get_rule(control).max_age,
+    )
+    return replace(secret, finding=derived)
 
 
 def normalize_trivy_config(
