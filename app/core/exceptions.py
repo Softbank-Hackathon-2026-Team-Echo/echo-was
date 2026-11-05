@@ -635,3 +635,36 @@ class PrecheckNotFoundError(NotFoundError):
 
     def __init__(self, precheck_id: str) -> None:
         super().__init__("precheck not found", precheck_id=precheck_id)
+
+
+# --- 재난 (API 서버 9) ---
+
+
+class DisasterNotFoundError(NotFoundError):
+    """재난이 없다. 다른 조직 것도 같다."""
+
+    code = "DISASTER_NOT_FOUND"
+
+    def __init__(self, disaster_id: str) -> None:
+        super().__init__("disaster not found", disaster_id=disaster_id)
+
+
+class DisasterNotActiveError(ConflictError):
+    """이미 끝난 재난을 끝내려 했다."""
+
+    code = "DISASTER_NOT_ACTIVE"
+
+    def __init__(self, disaster_id: str) -> None:
+        super().__init__("disaster is not active", disaster_id=disaster_id)
+
+
+class DisasterActiveError(ConflictError):
+    """도착 환경이 끝나지 않은 재난의 피해 환경이다. details.disasterId 가 그 재난이다."""
+
+    code = "DISASTER_ACTIVE"
+
+    def __init__(self, disaster_id: str) -> None:
+        super().__init__(
+            "target environment is affected by an active disaster",
+            details=[ErrorField(field="disasterId", reason="DISASTER_ACTIVE", value=disaster_id)],
+        )

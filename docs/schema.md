@@ -28,6 +28,7 @@ erDiagram
     deploy_requests |o--o{ deploy_requests : "따라가기 원본·밀어낸 요청·되돌리기 대상"
     deploy_requests ||--o{ deploy_request_logs : "배포 작업 로그"
     services ||--o{ migration_plans : "이전 계획(끝나지 않은 것 하나)"
+    disasters |o--o{ migration_plans : "재난이 만든 긴급 계획"
     service_environments ||--o{ service_environment_variables : "앱 환경 변수(값 없음)"
     service_environments ||--o{ migration_plans : "출발·도착"
     migration_plans ||--o{ migration_plan_logs : "이전 실행 로그"
@@ -316,6 +317,8 @@ erDiagram
 | `created_by_user_id`(N)·`approved_by_user_id`·`rejected_by_user_id`·`cancelled_by_user_id`·`aborted_by_user_id` | uuid | | FK `users.id`, `approved_by ⇔ approved_at` | 사람 칸 |
 | `self_approved` | bool | N | 기본 false | 만든 사람이 승인했나(조직 스위치가 켜져 있을 때만 가능) |
 | `approved_at`·`started_at`·`finished_at`·`abort_requested_at`·`expires_at`(N) | timestamptz | | `끝 상태 ⇔ finished_at` | 승인 대기 만료는 만든 시각 + 24시간 |
+| `mode` | varchar(16) | N | 값 CHECK, 기본 `PLANNED` | 계획 종류(API 서버 8-3). `EMERGENCY` 는 재난 트리거만 만든다 |
+| `disaster_id` | uuid | Y | FK `disasters.id` RESTRICT, 인덱스 `(disaster_id)`, 맨 뒤 칸 | 이 계획을 만든 재난(API 서버 9). 그 밖의 계획은 NULL |
 | (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_migration_plans_prevent_delete` → `prevent_append_only_delete()` | |
 
 ### `migration_plan_logs` — 이전 실행 로그 (지우지 않는 기록, API 서버 8)
@@ -333,6 +336,29 @@ erDiagram
 - 계획당 500줄(500번째 자리에 `LOG_TRUNCATED`). 줄은 상태 변경과 같은 트랜잭션에서 반영됐을 때만 쓴다.
 - `organizations.allow_self_approval`(bool, 기본 false): 만든 사람의 자기 승인 허용 스위치(⑨).
 - revision `4cea1ec99f1b` downgrade 는 `MIGRATION_PLAN` 할 일 행이 있으면 분명한 메시지(`jobs has N MIGRATION_PLAN rows …`)로 실패한다.
+
+### `disasters` — 재난 이벤트 (지우지 않는 기록, API 서버 9)
+
+사람이 버튼으로 낸 재난 한 건과 그 순간 서버가 계산한 값. 흐름·규칙은 [api/disasters.md](api/disasters.md).
+
+| 칸 | 타입 | NULL | 제약 | 뜻 |
+|---|---|---|---|---|
+| `id` | uuid | N | PK | |
+| `organization_id` | uuid | N | FK `organizations.id` RESTRICT, 인덱스 `(organization_id, status, created_at)` | 조직 |
+| `type` | varchar(16) | N | `EARTHQUAKE`·`TYPHOON` | |
+| `source` | varchar(16) | N | `SIMULATED`, 기본 `SIMULATED` | 지금은 버튼뿐이다 |
+| `magnitude` | numeric(3,1) | N | 0~10 | 규모 |
+| `epicenter_lat`·`epicenter_lng` | double precision | N | −90~90 · −180~180 | 진원지 |
+| `radius_km` | int | N | `>= 0` | 서버가 계산한 반경 |
+| `meets_threshold` | bool | N | | 이전 대상 기준을 넘었나(미달이면 계획 없음) |
+| `status` | varchar(16) | N | `ACTIVE`·`ENDED`, `(status = 'ENDED') = (ended_at IS NOT NULL)` | ACTIVE 재난의 피해 환경은 도착이 될 수 없다 |
+| `affected_environment_ids`·`safe_environment_ids`·`unknown_environment_ids` | jsonb | N | 배열 | 환경 id 문자열. **만든 순간의 스냅숏**이고 고치지 않는다 |
+| `created_by_user_id`(N)·`ended_by_user_id` | uuid | | FK `users.id` RESTRICT | 누른 사람 · 끝낸 사람 |
+| `started_at`(N)·`ended_at` | timestamptz | | | 주입 시계 |
+| (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_disasters_prevent_delete` → `prevent_append_only_delete()` | |
+
+- 상태는 조건부 UPDATE 로만 바꾼다(`ACTIVE` → `ENDED`). 건너뛴 서비스는 저장하지 않는다(감사 줄 `details.skippedPlans`).
+- revision `250e2535417a` downgrade 는 더한 것만 지운다. 재난 기록과 계획의 재난 연결 정보가 사라지고, 계획 행과 `mode = EMERGENCY` 값은 남는다.
 
 ### `findings` — 보안 증거 (보안·거버넌스 2)
 

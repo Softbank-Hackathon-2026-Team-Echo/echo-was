@@ -66,6 +66,7 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
       어디까지 했는지 적어 두는 칸이다. 다시 시작한 일꾼은 이 칸을 보고 같은 멱등 키로 이어 간다.
     - simulated 는 가짜 실행기로 만든 계획인지다(만들 때 저장, 응답 때 다시 계산하지 않는다).
     - mode 는 계획 종류(PLANNED·EMERGENCY·FAILBACK)다. 만들 때 판정해 저장하고 바꾸지 않는다.
+    - disaster_id 는 이 계획을 만든 재난이다(EMERGENCY 계획만 값이 있다).
     """
 
     __tablename__ = "migration_plans"
@@ -109,6 +110,7 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("jsonb_typeof(fingerprint) = 'object'", name="fingerprint_is_object"),
         CheckConstraint("jsonb_typeof(simulate) = 'object'", name="simulate_is_object"),
         Index("ix_migration_plans_service_id_created_at", "service_id", "created_at"),
+        Index("ix_migration_plans_disaster_id", "disaster_id"),
         Index(
             OPEN_PLAN_UNIQUE_INDEX,
             "service_id",
@@ -188,5 +190,11 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=MigrationPlanMode.PLANNED,
         server_default=MigrationPlanMode.PLANNED.value,
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    # API 서버 9 에 더한 칸(mode 뒤). 재난 트리거가 만든 계획만 값이 있다.
+    disaster_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("disasters.id", ondelete="RESTRICT"),
+        nullable=True,
         sort_order=APPENDED_COLUMN_SORT_ORDER,
     )

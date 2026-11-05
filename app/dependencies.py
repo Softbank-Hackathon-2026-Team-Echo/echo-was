@@ -37,6 +37,7 @@ from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
+from app.services.disaster_service import DisasterService
 from app.services.environment_connection_service import (
     AdapterResolver,
     EnvironmentConnectionService,
@@ -456,6 +457,22 @@ def get_migration_plan_service(
             SecurityGate(session, clock, tls_checker, settings.was_version)
             if tls_checker is not None
             else None
+        ),
+    )
+
+
+def get_disaster_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    migration_plans: Annotated[MigrationPlanService, Depends(get_migration_plan_service)],
+) -> DisasterService:
+    return DisasterService(
+        session=session,
+        clock=clock,
+        migration_plans=migration_plans,
+        entrypoint_environment_keys=frozenset(
+            item.partition("=")[0].strip() for item in settings.entrypoint_environment_map
         ),
     )
 

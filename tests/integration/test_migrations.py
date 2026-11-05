@@ -732,6 +732,53 @@ EXPECTED_CONSTRAINTS = {
         "fk_service_environment_variables_updated_by_user_id_users",
     ): ("FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"),
     ("service_environment_variables", "pk_service_environment_variables"): "PRIMARY KEY (id)",
+    # API 서버 9: 재난(지우지 않는 기록)
+    ("disasters", "ck_disasters_affected_environment_ids_is_array"): (
+        "CHECK ((jsonb_typeof(affected_environment_ids) = 'array'::text))"
+    ),
+    ("disasters", "ck_disasters_ended_at_consistency"): (
+        "CHECK ((((status)::text = 'ENDED'::text) = (ended_at IS NOT NULL)))"
+    ),
+    ("disasters", "ck_disasters_epicenter_lat_range"): (
+        "CHECK (((epicenter_lat >= ('-90'::integer)::double precision) "
+        "AND (epicenter_lat <= (90)::double precision)))"
+    ),
+    ("disasters", "ck_disasters_epicenter_lng_range"): (
+        "CHECK (((epicenter_lng >= ('-180'::integer)::double precision) "
+        "AND (epicenter_lng <= (180)::double precision)))"
+    ),
+    ("disasters", "ck_disasters_magnitude_range"): (
+        "CHECK (((magnitude >= (0)::numeric) AND (magnitude <= (10)::numeric)))"
+    ),
+    ("disasters", "ck_disasters_radius_km_non_negative"): "CHECK ((radius_km >= 0))",
+    ("disasters", "ck_disasters_safe_environment_ids_is_array"): (
+        "CHECK ((jsonb_typeof(safe_environment_ids) = 'array'::text))"
+    ),
+    ("disasters", "ck_disasters_source_valid"): "CHECK (((source)::text = 'SIMULATED'::text))",
+    ("disasters", "ck_disasters_status_valid"): (
+        "CHECK (((status)::text = ANY "
+        "((ARRAY['ACTIVE'::character varying, 'ENDED'::character varying])::text[])))"
+    ),
+    ("disasters", "ck_disasters_type_valid"): (
+        "CHECK (((type)::text = ANY "
+        "((ARRAY['EARTHQUAKE'::character varying, 'TYPHOON'::character varying])::text[])))"
+    ),
+    ("disasters", "ck_disasters_unknown_environment_ids_is_array"): (
+        "CHECK ((jsonb_typeof(unknown_environment_ids) = 'array'::text))"
+    ),
+    ("disasters", "fk_disasters_created_by_user_id_users"): (
+        "FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("disasters", "fk_disasters_ended_by_user_id_users"): (
+        "FOREIGN KEY (ended_by_user_id) REFERENCES users(id) ON DELETE RESTRICT"
+    ),
+    ("disasters", "fk_disasters_organization_id_organizations"): (
+        "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
+    ),
+    ("disasters", "pk_disasters"): "PRIMARY KEY (id)",
+    ("migration_plans", "fk_migration_plans_disaster_id_disasters"): (
+        "FOREIGN KEY (disaster_id) REFERENCES disasters(id) ON DELETE RESTRICT"
+    ),
 }
 
 EXPECTED_INDEXES = {
@@ -963,6 +1010,15 @@ EXPECTED_INDEXES = {
         "service_environment_variables USING btree (service_environment_id, key) "
         "WHERE (is_deleted = false)"
     ),
+    # API 서버 9: 재난
+    "pk_disasters": "CREATE UNIQUE INDEX pk_disasters ON disasters USING btree (id)",
+    "ix_disasters_organization_id_status_created_at": (
+        "CREATE INDEX ix_disasters_organization_id_status_created_at ON disasters "
+        "USING btree (organization_id, status, created_at)"
+    ),
+    "ix_migration_plans_disaster_id": (
+        "CREATE INDEX ix_migration_plans_disaster_id ON migration_plans USING btree (disaster_id)"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -998,6 +1054,11 @@ EXPECTED_TRIGGERS = {
         "CREATE TRIGGER trg_migration_plan_logs_prevent_delete BEFORE DELETE ON "
         "migration_plan_logs FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
     ),
+    # 재난도 지우지 않는다(같은 공용 함수).
+    ("disasters", "trg_disasters_prevent_delete"): (
+        "CREATE TRIGGER trg_disasters_prevent_delete BEFORE DELETE ON disasters "
+        "FOR EACH ROW EXECUTE FUNCTION prevent_append_only_delete()"
+    ),
 }
 
 # 기존 표에 칸을 더하기 전(접속 상태 revision) 시점.
@@ -1020,7 +1081,10 @@ BEFORE_AUDIT_EXTENSION = "48b2126a9c37"
 AUDIT_EXTENSION_REVISION = "b7d41e6f2a93"
 # 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(감사 로그 확장 = API 서버 7 head) 시점.
 BEFORE_SECURITY_GATE_BLOCKED = AUDIT_EXTENSION_REVISION
-HEAD_REVISION = "286d9ea982d6"
+# 재난 표(API 서버 9)를 더하기 전(보안 게이트 원인 코드) 시점과 지금 head.
+BEFORE_DISASTERS = "286d9ea982d6"
+DISASTERS_REVISION = "250e2535417a"
+HEAD_REVISION = DISASTERS_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1179,6 +1243,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "deploy_request_logs",
         "deploy_requests",
         "deployments",
+        "disasters",
         "environments",
         "findings",
         "invitations",
@@ -1851,7 +1916,8 @@ async def test_audit_logs_cannot_be_updated(harness: DeployHarness, engine: Asyn
 
 
 # 고객 앱 환경 변수 표(API 서버 10) 리비전과 그 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
-# 그 뒤에 감사 로그 확장(b7d41e6f2a93), 보안 게이트 원인 코드(286d9ea982d6)가 이어진다.
+# 그 뒤에 감사 로그 확장(b7d41e6f2a93), 보안 게이트 원인 코드(286d9ea982d6), 재난 표(250e2535417a)가
+# 이어진다.
 SERVICE_VARIABLES_REVISION = BEFORE_AUDIT_EXTENSION
 BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
 SERVICE_VARIABLES_TABLE = "service_environment_variables"
@@ -1867,7 +1933,9 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
-    gate = scripts.get_revision(HEAD_REVISION)
+    disasters = scripts.get_revision(DISASTERS_REVISION)
+    assert disasters is not None and disasters.down_revision == BEFORE_DISASTERS
+    gate = scripts.get_revision(BEFORE_DISASTERS)
     assert gate is not None and gate.down_revision == AUDIT_EXTENSION_REVISION
     audit = scripts.get_revision(AUDIT_EXTENSION_REVISION)
     assert audit is not None and audit.down_revision == SERVICE_VARIABLES_REVISION
@@ -1895,7 +1963,8 @@ async def test_service_variables_revision_only_adds_a_table_and_has_no_value_col
         await connection.run_sync(run_alembic(command.check))
         await transaction.rollback()
 
-    assert up - down == {SERVICE_VARIABLES_TABLE}
+    # 그 뒤 리비전이 더한 재난 표도 함께 내려간다.
+    assert up - down == {SERVICE_VARIABLES_TABLE, "disasters"}
     assert down - up == set()
     assert columns == {
         "id",
@@ -1909,6 +1978,98 @@ async def test_service_variables_revision_only_adds_a_table_and_has_no_value_col
         "is_deleted",
         "deleted_at",
     }
+
+
+def _disaster_schema_state(connection: Connection) -> tuple[bool, bool, int]:
+    """(재난 표가 있는가, 계획에 disaster_id 칸이 있는가, 재난 트리거 수)."""
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("migration_plans")}
+    triggers = connection.scalar(
+        text("SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_disasters_prevent_delete'")
+    )
+    return (
+        "disasters" in inspector.get_table_names(),
+        "disaster_id" in columns,
+        int(triggers or 0),
+    )
+
+
+async def test_disasters_revision_downgrade_removes_only_additions_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        up = await connection.run_sync(_table_names)
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_DISASTERS))
+        )
+        down_state = await connection.run_sync(_disaster_schema_state)
+        down = await connection.run_sync(_table_names)
+        # 공용 함수는 API 서버 3 소유라 남는다.
+        function_count = await connection.scalar(
+            text("SELECT count(*) FROM pg_proc WHERE proname = 'prevent_append_only_delete'")
+        )
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up_state = await connection.run_sync(_disaster_schema_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down_state == (False, False, 0)
+    assert up_state == (True, True, 1)
+    assert up - down == {"disasters"}
+    assert function_count == 1
+
+
+async def test_disasters_cannot_be_deleted(harness: DeployHarness, engine: AsyncEngine) -> None:
+    response = await harness.client.post(
+        f"/api/v1/orgs/{harness.organization.id}/disasters",
+        json={"type": "EARTHQUAKE", "epicenter": {"lat": 0, "lng": 0}, "magnitude": 6.0},
+    )
+    assert response.status_code == 201, response.text
+
+    with pytest.raises(DBAPIError, match="append-only"):
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM disasters"))
+
+
+@pytest.mark.parametrize(
+    ("columns", "values", "violated"),
+    [
+        ("magnitude", "10.5", "ck_disasters_magnitude_range"),
+        ("radius_km", "-1", "ck_disasters_radius_km_non_negative"),
+        ("epicenter_lat", "91", "ck_disasters_epicenter_lat_range"),
+        ("epicenter_lng", "181", "ck_disasters_epicenter_lng_range"),
+        ("type", "'FLOOD'", "ck_disasters_type_valid"),
+        ("source", "'LIVE_FEED'", "ck_disasters_source_valid"),
+        ("status", "'ENDED'", "ck_disasters_ended_at_consistency"),
+        ("ended_at", "now()", "ck_disasters_ended_at_consistency"),
+        ("safe_environment_ids", "'{}'::jsonb", "ck_disasters_safe_environment_ids_is_array"),
+    ],
+)
+async def test_disasters_checks_reject_invalid_rows(
+    harness: DeployHarness, engine: AsyncEngine, columns: str, values: str, violated: str
+) -> None:
+    defaults = {
+        "organization_id": "(SELECT id FROM organizations LIMIT 1)",
+        "type": "'EARTHQUAKE'",
+        "magnitude": "7.2",
+        "epicenter_lat": "35.2",
+        "epicenter_lng": "139.4",
+        "radius_km": "300",
+        "meets_threshold": "true",
+        "status": "'ACTIVE'",
+        "affected_environment_ids": "'[]'::jsonb",
+        "safe_environment_ids": "'[]'::jsonb",
+        "unknown_environment_ids": "'[]'::jsonb",
+        "created_by_user_id": "(SELECT id FROM users LIMIT 1)",
+        "started_at": "now()",
+    }
+    row = {**defaults, columns: values}
+    statement = f"INSERT INTO disasters ({', '.join(row)}) VALUES ({', '.join(row.values())})"
+
+    with pytest.raises(IntegrityError, match=violated):
+        async with engine.begin() as connection:
+            await connection.execute(text(statement))
 
 
 async def test_alembic_check_reports_no_differences(engine: AsyncEngine) -> None:

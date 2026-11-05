@@ -1,5 +1,5 @@
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -110,6 +110,20 @@ class MigrationPlanRepository:
             )
             .limit(1)
         )
+
+    async def search_by_disaster_ids(
+        self, disaster_ids: Collection[uuid.UUID]
+    ) -> list[MigrationPlan]:
+        """재난들이 만든 계획. 서비스 id 오름차순(재난 응답 plans[] 순서와 같다)."""
+        if not disaster_ids:
+            return []
+        statement = (
+            select(MigrationPlan)
+            .where(MigrationPlan.disaster_id.in_(disaster_ids))
+            .order_by(MigrationPlan.service_id, MigrationPlan.created_at)
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(statement)).all())
 
     async def search_by_service(
         self,

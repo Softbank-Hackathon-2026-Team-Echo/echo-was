@@ -12,6 +12,9 @@
 보안 게이트(설정으로 켤 때만 주입)는 승인 잠금 전에 판정하고(TLS 시험은 트랜잭션 밖), 잠금 안에서
 지문이 같을 때 판정 줄을 남긴다. 막혔으면 계획은 승인 대기 그대로 두고 커밋한 뒤 409
 SECURITY_GATE_BLOCKED 를 올린다.
+
+재난 트리거(DisasterService)도 create_plan·approve_plan 을 그대로 부른다. DisasterTrigger 를 넘기면
+계획은 EMERGENCY 이고 disaster_id 가 채워진다(사람 API 요청으로는 넘길 수 없다).
 """
 
 import logging
@@ -32,6 +35,7 @@ from app.core.clock import Clock
 from app.core.config import ExecutorMode
 from app.core.exceptions import (
     DeployInProgressError,
+    DisasterActiveError,
     EnvironmentUnhealthyError,
     ErrorField,
     MigrationPlanNotFoundError,
@@ -73,6 +77,7 @@ from app.models import (
 from app.models.migration_plan import OPEN_PLAN_UNIQUE_INDEX
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
+from app.repositories.disaster_repository import DisasterRepository
 from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.migration_plan_log_repository import MigrationPlanLogRepository
@@ -109,6 +114,7 @@ NO_DEPLOYMENT_REASON = "NO_DEPLOYMENT"
 VERSION_MISMATCH_REASON = "VERSION_MISMATCH"
 LAST_SYNC_FAILED_REASON = "LAST_SYNC_FAILED"
 CHANGED_REASON = "CHANGED"
+AUDIT_TRIGGER_DISASTER = "DISASTER"
 
 
 class _Outcome(StrEnum):
@@ -132,10 +138,21 @@ class CreateMigrationPlanCommand:
 
 
 @dataclass(frozen=True)
+class DisasterTrigger:
+    """재난이 만드는 계획의 값. distance_km 는 진원지에서 출발 환경까지다(로그 줄 data)."""
+
+    disaster_id: uuid.UUID
+    magnitude: float
+    distance_km: float
+
+
+@dataclass(frozen=True)
 class MigrationPlanView:
     plan: MigrationPlan
     users_by_id: dict[uuid.UUID, User]
     environment_id_by_connection: dict[uuid.UUID, uuid.UUID]
+    # 이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 막는 ACTIVE 재난.
+    failback_blocking_disaster_id: uuid.UUID | None = None
 
     def user(self, user_id: uuid.UUID | None) -> User | None:
         return self.users_by_id.get(user_id) if user_id is not None else None
@@ -197,6 +214,7 @@ class MigrationPlanService:
         self._connections = ServiceEnvironmentRepository(session)
         self._deploy_requests = DeployRequestRepository(session)
         self._deployments = DeploymentRepository(session)
+        self._disasters = DisasterRepository(session)
         self._plans = MigrationPlanRepository(session)
         self._logs = MigrationPlanLogRepository(session)
         self._jobs = JobRepository(session)
@@ -229,10 +247,12 @@ class MigrationPlanService:
         service_id: uuid.UUID,
         actor_user_id: uuid.UUID,
         command: CreateMigrationPlanCommand,
+        disaster: DisasterTrigger | None = None,
     ) -> MigrationPlanView:
         """출발(지금 100% 연결) → 도착(같은 이미지의 예비 연결) 계획을 PENDING_APPROVAL 로 만든다.
 
-        거절 순서: 서비스·환경(404·409) → 열린 계획 → 출발 → 같은 환경 → 열린 배포 요청 → 도착.
+        거절 순서: 서비스·환경(404·409) → 열린 계획 → 출발 → 같은 환경 → 도착의 ACTIVE 재난 →
+        열린 배포 요청 → 도착. disaster 를 넘기면 재난 트리거의 EMERGENCY 계획이다.
         """
         if (
             command.simulate_fail_at_step is not None
@@ -267,17 +287,33 @@ class MigrationPlanService:
             )
             if target is not None and target.id == source.id:
                 raise RequestFieldInvalidError("targetEnvironmentId", SAME_ENVIRONMENT_REASON)
+            await self._check_target_not_in_active_disaster(environment.id)
             await self._check_no_open_deploy_requests(service.id, target)
             target = await self._check_target_ready(source, target)
             plan = self._new_plan(service, source, target, actor_user_id, command, now)
-            # 서비스 행을 잠근 뒤라 판정 사이에 다른 계획이 끝나거나 생기지 않는다.
-            plan.mode = decide_plan_mode(
-                await self._plans.find_last_succeeded_for_service(service.id), source, target
-            )
+            if disaster is not None:
+                plan.mode = MigrationPlanMode.EMERGENCY
+                plan.disaster_id = disaster.disaster_id
+            else:
+                # 서비스 행을 잠근 뒤라 판정 사이에 다른 계획이 끝나거나 생기지 않는다.
+                plan.mode = decide_plan_mode(
+                    await self._plans.find_last_succeeded_for_service(service.id), source, target
+                )
             plan.fingerprint = await read_fingerprint(
                 self._session, service, connections, source.id, target.id
             )
             await self._insert(plan)
+            if disaster is not None:
+                await self._log.append(
+                    plan,
+                    MigrationLogCode.DISASTER_TRIGGERED,
+                    now,
+                    data={
+                        "disasterId": str(disaster.disaster_id),
+                        "magnitude": disaster.magnitude,
+                        "distanceKm": disaster.distance_km,
+                    },
+                )
             await self._log.append(
                 plan,
                 MigrationLogCode.PLAN_CREATED,
@@ -299,6 +335,7 @@ class MigrationPlanService:
                 {
                     "sourceEnvironmentId": str(source.environment_id),
                     "targetEnvironmentId": str(target.environment_id),
+                    **_disaster_audit_details(plan),
                 },
             )
             view = (await self._views([plan]))[0]
@@ -366,6 +403,12 @@ class MigrationPlanService:
                 raise
             existing = await self._plans.find_open_for_service(plan.service_id)
             raise MigrationPlanOpenError(str(existing.id) if existing else None) from None
+
+    async def _check_target_not_in_active_disaster(self, environment_id: uuid.UUID) -> None:
+        """끝나지 않은 재난의 피해 환경으로는 옮기지 않는다(수동 복귀 포함). 최신 재난을 싣는다."""
+        blocking = await self._disasters.search_active_affecting([environment_id])
+        if blocking:
+            raise DisasterActiveError(str(blocking[0].id))
 
     async def _check_no_open_deploy_requests(
         self, service_id: uuid.UUID, target: ServiceEnvironment | None
@@ -538,7 +581,7 @@ class MigrationPlanService:
                         plan,
                         organization_id,
                         actor_user_id,
-                        {"selfApproved": is_self},
+                        {"selfApproved": is_self, **_disaster_audit_details(plan)},
                     )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)
@@ -810,7 +853,7 @@ class MigrationPlanService:
         return (await self._views([plan]))[0]
 
     async def _views(self, plans: list[MigrationPlan]) -> list[MigrationPlanView]:
-        """계획 수와 상관없이 쿼리 2번(사용자·연결)으로 사람 칸과 환경 id 를 채운다."""
+        """계획 수와 상관없이 쿼리 3번(사용자·연결·ACTIVE 재난)으로 응답 값을 채운다."""
         user_ids = {
             user_id
             for plan in plans
@@ -835,11 +878,24 @@ class MigrationPlanService:
         environment_id_by_connection = await self._connections.search_environment_ids(
             connection_ids
         )
+        source_environment_ids = {
+            environment_id_by_connection[plan.source_service_environment_id] for plan in plans
+        }
+        active_disasters = await self._disasters.search_active_affecting(source_environment_ids)
         return [
             MigrationPlanView(
                 plan=plan,
                 users_by_id=users_by_id,
                 environment_id_by_connection=environment_id_by_connection,
+                failback_blocking_disaster_id=next(
+                    (
+                        disaster.id
+                        for disaster in active_disasters
+                        if str(environment_id_by_connection[plan.source_service_environment_id])
+                        in disaster.affected_environment_ids
+                    ),
+                    None,
+                ),
             )
             for plan in plans
         ]
@@ -863,6 +919,13 @@ def decide_plan_mode(
     ):
         return MigrationPlanMode.FAILBACK
     return MigrationPlanMode.PLANNED
+
+
+def _disaster_audit_details(plan: MigrationPlan) -> dict[str, str]:
+    """재난 트리거가 만든 계획의 만들기·승인 감사 줄에 붙이는 칸. 그 밖의 계획은 비어 있다."""
+    if plan.disaster_id is None:
+        return {}
+    return {"disasterId": str(plan.disaster_id), "trigger": AUDIT_TRIGGER_DISASTER}
 
 
 def _check_service_accepts(service: Service) -> None:

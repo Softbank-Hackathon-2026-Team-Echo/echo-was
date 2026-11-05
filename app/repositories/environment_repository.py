@@ -87,6 +87,15 @@ class EnvironmentRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_all_live(self, organization_id: uuid.UUID) -> list[Environment]:
+        """조직의 살아 있는 환경 전부(재난 판정용). 페이지를 나누지 않는다."""
+        statement = (
+            _in_organization(select(Environment), organization_id)
+            .order_by(Environment.created_at, Environment.id)
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(statement)).all())
+
     async def count_live(self, organization_id: uuid.UUID, kind: str | None) -> int:
         statement = _filter_by_kind(
             _in_organization(select(func.count()).select_from(Environment), organization_id), kind
