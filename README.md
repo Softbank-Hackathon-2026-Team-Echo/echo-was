@@ -293,6 +293,10 @@ uv run --env-file .env python -m app.scripts.issue_runner_token --revoke echo-sa
 
 운영 WAS 파드 안에서는 `python -m app.scripts.issue_runner_token --name echo-sandbox-runner` 다. 출력된 원문은 **GCP Secret Manager 비밀 `echo-runner-token` 에만** 넣고(VM 서비스 계정에 그 비밀 읽기만 준다), 채팅·로그·`.env` 에 남기지 않는다. DB 에는 SHA-256 만 있어 다시 볼 수 없다. 이름이 있으면(철회한 이름 포함) 발급이 실패하므로 교체는 새 이름으로 한다. 계약은 [docs/agent-runner.md](docs/agent-runner.md), C-AI-1 을 실제로 판정하려면 `SECURITY_GATE_ENABLED=true` 가 필요하다(기본 꺼짐, 켜면 다른 필수 통제도 판정한다).
 
+### 청구 실측 갱신
+
+비용 API 의 `billing` 값은 운영자가 받은 AWS Cost Explorer 응답(DAILY·`UnblendedCost`·`RECORD_TYPE` 묶음)을 `uv run python -X utf8 -m app.scripts.import_billing --provider aws --input <CE JSON> --fetched-at <받은 시각>` 으로 `app/data/cloud_billing.json` 에 병합해 커밋하고 배포하면 실린다. 스크립트는 네트워크를 쓰지 않고 같은 날짜만 덮어쓴다. 서버는 청구 API 를 부르지 않는다. 자세한 내용은 [docs/api/costs.md](docs/api/costs.md).
+
 자주 쓰는 명령
 
 ```bash
@@ -383,6 +387,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | GET | `/api/v1/orgs/{orgId}/migration-plans/{id}` | 200 | 계획 단건(단계별 계획 값과 실제 결과) |
 | POST | `/api/v1/orgs/{orgId}/migration-plans/{id}/approve·reject·cancel·abort` | 202·200·200·202 | 승인(= 실행 시작)·거절·취소·중단(개발자·사람) |
 | GET | `/api/v1/orgs/{orgId}/migration-plans/{id}/logs` | 200 | 이전 실행 로그(`cursor`·`limit`) |
+| GET | `/api/v1/orgs/{orgId}/costs` | 200 | 환경별 비용 추정(ESTIMATE) + 계정 단위 청구 실측(BILLING), 온프레 제외 |
 
 - 모든 JSON 응답은 `{"success", "code", "message", "data", "details"}` 봉투다. 봉투의 `code`·`message`·`details` 는 값이 없으면 빼고, **성공 응답의 `data` 안 칸은 항상 있고 값이 없으면 null** 이다. 오류도 같은 봉투다(`data` 없음).
 - 다른 파트는 환경을 `id` 로만 가리킨다(`name` 은 바뀔 수 있다). 자세한 계약: [docs/api/environments.md](docs/api/environments.md).
@@ -431,6 +436,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포·이력·되돌리기·로그 API 계약(접수 규칙·진행 단계·실패 코드·로그 줄) |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획 API 계약(만들기 거절 순서·승인·지문·단계 실행·롤백·중단·로그·`simulate`) |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 API(사람 쪽) · 러너 계약(토큰·임대·이벤트·`RunResult`·감사·발급 명령) |
+| [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API 계약(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처) |
 | [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·로그 읽기·마스킹·가짜 구현) |
 | [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md) | AI 도구용 작업 규칙 |
 | [.claude/rules/](.claude/rules/) | 용어 사전·DB 스키마(DDL)·마이그레이션·백엔드·Git 규칙 |

@@ -762,3 +762,20 @@ class AgentRunFailureCode(StrEnum):
     DEADLINE = "DEADLINE"  # 러너가 마감 전에 끝내지 못해 스스로 실패로 냈다.
     LEASE_EXPIRED = "LEASE_EXPIRED"  # WAS: 러너의 임대가 끊겼다.
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"  # WAS: 마감이 지났다.
+
+
+class CostComponentKind(StrEnum):
+    """비용 자원 항목의 묶음(운영 1)."""
+
+    COMPUTE = "COMPUTE"
+    DATABASE = "DATABASE"
+    NETWORK = "NETWORK"
+    STORAGE = "STORAGE"
+    OTHER = "OTHER"
+
+
+class CostSource(StrEnum):
+    """비용 값의 출처. ESTIMATE = 사용량 × 단가 추정, BILLING = 청구 실측(운영 1)."""
+
+    ESTIMATE = "ESTIMATE"
+    BILLING = "BILLING"
