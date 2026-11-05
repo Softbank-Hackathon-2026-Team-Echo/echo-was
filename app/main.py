@@ -35,6 +35,7 @@ from app.routers import (
     runner_router,
     security_exception_router,
     security_router,
+    service_metrics_router,
     service_router,
     service_variable_router,
 )
@@ -81,6 +82,7 @@ app.include_router(agent_token_router.router)
 app.include_router(environment_router.router)
 app.include_router(environment_kind_router.router)
 app.include_router(service_router.router)
+app.include_router(service_metrics_router.router)
 app.include_router(service_variable_router.router)
 app.include_router(deploy_request_router.router)
 app.include_router(migration_plan_router.router)

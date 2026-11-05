@@ -11,6 +11,7 @@ from app.adapters.registry import get_environment_adapter
 from app.clients.app_secret_store import AppSecretStore, build_app_secret_store
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
+from app.clients.prometheus_client import PrometheusClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
 from app.clients.tls_probe import PublicHostTlsChecker
@@ -26,6 +27,7 @@ from app.core.database import get_session_factory
 from app.core.secrets import parse_secret_ref
 from app.executors import ExecutorSet, build_executor_set
 from app.executors.base import NoCutoverRuns
+from app.executors.entrypoint import parse_entrypoint_environment_map
 from app.executors.google_metadata import GoogleMetadataClient
 from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeHttpClients, default_kube_http_factory
@@ -57,6 +59,7 @@ from app.services.precheck_service import PrecheckService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
 from app.services.security_matrix_service import SecurityMatrixService
+from app.services.service_metrics import ServiceMetricsService, service_metrics_cache
 from app.services.service_service import ServiceService
 from app.services.service_variable_service import ServiceVariableService
 
@@ -495,6 +498,45 @@ def get_cost_service(
     catalog: Annotated[CostCatalog, Depends(get_cost_catalog)],
 ) -> CostService:
     return CostService(session, clock, catalog)
+
+
+def get_prometheus_client(
+    settings: Annotated[Settings, Depends(get_settings)],
+    secret_client: Annotated[SecretClient, Depends(get_secret_client)],
+) -> PrometheusClient | None:
+    """진입점 Prometheus 읽기(운영 2). 주소가 없으면 None(기능 꺼짐).
+
+    만들 때 네트워크·비밀값 조회가 없다(호출 때 한다).
+    """
+    if not settings.entrypoint_prometheus_url:
+        return None
+    password_ref = settings.entrypoint_prometheus_basic_auth_password_ref
+    return PrometheusClient(
+        settings.entrypoint_prometheus_url,
+        secret_client=secret_client,
+        username=settings.entrypoint_prometheus_basic_auth_user,
+        password_ref=parse_secret_ref(password_ref) if password_ref else None,
+        timeout_seconds=settings.entrypoint_request_timeout_seconds,
+    )
+
+
+def get_service_metrics_service(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    prometheus: Annotated[PrometheusClient | None, Depends(get_prometheus_client)],
+    executors: Annotated[ExecutorSet | None, Depends(get_executor_set)],
+) -> ServiceMetricsService:
+    return ServiceMetricsService(
+        session,
+        prometheus=prometheus,
+        data_sync=executors.data_sync if executors is not None else None,
+        cache=service_metrics_cache(request.app.state),
+        clock=clock,
+        environment_map=parse_entrypoint_environment_map(settings),
+        cache_seconds=settings.service_metrics_cache_seconds,
+    )
 
 
 def get_precheck_service(

@@ -158,6 +158,10 @@ data:
   ENTRYPOINT_EXECUTOR_MODE: http
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
+  # 서비스 대시보드 지표 API(운영 2)가 같은 진입점 VM 의 Prometheus 를 직접 읽는다(VPC 내부).
+  # 진입점이 basic auth 를 켜면 ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF 와 Secret 연결이
+  # 필요하다(docs/api/metrics.md "설정"). 그 전까지 응답은 200 + metricsStatus UNAVAILABLE.
+  ENTRYPOINT_PROMETHEUS_URL: http://10.60.0.6:9090
   # 고객 앱 환경 변수·API 키 보관함(API 서버 10). GSA 는 echo-app- 접두어 비밀만 다룬다(조건부 secretmanager.admin,
   # 11/4 운영 파드에서 만들기·버전 추가·읽기 200, 접두어 밖 만들기 403 확인). 되돌리려면 fake(쓰기 API 409, 이미 쓴 {ns}-env 는 남음).
   APP_SECRET_STORE_MODE: gcp

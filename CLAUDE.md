@@ -35,6 +35,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
+| [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API(진입점 Prometheus PromQL·`metricsStatus`·에러 버짓 공식·복제 지연·5초 캐시·basic auth 설정)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
 | [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약(계산 표·민감 등급 판정·정책 위반·기본 정책)을 바꾸거나 쓸 때. 러너 칸 규칙은 [docs/agent-runner.md](docs/agent-runner.md) |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
@@ -70,6 +71,7 @@ app/
 │                     #   PrecheckService(AI 사전 점검 만들기·조회·이벤트·취소·입력 사본) · AgentRunService(러너: 가져가기·하트비트·이벤트·결과, 부를 때 만료)
 │                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)
 │                     #   ai_residency(레지던시 요약·판정·위반, 순수 계산) · AiResidencyService(조직 요약 조회)
+│                     #   service_metrics(대시보드 지표: 범위 검증·PromQL 조립·응답 변환·5초 캐시, ServiceMetricsService, 운영 2)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository · Disaster Repository · Finding Repository(보안 증거, 조직 조건 필수)
@@ -81,6 +83,7 @@ app/
 │                     #   tls_probe(공개 경로 TLS 접속 시험: 인증서·호스트명·버전·만료, 네트워크만.
 │                     #     PublicHostTlsChecker = Echo 공개 도메인 주소만, 443, DNS 로 확인한 공인 IP 로만 접속)
 │                     #   app_secret_store(앱 환경 변수 보관함: GCP Secret Manager + 가짜, 지우는 메서드 없음)
+│                     #   prometheus_client(진입점 Prometheus query_range·query, basic auth 비밀 참조, 운영 2)
 ├─ executors/         # 실행기 인터페이스(base, 빌드·실행 로그 읽기·트래픽·지표·데이터 확인 포함) · 가짜(fake) · HttpHealthChecker · 고정 진입점(entrypoint: 트래픽·대표 주소·지표). 고르는 곳 build_executor_set
 │                     #   실제 빌드 github_actions(workflow_dispatch) · 실제 배포·내리기 kubernetes/(access 접속기·api REST·manifests·executors)
 │                     #   cloudflare_dns(온프레 앱 DNS) · google_metadata(메타데이터 토큰) · retry(일시 오류 재시도)

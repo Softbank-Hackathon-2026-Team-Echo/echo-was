@@ -20,6 +20,7 @@ echo-infra 의 고정 진입점 VM 이 여는 가중치 API 를 부른다(계약
 
 import logging
 import math
+import uuid
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, TypeGuard
@@ -64,19 +65,33 @@ SUMMARY_WINDOW_MAX_SECONDS = 9999
 PROMETHEUS_OK = "ok"
 
 
+def parse_entrypoint_environment_map(settings: Settings) -> dict[str, str]:
+    """`entrypoint_environment_map`(`<환경 id 또는 종류>=<진입점 이름>`)을 사전으로."""
+    return dict(
+        (key.strip(), name.strip())
+        for key, _, name in (item.partition("=") for item in settings.entrypoint_environment_map)
+    )
+
+
+def entrypoint_environment_name(
+    environment_id: uuid.UUID, environment_kind: str, environment_map: Mapping[str, str]
+) -> str:
+    """진입점 환경 이름(= 수집기 `cloud_provider`). 환경 id 매핑 → 환경 종류 매핑 → 종류 그대로."""
+    by_id = environment_map.get(str(environment_id))
+    if by_id is not None:
+        return by_id
+    return environment_map.get(environment_kind, environment_kind)
+
+
 def build_entrypoint_client(settings: Settings, secret_client: SecretClient) -> "EntrypointClient":
     """설정으로 클라이언트를 만든다. 주소·토큰 참조가 없으면 설정 검증이 먼저 막는다."""
     if not settings.entrypoint_base_url or not settings.entrypoint_token_ref:
         raise ValueError("entrypoint_base_url and entrypoint_token_ref are required")
-    environment_map = dict(
-        (key.strip(), name.strip())
-        for key, _, name in (item.partition("=") for item in settings.entrypoint_environment_map)
-    )
     return EntrypointClient(
         settings.entrypoint_base_url,
         parse_secret_ref(settings.entrypoint_token_ref),
         secret_client,
-        environment_map=environment_map,
+        environment_map=parse_entrypoint_environment_map(settings),
         timeout_seconds=settings.entrypoint_request_timeout_seconds,
     )
 
@@ -111,10 +126,9 @@ class EntrypointClient:
 
     def environment_name(self, target: DeployTarget) -> str:
         """연결의 진입점 환경 이름. 환경 id 매핑 → 환경 종류 매핑 → 환경 종류 그대로."""
-        by_id = self._environment_map.get(str(target.environment_id))
-        if by_id is not None:
-            return by_id
-        return self._environment_map.get(target.environment_kind, target.environment_kind)
+        return entrypoint_environment_name(
+            target.environment_id, target.environment_kind, self._environment_map
+        )
 
     async def get_weights(self) -> dict[str, int]:
         return _as_weights(await self._request("GET", "/weights"))

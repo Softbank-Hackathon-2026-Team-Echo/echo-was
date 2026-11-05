@@ -328,6 +328,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `HEALTH_CHECKER_MODE` | `fake` | `fake`(늘 통과) · `http`(환경별 주소 + 헬스 경로를 실제 GET) |
 | `ENTRYPOINT_EXECUTOR_MODE`·`ENTRYPOINT_BASE_URL`·`ENTRYPOINT_TOKEN_REF` | `fake` · `http://<진입점 내부 IP>:8080` · `env:ECHO_SECRET_ENTRYPOINT_TOKEN` | `http` 면 트래픽 비율·대표 주소·지표 실행기가 고정 진입점(Envoy 가중치 API)을 부른다. 토큰은 비밀 참조만 ([docs/executors.md](docs/executors.md)) |
 | `ENTRYPOINT_ENVIRONMENT_MAP`·`ENTRYPOINT_REQUEST_TIMEOUT_SECONDS` | (비움) · `5` | 환경 id → 진입점 환경 이름(비면 환경 종류 그대로), 요청 제한 시간 |
+| `ENTRYPOINT_PROMETHEUS_URL`·`ENTRYPOINT_PROMETHEUS_BASIC_AUTH_USER`·`ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF`·`SERVICE_METRICS_CACHE_SECONDS` | (비움) · `echo-otel` · (비움) · `5` | 서비스 대시보드 지표 API 가 읽는 진입점 Prometheus(`http://<진입점 내부 IP>:9090`, 비면 `NOT_CONFIGURED`). 비밀번호 참조가 비면 인증 없이 읽는다. 캐시 초 ([docs/api/metrics.md](docs/api/metrics.md)) |
 | `APP_SECRET_STORE_MODE`·`APP_SECRET_PROJECT_ID`·`APP_SECRET_NAME_PREFIX` | `fake` · (비움) · `echo-app-` | 고객 앱 환경 변수 보관함. `gcp` 면 GCP Secret Manager(프로젝트 필수). `fake` + `EXECUTOR_MODE=real` 이면 쓰기 API 409, 실행기는 앱 Secret 을 건드리지 않는다 ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_CHECKER_MODE`·`DATA_SYNC_DATABASES`·`DATA_SYNC_PASSWORD_REF` | `fake` · (비움) · `env:ECHO_SECRET_DATA_SYNC_PASSWORD` | `postgres` 면 이전 계획 데이터 확인이 출발 PostgreSQL 의 `pg_stat_replication` 복제 지연을 읽고, 도착이 이미 쓰기 담당이면 지연 0(`TARGET_IS_WRITER`)으로 통과한다. 매핑은 `<환경 id 또는 종류>=<host>:<port>/<구독 이름>` ([docs/executors.md](docs/executors.md)) |
 | `DATA_SYNC_USER`·`DATA_SYNC_DATABASE`·`DATA_SYNC_SSL_MODE`·`DATA_SYNC_TIMEOUT_SECONDS` | `echo_monitor` · `postgres` · `require` · `3` | `pg_monitor` 권한 계정, 접속 DB, TLS(`require`·`verify-full`·`disable`), 제한 시간 |
@@ -439,6 +440,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 API(사람 쪽) · 러너 계약(토큰·임대·이벤트·`RunResult`·감사·발급 명령) |
 | [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약 API(계산 표·민감 등급 판정·정책 위반·기본 정책) |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API 계약(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처) |
+| [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API 계약(PromQL·`metricsStatus`·에러 버짓·복제 지연·캐시·설정) |
 | [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·로그 읽기·마스킹·가짜 구현) |
 | [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md) | AI 도구용 작업 규칙 |
 | [.claude/rules/](.claude/rules/) | 용어 사전·DB 스키마(DDL)·마이그레이션·백엔드·Git 규칙 |
