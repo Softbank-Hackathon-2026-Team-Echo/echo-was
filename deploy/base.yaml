@@ -34,6 +34,10 @@ spec:
       # 데이터 확인(복제 지연) 읽기 전용 계정 echo_monitor 비밀번호(pg_monitor 만, A·B 같은 값). echo-infra replication/k8s/scripts/monitor-user.sh 가 만든다.
       - resourceName: "projects/team-echo-final/secrets/echo-dev-echo-was-pg-monitor-password/versions/latest"
         path: "data-sync-password"
+      # 진입점 Prometheus basic auth 비밀번호(사용자 echo-otel, 지표 API 운영 2). 진입점 VM 이 쓰는 비밀이고
+      # GSA 읽기 권한(이 비밀 하나에만)은 11/5 gcloud 로 손으로 줬다.
+      - resourceName: "projects/team-echo-final/secrets/echo-dev-entry-prometheus-remote-write/versions/latest"
+        path: "entrypoint-prometheus-password"
 ---
 apiVersion: secret-sync.gke.io/v1
 kind: SecretSync
@@ -52,6 +56,7 @@ spec:
       # SecretSync 키는 밑줄 두 개(조직 접두사 ECHO_SECRET_<조직>__)를 받지 않는다. 앱 이름으로는 app.yaml 의 env 가 옮긴다.
       - {sourcePath: "onprem-executor-token", targetKey: "ECHO_DEMO_ONPREM_EXECUTOR_TOKEN"}
       - {sourcePath: "data-sync-password", targetKey: "ECHO_SECRET_DATA_SYNC_PASSWORD"}
+      - {sourcePath: "entrypoint-prometheus-password", targetKey: "ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD"}
 ---
 # echo-was 네임스페이스 울타리: 같은 네임스페이스끼리와 GCP 부하 분산기(프록시·헬스체크 대역)만 들어올 수 있다.
 # 고객 앱 네임스페이스의 파드는 echo-was API·DB 에 직접 붙지 못한다.
@@ -159,9 +164,10 @@ data:
   ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
   # 서비스 대시보드 지표 API(운영 2)가 같은 진입점 VM 의 Prometheus 를 직접 읽는다(VPC 내부).
-  # 진입점이 basic auth 를 켜면 ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF 와 Secret 연결이
-  # 필요하다(docs/api/metrics.md "설정"). 그 전까지 응답은 200 + metricsStatus UNAVAILABLE.
+  # 진입점 Prometheus 는 basic auth 를 쓴다(11/5 인프라 9, 사용자는 기본 echo-otel). 비밀번호는 SecretSync 가
+  # 옮긴 ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD 에서 읽는다. 지우면 인증 없이 읽어 401 → UNAVAILABLE.
   ENTRYPOINT_PROMETHEUS_URL: http://10.60.0.6:9090
+  ENTRYPOINT_PROMETHEUS_BASIC_AUTH_PASSWORD_REF: env:ECHO_SECRET_ENTRYPOINT_PROMETHEUS_PASSWORD
   # 고객 앱 환경 변수·API 키 보관함(API 서버 10). GSA 는 echo-app- 접두어 비밀만 다룬다(조건부 secretmanager.admin,
   # 11/4 운영 파드에서 만들기·버전 추가·읽기 200, 접두어 밖 만들기 403 확인). 되돌리려면 fake(쓰기 API 409, 이미 쓴 {ns}-env 는 남음).
   APP_SECRET_STORE_MODE: gcp
