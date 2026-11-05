@@ -18,7 +18,9 @@ from app.enums import (
     SecurityResult,
 )
 from app.models import AgentRun, Finding
-from app.services.security_rules import POLICY_VERSION
+from app.services.security_finding_service import SecurityFindingService
+from app.services.security_normalizers import derive_delivery_path_finding, normalize_gitleaks
+from app.services.security_rules import POLICY_VERSION, SecurityScope
 from tests.integration.migration_support import Migration
 from tests.integration.security_gate_support import (
     PRIVATE_IP,
@@ -31,6 +33,7 @@ from tests.integration.security_gate_support import (
     prepare_passing_gate,
     record_passing_evidence,
     revoke_exception,
+    target_digest,
 )
 
 _C = SecurityControlId
@@ -146,6 +149,44 @@ async def test_approve_with_evidence_exceptions_and_precheck_runs_migration(
     # C-DB-1·C-DST-1 은 기한부 예외로 통과(값은 WARN)했고 예외 ID 가 판정에 남는다.
     assert len(passed["exceptionIds"]) == 2
     assert len(await gate_findings(migration, _C.TLS_1)) == 2
+
+
+async def test_approve_passes_c_sec_1_on_build_scan_evidence_without_exception(
+    migration: Migration,
+) -> None:
+    """빌드 비밀 검사에서 만든 C-SEC-1(조직 범위)로 통과하고, 다른 이미지의 경고는 막지 않는다."""
+    harness = migration.harness
+    enable_gate(migration)
+    await record_passing_evidence(migration, include_delivery_path=False)
+    await add_exception(migration, _C.DB_1)
+    await add_exception(migration, _C.DST_1)
+    await add_precheck(migration)
+    organization_id = harness.organization.id
+    scanned_at = harness.clock.now() - timedelta(minutes=1)
+    this_image = SecurityScope(organization_id, image_digest=await target_digest(migration))
+    other_image = SecurityScope(organization_id, image_digest="sha256:" + "e" * 64)
+    leak = {"RuleID": "github-pat", "File": "app/settings.py", "StartLine": 7}
+    derived = [
+        derive_delivery_path_finding(
+            normalize_gitleaks(report, scope=scope, collected_at=scanned_at)
+        )
+        for report, scope in (([], this_image), ([leak], other_image))
+    ]
+    clean, warned = (item for item in derived if item is not None)
+    async with harness.session_factory() as session:
+        await SecurityFindingService(session).record_all([clean, warned])
+    plan = await migration.create_plan()
+
+    approved = await migration.approve(plan["id"])
+
+    assert approved["status"] == MigrationPlanStatus.APPROVED
+    passed = (await migration.log_rows(plan["id"]))[1].data
+    assert passed is not None
+    assert passed["blocking"] == []
+    # 예외는 C-DB-1·C-DST-1 둘뿐이고, C-SEC-1 은 두 증거(PASS·WARN)를 썼다.
+    assert len(passed["exceptionIds"]) == 2
+    used = set(passed["findingIds"])
+    assert {str(clean.finding.finding_id), str(warned.finding.finding_id)} <= used
 
 
 async def test_start_with_revoked_exception_fails_plan_without_traffic_change(

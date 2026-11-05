@@ -21,7 +21,7 @@
 ## 3. 범위
 
 ### 3.1 이번에 한다
-- `app/services/security_normalizers.py`: `normalize_trivy_image`(C-IMG-1), `normalize_trivy_image_secrets`·`normalize_gitleaks`(C-IMG-2), `normalize_trivy_config`(C-CFG-1), `normalize_tls_probes`(C-TLS-1·C-POST-1의 TLS 부분)
+- `app/services/security_normalizers.py`: `normalize_trivy_image`(C-IMG-1), `normalize_trivy_image_secrets`·`normalize_gitleaks`(C-IMG-2, 같은 결과에서 `derive_delivery_path_finding` 으로 C-SEC-1 — 2-4 SPEC), `normalize_trivy_config`(C-CFG-1), `normalize_tls_probes`(C-TLS-1·C-POST-1의 TLS 부분)
 - `app/clients/tls_probe.py`: `SocketTlsProbeClient.probe(host, port)`, `judge_tls`
 - `app/enums.py`: 정규화 이유 `SecurityFindingReason`
 - 시험: `tests/test_security_normalizers.py`, `tests/test_tls_probe.py`(로컬 TLS 서버로 실제 핸드셰이크)

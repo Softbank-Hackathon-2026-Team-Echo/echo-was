@@ -85,3 +85,4 @@
 
 - `GET …/security/compare?source=&target=`(이전 전후 비교, 통제마다 양쪽 값 + 막는 사유) — 이전 게이트(#29)와 같은 판정을 쓴다
 - WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거, TLS 주기 시험(C-TLS-1) — 지금은 UNKNOWN
+- (11/5 됨) C-SEC-1(비밀 전달 경로, 조직 범위)은 빌드 비밀 검사에서 C-IMG-2 와 함께 생긴다: 원문 없음 PASS, 발견 WARN(그 이미지는 C-IMG-2 FAIL), 원문을 못 읽으면 만들지 않음. 새 빌드부터 보인다

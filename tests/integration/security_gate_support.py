@@ -133,8 +133,16 @@ def _finding(
     return NormalizedFinding(finding, SecurityFindingReason.NO_ISSUES, (), 0, None)
 
 
-async def record_passing_evidence(migration: Migration, was_version: str = WAS_VERSION) -> None:
-    """준비 단계 필수 통제(C-IMG-1·C-IMG-2·C-SEC-1·C-IAM-2·C-AUD-1)의 PASS 증거."""
+async def record_passing_evidence(
+    migration: Migration,
+    was_version: str = WAS_VERSION,
+    *,
+    include_delivery_path: bool = True,
+) -> None:
+    """준비 단계 필수 통제(C-IMG-1·C-IMG-2·C-SEC-1·C-IAM-2·C-AUD-1)의 PASS 증거.
+
+    include_delivery_path=False 면 C-SEC-1 은 넣지 않는다(빌드 검사에서 만든 증거로 시험할 때).
+    """
     organization_id = migration.harness.organization.id
     digest = await target_digest(migration)
     now = migration.harness.clock.now()
@@ -143,15 +151,18 @@ async def record_passing_evidence(migration: Migration, was_version: str = WAS_V
     findings = [
         _finding(SecurityControlId.IMG_1, SecurityFindingSource.TRIVY_IMAGE, by_digest, now),
         _finding(SecurityControlId.IMG_2, SecurityFindingSource.GITLEAKS, by_digest, now),
-        _finding(
-            SecurityControlId.SEC_1,
-            SecurityFindingSource.GITLEAKS,
-            SecurityScope(organization_id),
-            now,
-        ),
         _finding(SecurityControlId.IAM_2, SecurityFindingSource.WAS_TEST, by_version, now),
         _finding(SecurityControlId.AUD_1, SecurityFindingSource.WAS_TEST, by_version, now),
     ]
+    if include_delivery_path:
+        findings.append(
+            _finding(
+                SecurityControlId.SEC_1,
+                SecurityFindingSource.GITLEAKS,
+                SecurityScope(organization_id),
+                now,
+            )
+        )
     async with migration.harness.session_factory() as session:
         await SecurityFindingService(session).record_all(findings)
 
