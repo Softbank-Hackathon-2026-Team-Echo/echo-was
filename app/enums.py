@@ -622,6 +622,18 @@ class SecurityGateStatus(StrEnum):
     WAIVED = "WAIVED"
 
 
+class SecurityCompareChange(StrEnum):
+    """이전 전후 비교에서 도착 칸이 출발 칸보다 어떤가(저장 안 함, 보안 5-2).
+
+    비교 열쇠는 결과 심각도(NA < PASS < WARN < UNKNOWN < FAIL)이고, 같으면 게이트 관점
+    (PASS < WAIVED < BLOCKED)으로 가른다.
+    """
+
+    WORSE = "WORSE"
+    SAME = "SAME"
+    BETTER = "BETTER"
+
+
 class SecurityReasonCode(StrEnum):
     """통제 판정 사유(기계 판독용). 게이트가 막으면 이 값을 통제 ID 와 함께 돌려준다."""
 

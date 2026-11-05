@@ -1,4 +1,4 @@
-# 보안 매트릭스·증거 API (보안·거버넌스 4, 계약 4-7)
+# 보안 매트릭스·증거·이전 전후 비교 API (보안·거버넌스 4·5-2, 계약 4-7)
 
 조직의 환경마다 **권한·암호화·감사 기록·정책** 4칸의 보안 상태와 그 근거(통제·사유·증거)를 돌려준다. 판정은 공통 보안 규칙표(`app/services/security_rules.py`, 정책 버전 `POLICY_VERSION`)가 하고, 이 API는 읽기만 한다.
 
@@ -66,6 +66,56 @@
 - PASS인 통제에는 예외를 적용하지 않는다(`exception` null, `gateStatus` `PASS`).
 - 준비 시점 판정이다. 실행 전용 통제와 실행 직전 C-TLS-1 재확인이 있어 `gateStatus`가 모두 막지 않아도 이전 게이트가 막을 수 있다.
 
+## GET `/api/v1/orgs/{orgId}/security/compare?source=&target=[&serviceId=]`
+
+이전 전후 보안 비교(보안 5-2, SPEC `specs/sec-5-2-security-compare.md`). 두 환경의 매트릭스 칸을 나란히 놓고, 칸마다 **도착 환경이 이전을 막는지**를 준다. SEC Compare 탭과 이전 계획 승인 화면(E01-3) 비교표의 원천이다.
+
+| 쿼리 | 뜻 |
+|---|---|
+| `source` · `target` | 출발·도착 환경 id(필수). 이 조직의 살아 있는 환경만 — 아니면 404 `ENVIRONMENT_NOT_FOUND` |
+| `serviceId` | 선택. 서비스 단위 통제를 그 서비스의 현재 배포로만 센다. 이 조직의 살아 있는 서비스가 아니면 404 `SERVICE_NOT_FOUND` |
+
+- 권한: 뷰어 이상(에이전트 토큰 가능). 같은 환경을 두 번 주면 422 `VALIDATION_ERROR`(`details=[{field: "target", reason: "SAME_ENVIRONMENT"}]`, DB를 읽기 전에 거절). 쿼리가 빠지거나 UUID가 아니면 422 `VALIDATION_ERROR`.
+- 캐시 없음. 매트릭스와 같은 요청 시각의 값이다(두 화면이 다르게 보이지 않게).
+
+```json
+{
+  "policyVersion": "sec-rules-2026.11.04",
+  "phase": "PREPARATION",
+  "checkedAt": "2026-11-05T14:00:00Z",
+  "simulated": false,
+  "serviceId": null,
+  "source": {"environmentId": "…", "environmentName": "aws-tokyo", "environmentKind": "aws",
+             "services": [{"serviceId": "…", "name": "demo", "imageDigest": "sha256:…"}]},
+  "target": {"environmentId": "…", "environmentName": "gcp-seoul", "environmentKind": "gcp", "services": []},
+  "summary": {"blocking": 1, "worseOnTarget": 0, "same": 3, "better": 1},
+  "rows": [
+    {"control": "iam",
+     "source": {"result": "UNKNOWN", "findingCount": 0, "hasException": true, "gateStatus": "WAIVED", "exception": {"…": "…"}, "mode": null, "checkedAt": null, "expiresAt": "…", "controls": [ … ]},
+     "target": {"result": "UNKNOWN", "findingCount": 0, "hasException": true, "gateStatus": "WAIVED", "…": "…"},
+     "blocksMigration": false, "blockingControlIds": [], "change": "SAME"},
+    {"control": "encryption",
+     "source": {"result": "UNKNOWN", "gateStatus": "BLOCKED", "…": "…"},
+     "target": {"result": "UNKNOWN", "gateStatus": "BLOCKED", "…": "…"},
+     "blocksMigration": true, "blockingControlIds": ["C-SEC-1"], "change": "SAME"},
+    {"control": "auditLog", "…": "…", "blocksMigration": false, "change": "SAME"},
+    {"control": "policy",
+     "source": {"result": "FAIL", "gateStatus": "BLOCKED", "…": "…"},
+     "target": {"result": "UNKNOWN", "gateStatus": "PASS", "…": "…"},
+     "blocksMigration": false, "blockingControlIds": [], "change": "BETTER"}
+  ]
+}
+```
+
+- `rows`: 늘 4줄(`iam`·`encryption`·`auditLog`·`policy` 순). `control` = 매트릭스 칸 이름. 줄의 `source`·`target`은 **매트릭스 칸 응답 그대로**(`result`·`findingCount`·`hasException`·`gateStatus`·`exception`·`mode`·`checkedAt`·`expiresAt`·`controls[]`) — `serviceId` 없이 부르면 같은 시각 매트릭스의 그 두 행 칸과 같다.
+- `blocksMigration` = 도착 칸 `gateStatus`가 `BLOCKED`. 곧 도착 칸 통제 중 하나라도 **필수 + 증거 FAIL·UNKNOWN + 유효 예외 없음**(규칙표 `evaluate_control`의 `is_blocking`, 이전 게이트와 같은 함수). 출발 칸 값은 보지 않는다. 예외로 풀린 칸(`WAIVED`)과 선택 통제의 FAIL은 막지 않는다.
+- `blockingControlIds` = 도착 칸에서 막은 통제 ID(중복 없음). 막지 않으면 빈 목록.
+- `change` = 도착이 출발보다 `WORSE`·`SAME`·`BETTER`. 비교는 칸 `result` 심각도(NA < PASS < WARN < UNKNOWN < FAIL), 같으면 `gateStatus`(PASS < WAIVED < BLOCKED).
+- `summary` = 4줄을 센 값: `blocking`(막는 줄 수) · `worseOnTarget` · `same` · `better`(셋의 합 4).
+- 맨 위 `source`·`target` = 비교한 환경과 그 비교에 센 서비스(지금 도는 이미지). `simulated`는 늘 false(서버 판정).
+- `serviceId`를 주면 환경 단위 통제는 그대로, 서비스 단위 통제(C-IMG-1·C-IMG-2·C-CFG-1·C-TLS-1)는 **그 서비스의** 현재 배포로만 한 줄이다. 그 환경에 배포가 없으면 매트릭스처럼 세지 않는다. 주지 않으면 그 환경의 모든 서비스를 센다 — 도착 환경의 다른 서비스 때문에 막힘이 보일 수 있으므로 서비스가 정해진 화면(E01-3)은 `serviceId`를 주는 것이 게이트에 가깝다.
+- 준비 시점 비교다. 실행 전용 통제(C-IMG-3·C-DB-1·C-DST-1·C-AI-1)와 실행 직전 C-TLS-1 재확인은 없으므로, `blocksMigration`이 모두 false여도 이전 게이트가 막을 수 있다. 막는지의 최종 판정은 게이트(승인 409 `SECURITY_GATE_BLOCKED`)다.
+
 ## GET `/api/v1/orgs/{orgId}/security/findings`
 
 칸의 근거 드로어용 증거 목록(최신순, 페이지).
@@ -83,6 +133,6 @@
 
 ## 다음 (같은 이슈)
 
-- `GET …/security/compare?source=&target=`(이전 전후 비교, 통제마다 양쪽 값 + 막는 사유) — 이전 게이트(#29)와 같은 판정을 쓴다
+- (11/5 됨) `GET …/security/compare?source=&target=` 이전 전후 비교 — 위 절. 게이트와 같은 판정(`is_blocking`)을 쓴다
 - WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거, TLS 주기 시험(C-TLS-1) — 지금은 UNKNOWN
 - (11/5 됨) C-SEC-1(비밀 전달 경로, 조직 범위)은 빌드 비밀 검사에서 C-IMG-2 와 함께 생긴다: 원문 없음 PASS, 발견 WARN(그 이미지는 C-IMG-2 FAIL), 원문을 못 읽으면 만들지 않음. 새 빌드부터 보인다

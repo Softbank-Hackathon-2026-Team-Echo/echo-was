@@ -33,7 +33,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
-| [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
+| [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회·이전 전후 비교 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건·`blocksMigration`)를 바꾸거나 쓸 때 |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
 | [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API(진입점 Prometheus PromQL·`metricsStatus`·에러 버짓 공식·복제 지연·5초 캐시·basic auth 설정)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
@@ -62,6 +62,7 @@ app/
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
 │                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings C-IMG-1·C-IMG-2·C-SEC-1, 실패해도 배포 계속, 보안 2·11)
 │                     #   SecurityMatrixService(환경 × 4칸 매트릭스·증거 목록, 서비스 단위 통제는 지금 이미지로, 보안 4)
+│                     #   SecurityCompareService(이전 전후 비교: 두 환경 매트릭스 칸 + 도착 기준 blocksMigration = 게이트 is_blocking, 보안 5-2)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   DisasterService(재난 미리보기·만들기·종료, 피해 서비스 긴급 계획 트리거) · disaster_rules(반경·거리·분류·도착 고르기, 순수 계산)

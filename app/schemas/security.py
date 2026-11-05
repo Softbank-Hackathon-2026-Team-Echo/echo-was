@@ -7,6 +7,7 @@ from typing import Any, Literal
 from app.enums import (
     AiFindingConfirmation,
     SecurityCheckPhase,
+    SecurityCompareChange,
     SecurityControlId,
     SecurityFindingMode,
     SecurityFindingSource,
@@ -18,6 +19,11 @@ from app.enums import (
 from app.models import Finding
 from app.schemas.migration_plan import UserRefResponse
 from app.schemas.response import ApiModel
+from app.services.security_compare_service import (
+    SecurityCompareRowView,
+    SecurityCompareSummaryView,
+    SecurityCompareView,
+)
 from app.services.security_matrix_service import (
     MatrixCellView,
     MatrixControlView,
@@ -174,6 +180,104 @@ class SecurityMatrixResponse(ApiModel):
             checked_at=view.checked_at,
             rows=[SecurityMatrixRowResponse.from_view(row) for row in view.rows],
         )
+
+
+class SecurityCompareEnvironmentResponse(ApiModel):
+    """비교한 환경 머리. `services` 는 그 비교에 센 서비스(지금 도는 이미지)."""
+
+    environment_id: uuid.UUID
+    environment_name: str
+    environment_kind: str
+    services: list[SecurityMatrixServiceResponse]
+
+    @classmethod
+    def from_view(cls, view: MatrixRowView) -> "SecurityCompareEnvironmentResponse":
+        return cls(
+            environment_id=view.environment_id,
+            environment_name=view.environment_name,
+            environment_kind=view.environment_kind,
+            services=[
+                SecurityMatrixServiceResponse(
+                    service_id=s.service_id, name=s.service_name, image_digest=s.image_digest
+                )
+                for s in view.services
+            ],
+        )
+
+
+class SecurityCompareRowResponse(ApiModel):
+    """칸 하나의 비교. source·target 은 매트릭스 칸 응답 그대로다."""
+
+    # 매트릭스 칸 이름(iam·encryption·auditLog·policy).
+    control: Literal["iam", "encryption", "auditLog", "policy"]
+    source: SecurityCellResponse
+    target: SecurityCellResponse
+    # 도착 칸 gateStatus 가 BLOCKED(필수 + FAIL·UNKNOWN + 유효 예외 없음인 통제가 있음).
+    blocks_migration: bool
+    blocking_control_ids: list[SecurityControlId]
+    change: SecurityCompareChange
+
+    @classmethod
+    def from_view(cls, view: SecurityCompareRowView) -> "SecurityCompareRowResponse":
+        return cls(
+            control=_CELL_KEYS[view.cell],
+            source=SecurityCellResponse.from_view(view.source),
+            target=SecurityCellResponse.from_view(view.target),
+            blocks_migration=view.blocks_migration,
+            blocking_control_ids=list(view.blocking_control_ids),
+            change=view.change,
+        )
+
+
+class SecurityCompareSummaryResponse(ApiModel):
+    blocking: int
+    worse_on_target: int
+    same: int
+    better: int
+
+    @classmethod
+    def from_view(cls, view: SecurityCompareSummaryView) -> "SecurityCompareSummaryResponse":
+        return cls(
+            blocking=view.blocking,
+            worse_on_target=view.worse_on_target,
+            same=view.same,
+            better=view.better,
+        )
+
+
+class SecurityCompareResponse(ApiModel):
+    policy_version: str
+    phase: SecurityCheckPhase
+    checked_at: datetime
+    # 서버 판정이라 늘 false(프론트 시뮬레이션과 구분).
+    simulated: bool
+    service_id: uuid.UUID | None
+    source: SecurityCompareEnvironmentResponse
+    target: SecurityCompareEnvironmentResponse
+    summary: SecurityCompareSummaryResponse
+    rows: list[SecurityCompareRowResponse]
+
+    @classmethod
+    def from_view(cls, view: SecurityCompareView) -> "SecurityCompareResponse":
+        return cls(
+            policy_version=view.policy_version,
+            phase=view.phase,
+            checked_at=view.checked_at,
+            simulated=False,
+            service_id=view.service_id,
+            source=SecurityCompareEnvironmentResponse.from_view(view.source),
+            target=SecurityCompareEnvironmentResponse.from_view(view.target),
+            summary=SecurityCompareSummaryResponse.from_view(view.summary),
+            rows=[SecurityCompareRowResponse.from_view(row) for row in view.rows],
+        )
+
+
+_CELL_KEYS: dict[SecurityMatrixCell, Literal["iam", "encryption", "auditLog", "policy"]] = {
+    SecurityMatrixCell.IAM: "iam",
+    SecurityMatrixCell.ENCRYPTION: "encryption",
+    SecurityMatrixCell.AUDIT_LOG: "auditLog",
+    SecurityMatrixCell.POLICY: "policy",
+}
 
 
 class FindingItemResponse(ApiModel):
