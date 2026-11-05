@@ -842,3 +842,15 @@ class CostSource(StrEnum):
 
     ESTIMATE = "ESTIMATE"
     BILLING = "BILLING"
+
+
+class ServiceMetricsStatus(StrEnum):
+    """서비스 대시보드 지표를 Prometheus 에서 읽었는가(운영 2).
+
+    OK = 읽음(데이터가 없으면 points 가 빔), UNAVAILABLE = 읽지 못함(미응답·인증·형식),
+    NOT_CONFIGURED = Prometheus 주소 설정이 없음(외부 호출 없음).
+    """
+
+    OK = "OK"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_CONFIGURED = "NOT_CONFIGURED"

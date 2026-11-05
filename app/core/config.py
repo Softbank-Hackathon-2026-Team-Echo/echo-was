@@ -126,6 +126,13 @@ class Settings(BaseSettings):
     # 환경 id(또는 환경 종류) → 진입점 환경 이름. 비면 환경 종류(aws·gcp)를 그대로 쓴다.
     entrypoint_environment_map: Annotated[list[str], NoDecode] = Field(default_factory=list)
     entrypoint_request_timeout_seconds: float = Field(default=5.0, gt=0)
+    # 서비스 대시보드 지표(운영 2). 진입점 VM 의 Prometheus(:9090)를 직접 읽는다. 비면 기능을 끈다.
+    # 진입점이 basic auth 를 켜면 비밀번호 참조(env:ECHO_SECRET_...)를 넣는다. 비면 인증 없이.
+    entrypoint_prometheus_url: str | None = None
+    entrypoint_prometheus_basic_auth_user: str = "echo-otel"
+    entrypoint_prometheus_basic_auth_password_ref: str | None = None
+    # 같은 서비스·구간·간격의 지표 응답을 다시 쓰는 시간(초).
+    service_metrics_cache_seconds: int = Field(default=5, ge=1)
 
     # 데이터 확인(인프라 7). postgres 면 출발 환경 PostgreSQL 에서 도착 구독의 복제 지연을 읽는다.
     # 환경 id(또는 종류) → `<host>:<port>/<그 환경의 구독 이름>`. 비밀번호는 비밀 참조만.
@@ -377,6 +384,26 @@ class Settings(BaseSettings):
             parse_secret_ref(value)
         except InvalidSecretRefError:
             raise ValueError("entrypoint_token_ref must be a secret reference") from None
+        return value
+
+    @field_validator("entrypoint_prometheus_url")
+    @classmethod
+    def _strip_entrypoint_prometheus_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().rstrip("/") or None
+
+    @field_validator("entrypoint_prometheus_basic_auth_password_ref")
+    @classmethod
+    def _check_prometheus_password_ref(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError(
+                "entrypoint_prometheus_basic_auth_password_ref must be a secret reference"
+            ) from None
         return value
 
     @model_validator(mode="after")

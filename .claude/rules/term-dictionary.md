@@ -153,6 +153,9 @@
 | 레지던시 요약 | Residency summary | `GET /api/v1/orgs/{orgId}/ai/residency`, `summarize_residency` | 기간 안에 끝난 실행의 기록을 조직 단위로 센 것(외부 전송·민감 등급 판정·정책 위반·최근 실행). 계약은 [docs/api/ai-residency.md](../../docs/api/ai-residency.md) | AI 3 |
 | 비용 항목 종류 | Cost component kind | `CostComponentKind`, 응답 `components[].kind` | 비용 자원 항목의 묶음: `COMPUTE` · `DATABASE` · `NETWORK` · `STORAGE` · `OTHER`. 값은 `app/data/cloud_inventory.toml` 에 있고 DB 칸이 아니다 | 운영 1 |
 | 비용 출처 | Cost source | `CostSource`, 응답 `source` | `ESTIMATE`(자원 목록 × 공개 목록가, 환경·공용 항목) · `BILLING`(클라우드 청구 데이터, 공급자 계정 단위 `billing[]`). 청구 값을 환경 값으로 쓰지 않는다 | 운영 1 |
+| 서비스 대시보드 지표 | Service metrics | `GET /api/v1/orgs/{orgId}/services/{serviceId}/metrics`, `ServiceMetricsService`, 응답 `series[]`·`summary` | 서비스 하나의 환경별 요청 그래프(rps·성공률·p95)와 KPI(성공률·p95·복제 지연·에러 버짓). 출처는 진입점 Prometheus 앱 지표(`namespace`·`cloud_provider` 라벨). 계약은 [docs/api/metrics.md](../../docs/api/metrics.md) | 운영 2 |
+| 지표 상태 | Metrics status | `ServiceMetricsStatus`, 응답 `metricsStatus`·`metricsErrorCode` | `OK`(읽음) · `UNAVAILABLE`(Prometheus 를 못 읽음, 응답은 200 + `series = []` + 요약 null) · `NOT_CONFIGURED`(주소 설정 없음). 실패 코드 `PROMETHEUS_UNREACHABLE`·`PROMETHEUS_UNAUTHORIZED`·`PROMETHEUS_SECRET_MISSING`·`PROMETHEUS_ERROR` | 운영 2 |
+| 에러 버짓 | Error budget | 응답 `summary.errorBudgetLeft`·`sloTarget`, 상수 `SLO_TARGET = 0.999` | SLO 99.9% 기준 남은 몫 `clamp(1 − (1 − 성공률) / 0.001, 0, 1)`. 요청 구간 기준의 간단 계산이다 | 운영 2 |
 
 ---
 
