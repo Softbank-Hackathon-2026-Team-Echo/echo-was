@@ -742,10 +742,18 @@ class AgentRunSeverity(StrEnum):
 
 
 class AgentPatchStatus(StrEnum):
-    """AI 수정안 상태. 러너 값을 믿지 않고 WAS 가 검사 결과로 다시 계산한다."""
+    """AI 수정안 상태. 러너 값을 믿지 않고 WAS 가 계산한다.
+
+    결과 JSON 에는 검사 결과로 다시 계산한 PROPOSED·BLOCKED 만 저장한다. 나머지는 결정 행과 반영
+    실행을 더해 응답 때 계산한다(compute_patch_status).
+    """
 
     PROPOSED = "PROPOSED"
     BLOCKED = "BLOCKED"
+    REJECTED = "REJECTED"
+    APPROVED = "APPROVED"
+    APPLIED = "APPLIED"
+    APPLY_FAILED = "APPLY_FAILED"
 
 
 class AgentPatchBlockReason(StrEnum):

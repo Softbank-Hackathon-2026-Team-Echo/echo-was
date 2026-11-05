@@ -14,6 +14,7 @@ from typing import Any
 from app.core.log_masking import mask_secrets_in_json
 from app.enums import (
     AgentPatchBlockReason,
+    AgentPatchDecision,
     AgentPatchStatus,
     AgentRunOrigin,
     AgentRunStatus,
@@ -22,6 +23,9 @@ from app.enums import (
 
 CHECK_PASSED = "PASS"
 _PASSTHROUGH_KEYS = ("sandbox", "model", "configDiff", "featureGaps")
+_OPEN_APPLY_STATUSES = frozenset(
+    {AgentRunStatus.QUEUED, AgentRunStatus.CLAIMED, AgentRunStatus.RUNNING}
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,31 @@ def patch_block_reason(patch: Mapping[str, Any]) -> AgentPatchBlockReason | None
     if any(check["result"] != CHECK_PASSED for check in checks):
         return AgentPatchBlockReason.CHECK_NOT_PASSED
     return None
+
+
+def patch_origin(patch: Mapping[str, Any]) -> AgentRunOrigin:
+    """저장된 패치의 출처. 이 칸이 생기기 전에 저장한 결과에는 없어 AI 로 본다."""
+    return AgentRunOrigin(patch.get("origin", AgentRunOrigin.AI))
+
+
+def compute_patch_status(
+    stored_status: AgentPatchStatus,
+    decision: AgentPatchDecision | None,
+    apply_status: AgentRunStatus | None,
+) -> AgentPatchStatus:
+    """응답의 패치 상태. 저장하지 않고 검증 상태 + 결정 + 반영 실행 상태로 계산한다.
+
+    거절을 맨 먼저 본다. 승인됐어도 반영 실행이 없거나(스위치 꺼짐) 아직 열려 있으면 APPROVED 다.
+    """
+    if decision == AgentPatchDecision.REJECTED:
+        return AgentPatchStatus.REJECTED
+    if stored_status == AgentPatchStatus.BLOCKED or decision is None:
+        return stored_status
+    if apply_status is None or apply_status in _OPEN_APPLY_STATUSES:
+        return AgentPatchStatus.APPROVED
+    if apply_status == AgentRunStatus.SUCCEEDED:
+        return AgentPatchStatus.APPLIED
+    return AgentPatchStatus.APPLY_FAILED
 
 
 def _with_recalculated_status(patch: Mapping[str, Any]) -> dict[str, Any]:

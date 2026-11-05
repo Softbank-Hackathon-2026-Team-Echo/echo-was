@@ -164,6 +164,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/prechecks/{precheck_id}/logs", V),
     _org("POST", "/prechecks", D, human_only=True),
     _org("POST", "/prechecks/{precheck_id}/cancel", D, human_only=True),
+    _org("POST", "/prechecks/{precheck_id}/patches/{patch_id}/approve", D, human_only=True),
+    _org("POST", "/prechecks/{precheck_id}/patches/{patch_id}/reject", D, human_only=True),
     # --- API 서버 9: 재난(조회·미리보기는 뷰어·에이전트, 만들기·종료는 개발자 이상 사람) ---
     _org("GET", "/disasters/preview", V),
     _org("GET", "/disasters", V),

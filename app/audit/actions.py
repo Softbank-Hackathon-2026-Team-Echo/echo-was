@@ -39,6 +39,8 @@ class AuditAction(StrEnum):
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
     PRECHECK_REQUESTED = "PRECHECK_REQUESTED"
     PRECHECK_CANCELLED = "PRECHECK_CANCELLED"
+    AGENT_PATCH_APPROVED = "AGENT_PATCH_APPROVED"
+    AGENT_PATCH_REJECTED = "AGENT_PATCH_REJECTED"
     DISASTER_DECLARED = "DISASTER_DECLARED"
     DISASTER_ENDED = "DISASTER_ENDED"
     # --- 서버(SYSTEM): 끝 상태 ---
@@ -125,6 +127,12 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ),
     ("POST", f"{_ORG}/prechecks"): AuditAction.PRECHECK_REQUESTED,
     ("POST", f"{_ORG}/prechecks/{{precheck_id}}/cancel"): AuditAction.PRECHECK_CANCELLED,
+    ("POST", f"{_ORG}/prechecks/{{precheck_id}}/patches/{{patch_id}}/approve"): (
+        AuditAction.AGENT_PATCH_APPROVED
+    ),
+    ("POST", f"{_ORG}/prechecks/{{precheck_id}}/patches/{{patch_id}}/reject"): (
+        AuditAction.AGENT_PATCH_REJECTED
+    ),
     ("POST", f"{_ORG}/disasters"): AuditAction.DISASTER_DECLARED,
     ("POST", f"{_ORG}/disasters/{{disaster_id}}/end"): AuditAction.DISASTER_ENDED,
 }

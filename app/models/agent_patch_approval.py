@@ -20,7 +20,7 @@ class AgentPatchApproval(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     """AI 패치 하나에 대한 사람의 결정(계약 v1 §4). 패치마다 한 번, 지우지 않는다.
 
     - 지문 = patch_hash + checks_digest + policy_version. 결정할 때 다시 계산해 같아야 한다.
-    - 승인하면 WAS 가 반영 실행(APPLY_PATCH)을 만들고 apply_run_id 로 잇는다.
+    - 승인하면 스위치(PATCH_APPLY_ENABLED)가 켜져 있을 때만 반영 실행(APPLY_PATCH)을 만들어 잇는다.
     - 개발자 이상의 사람만 결정한다(에이전트 불가). 자기 승인은 조직 스위치를 따른다.
     """
 

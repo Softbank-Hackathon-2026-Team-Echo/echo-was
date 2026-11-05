@@ -6,13 +6,13 @@ CLAIMED·RUNNING·TIMED_OUT·CANCELLED)면 비어 있다.
 """
 
 import uuid
-from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Self
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, field_validator
 
 from app.enums import (
+    AgentPatchDecision,
     AgentPatchStatus,
     AgentRunOrigin,
     AgentRunSeverity,
@@ -22,18 +22,36 @@ from app.enums import (
     LogLevel,
     SecurityResult,
 )
-from app.models import AgentRunEvent
+from app.models import AgentPatchApproval, AgentRun, AgentRunEvent
 from app.schemas.response import ApiModel, ApiRequestModel
-from app.services.precheck_service import PrecheckLogPage, PrecheckView
-from app.services.run_result import CHECK_PASSED
+from app.schemas.runner import PATCH_HASH_PATTERN
+from app.services.precheck_service import PrecheckLogPage, PrecheckPatchView, PrecheckView
+from app.services.run_result import CHECK_PASSED, compute_patch_status, patch_origin
 
 DEFAULT_LOG_PAGE_SIZE = 200
 MAX_LOG_PAGE_SIZE = 500
+PATCH_DECISION_REASON_MAX_LENGTH = 2_000
 
 
 class CreatePrecheckRequest(ApiRequestModel):
     service_id: uuid.UUID
     target_environment_id: uuid.UUID
+
+
+class DecidePrecheckPatchRequest(ApiRequestModel):
+    """승인·거절 본문. patchHash 는 화면이 본 패치의 해시다."""
+
+    patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
+    reason: (
+        Annotated[str, Field(min_length=1, max_length=PATCH_DECISION_REASON_MAX_LENGTH)] | None
+    ) = None
+
+    @field_validator("reason")
+    @classmethod
+    def _check_reason_storable(cls, value: str | None) -> str | None:
+        if value is not None and "\x00" in value:
+            raise ValueError("reason must not contain NUL")
+        return value
 
 
 class PrecheckStepResponse(ApiModel):
@@ -92,7 +110,23 @@ class PrecheckPatchVerificationResponse(ApiModel):
     total: int
 
 
+class PrecheckPatchApprovalResponse(ApiModel):
+    decision: AgentPatchDecision
+    decided_by_user_id: uuid.UUID
+    decided_at: datetime
+    reason: str | None
+
+
+class PrecheckPatchApplyResponse(ApiModel):
+    run_id: uuid.UUID
+    status: AgentRunStatus
+    failure_code: str | None
+    finished_at: datetime | None
+
+
 class PrecheckPatchResponse(ApiModel):
+    """상세의 patches[] 원소이자 승인·거절 응답. 화면은 원소를 그대로 바꿔 끼운다."""
+
     id: str
     patch_hash: str
     files: list[str]
@@ -100,18 +134,55 @@ class PrecheckPatchResponse(ApiModel):
     reason: str
     touches_protected_files: bool
     checks: list[PrecheckPatchCheckResponse]
+    origin: AgentRunOrigin
     status: AgentPatchStatus
     block_reason: str | None = None
     verification: PrecheckPatchVerificationResponse
+    approval: PrecheckPatchApprovalResponse | None = None
+    apply: PrecheckPatchApplyResponse | None = None
 
     @classmethod
-    def from_stored(cls, stored: Mapping[str, Any]) -> Self:
+    def from_view(cls, view: PrecheckPatchView) -> Self:
+        stored = view.stored
+        approval = view.approval
+        apply_run = view.apply_run
         checks = stored["checks"]
         verification = PrecheckPatchVerificationResponse(
             passed=sum(1 for check in checks if check["result"] == CHECK_PASSED),
             total=len(checks),
         )
-        return cls.model_validate({**stored, "verification": verification})
+        return cls.model_validate(
+            {
+                **stored,
+                "origin": patch_origin(stored),
+                "status": compute_patch_status(
+                    AgentPatchStatus(stored["status"]),
+                    AgentPatchDecision(approval.decision) if approval is not None else None,
+                    AgentRunStatus(apply_run.status) if apply_run is not None else None,
+                ),
+                "verification": verification,
+                "approval": _approval_response(approval) if approval is not None else None,
+                "apply": _apply_response(apply_run) if apply_run is not None else None,
+            }
+        )
+
+
+def _approval_response(approval: AgentPatchApproval) -> PrecheckPatchApprovalResponse:
+    return PrecheckPatchApprovalResponse(
+        decision=AgentPatchDecision(approval.decision),
+        decided_by_user_id=approval.decided_by_user_id,
+        decided_at=approval.decided_at,
+        reason=approval.reason,
+    )
+
+
+def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
+    return PrecheckPatchApplyResponse(
+        run_id=apply_run.id,
+        status=AgentRunStatus(apply_run.status),
+        failure_code=apply_run.failure_code,
+        finished_at=apply_run.finished_at,
+    )
 
 
 class PrecheckBlockedAttemptResponse(ApiModel):
@@ -194,7 +265,10 @@ class PrecheckDetailResponse(ApiModel):
             findings=[
                 PrecheckFindingResponse.model_validate(item) for item in result.get("findings", [])
             ],
-            patches=[PrecheckPatchResponse.from_stored(item) for item in result.get("patches", [])],
+            patches=[
+                PrecheckPatchResponse.from_view(view.decisions.patch_view(item))
+                for item in result.get("patches", [])
+            ],
             blocked_attempts=[
                 PrecheckBlockedAttemptResponse.model_validate(item)
                 for item in result.get("blockedAttempts", [])
