@@ -6,6 +6,9 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · processing 컬럼 추가
+- 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · processing 컬럼 추가
+- 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · +5 −0
 - 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가
 - 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가
 - 2026-11-05T00:51Z · app/models/migration_plan.py (Edit) · disaster_id 컬럼 추가

@@ -14,6 +14,7 @@ from pydantic import (
     AwareDatetime,
     Field,
     JsonValue,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -21,7 +22,9 @@ from pydantic import (
 
 from app.core.exceptions import ErrorField, ResultInvalidError
 from app.enums import (
+    AgentRunDataClass,
     AgentRunKind,
+    AgentRunModelProvider,
     AgentRunOrigin,
     AgentRunSeverity,
     AgentRunStatus,
@@ -49,6 +52,12 @@ MAX_PROMPT_VERSION_LENGTH = 32
 FAILURE_CODE_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
 PATCH_HASH_PATTERN = "^sha256:[0-9a-f]{64}$"
 CHECK_RESULT_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
+PROCESSING_LOCATION_PATTERN = "^[a-z][a-z0-9-]{0,15}/[a-z0-9-]{1,40}$"
+PROCESSING_MODEL_PATTERN = "^[A-Za-z0-9._:/@-]{1,64}$"
+PROCESSING_MODEL_REGION_PATTERN = "^[a-z0-9-]{1,40}$"
+MAX_PROCESSING_DATA_CLASSES = 5
+# 아주 큰 정수는 JSON 으로 다시 쓸 때 Python 의 자릿수 제한에 걸린다(422 대신 500 이 된다).
+MAX_EXTERNAL_TRANSFER_BYTES = 2**63 - 1
 BODY_TOO_LARGE_REASON = "BODY_TOO_LARGE"
 NUL_CHARACTER_REASON = "NUL_CHARACTER"
 _BODY_FIELD = "body"
@@ -307,6 +316,43 @@ class RunBlockedAttemptRequest(ApiRequestModel):
     reason: Text
 
 
+class RunProcessingRequest(ApiRequestModel):
+    """어디서 처리했고 무엇이 밖으로 나갔나(러너 신고). model 칸과 서로 맞추지 않는다.
+
+    모델이 거절·실패하면 결과의 model 은 null 이어도 자료는 이미 나갔을 수 있다.
+    """
+
+    location: Annotated[str, Field(pattern=PROCESSING_LOCATION_PATTERN)]
+    sandbox: StrictBool
+    model_provider: AgentRunModelProvider
+    model: Annotated[str, Field(pattern=PROCESSING_MODEL_PATTERN)] | None = None
+    model_region: Annotated[str, Field(pattern=PROCESSING_MODEL_REGION_PATTERN)] | None = None
+    data_classes: Annotated[list[AgentRunDataClass], Field(max_length=MAX_PROCESSING_DATA_CLASSES)]
+    external_transfer: StrictBool
+    external_transfer_bytes: (
+        Annotated[int, Field(ge=0, le=MAX_EXTERNAL_TRANSFER_BYTES, strict=True)] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _check_provider_and_transfer(self) -> Self:
+        if len(self.data_classes) != len(set(self.data_classes)):
+            raise ValueError("dataClasses must be unique")
+        if self.model_provider is AgentRunModelProvider.NONE:
+            if self.model is not None:
+                raise ValueError("model must be null when modelProvider is NONE")
+            if self.model_region is not None:
+                raise ValueError("modelRegion must be null when modelProvider is NONE")
+            if self.data_classes:
+                raise ValueError("dataClasses must be empty when modelProvider is NONE")
+            if self.external_transfer:
+                raise ValueError("externalTransfer must be false when modelProvider is NONE")
+        elif self.model is None:
+            raise ValueError("model is required unless modelProvider is NONE")
+        if not self.external_transfer and self.external_transfer_bytes:
+            raise ValueError("externalTransferBytes must be null or 0 without externalTransfer")
+        return self
+
+
 class RunResultRequest(ApiRequestModel):
     """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다."""
 
@@ -315,6 +361,7 @@ class RunResultRequest(ApiRequestModel):
     simulated: bool
     sandbox: RunSandboxRequest | None = None
     model: RunModelRequest | None = None
+    processing: RunProcessingRequest | None = None
     config_diff: Annotated[list[RunConfigDiffRequest], Field(max_length=MAX_CONFIG_DIFFS)] = []
     feature_gaps: Annotated[list[RunFeatureGapRequest], Field(max_length=MAX_FEATURE_GAPS)] = []
     findings: Annotated[list[RunFindingRequest], Field(max_length=MAX_FINDINGS)] = []

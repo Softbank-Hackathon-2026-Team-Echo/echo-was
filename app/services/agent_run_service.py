@@ -205,6 +205,7 @@ class AgentRunService:
                     "model_id": normalized.model_id,
                     "prompt_version": normalized.prompt_version,
                     "simulated": normalized.simulated,
+                    "processing": normalized.processing,
                 },
             )
             if is_finished:
@@ -246,6 +247,8 @@ class AgentRunService:
         }
         if normalized.failure_code is not None:
             details["failureCode"] = normalized.failure_code
+        if normalized.processing is not None:
+            details["processing"] = normalized.processing
         self._audit.record(
             organization_id=run.organization_id,
             actor=AuditActor.system(AuditComponent.AI_RUNNER),

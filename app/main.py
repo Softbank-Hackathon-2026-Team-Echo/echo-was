@@ -20,6 +20,7 @@ from app.core.middleware import RequestContextMiddleware
 from app.dependencies import app_secret_store_holder, cluster_reader_holder, executor_set_holder
 from app.routers import (
     agent_token_router,
+    ai_residency_router,
     audit_log_router,
     auth_router,
     deploy_request_router,
@@ -87,6 +88,7 @@ app.include_router(audit_log_router.router)
 app.include_router(security_router.router)
 app.include_router(security_exception_router.router)
 app.include_router(precheck_router.router)
+app.include_router(ai_residency_router.router)
 app.include_router(runner_router.router)
 
 

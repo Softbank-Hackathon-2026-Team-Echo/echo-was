@@ -1,13 +1,19 @@
 """러너 결과 검사·패치 상태 재계산 단위 시험(SPEC api-runner-prechecks AC-9, AC-8 형식). DB 없음."""
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from app.core.exceptions import ResultInvalidError
 from app.core.log_masking import MASK
-from app.enums import AgentPatchBlockReason, AgentPatchStatus, AgentRunStatus
+from app.enums import (
+    AgentPatchBlockReason,
+    AgentPatchStatus,
+    AgentRunDataClass,
+    AgentRunStatus,
+)
 from app.schemas.runner import (
     MAX_BODY_BYTES,
     MAX_DIFF_BYTES,
@@ -92,6 +98,136 @@ def _rejected(body: dict[str, Any]) -> list[tuple[str, str]]:
     with pytest.raises(ResultInvalidError) as caught:
         _parse(body)
     return [(item.field, item.reason) for item in caught.value.details or []]
+
+
+def _none_processing(**changes: Any) -> dict[str, Any]:
+    return {
+        "location": "gcp/asia-northeast3",
+        "sandbox": True,
+        "modelProvider": "NONE",
+        "model": None,
+        "modelRegion": None,
+        "dataClasses": [],
+        "externalTransfer": False,
+        "externalTransferBytes": None,
+    } | changes
+
+
+def _model_processing(**changes: Any) -> dict[str, Any]:
+    return {
+        "location": "aws/ap-northeast-1",
+        "sandbox": False,
+        "modelProvider": "AWS_BEDROCK",
+        "model": "anthropic.claude:1/v@2",
+        "modelRegion": "ap-northeast-1",
+        "dataClasses": ["CONFIG"],
+        "externalTransfer": True,
+        "externalTransferBytes": 0,
+    } | changes
+
+
+def test_processing_defaults_to_none_when_omitted() -> None:
+    assert _normalize(_result()).processing is None
+    assert _normalize(_result(processing=None)).processing is None
+
+
+@pytest.mark.parametrize(
+    "processing",
+    [
+        _none_processing(),
+        _none_processing(location="onprem/seoul-dc1", externalTransferBytes=0),
+        _model_processing(),
+        _model_processing(modelProvider="LOCAL", externalTransfer=False, externalTransferBytes=0),
+        _model_processing(modelRegion=None, externalTransferBytes=None),
+        _model_processing(location="a" * 16 + "/" + "b" * 40, model="m" * 64, modelRegion="r" * 40),
+    ],
+    ids=["none", "onprem", "bedrock", "local", "unknown-region", "at-limits"],
+)
+def test_processing_accepts_valid_shapes_as_is(processing: dict[str, Any]) -> None:
+    assert _normalize(_result(processing=processing)).processing == processing
+
+
+def test_processing_sorts_data_classes_in_enum_order() -> None:
+    every_class = ["SECRETS", "LOGS", "SOURCE_CODE", "FINDINGS", "CONFIG"]
+
+    normalized = _normalize(_result(processing=_model_processing(dataClasses=every_class)))
+
+    assert normalized.processing is not None
+    assert normalized.processing["dataClasses"] == list(AgentRunDataClass)
+    assert "processing" not in normalized.result
+
+
+def test_processing_masks_secret_shaped_model_name() -> None:
+    secret = "sk-" + "a" * 24
+
+    normalized = _normalize(_result(processing=_model_processing(model=secret)))
+
+    assert normalized.processing is not None
+    assert normalized.processing["model"] == MASK
+
+
+@pytest.mark.parametrize(
+    ("build", "changes"),
+    [
+        (_none_processing, {"unknown": 1}),
+        (_none_processing, {"externalTransfer": "false"}),
+        (_none_processing, {"sandbox": 1}),
+        (_none_processing, {"modelProvider": "GEMINI"}),
+        (_none_processing, {"model": "m"}),
+        (_none_processing, {"modelRegion": "ap-northeast-1"}),
+        (_none_processing, {"dataClasses": ["CONFIG"]}),
+        (_none_processing, {"externalTransfer": True}),
+        (_none_processing, {"externalTransferBytes": 1}),
+        (_none_processing, {"location": ""}),
+        (_none_processing, {"location": "gcp"}),
+        (_none_processing, {"location": "GCP/asia-northeast3"}),
+        (_none_processing, {"location": "gcp/asia_northeast3"}),
+        (_none_processing, {"location": "1gcp/asia-northeast3"}),
+        (_none_processing, {"location": "gcp/asia-northeast3\n"}),
+        (_none_processing, {"location": "a" * 17 + "/r"}),
+        (_none_processing, {"location": "gcp/" + "r" * 41}),
+        (_model_processing, {"model": None}),
+        (_model_processing, {"model": ""}),
+        (_model_processing, {"model": "has space"}),
+        (_model_processing, {"model": "m" * 65}),
+        (_model_processing, {"modelRegion": "AP-NORTHEAST-1"}),
+        (_model_processing, {"modelRegion": ""}),
+        (_model_processing, {"modelRegion": "r" * 41}),
+        (_model_processing, {"dataClasses": ["CONFIG", "CONFIG"]}),
+        (_model_processing, {"dataClasses": ["PASSWORDS"]}),
+        (_model_processing, {"dataClasses": ["CONFIG"] * 6}),
+        (_model_processing, {"externalTransferBytes": -1}),
+        (_model_processing, {"externalTransferBytes": 1.5}),
+        (_model_processing, {"externalTransferBytes": "1"}),
+        (_model_processing, {"externalTransferBytes": True}),
+        (_model_processing, {"externalTransferBytes": 2**63}),
+        (_model_processing, {"externalTransfer": False, "externalTransferBytes": 5}),
+    ],
+)
+def test_processing_rejects_rule_violations(
+    build: Callable[..., dict[str, Any]], changes: dict[str, Any]
+) -> None:
+    fields = _rejected(_result(processing=build(**changes)))
+
+    assert fields
+    assert all(field.startswith("processing") for field, _ in fields)
+
+
+@pytest.mark.parametrize(
+    "missing", ["location", "sandbox", "modelProvider", "dataClasses", "externalTransfer"]
+)
+def test_processing_requires_field(missing: str) -> None:
+    body = _none_processing()
+    del body[missing]
+
+    assert _rejected(_result(processing=body))
+
+
+def test_processing_rejects_snake_case_names() -> None:
+    body = _none_processing()
+    body["model_provider"] = body.pop("modelProvider")
+
+    assert _rejected(_result(processing=body))
 
 
 def test_result_validation_accepts_contract_shape_and_null_model() -> None:

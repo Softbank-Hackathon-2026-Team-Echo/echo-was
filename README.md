@@ -404,7 +404,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 - 업무 API 는 로그인·조직·환경·서비스·배포 요청 API 다. **실제 GitHub 로그인은 GitHub App 설정 뒤에만 된다**(시험은 가짜 GitHub 를 의존성 교체로 쓴다). API 2·3 경로는 모두 `/api/v1/orgs/{orgId}` 아래로 옮겼다(깨지는 변경, 프론트 미연결).
 - **알려진 제한 — GitHub App 설치가 조직에 묶이지 않는다.** App 이 설치된 비공개 저장소는 다른 Echo 조직도 서비스로 등록할 수 있다(해커톤 데모 범위에서 감수).
 - **이전 계획의 트래픽·지표·복제 확인은 가짜다**(`simulated: true`). 비율 칸·로그·판정 흐름은 실제이고, 실제 Envoy(인프라 6, 시연용은 늦으면 지민)·OpenTelemetry(인프라 9)·복제(인프라 7)가 붙으면 실행기만 바꾼다. 실제 연결 확인 전에는 이슈 #8 을 `In Progress` 로 둔다. 판정 최소 표본 수는 없다(실제 지표 연결 때 다시 본다). 예비·주력 동시 배포, 단계별 사람 승인, 비율 목록 변경은 하지 않는다.
-- **AI 사전 점검 API·러너 계약은 있지만 러너 쪽은 별도다.** 러너 스크립트는 echo-ai-agent 에 있고, 러너 토큰은 배포 뒤 발급한다. 패치 승인·거절·`APPLY_PATCH`, AI 결과의 `findings` 표 저장, `blockedAttempts` 와 감사 줄 맞추기, 계획 만들 때 최신 점검 필수화, 주기 만료(일꾼 루프)는 2차다. 실행 시간 초과는 누가 부를 때 저장한다([docs/agent-runner.md](docs/agent-runner.md)).
+- **AI 사전 점검 API·러너 계약은 있지만 러너 쪽은 별도다.** 러너 스크립트는 echo-ai-agent 에 있고, 러너 토큰은 배포 뒤 발급한다. 패치 승인·거절·`APPLY_PATCH`, AI 결과의 `findings` 표 저장, `blockedAttempts` 와 감사 줄 맞추기, 계획 만들 때 최신 점검 필수화, 주기 만료(일꾼 루프)는 2차다. 실행 시간 초과는 누가 부를 때 저장한다([docs/agent-runner.md](docs/agent-runner.md)). 데이터 레지던시 기록은 러너 신고 그대로이고(WAS 가 재지 않는다) 정책은 서버 상수뿐이다. 조직별 정책 저장과 게이트 연동은 후속이다([docs/api/ai-residency.md](docs/api/ai-residency.md)).
 - **감사 로그의 범위**: 실시간 알림·보관 기간·내보내기·외부 수집기는 없다. 배포 요청 표·이력 응답에는 요청자 칸이 없고, 누가 눌렀는지는 감사 로그로 읽는다(`targetId`). 롤아웃 수 분 동안 옛 파드가 처리한 작업은 성공 줄이 없을 수 있다. 운영 스키마는 forward-only 다([docs/api/audit-logs.md](docs/api/audit-logs.md)).
 - **빌드·실행 로그는 기본(가짜 모드)에서 가짜 실행기가 만든 줄이다**(`simulated: true`). `EXECUTOR_MODE=real` 이면 Actions 잡 로그·앱 파드 로그를 즉석으로 읽는다(실행기 묶음은 API 프로세스당 하나). 가짜로 만든 기록을 실제 모드에서 읽으면 빈 페이지다. 로그 실시간 스트리밍·검색·보존 기간 정책은 없다.
 - 조직 삭제 API·조직 안 프로젝트(2단)는 없다.
@@ -431,6 +431,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | [docs/api/deploy-requests.md](docs/api/deploy-requests.md) | 원터치 배포·이력·되돌리기·로그 API 계약(접수 규칙·진행 단계·실패 코드·로그 줄) |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획 API 계약(만들기 거절 순서·승인·지문·단계 실행·롤백·중단·로그·`simulate`) |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 API(사람 쪽) · 러너 계약(토큰·임대·이벤트·`RunResult`·감사·발급 명령) |
+| [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약 API(계산 표·민감 등급 판정·정책 위반·기본 정책) |
 | [docs/executors.md](docs/executors.md) | 실행기 계약(멱등 키·호출 순서·실패 코드·로그 읽기·마스킹·가짜 구현) |
 | [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md) | AI 도구용 작업 규칙 |
 | [.claude/rules/](.claude/rules/) | 용어 사전·DB 스키마(DDL)·마이그레이션·백엔드·Git 규칙 |

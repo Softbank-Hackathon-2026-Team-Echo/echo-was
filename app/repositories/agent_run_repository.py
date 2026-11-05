@@ -4,10 +4,11 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.enums import AgentRunKind, AgentRunStatus
 from app.models import AgentRun
-from app.models.agent_run import CLAIMED_STATUSES, OPEN_STATUSES
+from app.models.agent_run import CLAIMED_STATUSES, FINISHED_STATUSES, OPEN_STATUSES
 from app.repositories.conditional_update import update_where
 
 
@@ -73,6 +74,34 @@ class AgentRunRepository:
             )
             .execution_options(populate_existing=True)
         )
+
+    async def search_finished_for_residency(
+        self, organization_id: uuid.UUID, from_at: datetime, to_at: datetime, limit: int
+    ) -> list[AgentRun]:
+        """그 조직에서 [from_at, to_at) 안에 끝난 실행(최신순). 요약에 쓰는 칸만 읽는다."""
+        statement = (
+            select(AgentRun)
+            .options(
+                load_only(
+                    AgentRun.service_id,
+                    AgentRun.kind,
+                    AgentRun.status,
+                    AgentRun.finished_at,
+                    AgentRun.simulated,
+                    AgentRun.model_id,
+                    AgentRun.processing,
+                )
+            )
+            .where(
+                AgentRun.organization_id == organization_id,
+                AgentRun.status.in_(FINISHED_STATUSES),
+                AgentRun.finished_at >= from_at,
+                AgentRun.finished_at < to_at,
+            )
+            .order_by(AgentRun.finished_at.desc(), AgentRun.id.desc())
+            .limit(limit)
+        )
+        return list((await self._session.scalars(statement)).all())
 
     async def find_id_by_token_hash(self, token_hash: str) -> uuid.UUID | None:
         """토큰 해시의 실행 id. 끝난 실행도 찾는다(상태로 409 를 가른다)."""

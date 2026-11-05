@@ -418,8 +418,10 @@ erDiagram
 | `failure_code` | varchar(32) | Y | `FAILED`·`TIMED_OUT` 일 때만 | 실패 이유 |
 | `result` | jsonb | Y | `SUCCEEDED`·`FAILED` 일 때만, 객체 | 러너 결과(WAS 가 스키마·크기·AI PASS 금지를 검증한 뒤) |
 | `model_id`·`prompt_version`·`simulated` | | | | 쓴 모델·프롬프트 버전·가짜 여부 |
+| `processing` | jsonb | Y | `SUCCEEDED`·`FAILED` 일 때만, 객체(`ck_agent_runs_processing_only_when_reported`) | 러너가 끝 보고에 밝힌 데이터 레지던시 기록(처리 위치·샌드박스·모델 제공자·모델·리전·넘긴 자료 등급·외부 전송·바이트, AI 3). 검증한 값 그대로(camelCase, `dataClasses` 정렬). NULL 은 "기록 없음"이다. 인덱스 없음 |
 
 - 같은 서비스에 열린 실행(`QUEUED`·`CLAIMED`·`RUNNING`)은 하나(`uq_agent_runs_service_id_open`). 가져가기는 `QUEUED` 를 오래된 순으로(`ix_agent_runs_queued_created_at`).
+- `processing` 행 예: `{"location": "gcp/asia-northeast3", "sandbox": true, "modelProvider": "ANTHROPIC", "model": "claude-opus-5-5", "modelRegion": null, "dataClasses": ["CONFIG", "FINDINGS"], "externalTransfer": true, "externalTransferBytes": 18432}`. 칸 규칙은 [docs/agent-runner.md](agent-runner.md#레지던시-기록-processing), 조직 요약은 [docs/api/ai-residency.md](api/ai-residency.md). `model_id` 와 맞추지 않는다(모델이 거절·실패하면 `model_id` 는 NULL 이어도 자료는 나갔을 수 있다).
 
 ### `agent_run_events` — AI 실행 이벤트
 

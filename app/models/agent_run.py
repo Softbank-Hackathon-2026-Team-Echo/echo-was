@@ -17,7 +17,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.enums import AgentRunKind, AgentRunStatus
-from app.models.base import Base, TimestampMixin, UuidPrimaryKeyMixin
+from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
+    Base,
+    TimestampMixin,
+    UuidPrimaryKeyMixin,
+)
 
 
 def _values(enum: type[StrEnum] | tuple[StrEnum, ...]) -> str:
@@ -68,6 +73,11 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "result IS NULL OR (status IN ('SUCCEEDED', 'FAILED') "
             "AND jsonb_typeof(result) = 'object')",
             name="result_only_when_reported",
+        ),
+        CheckConstraint(
+            "processing IS NULL OR (status IN ('SUCCEEDED', 'FAILED') "
+            "AND jsonb_typeof(processing) = 'object')",
+            name="processing_only_when_reported",
         ),
         CheckConstraint(
             f"kind <> '{AgentRunKind.PRECHECK.value}' OR target_environment_id IS NOT NULL",
@@ -154,4 +164,8 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     simulated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # 러너가 끝 보고에 밝힌 레지던시 기록(값을 다시 계산하지 않는다). 없으면 "기록 없음"이다.
+    processing: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
     )

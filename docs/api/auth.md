@@ -97,6 +97,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `GET /security/matrix` · `GET /security/findings` (보안 매트릭스·증거, 보안·거버넌스 4) | 뷰어 | 읽기 가능 |
 | `GET /security/exceptions` · `GET /security/exceptions/{id}` (기한부 예외, 보안 3) | 뷰어 | 읽기 가능 |
 | `GET /prechecks/{id}` · `GET /prechecks/{id}/logs` (AI 사전 점검) | 뷰어 | 읽기 가능 |
+| `GET /ai/residency` (AI 데이터 레지던시 요약, AI 3) | 뷰어 | 읽기 가능 |
 | `GET /members` | 뷰어(사람만) | 403 |
 | `POST /environments` · `PATCH /environments/{id}` · `POST /environments/{id}/connection-check` | 개발자 | 403 |
 | `POST /services` · `PATCH /services/{id}` · `POST /services/{id}/deploy-requests` | 개발자 | 403 |

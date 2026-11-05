@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from httpx import Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.auth.tokens import hash_token
 from app.enums import ActorType, AgentRunKind, AgentRunStatus, AuditResult, OrganizationRole
@@ -32,6 +32,28 @@ from tests.integration.runner_support import (
     run_result,
     run_row,
 )
+
+NONE_PROCESSING: dict[str, Any] = {
+    "location": "gcp/asia-northeast3",
+    "sandbox": True,
+    "modelProvider": "NONE",
+    "model": None,
+    "modelRegion": None,
+    "dataClasses": [],
+    "externalTransfer": False,
+    "externalTransferBytes": None,
+}
+ANTHROPIC_PROCESSING: dict[str, Any] = {
+    "location": "gcp/asia-northeast3",
+    "sandbox": True,
+    "modelProvider": "ANTHROPIC",
+    "model": "claude-opus-5-5",
+    "modelRegion": None,
+    "dataClasses": ["CONFIG", "FINDINGS"],
+    "externalTransfer": True,
+    "externalTransferBytes": 18432,
+}
+_UNSORTED_CLASSES: dict[str, Any] = {"dataClasses": ["FINDINGS", "CONFIG"]}
 
 
 @pytest.fixture
@@ -756,6 +778,136 @@ async def test_runner_failed_result_audit_line_has_failure_code_and_failed_resul
         "simulated": False,
         "aiReviewed": True,
     }
+
+
+async def test_runner_result_audit_line_carries_processing_only_when_reported(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    claimed = await _claim(migration, runner)
+
+    response = await claimed.post(
+        "result", run_result(migration, processing=ANTHROPIC_PROCESSING | _UNSORTED_CLASSES)
+    )
+
+    assert response.status_code == 200, response.text
+    finish_line = (await run_audit_rows(migration, claimed.run_id))[-1]
+    assert finish_line.details == {
+        "status": "SUCCEEDED",
+        "simulated": False,
+        "aiReviewed": False,
+        "processing": ANTHROPIC_PROCESSING,
+    }
+
+
+# --- 레지던시 기록(AI 3 AC-1·2) ---
+
+
+async def _processing_is_sql_null(migration: Migration, run_id: str) -> bool | None:
+    async with migration.harness.session_factory() as session:
+        return await session.scalar(
+            text("SELECT processing IS NULL FROM agent_runs WHERE id = :id"), {"id": run_id}
+        )
+
+
+async def test_runner_result_stores_processing_sorted_and_keeps_it_out_of_result(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    claimed = await _claim(migration, runner)
+
+    response = await claimed.post(
+        "result", run_result(migration, processing=ANTHROPIC_PROCESSING | _UNSORTED_CLASSES)
+    )
+
+    assert response.status_code == 200, response.text
+    row = await run_row(migration, claimed.run_id)
+    assert row.status == AgentRunStatus.SUCCEEDED
+    assert row.processing == ANTHROPIC_PROCESSING
+    assert row.result is not None and "processing" not in row.result
+
+
+async def test_runner_result_fills_omitted_optional_processing_fields_with_null(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    claimed = await _claim(migration, runner)
+    body = {
+        "location": "gcp/asia-northeast3",
+        "sandbox": False,
+        "modelProvider": "NONE",
+        "dataClasses": [],
+        "externalTransfer": False,
+    }
+
+    response = await claimed.post("result", run_result(migration, processing=body))
+
+    assert response.status_code == 200, response.text
+    row = await run_row(migration, claimed.run_id)
+    assert row.processing == NONE_PROCESSING | {"sandbox": False}
+
+
+async def test_runner_failed_result_accepts_external_transfer_with_null_model(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    claimed = await _claim(migration, runner)
+
+    response = await claimed.post(
+        "result",
+        run_result(
+            migration, status="FAILED", failureCode="MODEL_ERROR", processing=ANTHROPIC_PROCESSING
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    row = await run_row(migration, claimed.run_id)
+    assert row.status == AgentRunStatus.FAILED
+    assert row.model_id is None
+    assert row.processing == ANTHROPIC_PROCESSING
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{}, {"processing": None}],
+    ids=["omitted", "null"],
+)
+async def test_runner_result_without_processing_stores_sql_null(
+    migration: Migration, runner: RunnerFixture, changes: dict[str, Any]
+) -> None:
+    claimed = await _claim(migration, runner)
+
+    response = await claimed.post("result", run_result(migration, **changes))
+
+    assert response.status_code == 200, response.text
+    assert await _processing_is_sql_null(migration, claimed.run_id) is True
+
+
+async def test_runner_result_rejects_each_processing_rule_and_keeps_run_open(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    claimed = await _claim(migration, runner)
+    violations = {
+        "unknown field": NONE_PROCESSING | {"extra": 1},
+        "NONE with model": NONE_PROCESSING | {"model": "m"},
+        "provider without model": ANTHROPIC_PROCESSING | {"model": None},
+        "NONE with external transfer": NONE_PROCESSING | {"externalTransfer": True},
+        "NONE with data classes": NONE_PROCESSING | {"dataClasses": ["CONFIG"]},
+        "duplicate data classes": ANTHROPIC_PROCESSING | {"dataClasses": ["CONFIG", "CONFIG"]},
+        "location format": NONE_PROCESSING | {"location": "SECRET-LOCATION"},
+        "bytes without transfer": NONE_PROCESSING | {"externalTransferBytes": 1},
+        "negative bytes": ANTHROPIC_PROCESSING | {"externalTransferBytes": -1},
+    }
+
+    for rule, processing in violations.items():
+        response = await claimed.post("result", run_result(migration, processing=processing))
+
+        assert _error(response) == (422, "RESULT_INVALID"), rule
+        assert response.json()["details"], rule
+        assert "SECRET-LOCATION" not in response.text
+    row = await run_row(migration, claimed.run_id)
+    assert row.status == AgentRunStatus.CLAIMED
+    assert row.result is None
+    assert await _processing_is_sql_null(migration, claimed.run_id) is True
+    assert [r.action for r in await run_audit_rows(migration, claimed.run_id)][-1] == (
+        "AGENT_RUN_CLAIMED"
+    )
 
 
 async def test_runner_timeout_audit_line_is_system_ai_runner_once(

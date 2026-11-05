@@ -1,6 +1,6 @@
 # Echo Control API (echo-was)
 
-Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 재난 버튼 → 피해 서비스 긴급 이전 계획 자동 생성 API, 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기), AI 사전 점검 API + 러너 계약(만들기·가져가기·이벤트·결과, C-AI-1 증거)까지 있다.
+Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**다. AWS·GCP·온프레 클러스터를 환경으로 등록하고, 서비스를 여러 환경에 배포·이전하며, 그 상태를 한곳에서 보여 준다. 지금은 골격·공통 모델(환경·서비스·배포), 환경 API(등록·조회·수정·삭제·접속 확인, 가짜 어댑터), 서비스 API와 원터치 배포 API(접수 + 일꾼, 기본 가짜 실행기 + 실제 실행기: GitHub Actions 빌드·쿠버네티스 직접 반영), GitHub 로그인 + 조직·역할 권한(세션 쿠키·에이전트 토큰·거부 기록), 배포 이력·되돌리기·로그 API(배포 작업 로그는 DB, 빌드·실행 로그는 가짜 실행기), 이전 계획 생성·승인·실행 API(트래픽·지표·복제 확인은 가짜 실행기), 재난 버튼 → 피해 서비스 긴급 이전 계획 자동 생성 API, 감사 로그 저장·조회 API(쓰기·끝 상태·거부·에이전트 읽기), AI 사전 점검 API + 러너 계약(만들기·가져가기·이벤트·결과, C-AI-1 증거), AI 실행의 데이터 레지던시 기록·조직 요약 API까지 있다.
 
 - **스택**: Python 3.13+, FastAPI, Pydantic v2, SQLAlchemy 2.0(async), PostgreSQL(asyncpg), Alembic, uv
 - **배경·환경변수·실행·세팅**: [README.md](README.md) 참조 (여기서 중복하지 않는다)
@@ -35,6 +35,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
+| [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약(계산 표·민감 등급 판정·정책 위반·기본 정책)을 바꾸거나 쓸 때. 러너 칸 규칙은 [docs/agent-runner.md](docs/agent-runner.md) |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
 ---
@@ -44,7 +45,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 ```text
 app/
 ├─ main.py            # API 진입점 (FastAPI). /healthz, /readyz, 라우터 등록, 모듈 로드 때 discover()
-├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·disaster·audit_log·security·security_exception·precheck 라우터
+├─ routers/           # auth·organization·invitation·agent_token + environment·environment_kind·service·service_variable·deploy_request·migration_plan·disaster·audit_log·security·security_exception·precheck·ai_residency 라우터
 │                     #   (/api/v1, 조직 리소스는 /api/v1/orgs/{org_id} 아래. 라우트마다 검사기 하나) + runner 라우터(/api/v1/runner/runs, 러너·실행 토큰)
 ├─ audit/             # 감사 로그: actions(행동 이름표·쓰기 경로 표·러너 경로 표) · recorder(AuditRecorder) · lifecycle(배포·이전 대상 값·끝 줄) · context(요청 값 contextvar)
 ├─ auth/              # guards(require_login·require_human·require_org_role) · runner_guards(require_runner·require_run_token) · audit(거부·에이전트 읽기 감사 줄) · tokens · cookies · actors
@@ -67,6 +68,7 @@ app/
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1 확인, 기본 꺼짐, 보안 5)
 │                     #   PrecheckService(AI 사전 점검 만들기·조회·이벤트·취소·입력 사본) · AgentRunService(러너: 가져가기·하트비트·이벤트·결과, 부를 때 만료)
 │                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)
+│                     #   ai_residency(레지던시 요약·판정·위반, 순수 계산) · AiResidencyService(조직 요약 조회)
 ├─ repositories/      # Environment·Service·ServiceEnvironment·DeployRequest·DeployRequestLog·Build·Deployment·Job Repository (조건부 UPDATE)
 │                     #   User·Organization·OrganizationMember·Invitation·UserSession·AgentToken·AuditLog Repository
 │                     #   MigrationPlan·MigrationPlanLog Repository · Disaster Repository · Finding Repository(보안 증거, 조직 조건 필수)
@@ -202,6 +204,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **입력 사본·이벤트·결과는 저장 전에 가린다**(`mask_secrets_in_json`, 문자열마다. 직렬화 글자 전체에 걸면 잘린 개인 키 블록이 JSON 구조까지 지운다). 입력 사본에 `secretRef`·변수 값을 넣지 않는다.
 - 이벤트·결과 본문은 FastAPI 본문 인자로 받지 않는다(`parse_runner_payload`). 검증 실패는 422 `RESULT_INVALID` 다. AI `findings` 는 `findings` 표에 넣지 않는다(2차).
 - 러너 토큰 발급 명령(`app.scripts.issue_runner_token`)은 시험 DB 밖에서 함부로 돌리지 않는다. 운영 실행은 README "AI 러너 토큰"을 따른다.
+- **레지던시 기록(`agent_runs.processing`)은 러너 신고 그대로다**(AI 3). 다시 계산하지 않고, `model`·`model_id` 와 맞추지 않는다(거절·실패면 모델이 null 이어도 자료는 나갔다). 기록이 없으면 지어내지 않고 "기록 없음"이며, 그런 실행이 있으면 민감 등급 판정을 `ZERO` 로 내지 않는다. 판정·집계는 `app/services/ai_residency.py` 순수 함수에만 둔다. 정책은 지금 서버 상수뿐이다(조직별 저장은 후속).
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

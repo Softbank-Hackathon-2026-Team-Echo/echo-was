@@ -103,6 +103,7 @@ CREATE TABLE public.agent_runs (
     simulated boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    processing jsonb,
     CONSTRAINT ck_agent_runs_apply_patch_has_parent CHECK ((((kind)::text <> 'APPLY_PATCH'::text) OR (parent_run_id IS NOT NULL))),
     CONSTRAINT ck_agent_runs_claim_consistency CHECK ((((status)::text <> ALL ((ARRAY['CLAIMED'::character varying, 'RUNNING'::character varying])::text[])) OR ((claimed_by_runner_id IS NOT NULL) AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL)))),
     CONSTRAINT ck_agent_runs_deadline_after_created CHECK ((deadline_at > created_at)),
@@ -112,6 +113,7 @@ CREATE TABLE public.agent_runs (
     CONSTRAINT ck_agent_runs_input_is_object CHECK ((jsonb_typeof(input_snapshot) = 'object'::text)),
     CONSTRAINT ck_agent_runs_kind_valid CHECK (((kind)::text = ANY ((ARRAY['PRECHECK'::character varying, 'APPLY_PATCH'::character varying, 'CHANGE_PROPOSAL'::character varying])::text[]))),
     CONSTRAINT ck_agent_runs_precheck_has_target CHECK ((((kind)::text <> 'PRECHECK'::text) OR (target_environment_id IS NOT NULL))),
+    CONSTRAINT ck_agent_runs_processing_only_when_reported CHECK (((processing IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(processing) = 'object'::text)))),
     CONSTRAINT ck_agent_runs_result_only_when_reported CHECK (((result IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(result) = 'object'::text)))),
     CONSTRAINT ck_agent_runs_run_token_hash_format CHECK (((run_token_hash IS NULL) OR (run_token_hash ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT ck_agent_runs_status_valid CHECK (((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'CLAIMED'::character varying, 'RUNNING'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])))
