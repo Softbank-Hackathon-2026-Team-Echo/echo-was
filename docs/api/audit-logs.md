@@ -127,7 +127,7 @@
 | `DISASTER_DECLARED` | `POST /disasters` | `disaster`(이름표 `EARTHQUAKE M7.2`) | `{type, magnitude, radiusKm, meetsThreshold, affectedEnvironmentIds}`. 건너뛴 서비스가 있으면 같은 대상에 둘째 줄 `{skippedPlans: [{serviceId, planId, reason}]}`([disasters.md](disasters.md#감사)) |
 | `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName}` |
-| `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{status, failureCode?, simulated, aiReviewed}` |
+| `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{status, failureCode?, simulated, aiReviewed, processing?}`(`processing` 은 레지던시 기록이 있을 때만) |
 | `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
 | `DEPLOY_FINISHED` · `ROLLBACK_FINISHED` | 끝 상태(SYSTEM). `trigger = ROLLBACK` 이면 `ROLLBACK_FINISHED`, 예비 따라가기는 `DEPLOY_FINISHED` + `details.trigger` | `deploy_request` | `{status, trigger, cancelReason?, errorCode?, simulated?}` |
 | `MIGRATION_FINISHED` | 끝 상태(SYSTEM) | `migration_plan` | `{status, errorCode?, simulated?}` |

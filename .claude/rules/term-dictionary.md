@@ -145,6 +145,11 @@
 | 입력 사본 | Input snapshot | `agent_runs.input_snapshot`, 응답 `inputSnapshot`·`inputHash` | 실행을 만들 때 고정한 입력(서비스·두 환경 설정·이미지·변수 이름·최근 증거). 비밀값·`secretRef`·변수 값이 없다. 같은 상태면 해시가 같다 | F14, 러너 계약 v1 |
 | 부를 때 만료 | Expire on call | `expire_overdue_runs`, `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 열린 실행을 일꾼 루프 없이 누가 부를 때 `TIMED_OUT` 으로 바꾸는 것(사전 점검 만들기·가져가기·실행 토큰 호출·취소). `GET` 은 쓰지 않는다 | 러너 계약 v1 |
 | AI 검토 여부 | AI reviewed | 응답 `aiReviewed` (저장 안 함, `model_id` 유무) | 결과에 모델이 있는가. false 는 "AI 검토 없음 · 규칙 비교만"이다. `simulated`(값을 지어냈는가)와 따로 본다. 실제 입력으로 규칙 비교만 한 러너는 `simulated = false` + `aiReviewed = false` 이고 C-AI-1 증거가 된다 | F14, D-1 |
+| 데이터 레지던시 기록 | Processing record | `agent_runs.processing` / `RunResult.processing`·응답 `processing` | 러너가 끝 보고에 밝힌 "어디서 처리했고, 어느 제공자·모델·리전으로, 어떤 자료가 밖으로 나갔나". WAS 는 검사만 하고 다시 계산하지 않는다. `model_id` 와 맞추지 않는다. 없으면 "기록 없음"(나가지 않았다는 뜻이 아니다) | AI 3 |
+| 외부 전송 | External transfer | `processing.externalTransfer`·`externalTransferBytes` | 처리 위치(`location`·샌드박스) 밖으로 자료가 나갔는가(모델 API 호출 포함, WAS 호출은 제외). 거절·실패여도 호출했으면 true | AI 3 |
+| 데이터 등급 | Data class | `processing.dataClasses` (`AgentRunDataClass`) | 모델에 넘긴 자료 종류. 변수 이름·digest·규칙 결과는 `CONFIG` 다 | AI 3 |
+| 레지던시 정책 | Residency policy | `ResidencyPolicy`, 상수 `DEFAULT_RESIDENCY_POLICY` (`app/services/ai_residency.py`), 응답 `policy` | 허용 모델 리전과 외부 전송 금지 등급. 지금은 서버 상수(`source = DEFAULT`)이고 조직별 저장은 후속이다. 보안 규칙표(`RULES`)와 다르고 게이트에 쓰지 않는다 | AI 3 |
+| 레지던시 요약 | Residency summary | `GET /api/v1/orgs/{orgId}/ai/residency`, `summarize_residency` | 기간 안에 끝난 실행의 기록을 조직 단위로 센 것(외부 전송·민감 등급 판정·정책 위반·최근 실행). 계약은 [docs/api/ai-residency.md](../../docs/api/ai-residency.md) | AI 3 |
 | 비용 항목 종류 | Cost component kind | `CostComponentKind`, 응답 `components[].kind` | 비용 자원 항목의 묶음: `COMPUTE` · `DATABASE` · `NETWORK` · `STORAGE` · `OTHER`. 값은 `app/data/cloud_inventory.toml` 에 있고 DB 칸이 아니다 | 운영 1 |
 | 비용 출처 | Cost source | `CostSource`, 응답 `source` | `ESTIMATE`(자원 목록 × 공개 목록가, 환경·공용 항목) · `BILLING`(클라우드 청구 데이터, 공급자 계정 단위 `billing[]`). 청구 값을 환경 값으로 쓰지 않는다 | 운영 1 |
 
@@ -264,6 +269,16 @@
 | `INFO` · `WARN` · `FAIL` | 결과 `severity` (`AgentRunSeverity`) | 설정 차이·기능 차이의 심각도 |
 | `PROPOSED` · `BLOCKED` · `REJECTED` · `APPROVED` · `APPLIED` · `APPLY_FAILED` | 결과 `patches[].status` (`AgentPatchStatus`) | WAS 가 계산한 패치 상태. 러너 값은 받지 않는다. 결과 JSON 에는 앞의 둘만 저장하고 나머지는 결정 행·반영 실행으로 응답 때 계산한다(API 서버 10) |
 | `PROTECTED_FILES_TOUCHED` · `CHECKS_MISSING` · `CHECK_NOT_PASSED` | 결과 `patches[].blockReason` (`AgentPatchBlockReason`) | `BLOCKED` 인 이유 |
+
+### AI 데이터 레지던시 값 (AI 3)
+
+| 값 목록 | 표·칸 | 뜻 |
+|---|---|---|
+| `NONE` · `LOCAL` · `GOOGLE_VERTEX` · `AWS_BEDROCK` · `OPENAI` · `ANTHROPIC` | `processing.modelProvider` (`AgentRunModelProvider`) | 모델 제공자. `NONE` 은 모델을 부르지 않음, `LOCAL` 은 처리 위치 안 모델(리전 규칙을 보지 않는다) |
+| `CONFIG` · `FINDINGS` · `SOURCE_CODE` · `LOGS` · `SECRETS` | `processing.dataClasses` (`AgentRunDataClass`) | 모델에 넘긴 자료 등급. 저장은 이 순서로 정렬한다 |
+| `ZERO` · `ZERO_WITH_UNRECORDED` · `DETECTED` | 응답 `sensitiveExternalTransfer.verdict` (`AiResidencyVerdict`, 저장 안 함) | 금지 등급 외부 전송 0건 · 기록에서는 0건이지만 기록 없는 실행이 있어(또는 상한을 넘어) 단정하지 않음 · 1건 이상 |
+| `MODEL_REGION_NOT_ALLOWED` · `FORBIDDEN_CLASS_SENT_EXTERNALLY` | 응답 `violations[].reasons` (`AiResidencyViolationReason`, 저장 안 함) | 제공자가 `NONE`·`LOCAL` 이 아닌데 리전이 모름·허용 목록 밖 · 금지 등급을 밖으로 보냄 |
+| `DEFAULT` | 응답 `policy.source` (`AiResidencyPolicySource`) | 서버 코드 상수 정책 |
 
 ### 환경 종류 (`environments.kind`)
 

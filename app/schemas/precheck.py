@@ -23,6 +23,7 @@ from app.enums import (
     SecurityResult,
 )
 from app.models import AgentPatchApproval, AgentRun, AgentRunEvent
+from app.schemas.ai_residency import AgentRunProcessingResponse
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.schemas.runner import PATCH_HASH_PATTERN
 from app.services.precheck_service import PrecheckLogPage, PrecheckPatchView, PrecheckView
@@ -214,6 +215,7 @@ class PrecheckDetailResponse(ApiModel):
     sandbox_id: str | None
     steps: list[PrecheckStepResponse]
     model: PrecheckModelResponse | None
+    processing: AgentRunProcessingResponse | None
     config_diff: list[PrecheckConfigDiffResponse]
     feature_gaps: list[PrecheckFeatureGapResponse]
     findings: list[PrecheckFindingResponse]
@@ -254,6 +256,11 @@ class PrecheckDetailResponse(ApiModel):
                 for step in view.steps
             ],
             model=PrecheckModelResponse.model_validate(model) if model else None,
+            processing=(
+                AgentRunProcessingResponse.model_validate(run.processing)
+                if run.processing is not None
+                else None
+            ),
             config_diff=[
                 PrecheckConfigDiffResponse.model_validate(item)
                 for item in result.get("configDiff", [])

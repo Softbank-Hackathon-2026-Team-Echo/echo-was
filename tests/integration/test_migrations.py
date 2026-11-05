@@ -630,6 +630,11 @@ EXPECTED_CONSTRAINTS = {
     ("agent_runs", "ck_agent_runs_precheck_has_target"): (
         "CHECK ((((kind)::text <> 'PRECHECK'::text) OR (target_environment_id IS NOT NULL)))"
     ),
+    ("agent_runs", "ck_agent_runs_processing_only_when_reported"): (
+        "CHECK (((processing IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character "
+        "varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(processing) = "
+        "'object'::text))))"
+    ),
     ("agent_runs", "ck_agent_runs_result_only_when_reported"): (
         "CHECK (((result IS NULL) OR (((status)::text = ANY ((ARRAY['SUCCEEDED'::character "
         "varying, 'FAILED'::character varying])::text[])) AND (jsonb_typeof(result) = "
@@ -1081,10 +1086,13 @@ BEFORE_AUDIT_EXTENSION = "48b2126a9c37"
 AUDIT_EXTENSION_REVISION = "b7d41e6f2a93"
 # 보안 게이트 원인 코드 SECURITY_GATE_BLOCKED 를 더하기 전(감사 로그 확장 = API 서버 7 head) 시점.
 BEFORE_SECURITY_GATE_BLOCKED = AUDIT_EXTENSION_REVISION
-# 재난 표(API 서버 9)를 더하기 전(보안 게이트 원인 코드) 시점과 지금 head.
+# 재난 표(API 서버 9)를 더하기 전(보안 게이트 원인 코드) 시점.
 BEFORE_DISASTERS = "286d9ea982d6"
 DISASTERS_REVISION = "250e2535417a"
-HEAD_REVISION = DISASTERS_REVISION
+# 레지던시 기록 칸(AI 3)을 더하기 전(재난 표) 시점과 지금 head.
+BEFORE_AGENT_RUN_PROCESSING = DISASTERS_REVISION
+AGENT_RUN_PROCESSING_REVISION = "31bc0563b24b"
+HEAD_REVISION = AGENT_RUN_PROCESSING_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1916,8 +1924,8 @@ async def test_audit_logs_cannot_be_updated(harness: DeployHarness, engine: Asyn
 
 
 # 고객 앱 환경 변수 표(API 서버 10) 리비전과 그 직전 리비전(보안·AI 기반 스키마). 더하기만 한다.
-# 그 뒤에 감사 로그 확장(b7d41e6f2a93), 보안 게이트 원인 코드(286d9ea982d6), 재난 표(250e2535417a)가
-# 이어진다.
+# 그 뒤에 감사 로그 확장(b7d41e6f2a93), 보안 게이트 원인 코드(286d9ea982d6), 재난 표(250e2535417a),
+# 레지던시 기록 칸(31bc0563b24b)이 이어진다.
 SERVICE_VARIABLES_REVISION = BEFORE_AUDIT_EXTENSION
 BEFORE_SERVICE_VARIABLES = "201cf5419f4d"
 SERVICE_VARIABLES_TABLE = "service_environment_variables"
@@ -1933,6 +1941,8 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
+    processing = scripts.get_revision(AGENT_RUN_PROCESSING_REVISION)
+    assert processing is not None and processing.down_revision == BEFORE_AGENT_RUN_PROCESSING
     disasters = scripts.get_revision(DISASTERS_REVISION)
     assert disasters is not None and disasters.down_revision == BEFORE_DISASTERS
     gate = scripts.get_revision(BEFORE_DISASTERS)
@@ -2068,6 +2078,62 @@ async def test_disasters_checks_reject_invalid_rows(
     statement = f"INSERT INTO disasters ({', '.join(row)}) VALUES ({', '.join(row.values())})"
 
     with pytest.raises(IntegrityError, match=violated):
+        async with engine.begin() as connection:
+            await connection.execute(text(statement))
+
+
+def _agent_run_processing_state(connection: Connection) -> tuple[bool, bool]:
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("agent_runs")}
+    checks = {check["name"] for check in inspector.get_check_constraints("agent_runs")}
+    return "processing" in columns, "ck_agent_runs_processing_only_when_reported" in checks
+
+
+async def test_agent_run_processing_revision_downgrade_removes_only_additions_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_AGENT_RUN_PROCESSING))
+        )
+        down_state = await connection.run_sync(_agent_run_processing_state)
+        down_version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up_state = await connection.run_sync(_agent_run_processing_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down_state == (False, False)
+    assert down_version == BEFORE_AGENT_RUN_PROCESSING
+    assert up_state == (True, True)
+
+
+@pytest.mark.parametrize(
+    ("status", "finished_at", "processing"),
+    [
+        ("QUEUED", "NULL", "'{}'::jsonb"),
+        ("TIMED_OUT", "now()", "'{}'::jsonb"),
+        ("CANCELLED", "now()", "'{}'::jsonb"),
+        ("SUCCEEDED", "now()", "'[]'::jsonb"),
+        ("FAILED", "now()", "'null'::jsonb"),
+    ],
+)
+async def test_agent_runs_processing_check_rejects_invalid_rows(
+    migration: Migration, engine: AsyncEngine, status: str, finished_at: str, processing: str
+) -> None:
+    statement = f"""
+        INSERT INTO agent_runs (
+            organization_id, service_id, kind, status, target_environment_id, input_hash,
+            requested_by_user_id, deadline_at, finished_at, processing
+        ) VALUES (
+            '{migration.harness.organization.id}', '{migration.service_id}', 'PRECHECK',
+            '{status}', '{migration.gcp.id}', 'sha256:{"0" * 64}', '{migration.author.user.id}',
+            now() + interval '15 minutes', {finished_at}, {processing}
+        )
+    """
+
+    with pytest.raises(IntegrityError, match="ck_agent_runs_processing_only_when_reported"):
         async with engine.begin() as connection:
             await connection.execute(text(statement))
 

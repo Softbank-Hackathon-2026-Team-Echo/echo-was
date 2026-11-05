@@ -33,6 +33,7 @@ from app.executors.kubernetes.reader import ClusterReader
 from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_run_service import AgentRunService
 from app.services.agent_token_service import AgentTokenService
+from app.services.ai_residency_service import AiResidencyService
 from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
@@ -501,6 +502,13 @@ def get_precheck_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> PrecheckService:
     return PrecheckService(session, clock)
+
+
+def get_ai_residency_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> AiResidencyService:
+    return AiResidencyService(session, clock)
 
 
 def get_precheck_patch_service(

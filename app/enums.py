@@ -772,6 +772,51 @@ class AgentRunFailureCode(StrEnum):
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"  # WAS: 마감이 지났다.
 
 
+# --- AI 실행 데이터 레지던시 (AI 3) ---
+
+
+class AgentRunModelProvider(StrEnum):
+    """러너가 밝힌 모델 제공자. NONE 은 모델을 부르지 않았다는 뜻이다."""
+
+    NONE = "NONE"
+    LOCAL = "LOCAL"
+    GOOGLE_VERTEX = "GOOGLE_VERTEX"
+    AWS_BEDROCK = "AWS_BEDROCK"
+    OPENAI = "OPENAI"
+    ANTHROPIC = "ANTHROPIC"
+
+
+class AgentRunDataClass(StrEnum):
+    """모델에 넘긴 자료 종류. 변수 이름·digest·규칙 결과는 CONFIG 에 넣는다. 저장은 이 순서다."""
+
+    CONFIG = "CONFIG"
+    FINDINGS = "FINDINGS"
+    SOURCE_CODE = "SOURCE_CODE"
+    LOGS = "LOGS"
+    SECRETS = "SECRETS"
+
+
+class AiResidencyPolicySource(StrEnum):
+    """요약 판정에 쓴 정책의 출처. 지금은 서버 코드 상수뿐이다."""
+
+    DEFAULT = "DEFAULT"
+
+
+class AiResidencyVerdict(StrEnum):
+    """민감 등급 외부 전송 판정. 기록이 없는 실행이 있으면 0건이라고 단정하지 않는다."""
+
+    ZERO = "ZERO"
+    ZERO_WITH_UNRECORDED = "ZERO_WITH_UNRECORDED"
+    DETECTED = "DETECTED"
+
+
+class AiResidencyViolationReason(StrEnum):
+    """기본 정책 위반 이유. 한 실행에 여러 개가 붙을 수 있다."""
+
+    MODEL_REGION_NOT_ALLOWED = "MODEL_REGION_NOT_ALLOWED"
+    FORBIDDEN_CLASS_SENT_EXTERNALLY = "FORBIDDEN_CLASS_SENT_EXTERNALLY"
+
+
 class CostComponentKind(StrEnum):
     """비용 자원 항목의 묶음(운영 1)."""
 

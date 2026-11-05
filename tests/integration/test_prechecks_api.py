@@ -70,6 +70,41 @@ async def _get_detail(migration: Migration, run_id: str) -> dict[str, Any]:
     return data
 
 
+# --- 레지던시 기록(AI 3 AC-3) ---
+
+
+async def test_precheck_detail_shows_processing_when_reported(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    processing = {
+        "location": "gcp/asia-northeast3",
+        "sandbox": True,
+        "modelProvider": "ANTHROPIC",
+        "model": "claude-opus-5-5",
+        "modelRegion": None,
+        "dataClasses": ["CONFIG", "FINDINGS"],
+        "externalTransfer": True,
+        "externalTransferBytes": 18432,
+    }
+
+    data = await finish_precheck(migration, runner, processing=processing)
+
+    assert data["processing"] == processing
+
+
+async def test_precheck_detail_shows_null_processing_when_not_reported(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    created = await create_precheck(migration)
+    assert created["processing"] is None
+
+    claimed = await claim_run(runner)
+    response = await claimed.post("result", run_result(migration))
+    assert response.status_code == 200, response.text
+
+    assert (await _get_detail(migration, created["id"]))["processing"] is None
+
+
 # --- 만들기 ---
 
 

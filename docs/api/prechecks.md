@@ -18,7 +18,7 @@
 | `POST /prechecks/{id}/patches/{patchId}/reject` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 
 - 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행과 `PRECHECK` 가 아닌 실행은 404 다.
-- 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다.
+- 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다. 최근 실행과 레지던시 기록은 조직 요약 [ai-residency.md](ai-residency.md) 의 `recentRuns` 로 본다.
 - 러너가 반영 실행(`APPLY_PATCH`)을 가져가는 길과 반영 결과 받기는 아직 없다(별도 작업).
 - 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
 
@@ -61,6 +61,8 @@
  inputHash, sandboxId,
  steps: [{name, firstAt, lastAt, level}],
  model: {id, effort, promptVersion, refusal} | null,
+ processing: {location, sandbox, modelProvider, model, modelRegion, dataClasses[],
+              externalTransfer, externalTransferBytes} | null,
  configDiff: [{key, source, target, origin, severity}],
  featureGaps: [{source, target, gap, action, hasReplacement, severity, origin}],
  findings: [{control, environmentId, result, title, reason, origin, suggestedFix, confirmation}],
@@ -74,6 +76,7 @@
 | `failureCode` | `FAILED`·`TIMED_OUT` 일 때. 러너 값(`RUNNER_ERROR`·`DEADLINE` 등) 또는 WAS 값 `LEASE_EXPIRED`·`DEADLINE_EXCEEDED` |
 | `simulated` | **결과 값을 지어냈는가.** 실제 입력으로 계산했으면 모델이 없어도 false, 러너의 가짜 모드면 true. true 면 C-AI-1 증거가 아니다(`EVIDENCE_SIMULATED`) |
 | `aiReviewed` | 결과의 `model` 이 있는가. false 는 "AI 검토 없음 · 규칙 비교만"이다. `simulated` 와 따로 본다 |
+| `processing` | 러너가 밝힌 데이터 레지던시 기록([칸 설명](../agent-runner.md#레지던시-기록-processing)). **null 은 "기록 없음"이다**(밖으로 안 나갔다는 뜻이 아니다). `model` 과 맞추지 않는다. 거절·실패면 `model` 이 null 이어도 `externalTransfer` 가 true 일 수 있다. 조직 요약은 [ai-residency.md](ai-residency.md) |
 | `sandboxId` | 결과 `sandbox.id`. 샌드박스 밖에서 돌았으면 null |
 | `steps` | 이벤트에서 계산한다. 단계마다 처음·마지막 시각과 가장 나쁜 `level`, 시작 순. 이벤트가 없으면 빈 배열 |
 | `findings[].confirmation` | AI finding 은 `UNCONFIRMED`, 규칙 finding 은 null. **`findings` 표에는 넣지 않는다**(매트릭스·게이트 영향 없음, 2차) |

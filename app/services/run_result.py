@@ -3,7 +3,8 @@
 스키마 검사(모르는 칸·크기·AI PASS)는 요청 스키마가 끝낸 뒤다. 여기서는
 - 패치 상태를 다시 계산한다. 러너 값을 믿지 않는다(보호 파일·검사 없음·PASS 아닌 검사 → BLOCKED).
 - AI finding 은 사람 확인 전(UNCONFIRMED)으로, 차단 시도는 "확인 안 됨"으로 둔다.
-- status·failureCode·simulated 는 표의 칸으로만 두고 JSON 에서 뺀다.
+- status·failureCode·simulated·processing 은 표의 칸으로만 두고 result JSON 에서 뺀다.
+- processing 의 dataClasses 는 enum 정의 순서로 정렬한다.
 - 모든 문자열의 비밀값 모양을 가린다.
 """
 
@@ -16,6 +17,7 @@ from app.enums import (
     AgentPatchBlockReason,
     AgentPatchDecision,
     AgentPatchStatus,
+    AgentRunDataClass,
     AgentRunOrigin,
     AgentRunStatus,
     AiFindingConfirmation,
@@ -36,6 +38,7 @@ class NormalizedRunResult:
     model_id: str | None
     prompt_version: str | None
     result: dict[str, Any]
+    processing: dict[str, Any] | None
 
     @property
     def is_ai_reviewed(self) -> bool:
@@ -91,6 +94,17 @@ def _with_confirmation(finding: Mapping[str, Any]) -> dict[str, Any]:
     return {**finding, "confirmation": confirmation}
 
 
+def _normalized_processing(processing: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if processing is None:
+        return None
+    class_order = list(AgentRunDataClass)
+    data_classes = sorted(
+        processing["dataClasses"], key=lambda value: class_order.index(AgentRunDataClass(value))
+    )
+    masked: dict[str, Any] = mask_secrets_in_json({**processing, "dataClasses": data_classes})
+    return masked
+
+
 def normalize_run_result(payload: Mapping[str, Any]) -> NormalizedRunResult:
     """검사를 통과한 RunResult(camelCase JSON 값)를 저장할 값으로 바꾼다."""
     result: dict[str, Any] = {key: payload[key] for key in _PASSTHROUGH_KEYS}
@@ -108,4 +122,5 @@ def normalize_run_result(payload: Mapping[str, Any]) -> NormalizedRunResult:
         model_id=model["id"] if model else None,
         prompt_version=model["promptVersion"] if model else None,
         result=masked,
+        processing=_normalized_processing(payload["processing"]),
     )
