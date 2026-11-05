@@ -37,7 +37,8 @@ plugins = ["pydantic.mypy"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # 건너뛴 테스트의 이유(DB 미연결 등)를 결과 요약에 항상 보여 준다.
-addopts = "-rs"
+# 기본은 병렬(워커마다 시험 DB 를 따로 쓴다). 직렬로 돌리려면 `uv run pytest -n 0`.
+addopts = "-rs -n auto --maxprocesses=8 --dist worksteal"
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = ["integration: 실제 PostgreSQL 이 필요한 테스트 (TEST_DATABASE_URL)"]
@@ -49,5 +50,6 @@ dev = [
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
 ]
