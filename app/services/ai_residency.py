@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, assert_never
 
 from app.enums import (
     AgentRunDataClass,
@@ -17,6 +17,7 @@ from app.enums import (
     AgentRunModelProvider,
     AgentRunStatus,
     AiResidencyPolicySource,
+    AiResidencyRegionlessCondition,
     AiResidencyVerdict,
     AiResidencyViolationReason,
 )
@@ -26,16 +27,32 @@ _PROVIDERS_WITHOUT_REGION_RULE = (AgentRunModelProvider.NONE, AgentRunModelProvi
 
 
 @dataclass(frozen=True)
+class RegionlessProvider:
+    """리전을 못 고르는 제공자의 조건부 허용 항목(AD-12). modelRegion null 일 때만 본다."""
+
+    provider: AgentRunModelProvider
+    condition: AiResidencyRegionlessCondition
+
+
+@dataclass(frozen=True)
 class ResidencyPolicy:
     source: AiResidencyPolicySource
     allowed_model_regions: tuple[str, ...]
     forbid_external_for_classes: tuple[AgentRunDataClass, ...]
+    allowed_regionless_providers: tuple[RegionlessProvider, ...]
 
 
 DEFAULT_RESIDENCY_POLICY = ResidencyPolicy(
     source=AiResidencyPolicySource.DEFAULT,
     allowed_model_regions=("asia-northeast3", "ap-northeast-1", "ap-northeast-2"),
     forbid_external_for_classes=(AgentRunDataClass.SECRETS,),
+    # Anthropic 1P(api.anthropic.com)는 리전을 고를 수 없다. 금지 등급을 안 넘겼을 때만 허용한다.
+    allowed_regionless_providers=(
+        RegionlessProvider(
+            provider=AgentRunModelProvider.ANTHROPIC,
+            condition=AiResidencyRegionlessCondition.NO_FORBIDDEN_CLASSES,
+        ),
+    ),
 )
 
 
@@ -78,6 +95,7 @@ class SensitiveExternalTransfer:
 class ResidencyViolation:
     run: ResidencyRun
     reasons: tuple[AiResidencyViolationReason, ...]
+    is_regionless_allowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,6 +122,33 @@ def sends_forbidden_class(processing: Mapping[str, Any], policy: ResidencyPolicy
     return not set(policy.forbid_external_for_classes).isdisjoint(processing["dataClasses"])
 
 
+def _meets_condition(
+    condition: AiResidencyRegionlessCondition,
+    processing: Mapping[str, Any],
+    policy: ResidencyPolicy,
+) -> bool:
+    match condition:
+        case AiResidencyRegionlessCondition.NO_FORBIDDEN_CLASSES:
+            # 밖으로 나갔는지와 상관없이 모델에 넘긴 등급만 본다(넘겼으면 조건 불충족).
+            return set(policy.forbid_external_for_classes).isdisjoint(processing["dataClasses"])
+        case _:
+            assert_never(condition)
+
+
+def is_regionless_allowed(processing: Mapping[str, Any], policy: ResidencyPolicy) -> bool:
+    """리전 없이(modelRegion null) 조건부 허용 항목으로 리전 규칙을 통과하는가(AD-12).
+
+    허용 리전 목록에 null 을 넣지 않고 제공자·조건으로 따로 본다. 리전을 밝혔으면 목록으로만 본다.
+    """
+    if processing["modelRegion"] is not None:
+        return False
+    return any(
+        item.provider == processing["modelProvider"]
+        and _meets_condition(item.condition, processing, policy)
+        for item in policy.allowed_regionless_providers
+    )
+
+
 def find_violations(
     processing: Mapping[str, Any] | None, policy: ResidencyPolicy
 ) -> tuple[AiResidencyViolationReason, ...]:
@@ -114,6 +159,7 @@ def find_violations(
     if (
         processing["modelProvider"] not in _PROVIDERS_WITHOUT_REGION_RULE
         and processing["modelRegion"] not in policy.allowed_model_regions
+        and not is_regionless_allowed(processing, policy)
     ):
         reasons.append(AiResidencyViolationReason.MODEL_REGION_NOT_ALLOWED)
     if sends_forbidden_class(processing, policy):
@@ -153,7 +199,16 @@ def summarize_residency(
     unrecorded = len(ordered) - len(records)
     transferred = [record for record in records if record["externalTransfer"]]
     sensitive_runs = sum(1 for record in records if sends_forbidden_class(record, policy))
-    judged = [ResidencyViolation(run, find_violations(run.processing, policy)) for run in ordered]
+    judged = [
+        ResidencyViolation(
+            run,
+            find_violations(run.processing, policy),
+            is_regionless_allowed=(
+                run.processing is not None and is_regionless_allowed(run.processing, policy)
+            ),
+        )
+        for run in ordered
+    ]
     return ResidencySummary(
         from_at=from_at,
         to_at=to_at,

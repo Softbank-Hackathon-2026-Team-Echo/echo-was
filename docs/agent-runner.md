@@ -128,7 +128,7 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `sandbox` | bool, 필수 | 샌드박스 안에서 처리했는가 |
 | `modelProvider` | enum, 필수 | `NONE`·`LOCAL`·`GOOGLE_VERTEX`·`AWS_BEDROCK`·`OPENAI`·`ANTHROPIC` |
 | `model` | 문자열·null | `^[A-Za-z0-9._:/@-]{1,64}$`. `NONE` 이면 null 이어야 하고, 그 밖이면 필수(요청한 모델 이름) |
-| `modelRegion` | 문자열·null | `^[a-z0-9-]{1,40}$`. `NONE` 이면 null 이어야 한다. 그 밖에서 모르면 null(요약에서 위반으로 센다) |
+| `modelRegion` | 문자열·null | `^[a-z0-9-]{1,40}$`. `NONE` 이면 null 이어야 한다. 그 밖에서 모르면 null(요약에서 위반으로 센다. 단 `ANTHROPIC` 직접 호출은 `SECRETS` 를 넘기지 않았으면 조건부 허용 — [정책](api/ai-residency.md#리전-없는-제공자-조건부-허용)) |
 | `dataClasses` | enum 배열, 필수 | 모델에 넘긴 자료 종류 `CONFIG`·`FINDINGS`·`SOURCE_CODE`·`LOGS`·`SECRETS`(변수 이름·digest·규칙 결과는 `CONFIG`). 중복 금지, 최대 5. `NONE` 이면 빈 배열. 저장 때 이 순서로 정렬한다 |
 | `externalTransfer` | bool, 필수 | 처리 위치(`location`·샌드박스) 밖으로 자료가 나갔는가(모델 API 호출 포함, WAS 호출은 제외). `NONE` 이면 false |
 | `externalTransferBytes` | 정수·null | 0 이상 2^63−1 이하. `externalTransfer = false` 면 null 또는 0 |

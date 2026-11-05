@@ -11,6 +11,7 @@ import pytest
 from httpx import Response
 
 from app.enums import AgentRunKind, AgentRunStatus, OrganizationRole
+from app.main import app
 from app.models import AgentRun, Organization
 from app.services import ai_residency_service
 from tests.integration.auth_support import (
@@ -46,6 +47,12 @@ ANTHROPIC_PROCESSING: dict[str, Any] = {
 SECRETS_PROCESSING: dict[str, Any] = ANTHROPIC_PROCESSING | {
     "modelRegion": "ap-northeast-1",
     "dataClasses": ["SECRETS"],
+}
+DEFAULT_POLICY: dict[str, Any] = {
+    "source": "DEFAULT",
+    "allowedModelRegions": ["asia-northeast3", "ap-northeast-1", "ap-northeast-2"],
+    "forbidExternalForClasses": ["SECRETS"],
+    "allowedRegionlessProviders": [{"provider": "ANTHROPIC", "condition": "NO_FORBIDDEN_CLASSES"}],
 }
 
 
@@ -122,11 +129,7 @@ async def test_residency_summary_matches_spec_example(migration: Migration) -> N
 
     assert data["from"] == _iso(now - timedelta(days=7))
     assert data["to"] == _iso(now)
-    assert data["policy"] == {
-        "source": "DEFAULT",
-        "allowedModelRegions": ["asia-northeast3", "ap-northeast-1", "ap-northeast-2"],
-        "forbidExternalForClasses": ["SECRETS"],
-    }
+    assert data["policy"] == DEFAULT_POLICY
     assert data["runs"] == {
         "total": 4,
         "recorded": 2,
@@ -146,14 +149,7 @@ async def test_residency_summary_matches_spec_example(migration: Migration) -> N
         "runs": 0,
         "verdict": "ZERO_WITH_UNRECORDED",
     }
-    assert data["violations"] == [
-        {
-            "runId": str(anthropic.id),
-            "serviceId": migration.service_id,
-            "finishedAt": _iso(now - timedelta(hours=1)),
-            "reasons": ["MODEL_REGION_NOT_ALLOWED"],
-        }
-    ]
+    assert data["violations"] == []
     assert [item["runId"] for item in data["recentRuns"]] == [
         str(run.id) for run in (anthropic, no_model, unrecorded_new, unrecorded_old)
     ]
@@ -166,12 +162,77 @@ async def test_residency_summary_matches_spec_example(migration: Migration) -> N
         "simulated": False,
         "aiReviewed": False,
         "processing": ANTHROPIC_PROCESSING,
-        "violations": ["MODEL_REGION_NOT_ALLOWED"],
+        "violations": [],
+        "regionlessAllowed": True,
     }
     assert data["recentRuns"][1]["processing"] == NONE_PROCESSING
     assert data["recentRuns"][1]["violations"] == []
+    assert data["recentRuns"][1]["regionlessAllowed"] is False
     assert data["recentRuns"][2]["processing"] is None
     assert data["recentRuns"][2]["violations"] == []
+    assert data["recentRuns"][2]["regionlessAllowed"] is False
+
+
+async def test_residency_summary_regionless_anthropic_with_secrets_keeps_both_violations(
+    migration: Migration,
+) -> None:
+    now = migration.harness.clock.now()
+    run = await _add_run(
+        migration,
+        finished_at=now - timedelta(hours=1),
+        processing=ANTHROPIC_PROCESSING | {"dataClasses": ["CONFIG", "SECRETS"]},
+    )
+
+    data = await _get_summary(migration)
+
+    assert data["policy"] == DEFAULT_POLICY
+    assert data["violations"] == [
+        {
+            "runId": str(run.id),
+            "serviceId": migration.service_id,
+            "finishedAt": _iso(now - timedelta(hours=1)),
+            "reasons": ["MODEL_REGION_NOT_ALLOWED", "FORBIDDEN_CLASS_SENT_EXTERNALLY"],
+        }
+    ]
+    assert data["recentRuns"][0]["regionlessAllowed"] is False
+    assert data["sensitiveExternalTransfer"]["verdict"] == "DETECTED"
+
+
+async def test_residency_summary_regionless_other_provider_is_still_a_violation(
+    migration: Migration,
+) -> None:
+    now = migration.harness.clock.now()
+    run = await _add_run(
+        migration,
+        finished_at=now - timedelta(hours=1),
+        processing=ANTHROPIC_PROCESSING | {"modelProvider": "OPENAI", "model": "gpt-5"},
+    )
+
+    data = await _get_summary(migration)
+
+    assert [item["runId"] for item in data["violations"]] == [str(run.id)]
+    assert data["violations"][0]["reasons"] == ["MODEL_REGION_NOT_ALLOWED"]
+    assert data["recentRuns"][0]["regionlessAllowed"] is False
+
+
+def test_openapi_documents_regionless_policy_and_marker() -> None:
+    schemas = app.openapi()["components"]["schemas"]
+
+    assert schemas["AiResidencyRegionlessCondition"]["enum"] == ["NO_FORBIDDEN_CLASSES"]
+    policy = schemas["AiResidencyPolicyResponse"]
+    assert "allowedRegionlessProviders" in policy["required"]
+    assert policy["properties"]["allowedRegionlessProviders"]["items"] == {
+        "$ref": "#/components/schemas/AiResidencyRegionlessProviderResponse"
+    }
+    item = schemas["AiResidencyRegionlessProviderResponse"]
+    assert item["properties"]["provider"] == {"$ref": "#/components/schemas/AgentRunModelProvider"}
+    assert item["properties"]["condition"] == {
+        "$ref": "#/components/schemas/AiResidencyRegionlessCondition"
+    }
+    assert sorted(item["required"]) == ["condition", "provider"]
+    recent = schemas["AiResidencyRecentRunResponse"]
+    assert recent["properties"]["regionlessAllowed"]["type"] == "boolean"
+    assert "regionlessAllowed" in recent["required"]
 
 
 async def test_residency_summary_with_no_runs_is_zero(migration: Migration) -> None:

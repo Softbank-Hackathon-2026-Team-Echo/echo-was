@@ -4,6 +4,7 @@
 - 저장소 경로: `specs/ai-3-residency.md`
 - 상태: **확정(Confirmed)** — 지민 결정 D의 최소판. 아래 AD-n은 AI 기본값(거부권은 PR 리뷰에서)
 - 기준: echo-was main `65b71d3b11098c84f06736b3d71c6390ad28bf09`(#73 병합 뒤). Alembic head `250e2535417a`(하나) · echo-ai-agent main `3806f7c`(#14 러프 러너) · 열린 PR echo-ai-agent #15(모델 검토, 형래)
+- 갱신(11/5): **AD-12 Anthropic 1P 조건부 허용**(형래·지민 결정, [echo-ai-agent #4 댓글](https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-ai-agent/issues/4#issuecomment-6653905864) 11/5 17:58). 기준 echo-was main `734845f`(#74 뒤), 마이그레이션 없음(서버 상수 정책). AD-10·5-3 예·AC-10 을 함께 고쳤다
 - Depth: Standard (러너 결과 칸 1·상세 칸 1·새 GET 1·순수 집계 1, **마이그레이션 1개**)
 
 ## 1. 목표 (한 문장)
@@ -52,8 +53,19 @@ AI 러너가 실행마다 "어디서 처리했고, 어느 제공자·모델·리
 - AD-7 집계는 DB에서 필요한 칸만 최대 5,000행(끝난 시각 최신순) 읽어 순수 함수로 계산한다. 넘으면 `truncated: true`.
 - AD-8 역할: `ViewerAccess`(조직 VIEWER 이상, 에이전트 토큰 GET 포함 — 다른 조회와 같다). 다른 조직 사람은 403(기존 검사기 그대로).
 - AD-9 민감 등급 판정 `verdict`: `ZERO`(기록 있는 실행에서 0건이고 기록 없는 실행도 0건) · `ZERO_WITH_UNRECORDED`(기록 있는 실행에서 0건, 기록 없는 실행이 있음 → "0건"이라고 단정하지 않음) · `DETECTED`(1건 이상). 끝난 실행이 0건이면 `ZERO`.
-- AD-10 위반 이유: `MODEL_REGION_NOT_ALLOWED`(제공자가 `NONE`·`LOCAL`이 아닌데 `modelRegion`이 null이거나 허용 목록 밖) · `FORBIDDEN_CLASS_SENT_EXTERNALLY`(`externalTransfer=true` ∧ `dataClasses`가 금지 등급과 겹침). 한 실행에 이유 여러 개 가능.
+- AD-10 위반 이유: `MODEL_REGION_NOT_ALLOWED`(제공자가 `NONE`·`LOCAL`이 아닌데 `modelRegion`이 null이거나 허용 목록 밖. **AD-12 조건부 허용을 통과한 실행은 제외**) · `FORBIDDEN_CLASS_SENT_EXTERNALLY`(`externalTransfer=true` ∧ `dataClasses`가 금지 등급과 겹침). 한 실행에 이유 여러 개 가능.
 - AD-11 enum 값: `modelProvider` = `NONE`·`LOCAL`·`GOOGLE_VERTEX`·`AWS_BEDROCK`·`OPENAI`·`ANTHROPIC`. `dataClasses` = `CONFIG`·`FINDINGS`·`SOURCE_CODE`·`LOGS`·`SECRETS`(변수 이름·digest·규칙 결과는 CONFIG에 넣는다).
+
+### 4-2. 추가 결정 (11/5 17:58, 배포 뒤)
+
+- AD-12 **Anthropic 1P 조건부 허용**(결정 — 형래·지민, [echo-ai-agent #4 댓글 6653905864](https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-ai-agent/issues/4#issuecomment-6653905864)). 이유: 러너는 Anthropic API(`api.anthropic.com`)를 직접 불러 리전을 고를 수 없어 `modelRegion`이 늘 null 이고, AD-10 그대로면 실행마다 `MODEL_REGION_NOT_ALLOWED`가 찍힌다. Vertex 경유(서울·도쿄)는 형래님이 시간이 남으면 바꾼다.
+  - 정책에 칸 `allowedRegionlessProviders`(내부 `ResidencyPolicy.allowed_regionless_providers`)를 더한다. 항목 = `{provider, condition}`. 기본 정책은 `[{"provider": "ANTHROPIC", "condition": "NO_FORBIDDEN_CLASSES"}]` 하나.
+  - `NO_FORBIDDEN_CLASSES`(`AiResidencyRegionlessCondition`): `dataClasses`가 정책 금지 등급(`forbidExternalForClasses`, 지금 `SECRETS`)과 겹치지 않을 때만. `externalTransfer`와 상관없이 모델에 넘긴 등급으로 본다.
+  - 리전 규칙: 제공자가 `NONE`·`LOCAL`이 아니면 ① `modelRegion`이 `allowedModelRegions` 안이거나 ② `modelRegion`이 null 이고 그 제공자 항목의 조건을 채울 때 통과. **리전 목록에 null 을 넣지 않는다.** 리전을 밝혔는데 목록 밖이면(예 Anthropic `us-east-1`) 지금처럼 위반이다.
+  - 조건 불충족(SECRETS를 넘김)이면 지금처럼 `MODEL_REGION_NOT_ALLOWED` + (밖으로 보냈으면) `FORBIDDEN_CLASS_SENT_EXTERNALLY` 둘 다 붙는다. 다른 제공자(`OPENAI`·`GOOGLE_VERTEX`·`AWS_BEDROCK`) + null 은 지금처럼 위반이다.
+  - 실행별 표시 `recentRuns[].regionlessAllowed`(bool, 내부 `ResidencyViolation.is_regionless_allowed`): 조건부 허용 항목으로 리전 규칙을 통과했으면 true. 화면 문구 "해외 모델 사용 · 비밀값은 안 보냄"은 이 값으로 고른다(프론트 몫). 정책을 다시 계산하지 않아도 된다.
+  - 이름 근거: `allowedRegionlessProviders`는 같은 객체의 `allowedModelRegions`(allowed + 복수 명사)를 따랐다. 조건 값은 용어 사전의 "금지 등급"(`forbidExternalForClasses`·`FORBIDDEN_CLASS_SENT_EXTERNALLY`)과 같은 말로 지어 정책의 금지 등급을 따라가게 했다(조직별 정책 저장 후속에서도 뜻이 같다). 실행 표시는 `aiReviewed`·`truncated`처럼 응답에는 `is` 없이, 내부 bool 은 `is_` 로 쓴다.
+  - 감수: 조건 값 `NO_FORBIDDEN_CLASSES`는 "SECRETS 없음"보다 넓은 말이다. 금지 등급이 늘면 조건도 같이 좁아진다(의도).
 
 ## 5. API
 
@@ -102,7 +114,8 @@ AI 러너가 실행마다 "어디서 처리했고, 어느 제공자·모델·리
   "policy": {
     "source": "DEFAULT",
     "allowedModelRegions": ["asia-northeast3", "ap-northeast-1", "ap-northeast-2"],
-    "forbidExternalForClasses": ["SECRETS"]
+    "forbidExternalForClasses": ["SECRETS"],
+    "allowedRegionlessProviders": [{"provider": "ANTHROPIC", "condition": "NO_FORBIDDEN_CLASSES"}]
   },
   "runs": {"total": 4, "recorded": 2, "unrecorded": 2, "sandboxed": 2, "externalTransfer": 1, "truncated": false},
   "byProvider": [{"key": "ANTHROPIC", "runs": 1}, {"key": "NONE", "runs": 1}],
@@ -112,15 +125,13 @@ AI 러너가 실행마다 "어디서 처리했고, 어느 제공자·모델·리
   "byDataClass": [{"key": "CONFIG", "runs": 1}, {"key": "FINDINGS", "runs": 1}],
   "externalTransferBytes": 18432,
   "sensitiveExternalTransfer": {"classes": ["SECRETS"], "runs": 0, "verdict": "ZERO_WITH_UNRECORDED"},
-  "violations": [
-    {"runId": "…", "serviceId": "…", "finishedAt": "…", "reasons": ["MODEL_REGION_NOT_ALLOWED"]}
-  ],
+  "violations": [],
   "recentRuns": [
     {"runId": "…", "serviceId": "…", "kind": "PRECHECK", "status": "SUCCEEDED", "finishedAt": "…",
      "simulated": false, "aiReviewed": false, "processing": {"location": "gcp/asia-northeast3", "sandbox": true, "modelProvider": "ANTHROPIC", "model": "claude-opus-5-5", "modelRegion": null, "dataClasses": ["CONFIG", "FINDINGS"], "externalTransfer": true, "externalTransferBytes": 18432},
-     "violations": ["MODEL_REGION_NOT_ALLOWED"]},
+     "violations": [], "regionlessAllowed": true},
     {"runId": "…", "serviceId": "…", "kind": "PRECHECK", "status": "SUCCEEDED", "finishedAt": "…",
-     "simulated": false, "aiReviewed": false, "processing": null, "violations": []}
+     "simulated": false, "aiReviewed": false, "processing": null, "violations": [], "regionlessAllowed": false}
   ]
 }
 ```
@@ -135,7 +146,7 @@ AI 러너가 실행마다 "어디서 처리했고, 어느 제공자·모델·리
 | `externalTransferBytes` | `externalTransfer=true`인 기록의 바이트 합(null은 0으로 더하지 않고 건너뜀). 해당 없으면 0 |
 | `sensitiveExternalTransfer` | `classes` = 정책 금지 등급, `runs` = `externalTransfer=true` ∧ 금지 등급을 넘긴 실행 수, `verdict` AD-9 |
 | `violations` | AD-10 이유가 하나라도 있는 실행(끝난 시각 최신순, 전부) |
-| `recentRuns` | 끝난 시각 최신순 최대 20개(기록 없는 실행 포함), 실행별 `violations` |
+| `recentRuns` | 끝난 시각 최신순 최대 20개(기록 없는 실행 포함), 실행별 `violations`·`regionlessAllowed`(AD-12) |
 
 - `aiReviewed` = `model_id is not None`(상세와 같은 규칙). 응답은 다른 조회처럼 `ApiResponse{data}`.
 
@@ -158,6 +169,7 @@ AI 러너가 실행마다 "어디서 처리했고, 어느 제공자·모델·리
 - AC-7 권한: 조직 뷰어·에이전트 200, 익명 401, 다른 조직 403. `ROLE_TABLE`·`test_every_route_has_guards` 통과. 감사 쓰기 경로 수 불변(GET만).
 - AC-8 마이그레이션 6절: `alembic heads` 하나, 새 리비전 1개, 시험 DB 왕복·`alembic check` 통과, db-schema.sql 일치.
 - AC-9 `ruff check`·`ruff format --check`·`mypy app` 통과, 전체 pytest(TEST_DATABASE_URL) 건너뜀 0.
+- AC-10 (AD-12) `ANTHROPIC` + `modelRegion` null + SECRETS 없음 → 위반 0·`regionlessAllowed: true` / `ANTHROPIC` + null + SECRETS → `MODEL_REGION_NOT_ALLOWED`·`FORBIDDEN_CLASS_SENT_EXTERNALLY` 2개 / 다른 제공자 + null → `MODEL_REGION_NOT_ALLOWED` / 응답 `policy.allowedRegionlessProviders` 모양·OpenAPI. `alembic heads` 변화 없음.
 
 ## 8. 이 PR 밖 (M1·다른 파트)
 

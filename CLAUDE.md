@@ -206,7 +206,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **입력 사본·이벤트·결과는 저장 전에 가린다**(`mask_secrets_in_json`, 문자열마다. 직렬화 글자 전체에 걸면 잘린 개인 키 블록이 JSON 구조까지 지운다). 입력 사본에 `secretRef`·변수 값을 넣지 않는다.
 - 이벤트·결과 본문은 FastAPI 본문 인자로 받지 않는다(`parse_runner_payload`). 검증 실패는 422 `RESULT_INVALID` 다. AI `findings` 는 `findings` 표에 넣지 않는다(2차).
 - 러너 토큰 발급 명령(`app.scripts.issue_runner_token`)은 시험 DB 밖에서 함부로 돌리지 않는다. 운영 실행은 README "AI 러너 토큰"을 따른다.
-- **레지던시 기록(`agent_runs.processing`)은 러너 신고 그대로다**(AI 3). 다시 계산하지 않고, `model`·`model_id` 와 맞추지 않는다(거절·실패면 모델이 null 이어도 자료는 나갔다). 기록이 없으면 지어내지 않고 "기록 없음"이며, 그런 실행이 있으면 민감 등급 판정을 `ZERO` 로 내지 않는다. 판정·집계는 `app/services/ai_residency.py` 순수 함수에만 둔다. 정책은 지금 서버 상수뿐이다(조직별 저장은 후속).
+- **레지던시 기록(`agent_runs.processing`)은 러너 신고 그대로다**(AI 3). 다시 계산하지 않고, `model`·`model_id` 와 맞추지 않는다(거절·실패면 모델이 null 이어도 자료는 나갔다). 기록이 없으면 지어내지 않고 "기록 없음"이며, 그런 실행이 있으면 민감 등급 판정을 `ZERO` 로 내지 않는다. 판정·집계는 `app/services/ai_residency.py` 순수 함수에만 둔다. 정책은 지금 서버 상수뿐이다(조직별 저장은 후속). 리전을 못 고르는 제공자(Anthropic 1P)는 리전 목록에 null 을 넣지 않고 `allowed_regionless_providers` 조건부 허용으로 다룬다(AD-12).
 
 ### 공통 안전 규칙
 - I/O는 전부 `async def` + `await`. 동기 블로킹 호출은 `asyncio.to_thread`로 감싼다. async 세션에서 관계는 `selectinload` 로 미리 읽는다.

@@ -20,7 +20,7 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
 
 ### 응답 예 (지어낸 값)
 
-끝난 실행 4건: 기록 없음 2, 모델 없이 샌드박스 처리 1, Anthropic 호출 1.
+끝난 실행 4건: 기록 없음 2, 모델 없이 샌드박스 처리 1, Anthropic 직접 호출 1(리전 null, 비밀값 안 보냄 → 조건부 허용이라 위반 없음).
 
 ```json
 {
@@ -29,7 +29,8 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
   "policy": {
     "source": "DEFAULT",
     "allowedModelRegions": ["asia-northeast3", "ap-northeast-1", "ap-northeast-2"],
-    "forbidExternalForClasses": ["SECRETS"]
+    "forbidExternalForClasses": ["SECRETS"],
+    "allowedRegionlessProviders": [{"provider": "ANTHROPIC", "condition": "NO_FORBIDDEN_CLASSES"}]
   },
   "runs": {"total": 4, "recorded": 2, "unrecorded": 2, "sandboxed": 2, "externalTransfer": 1, "truncated": false},
   "byProvider": [{"key": "ANTHROPIC", "runs": 1}, {"key": "NONE", "runs": 1}],
@@ -39,16 +40,14 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
   "byDataClass": [{"key": "CONFIG", "runs": 1}, {"key": "FINDINGS", "runs": 1}],
   "externalTransferBytes": 18432,
   "sensitiveExternalTransfer": {"classes": ["SECRETS"], "runs": 0, "verdict": "ZERO_WITH_UNRECORDED"},
-  "violations": [
-    {"runId": "…", "serviceId": "…", "finishedAt": "…", "reasons": ["MODEL_REGION_NOT_ALLOWED"]}
-  ],
+  "violations": [],
   "recentRuns": [
     {"runId": "…", "serviceId": "…", "kind": "PRECHECK", "status": "SUCCEEDED", "finishedAt": "…",
      "simulated": false, "aiReviewed": false,
      "processing": {"location": "gcp/asia-northeast3", "sandbox": true, "modelProvider": "ANTHROPIC", "model": "claude-opus-5-5", "modelRegion": null, "dataClasses": ["CONFIG", "FINDINGS"], "externalTransfer": true, "externalTransferBytes": 18432},
-     "violations": ["MODEL_REGION_NOT_ALLOWED"]},
+     "violations": [], "regionlessAllowed": true},
     {"runId": "…", "serviceId": "…", "kind": "PRECHECK", "status": "SUCCEEDED", "finishedAt": "…",
-     "simulated": false, "aiReviewed": false, "processing": null, "violations": []}
+     "simulated": false, "aiReviewed": false, "processing": null, "violations": [], "regionlessAllowed": false}
   ]
 }
 ```
@@ -67,6 +66,7 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
 | `violations` | 위반 이유가 하나라도 있는 실행. 끝난 시각 최신순, 전부 |
 | `recentRuns` | 끝난 시각 최신순 최대 20개(기록 없는 실행 포함), 실행별 `violations` |
 | `recentRuns[].aiReviewed` | `model_id` 가 있는가(사전 점검 상세와 같은 규칙). `processing` 과 따로 본다 |
+| `recentRuns[].regionlessAllowed` | 리전 없이(`modelRegion` null) [조건부 허용](#리전-없는-제공자-조건부-허용) 항목으로 리전 규칙을 통과했으면 `true`. 화면의 "해외 모델 사용 · 비밀값은 안 보냄" 표시는 이 값으로 고른다. 기록 없음·리전을 밝힌 실행·조건 불충족은 `false` |
 
 ### 민감 등급 판정 `verdict`
 
@@ -80,7 +80,7 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
 
 | 값 | 조건 |
 |---|---|
-| `MODEL_REGION_NOT_ALLOWED` | 제공자가 `NONE`·`LOCAL` 이 아닌데 `modelRegion` 이 null 이거나 `allowedModelRegions` 밖 |
+| `MODEL_REGION_NOT_ALLOWED` | 제공자가 `NONE`·`LOCAL` 이 아닌데 `modelRegion` 이 null 이거나 `allowedModelRegions` 밖. 단 `modelRegion` null 이고 `allowedRegionlessProviders` 항목의 조건을 채우면 위반이 아니다 |
 | `FORBIDDEN_CLASS_SENT_EXTERNALLY` | `externalTransfer = true` 이고 `dataClasses` 가 `forbidExternalForClasses` 와 겹침 |
 
 한 실행에 이유가 여러 개 붙을 수 있다. 기록이 없는 실행은 판단할 것이 없어 위반이 없다.
@@ -88,5 +88,23 @@ AI 러너가 실행마다 끝 보고에 적어 낸 레지던시 기록(`agent_ru
 ## 정책
 
 지금은 서버 코드 상수 `DEFAULT_RESIDENCY_POLICY`(`app/services/ai_residency.py`) 하나이고 응답 `policy.source = "DEFAULT"` 로 밝힌다.
+
+| 칸 | 기본값 | 뜻 |
+|---|---|---|
+| `allowedModelRegions` | `asia-northeast3`·`ap-northeast-1`·`ap-northeast-2` | 모델 리전 허용 목록. null 은 들어가지 않는다 |
+| `forbidExternalForClasses` | `SECRETS` | 밖으로 보내면 안 되는 등급(금지 등급) |
+| `allowedRegionlessProviders` | `[{"provider": "ANTHROPIC", "condition": "NO_FORBIDDEN_CLASSES"}]` | 리전을 고를 수 없는 제공자의 조건부 허용(아래) |
+
+### 리전 없는 제공자 조건부 허용
+
+Anthropic API 를 직접 부르면(1P, `api.anthropic.com`) 리전을 고를 수 없어 `modelRegion` 이 null 이다. 이런 제공자는 리전 목록에 null 을 넣지 않고 `allowedRegionlessProviders` 항목으로 따로 허용한다(SPEC AD-12, 결정: [echo-ai-agent #4 댓글](https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-ai-agent/issues/4#issuecomment-6653905864)).
+
+| `condition` | 허용 조건 |
+|---|---|
+| `NO_FORBIDDEN_CLASSES` | `dataClasses` 가 `forbidExternalForClasses`(지금 `SECRETS`)와 겹치지 않음. `externalTransfer` 와 상관없이 모델에 넘긴 등급으로 본다 |
+
+- 통과하면 그 실행은 리전 위반이 없고 `recentRuns[].regionlessAllowed = true` 다.
+- 조건을 못 채우면(SECRETS 를 넘김) `MODEL_REGION_NOT_ALLOWED` 가 그대로 붙고, 밖으로 보냈으면 `FORBIDDEN_CLASS_SENT_EXTERNALLY` 도 붙는다(이유 2개).
+- 항목에 없는 제공자(`OPENAI`·`GOOGLE_VERTEX`·`AWS_BEDROCK`) + null 은 지금처럼 위반이다. 리전을 밝혔는데 목록 밖이면 제공자와 상관없이 위반이다.
 
 **후속(이번 범위 밖):** 조직별 정책 저장(organizations 칸·설정 PATCH·감사·화면), 레지던시 위반으로 이전을 막는 보안 게이트·매트릭스 연동.

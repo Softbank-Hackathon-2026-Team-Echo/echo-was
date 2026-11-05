@@ -9,20 +9,24 @@ import pytest
 from app.enums import (
     AgentRunDataClass,
     AgentRunKind,
+    AgentRunModelProvider,
     AgentRunStatus,
     AiResidencyPolicySource,
+    AiResidencyRegionlessCondition,
     AiResidencyVerdict,
     AiResidencyViolationReason,
 )
 from app.services.ai_residency import (
     DEFAULT_RESIDENCY_POLICY,
     RECENT_RUNS_LIMIT,
+    RegionlessProvider,
     ResidencyBucket,
     ResidencyPolicy,
     ResidencyRun,
     ResidencySummary,
     decide_verdict,
     find_violations,
+    is_regionless_allowed,
     summarize_residency,
 )
 
@@ -92,10 +96,16 @@ def test_default_policy_is_the_decided_constant() -> None:
         source=AiResidencyPolicySource.DEFAULT,
         allowed_model_regions=("asia-northeast3", "ap-northeast-1", "ap-northeast-2"),
         forbid_external_for_classes=(AgentRunDataClass.SECRETS,),
+        allowed_regionless_providers=(
+            RegionlessProvider(
+                provider=AgentRunModelProvider.ANTHROPIC,
+                condition=AiResidencyRegionlessCondition.NO_FORBIDDEN_CLASSES,
+            ),
+        ),
     )
 
 
-# --- 위반(AD-10) ---
+# --- 위반(AD-10, AD-12) ---
 
 
 @pytest.mark.parametrize(
@@ -108,11 +118,19 @@ def test_default_policy_is_the_decided_constant() -> None:
         (_anthropic(modelRegion="asia-northeast3"), ()),
         (_anthropic(modelRegion="ap-northeast-1"), ()),
         (_anthropic(modelRegion="ap-northeast-2"), ()),
-        (_anthropic(), (REGION,)),
+        (_anthropic(), ()),
+        (_anthropic(dataClasses=[]), ()),
         (_anthropic(modelRegion="us-east-1"), (REGION,)),
         (_anthropic(modelProvider="GOOGLE_VERTEX", modelRegion=None), (REGION,)),
+        (_anthropic(modelProvider="OPENAI", modelRegion=None), (REGION,)),
+        (_anthropic(modelProvider="AWS_BEDROCK", modelRegion=None), (REGION,)),
         (_anthropic(modelRegion="ap-northeast-1", dataClasses=["SECRETS"]), (FORBIDDEN,)),
         (_anthropic(dataClasses=["CONFIG", "SECRETS"]), (REGION, FORBIDDEN)),
+        (_anthropic(dataClasses=["SECRETS"]), (REGION, FORBIDDEN)),
+        (
+            _anthropic(dataClasses=["SECRETS"], externalTransfer=False, externalTransferBytes=None),
+            (REGION,),
+        ),
         (
             _anthropic(
                 modelProvider="LOCAL",
@@ -131,11 +149,16 @@ def test_default_policy_is_the_decided_constant() -> None:
         "allowed-asia-northeast3",
         "allowed-ap-northeast-1",
         "allowed-ap-northeast-2",
-        "unknown-region",
-        "region-outside",
+        "anthropic-regionless-no-secrets",
+        "anthropic-regionless-no-classes",
+        "anthropic-region-outside",
         "vertex-unknown-region",
+        "openai-unknown-region",
+        "bedrock-unknown-region",
         "secrets-sent",
-        "both-reasons",
+        "anthropic-regionless-with-secrets",
+        "anthropic-regionless-only-secrets",
+        "anthropic-regionless-secrets-not-sent",
         "secrets-kept-inside",
     ],
 )
@@ -143,6 +166,61 @@ def test_find_violations_returns_reasons(
     processing: dict[str, Any] | None, expected: tuple[AiResidencyViolationReason, ...]
 ) -> None:
     assert find_violations(processing, DEFAULT_RESIDENCY_POLICY) == expected
+
+
+def test_regionless_run_is_a_violation_without_the_policy_entry() -> None:
+    policy = ResidencyPolicy(
+        source=AiResidencyPolicySource.DEFAULT,
+        allowed_model_regions=DEFAULT_RESIDENCY_POLICY.allowed_model_regions,
+        forbid_external_for_classes=DEFAULT_RESIDENCY_POLICY.forbid_external_for_classes,
+        allowed_regionless_providers=(),
+    )
+
+    assert find_violations(_anthropic(), policy) == (REGION,)
+    assert is_regionless_allowed(_anthropic(), policy) is False
+
+
+@pytest.mark.parametrize(
+    ("processing", "expected"),
+    [
+        (_anthropic(), True),
+        (_anthropic(dataClasses=["CONFIG", "SECRETS"]), False),
+        (_anthropic(modelRegion="ap-northeast-1"), False),
+        (_anthropic(modelRegion="us-east-1"), False),
+        (_anthropic(modelProvider="OPENAI"), False),
+        (_anthropic(modelProvider="LOCAL", externalTransfer=False), False),
+        (_no_model(), False),
+    ],
+    ids=[
+        "anthropic-regionless-no-secrets",
+        "anthropic-regionless-with-secrets",
+        "anthropic-allowed-region",
+        "anthropic-region-outside",
+        "openai-regionless",
+        "local",
+        "no-model",
+    ],
+)
+def test_is_regionless_allowed(processing: dict[str, Any], expected: bool) -> None:
+    assert is_regionless_allowed(processing, DEFAULT_RESIDENCY_POLICY) is expected
+
+
+def test_summary_marks_recent_runs_allowed_without_region() -> None:
+    regionless = _run(_anthropic(), hours_ago=1)
+    with_secrets = _run(_anthropic(dataClasses=["SECRETS"]), hours_ago=2)
+    in_region = _run(_anthropic(modelRegion="ap-northeast-1"), hours_ago=3)
+    unrecorded = _run(None, hours_ago=4)
+
+    summary = _summarize(regionless, with_secrets, in_region, unrecorded)
+
+    assert [item.is_regionless_allowed for item in summary.recent_runs] == [
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert [item.run for item in summary.violations] == [with_secrets]
+    assert summary.violations[0].reasons == (REGION, FORBIDDEN)
 
 
 # --- 판정(AD-9) ---
@@ -304,7 +382,7 @@ def test_summary_model_region_excludes_no_model_but_includes_local() -> None:
 
 
 def test_summary_lists_violations_and_recent_runs_latest_first() -> None:
-    old_violation = _run(_anthropic(), hours_ago=3)
+    old_violation = _run(_anthropic(modelRegion="us-east-1"), hours_ago=3)
     clean = _run(_no_model(), hours_ago=2)
     new_violation = _run(_anthropic(dataClasses=["SECRETS"]), hours_ago=1)
 
@@ -317,7 +395,10 @@ def test_summary_lists_violations_and_recent_runs_latest_first() -> None:
 
 
 def test_summary_limits_recent_runs_but_not_violations_or_counts() -> None:
-    runs = [_run(_anthropic(), hours_ago=index + 1) for index in range(RECENT_RUNS_LIMIT + 5)]
+    runs = [
+        _run(_anthropic(modelRegion="us-east-1"), hours_ago=index + 1)
+        for index in range(RECENT_RUNS_LIMIT + 5)
+    ]
 
     summary = _summarize(*runs)
 

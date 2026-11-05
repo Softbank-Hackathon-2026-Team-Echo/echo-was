@@ -12,6 +12,7 @@ from app.enums import (
     AgentRunModelProvider,
     AgentRunStatus,
     AiResidencyPolicySource,
+    AiResidencyRegionlessCondition,
     AiResidencyVerdict,
     AiResidencyViolationReason,
 )
@@ -30,10 +31,18 @@ class AgentRunProcessingResponse(ApiModel):
     external_transfer_bytes: int | None
 
 
+class AiResidencyRegionlessProviderResponse(ApiModel):
+    """리전 없이 조건부로 허용하는 제공자(AD-12)."""
+
+    provider: AgentRunModelProvider
+    condition: AiResidencyRegionlessCondition
+
+
 class AiResidencyPolicyResponse(ApiModel):
     source: AiResidencyPolicySource
     allowed_model_regions: list[str]
     forbid_external_for_classes: list[AgentRunDataClass]
+    allowed_regionless_providers: list[AiResidencyRegionlessProviderResponse]
 
 
 class AiResidencyRunCountsResponse(ApiModel):
@@ -86,6 +95,9 @@ class AiResidencyRecentRunResponse(ApiModel):
     ai_reviewed: bool
     processing: AgentRunProcessingResponse | None
     violations: list[AiResidencyViolationReason]
+    regionless_allowed: bool = Field(
+        description="리전 없이(modelRegion null) 조건부 허용 항목으로 리전 규칙을 통과했는가(AD-12)"
+    )
 
     @classmethod
     def from_violation(cls, violation: ResidencyViolation) -> Self:
@@ -104,6 +116,7 @@ class AiResidencyRecentRunResponse(ApiModel):
                 else None
             ),
             violations=list(violation.reasons),
+            regionless_allowed=violation.is_regionless_allowed,
         )
 
 
@@ -134,6 +147,12 @@ class AiResidencySummaryResponse(ApiModel):
                 source=policy.source,
                 allowed_model_regions=list(policy.allowed_model_regions),
                 forbid_external_for_classes=list(policy.forbid_external_for_classes),
+                allowed_regionless_providers=[
+                    AiResidencyRegionlessProviderResponse(
+                        provider=item.provider, condition=item.condition
+                    )
+                    for item in policy.allowed_regionless_providers
+                ],
             ),
             runs=AiResidencyRunCountsResponse(
                 total=runs.total,
