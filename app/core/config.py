@@ -267,6 +267,11 @@ class Settings(BaseSettings):
     # (echo-ai-agent #22)가 배포되기 전에 켜면 실행이 마감(15분)까지 QUEUED 로 머물고 그동안 그
     # 서비스의 새 사전 점검이 409 다.
     ai_diagnosis_runner_enabled: bool = False
+    # 켜면 러너가 검증한 진단 패치 반영(APPLY_PATCH SUCCEEDED)을 WAS 가 GitHub App 으로 서비스
+    # 저장소에 브랜치 echoport/fix-<run8> + 커밋 + PR 로 넣고, 재배포를 그 커밋으로 만든다
+    # (SPEC api-19). App 에 contents·pull_requests 쓰기 권한이 있어야 한다. 꺼지면 #98 동작 그대로
+    # (원래 실패 커밋을 다시 배포). 가짜 반영(simulated)은 켜져 있어도 GitHub 를 부르지 않는다.
+    ai_apply_commit_enabled: bool = False
     # CVE 감시(SPEC sec-6-cve-watch). 켜면 일꾼이 cve_watch_interval_seconds 마다 서비스 의존성을
     # OSV 로 조회해 새 HIGH·CRITICAL 취약점을 C-IMG-1 증거(source CVE_WATCH)로 남기고, 즉시 조회
     # API(`POST /security/cve-watch:check`)도 열린다. 끄면 둘 다 없다(조회 API 409).
