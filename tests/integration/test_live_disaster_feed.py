@@ -1,6 +1,9 @@
 """실제 재난 피드(API 서버 18): 가짜 HTTP 피드 → 재난 → 대피 제안, 스위치, 시연 주입, 상태 API."""
 
+import asyncio
+import gzip
 import json
+import tracemalloc
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -489,6 +492,73 @@ async def test_declared_content_length_over_limit_is_rejected(tokyo: Migration) 
         result = await poller.poll_once()
 
     assert result is not None and result.error_code == FEED_TOO_LARGE
+
+
+async def test_feed_request_refuses_compression(tokyo: Migration) -> None:
+    """요청은 압축을 거부한다(Accept-Encoding: identity) — 주입한 클라이언트여도."""
+    harness = tokyo.harness
+    _enable(harness)
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding"))
+        return httpx.Response(200, json=collection(feature("plain", 6.0, HASAKI)))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        poller = LiveDisasterFeedPoller(
+            harness.session_factory, harness.clock, harness.settings, http_client=client
+        )
+        result = await poller.poll_once()
+
+    assert seen == ["identity"]
+    assert result is not None and result.error_code is None and result.feed_count == 1
+
+
+async def test_compressed_feed_bomb_is_rejected_before_decompression(tokyo: Migration) -> None:
+    """실제 소켓 서버가 identity 요청을 무시하고 gzip 폭탄(32KB → 32MB)을 보내도 풀지 않는다."""
+    harness = tokyo.harness
+    _enable(harness)
+    limit = harness.settings.live_disaster_feed_max_bytes
+    raw = b'{"type":"FeatureCollection","features":[],"padding":"' + b"x" * (32 << 20) + b'"}'
+    compressed = gzip.compress(raw)
+    del raw
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            head = (
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n"
+                f"Content-Length: {len(compressed)}\r\nConnection: close\r\n\r\n"
+            )
+            writer.write(head.encode() + compressed)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    harness.use_settings(live_disaster_feed_url=f"http://127.0.0.1:{port}/feed")
+    try:
+        async with httpx.AsyncClient() as client:
+            poller = LiveDisasterFeedPoller(
+                harness.session_factory, harness.clock, harness.settings, http_client=client
+            )
+            tracemalloc.start()
+            try:
+                result = await poller.poll_once()
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result is not None and result.error_code == FEED_TOO_LARGE
+    assert peak < limit, f"압축 응답에서 {peak}바이트를 잡았다(상한 {limit})"
+    assert await _count(harness, Disaster) == 0
+    status = await _feed_status(harness)
+    assert (status["connectionStatus"], status["lastErrorCode"]) == ("ERROR", FEED_TOO_LARGE)
 
 
 async def test_event_processing_failure_skips_only_that_event(

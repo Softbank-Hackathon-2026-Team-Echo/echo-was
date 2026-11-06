@@ -3,7 +3,9 @@
 흐름(일꾼, `LIVE_DISASTER_FEED_ENABLED=true` 일 때만, 기본 60초마다)
 1. USGS 요약 피드(GeoJSON)를 HTTP 로 읽는다. 실패하면 피드 상태에 오류 코드만 남기고 다음 주기에
    다시 한다. 본문은 스트리밍으로 읽고 LIVE_DISASTER_FEED_MAX_BYTES(기본 5MB)를 넘으면 그 주기를
-   버린다(FEED_TOO_LARGE). 이상한 지진 한 건은 그 건만 건너뛰고 수를 센다(last_skipped_count).
+   버린다(FEED_TOO_LARGE). 압축은 받지 않는다(`Accept-Encoding: identity`, 그래도 압축해 보내면
+   본문을 읽지 않고 FEED_TOO_LARGE — 풀린 크기를 미리 알 수 없어서). 이상한 지진 한 건은
+   그 건만 건너뛰고 수를 센다(last_skipped_count).
 2. 이미 본 지진 id(disaster_feed_states.seen_event_ids)를 빼고 새 지진만 남긴다.
 3. 새 지진마다 살아 있는 환경이 있는 조직 전부를 조직 기준(규모·반경)으로 판정한다.
    맞으면 그 조직에 재난(source = LIVE_FEED, simulated = false, 만든 사람 없음)을 만들고 SYSTEM 감사
@@ -413,13 +415,25 @@ class LiveDisasterFeedPoller:
     async def _fetch(self) -> ParsedFeed:
         limit = self._settings.live_disaster_feed_max_bytes
         try:
-            async with self._http.stream("GET", self._settings.live_disaster_feed_url) as response:
+            # 압축은 받지 않는다: 압축 본문은 풀린 크기를 미리 알 수 없고, HTTPX 디코더는 상한
+            # 없이 한 번에 풀어서 크기 검사 전에 큰 메모리를 잡는다(gzip 32KB → 33MB).
+            async with self._http.stream(
+                "GET",
+                self._settings.live_disaster_feed_url,
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 if response.status_code != httpx.codes.OK:
                     raise _FeedFetchError(FEED_HTTP_ERROR)
+                encoding = response.headers.get("content-encoding", "").strip().lower()
+                if encoding not in ("", "identity"):
+                    # 서버가 identity 요청을 무시하고 압축했다 — 본문을 한 바이트도 읽지 않고
+                    # 버린다(풀린 크기를 상한 안으로 보장할 수 없어 크기 초과로 본다).
+                    raise _FeedFetchError(FEED_TOO_LARGE)
                 declared = response.headers.get("content-length")
                 if declared is not None and declared.isdigit() and int(declared) > limit:
                     raise _FeedFetchError(FEED_TOO_LARGE)
                 body = bytearray()
+                # 위에서 압축이 없음을 확인했으므로 디코더는 받은 바이트를 그대로 넘긴다.
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > limit:
