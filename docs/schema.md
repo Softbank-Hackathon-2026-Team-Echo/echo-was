@@ -405,7 +405,7 @@ erDiagram
 | 칸 | 타입 | NULL | 제약 | 뜻 |
 |---|---|---|---|---|
 | `organization_id`·`service_id` | uuid | N | FK | 실행 대상 |
-| `kind` | varchar(16) | N | `PRECHECK`·`APPLY_PATCH`·`CHANGE_PROPOSAL` | 사전 점검 · 승인한 패치 반영 · (P1) 수정안만 |
+| `kind` | varchar(16) | N | `PRECHECK`·`APPLY_PATCH`·`CHANGE_PROPOSAL` | 사전 점검 · 승인한 패치 반영 · 배포 실패 AI 진단(수정안, 이슈 #98) |
 | `status` | varchar(16) | N | 값 CHECK, 기본 `QUEUED` | ④-6 흐름 |
 | `source_environment_id`·`target_environment_id` | uuid | Y | FK. `PRECHECK` 은 도착 필수 | 출발·도착 환경 |
 | `parent_run_id` | uuid | Y | FK `agent_runs`. `APPLY_PATCH` 은 필수 | 패치를 낸 사전 점검 |
@@ -418,6 +418,7 @@ erDiagram
 | `failure_code` | varchar(32) | Y | `FAILED`·`TIMED_OUT` 일 때만 | 실패 이유 |
 | `result` | jsonb | Y | `SUCCEEDED`·`FAILED` 일 때만, 객체 | 러너 결과(WAS 가 스키마·크기·AI PASS 금지를 검증한 뒤) |
 | `model_id`·`prompt_version`·`simulated` | | | | 쓴 모델·프롬프트 버전·가짜 여부 |
+| `deploy_request_id` | uuid | Y | FK `deploy_requests` RESTRICT. `CHANGE_PROPOSAL` 은 이 칸과 도착 환경 필수(`ck_agent_runs_diagnosis_has_deploy_request`), 진단은 요청마다 하나(`uq_agent_runs_deploy_request_id_diagnosis`, `kind = CHANGE_PROPOSAL` 부분 unique) | 진단하는 실패한 배포 요청(이슈 #98, [api/deploy-diagnosis.md](api/deploy-diagnosis.md)). 다른 종류는 NULL |
 | `processing` | jsonb | Y | `SUCCEEDED`·`FAILED` 일 때만, 객체(`ck_agent_runs_processing_only_when_reported`) | 러너가 끝 보고에 밝힌 데이터 레지던시 기록(처리 위치·샌드박스·모델 제공자·모델·리전·넘긴 자료 등급·외부 전송·바이트, AI 3). 검증한 값 그대로(camelCase, `dataClasses` 정렬). NULL 은 "기록 없음"이다. 인덱스 없음 |
 
 - 같은 서비스에 열린 실행(`QUEUED`·`CLAIMED`·`RUNNING`)은 하나(`uq_agent_runs_service_id_open`). 가져가기는 `QUEUED` 를 오래된 순으로(`ix_agent_runs_queued_created_at`).

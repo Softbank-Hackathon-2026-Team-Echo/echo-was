@@ -50,8 +50,9 @@ RUN_LEASE = timedelta(seconds=60)
 RUN_DEADLINE = timedelta(minutes=15)
 EXPIRE_BATCH_SIZE = 100
 RUNNER_ID_MISMATCH_REASON = "RUNNER_ID_MISMATCH"
-# 러너가 가져갈 수 있는 종류(PD-8). CHANGE_PROPOSAL 은 만드는 곳이 없어(P1) 주지 않는다.
-CLAIMABLE_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH)
+# 러너가 가져갈 수 있는 종류(PD-8). capabilities 에 그 종류를 밝힌 러너에게만 준다.
+# CHANGE_PROPOSAL(배포 실패 진단, SPEC api-98)은 진단을 구현한 러너(echo-ai-agent #22)만 밝힌다.
+CLAIMABLE_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH, AgentRunKind.CHANGE_PROPOSAL)
 PATCH_HASH_MISMATCH_REASON = "PATCH_HASH_MISMATCH"
 APPROVAL_NOT_FOUND_REASON = "APPROVAL_NOT_FOUND"
 BRANCH_MISMATCH_REASON = "BRANCH_MISMATCH"
@@ -134,7 +135,8 @@ class AgentRunService:
     async def claim_run(
         self, runner: AgentRunner, runner_id: str, capabilities: Sequence[str]
     ) -> ClaimedRun | None:
-        """capabilities 에 든 종류(PRECHECK·APPLY_PATCH) 중 가장 오래된 대기 실행 하나를 준다(PD-8).
+        """capabilities 에 든 종류(PRECHECK·APPLY_PATCH·CHANGE_PROPOSAL) 중 가장 오래된 대기 실행
+        하나를 준다(PD-8).
 
         없으면 None. 만료 전환은 어느 쪽이든 커밋한다.
         """

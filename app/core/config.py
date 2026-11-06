@@ -257,6 +257,16 @@ class Settings(BaseSettings):
     # 켜면 패치 승인이 반영 실행(APPLY_PATCH)을 만든다. 러너가 그 실행을 가져가는 길이 생기기 전에는
     # 켜지 않는다(실행이 QUEUED 로 마감까지 머물고 그동안 그 서비스의 새 사전 점검이 409 다).
     patch_apply_enabled: bool = False
+    # 배포 실패 진단 만들기(POST .../diagnosis)가 본문의 simulate 를 받는가(SPEC api-98). 받으면
+    # 러너 없이 WAS 가 가짜 진단(simulated = true)을 바로 끝내고, 그 패치 승인도 가짜 반영으로
+    # 끝낸다.
+    # 러너 진단(echo-ai-agent #22)이 붙기 전 화면 연동·시연용이다. 끄면 simulate 는 422 다.
+    ai_diagnosis_simulate_enabled: bool = True
+    # 켜면 본문 없는 진단 만들기가 러너에게 가는 실행(QUEUED)을 만든다. 꺼져 있으면(기본) 본문이
+    # 없어도 가짜 진단(simulate = DIAGNOSED)으로 끝낸다 — CHANGE_PROPOSAL 을 가져가는 러너
+    # (echo-ai-agent #22)가 배포되기 전에 켜면 실행이 마감(15분)까지 QUEUED 로 머물고 그동안 그
+    # 서비스의 새 사전 점검이 409 다.
+    ai_diagnosis_runner_enabled: bool = False
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
 

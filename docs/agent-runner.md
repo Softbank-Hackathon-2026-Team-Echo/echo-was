@@ -27,12 +27,12 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `POST :claim` | 러너 | `{runnerId, capabilities}` | 200 `{run, runToken}` · 없으면 `{run: null, runToken: null}` | 401 · 403 · 422 `VALIDATION_ERROR` |
 | `POST /{id}/heartbeat` | 실행 | `{}` | 200 `{status, leaseUntil}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` |
 | `POST /{id}/events` | 실행 | `{events: [...]}` 1~100개 | 200 `{acceptedUpTo}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
-| `POST /{id}/result` | 실행 | `RunResult` · 반영 실행이면 `ApplyPatchResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
+| `POST /{id}/result` | 실행 | `RunResult`(배포 실패 진단이면 선택 칸 `diagnosis`) · 반영 실행이면 `ApplyPatchResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
 
 ### 가져가기 `POST :claim`
 
 - `runnerId` 는 토큰의 러너 이름과 같아야 한다(다르면 422, `details: [{field: "runnerId", reason: "RUNNER_ID_MISMATCH"}]`).
-- `capabilities` 에 든 종류(`PRECHECK`·`APPLY_PATCH`, 대소문자 그대로)만 준다. 둘 다 없으면 `run: null` 이다. `["PRECHECK"]` 만 보내는 러너는 반영 실행을 받지 않는다.
+- `capabilities` 에 든 종류(`PRECHECK`·`APPLY_PATCH`·`CHANGE_PROPOSAL`, 대소문자 그대로)만 준다. 하나도 없으면 `run: null` 이다. `["PRECHECK"]` 만 보내는 러너는 반영 실행을 받지 않는다. `CHANGE_PROPOSAL`(배포 실패 진단) 입력·결과 형식은 [api/deploy-diagnosis.md](api/deploy-diagnosis.md#러너-계약-change_proposal--echo-ai-agent-22-가-맞출-기준) 를 본다.
 - 고른 종류의 대기 실행을 오래된 순으로 하나 준다(종류 사이 우선순위 없음, `FOR UPDATE SKIP LOCKED` + 조건부 UPDATE). 동시에 불러도 한 러너만 받는다. 없으면 5초쯤 쉬고 다시 부른다.
 
 ```json

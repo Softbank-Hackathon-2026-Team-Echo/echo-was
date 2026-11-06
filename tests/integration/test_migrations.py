@@ -607,6 +607,10 @@ EXPECTED_CONSTRAINTS = {
         "AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL))))"
     ),
     ("agent_runs", "ck_agent_runs_deadline_after_created"): "CHECK ((deadline_at > created_at))",
+    ("agent_runs", "ck_agent_runs_diagnosis_has_deploy_request"): (
+        "CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((deploy_request_id IS NOT NULL) "
+        "AND (target_environment_id IS NOT NULL))))"
+    ),
     ("agent_runs", "ck_agent_runs_failure_code_only_when_failed"): (
         "CHECK (((failure_code IS NULL) OR ((status)::text = ANY "
         "((ARRAY['FAILED'::character varying, 'TIMED_OUT'::character varying])::text[]))))"
@@ -651,6 +655,9 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("agent_runs", "fk_agent_runs_claimed_by_runner_id_agent_runners"): (
         "FOREIGN KEY (claimed_by_runner_id) REFERENCES agent_runners(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_deploy_request_id_deploy_requests"): (
+        "FOREIGN KEY (deploy_request_id) REFERENCES deploy_requests(id) ON DELETE RESTRICT"
     ),
     ("agent_runs", "fk_agent_runs_organization_id_organizations"): (
         "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT"
@@ -992,6 +999,10 @@ EXPECTED_INDEXES = {
     "uq_agent_runners_token_hash": (
         "CREATE UNIQUE INDEX uq_agent_runners_token_hash ON agent_runners USING btree (token_hash)"
     ),
+    "uq_agent_runs_deploy_request_id_diagnosis": (
+        "CREATE UNIQUE INDEX uq_agent_runs_deploy_request_id_diagnosis ON agent_runs USING btree "
+        "(deploy_request_id) WHERE ((kind)::text = 'CHANGE_PROPOSAL'::text)"
+    ),
     "uq_agent_runs_run_token_hash": (
         "CREATE UNIQUE INDEX uq_agent_runs_run_token_hash ON agent_runs USING btree "
         "(run_token_hash) WHERE (run_token_hash IS NOT NULL)"
@@ -1092,7 +1103,9 @@ DISASTERS_REVISION = "250e2535417a"
 # 레지던시 기록 칸(AI 3)을 더하기 전(재난 표) 시점과 지금 head.
 BEFORE_AGENT_RUN_PROCESSING = DISASTERS_REVISION
 AGENT_RUN_PROCESSING_REVISION = "31bc0563b24b"
-HEAD_REVISION = AGENT_RUN_PROCESSING_REVISION
+# 배포 실패 진단(SPEC api-98)의 agent_runs.deploy_request_id. 지금 head.
+AGENT_RUN_DEPLOY_REQUEST_REVISION = "9d8e1f2a3b4c"
+HEAD_REVISION = AGENT_RUN_DEPLOY_REQUEST_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1941,6 +1954,9 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
+    deploy_request = scripts.get_revision(AGENT_RUN_DEPLOY_REQUEST_REVISION)
+    assert deploy_request is not None
+    assert deploy_request.down_revision == AGENT_RUN_PROCESSING_REVISION
     processing = scripts.get_revision(AGENT_RUN_PROCESSING_REVISION)
     assert processing is not None and processing.down_revision == BEFORE_AGENT_RUN_PROCESSING
     disasters = scripts.get_revision(DISASTERS_REVISION)
@@ -2107,6 +2123,40 @@ async def test_agent_run_processing_revision_downgrade_removes_only_additions_an
     assert down_state == (False, False)
     assert down_version == BEFORE_AGENT_RUN_PROCESSING
     assert up_state == (True, True)
+
+
+def _agent_run_deploy_request_state(connection: Connection) -> tuple[bool, bool, bool]:
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("agent_runs")}
+    checks = {check["name"] for check in inspector.get_check_constraints("agent_runs")}
+    indexes = {index["name"] for index in inspector.get_indexes("agent_runs")}
+    return (
+        "deploy_request_id" in columns,
+        "ck_agent_runs_diagnosis_has_deploy_request" in checks,
+        "uq_agent_runs_deploy_request_id_diagnosis" in indexes,
+    )
+
+
+async def test_agent_run_deploy_request_revision_downgrade_removes_additions_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, AGENT_RUN_PROCESSING_REVISION))
+        )
+        down_state = await connection.run_sync(_agent_run_deploy_request_state)
+        processing_kept = await connection.run_sync(_agent_run_processing_state)
+        down_version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up_state = await connection.run_sync(_agent_run_deploy_request_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down_state == (False, False, False)
+    assert processing_kept == (True, True)
+    assert down_version == AGENT_RUN_PROCESSING_REVISION
+    assert up_state == (True, True, True)
 
 
 @pytest.mark.parametrize(

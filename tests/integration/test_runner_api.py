@@ -197,16 +197,14 @@ async def test_claim_without_precheck_capability_returns_null(
     assert (await run_row(migration, created["id"])).status == AgentRunStatus.QUEUED
 
 
-async def test_claim_never_gives_other_kinds(migration: Migration, runner: RunnerFixture) -> None:
+async def test_claim_gives_only_declared_kinds(migration: Migration, runner: RunnerFixture) -> None:
+    """대기 사전 점검은 PRECHECK 를 밝히지 않은 러너에게 주지 않는다(진단은 api-98 시험)."""
     run_id = await _add_queued_run(migration)
-    async with migration.harness.session_factory() as session, session.begin():
-        row = await session.get(AgentRun, run_id)
-        assert row is not None
-        row.kind = AgentRunKind.CHANGE_PROPOSAL
 
-    response = await claim(runner, capabilities=["PRECHECK", "CHANGE_PROPOSAL", "APPLY_PATCH"])
+    response = await claim(runner, capabilities=["CHANGE_PROPOSAL", "APPLY_PATCH"])
 
     assert response.json()["data"]["run"] is None
+    assert (await run_row(migration, str(run_id))).status == AgentRunStatus.QUEUED
 
 
 async def test_claim_expires_queued_run_past_deadline(

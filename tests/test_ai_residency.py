@@ -406,3 +406,18 @@ def test_summary_limits_recent_runs_but_not_violations_or_counts() -> None:
     assert summary.recent_runs[0].run == runs[0]
     assert len(summary.violations) == RECENT_RUNS_LIMIT + 5
     assert summary.runs.total == RECENT_RUNS_LIMIT + 5
+
+
+def test_change_proposal_runs_are_not_counted() -> None:
+    """배포 실패 진단(CHANGE_PROPOSAL, SPEC api-98)은 숫자·판정·위반·최근 목록에 넣지 않는다."""
+    precheck = _run(_no_model())
+    violating = _anthropic(modelRegion="us-east-1", dataClasses=["SECRETS"])
+    diagnosis = _run(violating, kind=AgentRunKind.CHANGE_PROPOSAL)
+    unrecorded_diagnosis = _run(None, kind=AgentRunKind.CHANGE_PROPOSAL, simulated=True)
+
+    summary = _summarize(precheck, diagnosis, unrecorded_diagnosis)
+
+    assert (summary.runs.total, summary.runs.recorded, summary.runs.unrecorded) == (1, 1, 0)
+    assert summary.violations == ()
+    assert summary.sensitive_external_transfer.verdict == AiResidencyVerdict.ZERO
+    assert [item.run.run_id for item in summary.recent_runs] == [precheck.run_id]

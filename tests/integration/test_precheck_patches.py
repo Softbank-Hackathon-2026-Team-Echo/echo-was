@@ -215,6 +215,9 @@ async def test_patch_approve_with_apply_enabled(
         "appliedCommitSha": None,
         "branch": None,
         "simulated": False,
+        "pullRequestUrl": None,
+        "redeployRequestId": None,
+        "redeployRejectedCode": None,
     }
     assert data == await _patch_in_detail(migration, run_id)
     apply_runs = await _apply_runs(migration)
