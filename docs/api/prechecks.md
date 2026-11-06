@@ -144,6 +144,8 @@
 
 ### 스위치 `PATCH_APPLY_ENABLED` (기본 꺼짐)
 
+운영은 11/6 켜짐(`deploy/base.yaml` ConfigMap `PATCH_APPLY_ENABLED: "true"`). 코드 기본값(`app/core/config.py`)은 그대로 꺼짐이다.
+
 | | 꺼짐(기본) | 켜짐 |
 |---|---|---|
 | 승인 | 결정 행만. 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기") | 결정 행 + 반영 실행(`APPLY_PATCH`, `QUEUED`, 마감 15분, `parentRunId` = 부모). `apply.runId`·`apply.status` 가 찬다 |
