@@ -109,9 +109,9 @@ SEC Compare 탭과 E01-3(이전 계획 승인) 비교표가 지금 브라우저 
 
 ## 6. 완료 기준 (AC)
 
-- **AC-1 단위: 막는 규칙 = 게이트 규칙** — `evaluate_control`로 만든 판정에서 칸을 만들어 `compare_rows`에 넣는다. 도착 칸 통제(필수 C-SEC-1 / 선택 C-IAM-1) × 증거 PASS·WARN·FAIL·UNKNOWN(없음) × 유효 예외 있음·없음: `blocksMigration` ⇔ (필수 ∧ FAIL·UNKNOWN ∧ 예외 없음) ⇔ 그 판정의 `is_blocking`. 예외 있음(WAIVED)은 false. 출발 칸이 막혀도 도착이 막지 않으면 false. `blockingControlIds`는 막은 통제만.
+- **AC-1 단위: 막는 규칙 = 게이트 규칙** — `evaluate_control`로 만든 판정에서 칸을 만들어 `compare_rows`에 넣는다. 도착 칸 통제(필수 C-SEC-1 / 선택 C-IAM-1, C-SEC-1 증거 출처는 11/6 부터 WAS_STATE) × 증거 PASS·WARN·FAIL·UNKNOWN(없음) × 유효 예외 있음·없음: `blocksMigration` ⇔ (필수 ∧ FAIL·UNKNOWN ∧ 예외 없음) ⇔ 그 판정의 `is_blocking`. 예외 있음(WAIVED)은 false. 출발 칸이 막혀도 도착이 막지 않으면 false. `blockingControlIds`는 막은 통제만.
 - **AC-2 단위: 요약·변화** — `change` 순서(결과 심각도, 같으면 gateStatus), `summary` 네 값과 합 4, 줄 순서 4칸.
-- **AC-3 통합: 두 환경 비교** — (a) `serviceId` 없이: 두 칸이 같은 시각의 매트릭스 행 칸과 같다(`checkedAt` 제외 전체 대조), `simulated` false, 4줄. (b) 출발에 FAIL 이미지(C-IMG-1) 서비스, 도착 서비스 없음 → `policy` 줄 `change` BETTER·`blocksMigration` false. 반대 방향 → WORSE·true·`blockingControlIds`에 C-IMG-1. (c) 도착의 필수 UNKNOWN(C-SEC-1 증거 없음) → `encryption` true, 조직 범위 C-SEC-1 예외를 넣으면 false(WAIVED). (d) `serviceId`: 그 서비스 통제 줄만 세고 다른 서비스 줄은 없다, 모르는 서비스 404 `SERVICE_NOT_FOUND`.
+- **AC-3 통합: 두 환경 비교** — (a) `serviceId` 없이: 두 칸이 같은 시각의 매트릭스 행 칸과 같다(`checkedAt` 제외 전체 대조), `simulated` false, 4줄. (b) 출발에 FAIL 이미지(C-IMG-1) 서비스, 도착 서비스 없음 → `policy` 줄 `change` BETTER·`blocksMigration` false. 반대 방향 → WORSE·true·`blockingControlIds`에 C-IMG-1. (c) 도착의 필수 UNKNOWN(C-AUD-1 증거 없음, 11/6 전에는 C-SEC-1) → `auditLog` true, WAS 버전 범위 C-AUD-1 예외를 넣으면 false(WAIVED). (d) `serviceId`: 그 서비스 통제 줄만 세고 다른 서비스 줄은 없다, 모르는 서비스 404 `SERVICE_NOT_FOUND`.
 - **AC-4 통합: 거절** — 같은 환경 422 `VALIDATION_ERROR`(`target`/`SAME_ENVIRONMENT`), 쿼리 빠짐 422, 다른 조직 환경·삭제된 환경·없는 id 404 `ENVIRONMENT_NOT_FOUND`(출발·도착 각각), 다른 조직 사람 404 `ORGANIZATION_NOT_FOUND`.
 - **AC-5 권한** — 뷰어·에이전트 토큰 200, 역할 표 시험에 경로 추가(`test_role_table_covers_every_api_route` 통과).
 - **AC-6 OpenAPI** — `/api/v1/orgs/{org_id}/security/compare` GET, 쿼리 `source`·`target` 필수·`serviceId` 선택, 응답 스키마에 `rows`·`summary`·`simulated`·`blocksMigration`·`change` enum.

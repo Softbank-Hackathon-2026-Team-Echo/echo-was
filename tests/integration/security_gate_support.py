@@ -23,6 +23,7 @@ from app.enums import (
 from app.models import (
     AgentRun,
     Deployment,
+    Environment,
     Finding,
     SecurityException,
     Service,
@@ -133,15 +134,10 @@ def _finding(
     return NormalizedFinding(finding, SecurityFindingReason.NO_ISSUES, (), 0, None)
 
 
-async def record_passing_evidence(
-    migration: Migration,
-    was_version: str = WAS_VERSION,
-    *,
-    include_delivery_path: bool = True,
-) -> None:
-    """준비 단계 필수 통제(C-IMG-1·C-IMG-2·C-SEC-1·C-IAM-2·C-AUD-1)의 PASS 증거.
+async def record_passing_evidence(migration: Migration, was_version: str = WAS_VERSION) -> None:
+    """준비 단계 필수 통제(C-IMG-1·C-IMG-2·C-IAM-2·C-AUD-1)의 PASS 증거.
 
-    include_delivery_path=False 면 C-SEC-1 은 넣지 않는다(빌드 검사에서 만든 증거로 시험할 때).
+    C-SEC-1 은 게이트가 앱 환경 변수 키로 계산한다(변수가 없으면 PASS).
     """
     organization_id = migration.harness.organization.id
     digest = await target_digest(migration)
@@ -154,15 +150,6 @@ async def record_passing_evidence(
         _finding(SecurityControlId.IAM_2, SecurityFindingSource.WAS_TEST, by_version, now),
         _finding(SecurityControlId.AUD_1, SecurityFindingSource.WAS_TEST, by_version, now),
     ]
-    if include_delivery_path:
-        findings.append(
-            _finding(
-                SecurityControlId.SEC_1,
-                SecurityFindingSource.GITLEAKS,
-                SecurityScope(organization_id),
-                now,
-            )
-        )
     async with migration.harness.session_factory() as session:
         await SecurityFindingService(session).record_all(findings)
 
@@ -249,6 +236,21 @@ async def prepare_passing_gate(migration: Migration) -> GateFakes:
     await add_exception(migration, SecurityControlId.DST_1)
     await add_precheck(migration)
     return fakes
+
+
+# 앱 환경 변수 시험 값. 증거·응답·로그 어디에도 나오면 안 된다.
+SECRET_VALUE = "gate-test-secret-value-9f3c"
+
+
+async def put_variable(migration: Migration, environment: Environment, key: str) -> None:
+    """앱 환경 변수 하나를 API 로 넣는다(가짜 보관함, 값은 SECRET_VALUE)."""
+    harness = migration.harness
+    response = await harness.client.put(
+        f"{harness.services}/{migration.service_id}/environments/{environment.id}/variables/{key}",
+        json={"value": SECRET_VALUE},
+    )
+    harness.responses.append(response.text)
+    assert response.status_code in (200, 201), response.text
 
 
 async def gate_findings(migration: Migration, control: SecurityControlId) -> list[Finding]:

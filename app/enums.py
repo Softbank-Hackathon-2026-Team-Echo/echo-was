@@ -691,6 +691,10 @@ class SecurityFindingReason(StrEnum):
     # 출발·도착 이미지 일치(C-IMG-3, WAS 상태). 한쪽에 현재 배포가 없어도 불일치다.
     IMAGE_MATCH = "IMAGE_MATCH"
     IMAGE_MISMATCH = "IMAGE_MISMATCH"
+    # 비밀 전달 경로(C-SEC-1, WAS 상태). 기준 연결의 앱 환경 변수 키가 대상 연결에 모두 있다
+    # (기준에 키가 없어도 PASS) · 빠진 키가 있다(FAIL, 근거 줄은 키 이름만).
+    SECRETS_READY = "SECRETS_READY"
+    SECRETS_MISSING = "SECRETS_MISSING"
     # 사람 점검 기록. 결과는 점검자가 정한 값(result)이다.
     MANUAL_REVIEW_RECORDED = "MANUAL_REVIEW_RECORDED"
 

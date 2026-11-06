@@ -38,7 +38,7 @@ from app.enums import (
 )
 
 # 규칙표 버전. 판정·사전 승인·이전 계획 지문에 넣는다. 규칙을 바꾸면 날짜를 올린다.
-POLICY_VERSION = "sec-rules-2026.11.04"
+POLICY_VERSION = "sec-rules-2026.11.06"
 
 # 기한부 예외의 최대 길이(만든 시각 → 만료).
 EXCEPTION_MAX_DURATION = timedelta(days=7)
@@ -374,15 +374,19 @@ RULES: tuple[SecurityControlRule, ...] = (
         sources=frozenset({_S.WAS_TEST, _S.AUDIT_LOG}),
         max_age=_PREPARATION_MAX_AGE,
     ),
+    # 서비스의 앱 환경 변수(비밀)가 도착 환경 보관함에 빠짐없이 있는가(키만 비교, 값은 읽지 않는다).
+    # 게이트·매트릭스가 판정 때 WAS 상태로 새로 계산한다. 전달 방식(envFrom Secret 참조)은
+    # 코드 구조라 시험으로 고정한다.
     SecurityControlRule(
         SecurityControlId.SEC_1,
         "비밀 전달 경로",
         SecurityMatrixCell.ENCRYPTION,
         is_mandatory=True,
-        phases=_PREP,
-        scope_keys=frozenset(),
-        sources=frozenset({_S.GITLEAKS, _S.TRIVY_SECRET, _S.MANUAL_REVIEW}),
+        phases=_PREP_AND_EXEC,
+        scope_keys=frozenset({_K.SERVICE, _K.ENVIRONMENT}),
+        sources=frozenset({_S.WAS_STATE, _S.MANUAL_REVIEW}),
         max_age=_PREPARATION_MAX_AGE,
+        time_budget=timedelta(seconds=1),
     ),
     SecurityControlRule(
         SecurityControlId.AUD_1,

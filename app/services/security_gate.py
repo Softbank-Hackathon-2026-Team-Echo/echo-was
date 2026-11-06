@@ -5,9 +5,11 @@
    기한부 예외(승인됐고 철회되지 않은 것), 24시간 안의 AI 사전 점검.
 2. 트랜잭션 밖: 실행 직전 증거를 만든다.
    - C-IMG-3: 두 현재 배포의 digest 비교(WAS 상태).
+   - C-SEC-1: 출발 연결의 앱 환경 변수 키가 도착 연결에 모두 있는가(WAS 상태, 키만. 1번에서 읽음).
    - C-TLS-1: 대표 주소·도착 환경 주소 TLS 접속 시험(Echo 가 만든 공개 주소만, 통제 시간 예산 안).
 3. 새 증거를 findings 에 남기고(짧은 쓰기 트랜잭션) 규칙표로 실행(EXECUTION) 판정을 한다.
-   C-IMG-3·C-TLS-1 은 방금 만든 증거만 쓴다(이전 판정의 결과가 남아 다시 막지 않게).
+   C-IMG-3·C-TLS-1·C-SEC-1(WAS 상태) 은 방금 만든 증거만 쓴다(이전 판정의 결과가 남아 다시 막지
+   않게). C-SEC-1 의 사람 점검 기록은 저장된 것을 그대로 쓴다.
 
 이 모듈은 계획 상태를 바꾸지 않는다. 부르는 쪽(승인·일꾼 시작)이 서비스를 잠근 트랜잭션 안에서
 판정을 실행 로그 줄(`gate_log_data`)로 남기고, 막혔으면 승인은 409, 실행 시작은 FAILED 로 끝낸다.
@@ -46,10 +48,17 @@ from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.security_exception_repository import SecurityExceptionRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_environment_variable_repository import (
+    ServiceEnvironmentVariableRepository,
+)
 from app.repositories.service_repository import ServiceRepository
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import SecurityFindingService, to_security_finding
-from app.services.security_normalizers import normalize_image_match, normalize_tls_probes
+from app.services.security_normalizers import (
+    normalize_image_match,
+    normalize_secret_delivery,
+    normalize_tls_probes,
+)
 from app.services.security_rules import (
     EXCEPTION_MAX_DURATION,
     POLICY_VERSION,
@@ -66,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 # 게이트가 판정마다 새로 확인하는 통제. 저장된 옛 증거 대신 방금 만든 증거만 쓴다.
 RECHECKED_CONTROLS = frozenset({SecurityControlId.IMG_3, SecurityControlId.TLS_1})
+# 출처까지 같을 때만 새로 확인하는 통제(C-SEC-1 은 WAS 상태만 다시 계산, 사람 점검 기록은 그대로).
+RECHECKED_SOURCES = frozenset({(SecurityControlId.SEC_1, SecurityFindingSource.WAS_STATE)})
 
 # 로그 줄 data 키(camelCase, 다른 이전 로그 data 와 같은 표기).
 LOG_POLICY_VERSION = "policyVersion"
@@ -104,6 +115,9 @@ class _Snapshot:
     target_environment_kind: str
     source_digest: str | None
     target_digest: str | None
+    # 출발·도착 연결의 살아 있는 앱 환경 변수 키(값 없음).
+    source_secret_keys: frozenset[str]
+    target_secret_keys: frozenset[str]
     hosts: tuple[str, ...]
     findings: list[SecurityFinding] = field(default_factory=list)
     exceptions: list[SecurityException] = field(default_factory=list)
@@ -134,16 +148,21 @@ class SecurityGate:
             scope=SecurityScope(snapshot.organization_id, service_id=snapshot.service_id),
             collected_at=now,
         )
-        tls = normalize_tls_probes(
-            probes,
-            scope=SecurityScope(
-                snapshot.organization_id,
-                service_id=snapshot.service_id,
-                environment_id=snapshot.target_environment_id,
-            ),
+        target_scope = SecurityScope(
+            snapshot.organization_id,
+            service_id=snapshot.service_id,
+            environment_id=snapshot.target_environment_id,
+        )
+        tls = normalize_tls_probes(probes, scope=target_scope, collected_at=now)
+        secret_delivery = normalize_secret_delivery(
+            snapshot.source_secret_keys,
+            snapshot.target_secret_keys,
+            scope=target_scope,
             collected_at=now,
         )
-        await self._findings.record_all([image_match, tls], source_ref=f"migration-plan:{plan_id}")
+        await self._findings.record_all(
+            [image_match, tls, secret_delivery], source_ref=f"migration-plan:{plan_id}"
+        )
         target = SecurityTarget(
             scope=SecurityScope(
                 snapshot.organization_id,
@@ -159,9 +178,10 @@ class SecurityGate:
             target,
             SecurityCheckPhase.EXECUTION,
             [
-                *(f for f in snapshot.findings if f.control_id not in RECHECKED_CONTROLS),
+                *(f for f in snapshot.findings if not is_rechecked(f)),
                 image_match.finding,
                 tls.finding,
+                secret_delivery.finding,
             ],
             snapshot.exceptions,
             now,
@@ -204,6 +224,11 @@ class SecurityGate:
                 if target is not None and target.current_deployment_id is not None
                 else None
             )
+            secret_keys = await ServiceEnvironmentVariableRepository(
+                self._session
+            ).search_live_keys_by_connections(
+                connection.id for connection in (source, target) if connection is not None
+            )
             now = self._clock.now()
             finding_models = await FindingRepository(
                 self._session
@@ -237,6 +262,12 @@ class SecurityGate:
                 target_environment_kind=target.environment.kind if target is not None else "",
                 source_digest=source_deployment.image_digest if source_deployment else None,
                 target_digest=target_deployment.image_digest if target_deployment else None,
+                source_secret_keys=(
+                    secret_keys.get(source.id, frozenset()) if source is not None else frozenset()
+                ),
+                target_secret_keys=(
+                    secret_keys.get(target.id, frozenset()) if target is not None else frozenset()
+                ),
                 hosts=tuple(
                     host
                     for host in (service.public_host, target.public_host if target else None)
@@ -245,6 +276,14 @@ class SecurityGate:
                 findings=findings,
                 exceptions=[to_security_exception(model) for model in exception_models],
             )
+
+
+def is_rechecked(finding: SecurityFinding) -> bool:
+    """판정 때 새로 계산하는 증거인가(저장된 옛 것은 판정에 넣지 않는다)."""
+    return (
+        finding.control_id in RECHECKED_CONTROLS
+        or (finding.control_id, finding.source) in RECHECKED_SOURCES
+    )
 
 
 def _precheck_finding(

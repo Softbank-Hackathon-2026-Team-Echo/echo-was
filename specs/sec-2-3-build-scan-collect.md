@@ -43,7 +43,7 @@
 | D-1 | 부르는 곳은 배포 처리기가 빌드를 `SUCCEEDED`로 **반영한 직후**(트랜잭션 밖), 반영됐을 때만 한 번. 재사용 빌드는 다시 모으지 않는다(같은 digest의 증거가 이미 있다) | §2 |
 | D-2 | 원문 읽기는 `BuildSecurityScanReader`를 갖춘 실행기만. `BuildExecutor`를 바꾸지 않아 가짜 실행기·다른 구현은 그대로다 | AI-default |
 | D-3 | 원문의 `build_id`가 빌드 id와 다르거나 digest가 빌드 digest와 다르면 버리고 경고만 남긴다 | 다른 빌드의 증거 금지 |
-| D-4 | 증거 3건: Trivy 이미지 → C-IMG-1(`TRIVY_IMAGE`), Trivy 비밀 → C-IMG-2(`TRIVY_SECRET`), gitleaks → C-IMG-2(`GITLEAKS`). 범위 = 조직·서비스·digest. 보고서가 없으면(검사 실패) 그 증거는 UNKNOWN(`REPORT_INVALID`). (11/5 2-4 SPEC: 두 비밀 검사를 읽었으면 C-SEC-1 도 함께 남겨 최대 5건) | #45 정규화 |
+| D-4 | 증거 3건: Trivy 이미지 → C-IMG-1(`TRIVY_IMAGE`), Trivy 비밀 → C-IMG-2(`TRIVY_SECRET`), gitleaks → C-IMG-2(`GITLEAKS`). 범위 = 조직·서비스·digest. 보고서가 없으면(검사 실패) 그 증거는 UNKNOWN(`REPORT_INVALID`). (11/5 2-4 SPEC 의 C-SEC-1 파생 2건은 11/6 1-2 SPEC 에서 지움 → 다시 3건) | #45 정규화 |
 | D-5 | 수집 시각 = 원문의 `scanned_at`. 없거나 우리 시계보다 5분 넘게 앞서면 지금 시각 | AI-default |
 | D-6 | 실패해도 예외를 올리지 않는다. 원문 읽기부터 확인·정규화까지의 **어떤 예외도** 경고 로그(예외 종류만, 원문·메시지 없음) + 0건으로 끝낸다. DB 오류는 `SQLAlchemyError`. `CancelledError`(BaseException)는 그대로 나간다. 실행기도 깨진 zip(`zlib.error`·`EOFError`)·지원하지 않는 압축(`NotImplementedError`)·암호 걸린 항목(`RuntimeError`)을 그 파일만 `None`으로 둔다 | 배포 우선, API 서버 담당 리뷰(11/4) |
 | D-7 | 원문은 신뢰하지 않는 입력으로 다룬다. 일꾼 메모리 상한(384Mi) 안에서 세 파일을 함께 들 수 있게 **아티팩트 zip 8MB**(목록의 `size_in_bytes`가 넘으면 받지 않고, 받은 크기도 다시 봄, 넘으면 경고 `SECURITY_SCAN_TOO_LARGE`)·**zip 안 파일 풀린 크기 8MB** 상한. JSON만, 도구 버전은 `^[0-9A-Za-z.+-]{1,32}$`일 때만 쓴다. 근거 줄 상한(50)과 비밀값 원문 버리기는 정규화가 한다 | API 서버 담당 리뷰(11/4) |

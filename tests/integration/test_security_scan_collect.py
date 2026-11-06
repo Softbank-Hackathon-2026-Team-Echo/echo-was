@@ -127,7 +127,7 @@ async def _build(harness: DeployHarness) -> Build:
         return (await session.scalars(select(Build))).one()
 
 
-# --- AC-3 빌드 성공 직후 같은 digest 의 증거 5건(C-SEC-1 2건은 sec-2-4 AC-1) ---
+# --- AC-3 빌드 성공 직후 같은 digest 의 증거 3건 ---
 
 
 async def test_build_success_records_image_findings_for_built_digest(
@@ -144,11 +144,8 @@ async def test_build_success_records_image_findings_for_built_digest(
         (SecurityControlId.IMG_1, SecurityFindingSource.TRIVY_IMAGE, SecurityResult.FAIL),
         (SecurityControlId.IMG_2, SecurityFindingSource.GITLEAKS, SecurityResult.PASS),
         (SecurityControlId.IMG_2, SecurityFindingSource.TRIVY_SECRET, SecurityResult.PASS),
-        (SecurityControlId.SEC_1, SecurityFindingSource.GITLEAKS, SecurityResult.PASS),
-        (SecurityControlId.SEC_1, SecurityFindingSource.TRIVY_SECRET, SecurityResult.PASS),
     ]
     assert findings[0].reason == SecurityFindingReason.FIXABLE_HIGH_VULNERABILITY
-    assert {f.expires_at for f in findings[3:]} == {scanned_at + timedelta(days=7)}
     assert {f.image_digest for f in findings} == {build.image_digest}
     assert {str(f.service_id) for f in findings} == {service["id"]}
     assert {f.source_ref for f in findings} == {SOURCE_REF}
@@ -180,7 +177,7 @@ async def test_reused_build_is_not_collected_again(harness: DeployHarness) -> No
         build_count = await session.scalar(select(func.count()).select_from(Build))
     assert build_count == 1
     assert len(executor.scan_reads) == 1
-    assert len(await _findings(harness)) == 5
+    assert len(await _findings(harness)) == 3
 
 
 # --- AC-5 다른 빌드·다른 digest 의 원문은 버린다 ---
@@ -220,25 +217,6 @@ async def test_missing_reports_are_recorded_as_unknown(harness: DeployHarness) -
     findings = await _findings(harness)
     assert [f.result for f in findings] == [SecurityResult.UNKNOWN] * 3
     assert {f.reason for f in findings} == {SecurityFindingReason.REPORT_INVALID}
-    # 원문을 못 읽으면 조직 범위 C-SEC-1 은 남기지 않는다(sec-2-4 AC-3).
-    assert SecurityControlId.SEC_1 not in {f.control_id for f in findings}
-
-
-async def test_found_secret_fails_image_and_warns_delivery_path(harness: DeployHarness) -> None:
-    leak = {"RuleID": "github-pat", "File": "app/settings.py", "StartLine": 7, "Commit": "d" * 40}
-    executor = ScanningBuildExecutor(harness.clock, 0, scan=_scan(gitleaks=(leak,)))
-
-    await _deploy_and_finish(harness, executor)
-
-    by_key = {(f.control_id, f.source): f for f in await _findings(harness)}
-    image_secret = by_key[(SecurityControlId.IMG_2, SecurityFindingSource.GITLEAKS)]
-    delivery = by_key[(SecurityControlId.SEC_1, SecurityFindingSource.GITLEAKS)]
-    assert image_secret.result == SecurityResult.FAIL
-    assert delivery.result == SecurityResult.WARN
-    assert delivery.reason == SecurityFindingReason.SECRET_FOUND
-    assert (delivery.items, delivery.total_items) == (image_secret.items, 1)
-    clean = by_key[(SecurityControlId.SEC_1, SecurityFindingSource.TRIVY_SECRET)]
-    assert clean.result == SecurityResult.PASS
 
 
 # --- AC-7 원문이 없거나 가짜 실행기면 아무것도 남기지 않고 배포는 그대로 ---

@@ -50,7 +50,7 @@ DIGEST = "sha256:" + "a" * 64
 
 # 통제마다 증거 출처·범위(판정 대상과 맞는 값).
 _SOURCES = {
-    SecurityControlId.SEC_1: SecurityFindingSource.GITLEAKS,
+    SecurityControlId.SEC_1: SecurityFindingSource.WAS_STATE,
     SecurityControlId.IAM_1: SecurityFindingSource.CLOUD_API,
     SecurityControlId.TLS_1: SecurityFindingSource.TLS_PROBE,
 }

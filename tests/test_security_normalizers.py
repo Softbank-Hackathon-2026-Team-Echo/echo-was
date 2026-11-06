@@ -18,10 +18,11 @@ from app.enums import (
 )
 from app.services.security_normalizers import (
     MAX_ITEMS,
+    FindingItem,
     NormalizedFinding,
-    derive_delivery_path_finding,
     normalize_gitleaks,
     normalize_image_match,
+    normalize_secret_delivery,
     normalize_tls_probes,
     normalize_trivy_config,
     normalize_trivy_image,
@@ -373,91 +374,58 @@ def test_image_match_compares_current_deployment_digests(
     ]
 
 
+# --- C-SEC-1 비밀 전달 경로: 기준 연결의 키가 대상 연결에 모두 있는가 (sec-1-2 AC-1) ---
+
+
+@pytest.mark.parametrize(
+    ("reference", "target", "result", "reason", "missing"),
+    [
+        ({"API_KEY", "DB_URL"}, {"API_KEY", "DB_URL", "EXTRA"}, R.PASS, "SECRETS_READY", []),
+        (set(), {"API_KEY"}, R.PASS, "SECRETS_READY", []),
+        (set(), set(), R.PASS, "SECRETS_READY", []),
+        (
+            {"DB_URL", "API_KEY", "TOKEN"},
+            {"TOKEN"},
+            R.FAIL,
+            "SECRETS_MISSING",
+            ["API_KEY", "DB_URL"],
+        ),
+    ],
+    ids=["all-present", "reference-empty", "both-empty", "missing-keys"],
+)
+def test_secret_delivery_compares_variable_keys_only(
+    reference: set[str], target: set[str], result: SecurityResult, reason: str, missing: list[str]
+) -> None:
+    normalized = normalize_secret_delivery(reference, target, scope=SCOPE, collected_at=NOW)
+    finding = normalized.finding
+    assert (finding.control_id, finding.source, finding.mode) == (
+        SecurityControlId.SEC_1,
+        SecurityFindingSource.WAS_STATE,
+        SecurityFindingMode.REAL,
+    )
+    assert (finding.result, normalized.reason) == (result, SecurityFindingReason(reason))
+    assert finding.scope == SCOPE
+    assert finding.policy_version == POLICY_VERSION
+    # 근거 줄은 빠진 키 이름뿐이다(값·위치·버전 칸 없음).
+    assert [i.item_id for i in normalized.items] == missing
+    assert all(i == FindingItem(item_id=i.item_id) for i in normalized.items)
+    assert normalized.total_items == len(missing)
+
+
+def test_secret_delivery_blocks_only_its_service_and_target_environment() -> None:
+    failing = normalize_secret_delivery({"API_KEY"}, set(), scope=SCOPE, collected_at=NOW).finding
+    same = SecurityTarget(scope=SCOPE, environment_kind="gcp")
+    other_env = SecurityTarget(
+        scope=replace(SCOPE, environment_id=UUID(int=9)), environment_kind="gcp"
+    )
+    blocked = evaluate_security(same, SecurityCheckPhase.EXECUTION, [failing], [], NOW)
+    unrelated = evaluate_security(other_env, SecurityCheckPhase.EXECUTION, [failing], [], NOW)
+    assert blocked.get_control(SecurityControlId.SEC_1).is_blocking
+    assert blocked.get_control(SecurityControlId.SEC_1).result == R.FAIL
+    assert unrelated.get_control(SecurityControlId.SEC_1).result == R.UNKNOWN
+
+
 # --- 정규화한 증거를 규칙표가 그대로 쓴다 ---
-
-
-# --- C-SEC-1 비밀 전달 경로 (sec-2-4) ---
-
-
-def _leak(rule_id: str, line: int) -> dict[str, Any]:
-    return {"RuleID": rule_id, "File": "app/settings.py", "StartLine": line, "Secret": FAKE_SECRET}
-
-
-def test_delivery_path_from_clean_secret_scans_is_pass() -> None:
-    clean_image = normalize_trivy_image_secrets(
-        trivy_image_report(secrets=[]), scope=SCOPE, collected_at=NOW, tool_version="0.70.0"
-    )
-    clean_source = normalize_gitleaks([], scope=SCOPE, collected_at=NOW)
-
-    for secret in (clean_image, clean_source):
-        derived = derive_delivery_path_finding(secret)
-        assert derived is not None
-        finding = derived.finding
-        assert finding.control_id == SecurityControlId.SEC_1
-        assert finding.result == R.PASS
-        assert finding.source == secret.finding.source
-        assert finding.finding_id != secret.finding.finding_id
-        assert (finding.scope, finding.collected_at) == (SCOPE, NOW)
-        assert finding.expires_at == NOW + timedelta(days=7)
-        assert finding.policy_version == POLICY_VERSION
-        assert (derived.reason, derived.tool_version) == (secret.reason, secret.tool_version)
-
-
-def test_delivery_path_from_found_secret_is_warn_with_same_items() -> None:
-    leaks = [_leak(f"rule-{index:03d}", index) for index in range(MAX_ITEMS + 3)]
-    secret = normalize_gitleaks(leaks, scope=SCOPE, collected_at=NOW)
-    assert secret.finding.result == R.FAIL
-
-    derived = derive_delivery_path_finding(secret)
-
-    assert derived is not None
-    assert derived.finding.result == R.WARN
-    assert derived.reason == Reason.SECRET_FOUND
-    assert (derived.items, derived.total_items) == (secret.items, MAX_ITEMS + 3)
-    assert FAKE_SECRET not in repr(derived)
-
-
-@pytest.mark.parametrize("report", [None, {"leaks": []}, ["x"]])
-def test_delivery_path_is_not_made_from_unreadable_scan(report: object) -> None:
-    secret = normalize_gitleaks(report, scope=SCOPE, collected_at=NOW)
-    assert secret.finding.result == R.UNKNOWN
-
-    assert derive_delivery_path_finding(secret) is None
-
-
-def test_delivery_path_is_not_made_from_other_scans() -> None:
-    other_image = normalize_trivy_image_secrets(
-        trivy_image_report(secrets=[], digest="sha256:" + "b" * 64),
-        scope=SCOPE,
-        collected_at=NOW,
-    )
-    vulnerabilities = image(trivy_image_report([]))
-
-    assert other_image.reason == Reason.ARTIFACT_MISMATCH
-    assert derive_delivery_path_finding(other_image) is None
-    assert derive_delivery_path_finding(vulnerabilities) is None
-
-
-def test_delivery_path_finding_is_judged_for_the_whole_organization() -> None:
-    other_service = SecurityTarget(
-        scope=SecurityScope(organization_id=ORG, service_id=UUID(int=9), image_digest=None),
-        environment_kind="aws",
-    )
-    clean = derive_delivery_path_finding(normalize_gitleaks([], scope=SCOPE, collected_at=NOW))
-    found = derive_delivery_path_finding(
-        normalize_gitleaks([_leak("github-pat", 7)], scope=SCOPE, collected_at=NOW)
-    )
-    assert clean is not None and found is not None
-
-    passing = evaluate_security(
-        other_service, SecurityCheckPhase.EXECUTION, [clean.finding], [], NOW
-    ).get_control(SecurityControlId.SEC_1)
-    warned = evaluate_security(
-        other_service, SecurityCheckPhase.EXECUTION, [clean.finding, found.finding], [], NOW
-    ).get_control(SecurityControlId.SEC_1)
-
-    assert (passing.result, passing.is_blocking) == (R.PASS, False)
-    assert (warned.result, warned.is_blocking) == (R.WARN, False)
 
 
 def test_normalized_findings_feed_rule_table() -> None:

@@ -10,6 +10,10 @@
 - 예외는 게이트와 같은 입력(승인·미철회 예외, 서버 WAS 버전, 조직 자기 승인 스위치)으로 규칙표
   `evaluate_control` 이 판정한다. 게이트가 막는지는 `gate_status`(BLOCKED·WAIVED·PASS)로 따로 준다.
 - 실행 때만 보는 통제(C-DB-1·C-DST-1·C-AI-1·C-IMG-3)는 줄이 없어 그 예외도 나타나지 않는다.
+- C-SEC-1(비밀 전달 경로)은 조회 때 WAS 상태로 계산한다: 서비스마다 서비스 중 연결(비율이 가장 큰
+  연결)을 기준으로, 각 연결에 기준의 앱 환경 변수 키가 모두 있는가(키만, 값은 읽지 않는다). 대기
+  환경에 비밀이 빠졌는지 이전 전에 보이게 하려는 것이다. 이 증거는 저장하지 않아 증거 목록에 없고,
+  저장된 WAS 상태 C-SEC-1(게이트 기록)은 쓰지 않는다. 사람 점검 기록은 그대로 쓴다.
 - 이전 전후 비교(보안 5-2)는 `get_rows` 로 고른 환경의 행을 같은 계산으로 받는다.
 """
 
@@ -25,6 +29,7 @@ from app.enums import (
     SecurityCheckPhase,
     SecurityControlId,
     SecurityFindingMode,
+    SecurityFindingSource,
     SecurityGateStatus,
     SecurityMatrixCell,
     SecurityReasonCode,
@@ -36,10 +41,14 @@ from app.repositories.finding_repository import FindingConditions, FindingReposi
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.security_exception_repository import SecurityExceptionRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
+from app.repositories.service_environment_variable_repository import (
+    ServiceEnvironmentVariableRepository,
+)
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import to_security_finding
+from app.services.security_normalizers import normalize_secret_delivery
 from app.services.security_rules import (
     EXCEPTION_MAX_DURATION,
     POLICY_VERSION,
@@ -171,6 +180,7 @@ class SecurityMatrixService:
         self._organizations = OrganizationRepository(session)
         self._users = UserRepository(session)
         self._services = ServiceRepository(session)
+        self._variables = ServiceEnvironmentVariableRepository(session)
 
     async def get_matrix(self, organization_id: uuid.UUID) -> SecurityMatrixView:
         """조직의 환경 × 4칸. 칸마다 판정 근거(통제·사유·증거 id·모드·시각)를 함께 준다."""
@@ -224,13 +234,23 @@ class SecurityMatrixService:
             for model in exception_models
             if model.approved_by_user_id is not None
         )
+        secret_keys = await self._variables.search_live_keys_by_connections(
+            connection.id for connection in connections
+        )
         judgement = _JudgementInput(
             organization_id=organization_id,
             was_version=self._was_version,
             allow_self_approval=(
                 organization.allow_self_approval if organization is not None else False
             ),
-            findings=[to_security_finding(model) for model in models],
+            findings=[
+                *(
+                    finding
+                    for finding in (to_security_finding(model) for model in models)
+                    if not _is_live_secret_delivery(finding)
+                ),
+                *_secret_delivery_findings(organization_id, connections, secret_keys, now),
+            ],
             exceptions=[to_security_exception(model) for model in exception_models],
             exception_views=_exception_views(exception_models, approvers),
             now=now,
@@ -263,6 +283,49 @@ class SecurityMatrixService:
             )
             total = await self._findings.count_by_organization(organization_id, conditions)
         return FindingPage(items=items, total=total)
+
+
+def _is_live_secret_delivery(finding: SecurityFinding) -> bool:
+    return (
+        finding.control_id == SecurityControlId.SEC_1
+        and finding.source == SecurityFindingSource.WAS_STATE
+    )
+
+
+def _secret_delivery_findings(
+    organization_id: uuid.UUID,
+    connections: Sequence[ServiceEnvironment],
+    secret_keys: dict[uuid.UUID, frozenset[str]],
+    now: datetime,
+) -> list[SecurityFinding]:
+    """연결마다 C-SEC-1: 그 서비스의 서비스 중 연결(비율이 가장 큰, 같으면 id 가 작은) 키 기준.
+
+    증거 id 는 (연결, 기준 연결)로 정한다. 저장하지 않는 값이라 조회마다 바뀌지 않게 한다.
+    """
+    reference_by_service: dict[uuid.UUID, ServiceEnvironment] = {}
+    for connection in connections:
+        reference = reference_by_service.get(connection.service_id)
+        if reference is None or (-connection.traffic_weight, connection.id) < (
+            -reference.traffic_weight,
+            reference.id,
+        ):
+            reference_by_service[connection.service_id] = connection
+    findings: list[SecurityFinding] = []
+    for connection in connections:
+        reference = reference_by_service[connection.service_id]
+        finding = normalize_secret_delivery(
+            secret_keys.get(reference.id, frozenset()),
+            secret_keys.get(connection.id, frozenset()),
+            scope=SecurityScope(
+                organization_id,
+                service_id=connection.service_id,
+                environment_id=connection.environment_id,
+            ),
+            collected_at=now,
+        ).finding
+        finding_id = uuid.uuid5(connection.id, f"{finding.control_id}:{reference.id}")
+        findings.append(replace(finding, finding_id=finding_id))
+    return findings
 
 
 def _evaluate_rows(

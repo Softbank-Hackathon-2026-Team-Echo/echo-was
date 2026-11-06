@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,28 @@ class ServiceEnvironmentVariableRepository:
             .execution_options(populate_existing=True)
         )
         return list((await self._session.scalars(statement)).all())
+
+    async def search_live_keys_by_connections(
+        self, service_environment_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, frozenset[str]]:
+        """연결마다 살아 있는 변수 키 이름(보안 C-SEC-1). 키만 읽고, 키가 없는 연결은 빈 집합."""
+        ids = list(dict.fromkeys(service_environment_ids))
+        if not ids:
+            return {}
+        keys_by_connection: dict[uuid.UUID, set[str]] = {id_: set() for id_ in ids}
+        rows = await self._session.execute(
+            select(
+                ServiceEnvironmentVariable.service_environment_id, ServiceEnvironmentVariable.key
+            ).where(
+                ServiceEnvironmentVariable.service_environment_id.in_(ids),
+                ServiceEnvironmentVariable.is_deleted.is_(False),
+            )
+        )
+        for connection_id, key in rows:
+            keys_by_connection[connection_id].add(key)
+        return {
+            connection_id: frozenset(keys) for connection_id, keys in keys_by_connection.items()
+        }
 
     async def find_live(
         self, service_environment_id: uuid.UUID, key: str

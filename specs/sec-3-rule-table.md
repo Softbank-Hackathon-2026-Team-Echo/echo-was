@@ -48,7 +48,7 @@
 | AD-1 | 이름은 용어 사전을 따른다: 증거 한 건 = `SecurityFinding`(표 `findings`), 판정 = `SecurityDecision`. 사유 코드는 #25 §6.2의 이름(`EVIDENCE_*`)을 쓴다 | AI-default |
 | AD-2 | 통제 ID 값은 문서·화면 표기(`C-IMG-1`) 그대로 저장한다. 내부 코드 UPPER_SNAKE 규칙의 예외로 용어 사전에 적는다 | AI-default(검토 필요) |
 | AD-3 | C-IMG-2(시크릿 노출)의 유효기간은 "같은 digest" + 7일로 둔다. 검사 도구 규칙이 바뀌므로 시간 상한을 C-IMG-1과 맞춘다 | AI-default(검토 필요) |
-| AD-4 | 플랫폼 통제(C-SEC-1·C-CI-1)는 조직만 범위로 본다. WAS 시험 결과로 보는 통제(C-IAM-2·C-AUD-1)는 WAS 버전이 같아야 한다 | AI-default |
+| AD-4 | 플랫폼 통제(C-CI-1)는 조직만 범위로 본다(C-SEC-1 은 11/6 서비스·환경 범위로 바뀜, 1-2 SPEC). WAS 시험 결과로 보는 통제(C-IAM-2·C-AUD-1)는 WAS 버전이 같아야 한다 | AI-default |
 | AD-5 | 미래 시각에 수집된 증거는 만료로 본다(시계 오류를 PASS로 쓰지 않게) | AI-default |
 
 ## 5. 계약
@@ -88,7 +88,7 @@
 | C-NET-2 | policy | 아니요 | 준비 | 환경 | MANUAL_REVIEW·KUBERNETES_API | 7일 | — |
 | C-IAM-1 | iam | 아니요 | 준비 | 환경 | MANUAL_REVIEW·CLOUD_API | 7일 | — |
 | C-IAM-2 | iam | 예 | 준비 | WAS 버전 | WAS_TEST·AUDIT_LOG | 7일 | — |
-| C-SEC-1 | encryption | 예 | 준비 | 조직 | GITLEAKS·TRIVY_SECRET·MANUAL_REVIEW | 7일 | — |
+| C-SEC-1 | encryption | 예 | 준비·실행 | 서비스·환경 (11/6, 1-2 SPEC) | WAS_STATE·MANUAL_REVIEW | 7일 | 1초 |
 | C-AUD-1 | auditLog | 예 | 준비 | WAS 버전 | WAS_TEST·AUDIT_LOG | 7일 | — |
 | C-AUD-2 | auditLog | 아니요 | 준비 | 환경 | CLOUD_API (온프레 NA) | 24시간 | — |
 | C-CI-1 | policy | 아니요 | 준비 | 조직 | MANUAL_REVIEW·GITHUB_API | 7일 | — |

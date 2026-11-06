@@ -42,7 +42,7 @@
 | ID | 결정 | 출처 |
 |---|---|---|
 | D-1 | **만든 시각을 앱 시계로 직접 넣는다**(`created_at = updated_at = clock.now()`). 만료 검사(`expiresAt - now <= 7일`)와 DB CHECK 가 같은 만든 시각을 본다. 정확히 7일은 받는다 | #60 리뷰 ② |
-| D-2 | 범위 칸은 **통제가 정한 것만, 모두**. 빠지면 `REQUIRED_FOR_CONTROL`, 더 있으면 `NOT_ALLOWED_FOR_CONTROL`(422, 여러 칸 한 번에). 정한 칸이 없는 통제(C-SEC-1·C-CI-1)는 조직 전체 | 규칙표 `scope_keys`, findings 와 같은 방식 |
+| D-2 | 범위 칸은 **통제가 정한 것만, 모두**. 빠지면 `REQUIRED_FOR_CONTROL`, 더 있으면 `NOT_ALLOWED_FOR_CONTROL`(422, 여러 칸 한 번에). 정한 칸이 없는 통제(C-CI-1)는 조직 전체(C-SEC-1 은 11/6 서비스·환경 범위로 바뀜) | 규칙표 `scope_keys`, findings 와 같은 방식 |
 | D-3 | 서비스·환경은 이 조직의 살아 있는 것(404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`). digest·설정 커밋·WAS 버전은 형식만 본다. 이전 게이트에 쓰는 C-DB-1·C-DST-1·C-AI-1·C-POST-1 의 `environmentId` 는 **이전 도착 환경**이다(게이트가 도착 환경으로 범위를 만든다) | 조직 격리, `security_gate.py` |
 | D-4 | 승인: `PENDING` 만, 요청한 사람의 승인은 조직 스위치가 켜졌을 때만(403 `SELF_APPROVAL_FORBIDDEN`, 거부 기록). 이전 계획 승인과 같은 스위치·같은 오류 | 보안 1 §6.4, 규칙표 |
 | D-5 | 철회: 철회 전·만료 전이면 승인 전이어도 된다. 철회 칸만 채우고 지우지 않는다 | #60 모델 |

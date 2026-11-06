@@ -132,7 +132,7 @@ async def test_create_exception_requires_exactly_the_control_scope(migration: Mi
         **_body(migration, _C.IMG_1, serviceId=None, environmentId=None, imageDigest=digest),
     )
     organization_wide = await _create(
-        migration, **_body(migration, _C.SEC_1, serviceId=None, environmentId=None)
+        migration, **_body(migration, _C.CI_1, serviceId=None, environmentId=None)
     )
     bad_digest = await client.post(
         _path(migration),
@@ -253,7 +253,7 @@ async def test_search_exceptions_filters_and_stays_in_organization(
     await _act(migration, dst["id"], "approve")
     harness.clock.advance(1)
     organization_wide = await _create(
-        migration, **_body(migration, _C.SEC_1, serviceId=None, environmentId=None)
+        migration, **_body(migration, _C.CI_1, serviceId=None, environmentId=None)
     )
     other = await create_organization(harness.session_factory, "other-org")
     outsider = await create_member(
