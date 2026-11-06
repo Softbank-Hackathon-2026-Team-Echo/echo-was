@@ -8,7 +8,8 @@
 2. 서비스·환경을 읽어 거절할 것을 먼저 거절한다(트랜잭션 밖 GitHub 호출 전에).
 3. 브랜치·커밋을 40자 SHA 로 고정한다(트랜잭션 밖).
 4. 환경 행을 FOR SHARE 로 잠그고 다시 확인한 뒤(환경 삭제와 경쟁 방지), 서비스·연결을 잠그고
-   연결이 없으면 만든다. 같은 연결의 대기 요청은 SUPERSEDED 로 밀어내고 새 요청과 할 일을 넣는다.
+   연결이 없으면 만든다(첫 배포 전 변수 저장이 만든 연결이 있으면 그것을 쓴다). 같은 연결의
+   대기 요청은 SUPERSEDED 로 밀어내고 새 요청과 할 일을 넣는다.
 
 서비스에 실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다(서비스 행을 잠근 뒤 본다).
 
@@ -23,7 +24,6 @@ from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.actions import AuditAction, AuditComponent
@@ -37,7 +37,6 @@ from app.core.exceptions import (
     DeployRequestNotFoundError,
     EnvironmentUnhealthyError,
     NotRollbackableError,
-    PublicHostConflictError,
     RequestFieldInvalidError,
     ServiceDeletingError,
     SimulateNotAllowedError,
@@ -56,7 +55,6 @@ from app.enums import (
 from app.executors import ExecutorSet
 from app.executors.base import InvalidLogCursor, LogChunk, LogLine
 from app.models import Build, DeployRequest, Environment, Service, ServiceEnvironment
-from app.models.service_environment import PUBLIC_HOST_UNIQUE_INDEX
 from app.repositories.build_repository import BuildRepository
 from app.repositories.deploy_request_log_repository import DeployRequestLogRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
@@ -69,13 +67,11 @@ from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
     build_config_snapshot,
-    connection_public_host,
+    create_service_connection,
     deploy_target,
     deployment_spec,
     enqueue_deploy_request,
-    read_environment_config,
 )
-from app.services.integrity import violated_constraint_name
 from app.services.migration_guard import check_no_migration_in_progress
 
 logger = logging.getLogger(__name__)
@@ -191,7 +187,10 @@ class DeployRequestService:
                 (item for item in connections if item.environment_id == environment.id), None
             )
             if connection is None:
-                connection = await self._create_connection(service, environment)
+                # 첫 배포 전에 변수를 저장했으면(API 서버 10-4) 그때 만든 연결을 그대로 쓴다.
+                connection = await create_service_connection(
+                    self._session, service, environment, self._public_base_domain
+                )
             request = DeployRequest(
                 id=uuid.uuid4(),
                 service_id=service.id,
@@ -490,47 +489,6 @@ class DeployRequestService:
     def _check_simulate_allowed(self, simulate_fail_at: SimulatedFailureStage | None) -> None:
         if simulate_fail_at is not None and self._executor_mode is not ExecutorMode.FAKE:
             raise SimulateNotAllowedError("simulate is only accepted with fake executors")
-
-    async def _create_connection(
-        self, service: Service, environment: Environment
-    ) -> ServiceEnvironment:
-        """그 환경의 첫 요청 때 연결을 만든다. 주소는 이때 한 번 정해 저장한다.
-
-        환경에 하위 도메인(ingressDomain)이 있으면 `{서비스}-{suffix}.{하위 도메인}`, 없으면
-        `{서비스}-{환경}-{suffix}.{도메인}` 이다(connection_public_host). 서비스의 suffix 를 쓴다.
-        살아 있는 연결과 겹치면 409 PUBLIC_HOST_CONFLICT 다(환경 이름을 바꾼 뒤 옛 이름으로
-        새 환경을 만든 경우, 63자 자르기로 같은 레이블이 된 경우, 두 환경이 같은 하위 도메인을
-        쓰는 경우). 서비스 이름이 53자 이상이면 자르기 때문에 환경별 주소가
-        그 서비스의 대표 주소와 같아진다. 연결이 하나뿐이라 둘 다 같은 곳으로 가므로 막지 않는다.
-        """
-        config = read_environment_config(environment)
-        public_host = connection_public_host(
-            service.name,
-            environment.name,
-            service.host_suffix,
-            self._public_base_domain,
-            config.environment_host_domain() if config is not None else None,
-        )
-        if await self._service_environments.is_public_host_in_use(public_host):
-            raise PublicHostConflictError(
-                "public host already in use", environment_id=str(environment.id)
-            )
-        connection = ServiceEnvironment(
-            service_id=service.id,
-            environment_id=environment.id,
-            traffic_weight=0,
-            public_host=public_host,
-        )
-        self._service_environments.add(connection)
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            if violated_constraint_name(exc) == PUBLIC_HOST_UNIQUE_INDEX:
-                raise PublicHostConflictError(
-                    "public host already in use", environment_id=str(environment.id)
-                ) from None
-            raise
-        return connection
 
     async def _views(self, requests: list[DeployRequest]) -> list[DeployRequestView]:
         """요청 수와 상관없이 쿼리 4번(환경·빌드·연결·서비스)으로 응답 값을 모은다."""

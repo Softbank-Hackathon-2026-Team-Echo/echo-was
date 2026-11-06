@@ -47,7 +47,7 @@
 - `result`(칸·통제) = **예외 반영 전 증거 값**이다. 칸은 그 칸 통제들의 가장 나쁜 값: FAIL > 필수 UNKNOWN > WARN > 선택 UNKNOWN > PASS. 칸의 통제가 모두 NA면 NA. 게이트가 막는지는 `gateStatus`로 따로 본다.
 - **환경 단위 통제**(범위가 환경·WAS 버전·없음)는 환경마다 한 줄, **서비스 단위 통제**(범위에 서비스·이미지 digest·설정 커밋, 예: C-IMG-1·C-IMG-2·C-TLS-1)는 그 환경에 현재 배포가 있는 서비스마다 한 줄(`serviceId`)이다. 서비스가 없는 환경은 서비스 단위 통제를 세지 않는다.
 - 증거는 그 서비스의 **지금 도는 이미지 digest**와 같을 때만 쓴다. 다른 digest의 증거는 `SCOPE_MISMATCH`로 버리고 UNKNOWN이다.
-- **C-SEC-1(비밀 전달 경로, `encryption` 칸, 서비스 단위)은 조회 때 계산한다.** 서비스마다 서비스 중 연결(비율이 가장 큰 연결)의 앱 환경 변수 **키**가 그 환경 연결에 모두 있으면 PASS, 빠지면 FAIL(필수 → BLOCKED). 서비스 중 연결 자신은 PASS 다. 값은 읽지 않는다. 이 증거는 저장하지 않아 `findingIds` 의 id(조회마다 같음)로 증거 목록을 불러도 나오지 않는다 — 빠진 키는 이전 게이트가 남긴 증거(`evidenceRef = migration-plan:…`) 또는 변수 API 로 본다. 값이 맞는지·도착 배포에 반영됐는지(`pendingRedeploy`)·Secret 저장 암호화는 보지 않는다([1-2 SPEC](../../specs/sec-1-2-secret-delivery.md)).
+- **C-SEC-1(비밀 전달 경로, `encryption` 칸, 서비스 단위)은 조회 때 계산한다.** 서비스마다 서비스 중 연결(비율이 가장 큰 연결)의 앱 환경 변수 **키**가 그 환경 연결에 모두 있으면 PASS, 빠지면 FAIL(필수 → BLOCKED). 서비스 중 연결 자신은 PASS 다. 값은 읽지 않는다. 이 증거는 저장하지 않아 `findingIds` 의 id(조회마다 같음)로 증거 목록을 불러도 나오지 않는다 — 빠진 키는 이전 게이트가 남긴 증거(`evidenceRef = migration-plan:…`) 또는 변수 API 로 본다. 현재 배포가 있는 연결만 본다 — 첫 배포 전 변수만 넣은 연결(API 서버 10-4)은 행의 `services`·C-SEC-1 기준·판정 대상에 들어가지 않는다. 값이 맞는지·도착 배포에 반영됐는지(`pendingRedeploy`)·Secret 저장 암호화는 보지 않는다([1-2 SPEC](../../specs/sec-1-2-secret-delivery.md)).
 - `findingCount` = 그 칸 판정에 쓴 증거 수. `mode` = 쓴 증거 중 가장 약한 모드(`REAL` < `CACHE`), `checkedAt` = 가장 오래된 수집 시각, `expiresAt` = 쓴 증거·적용된 예외 중 가장 이른 만료.
 - `reasons` 값은 [용어 사전](../../.claude/rules/term-dictionary.md) "보안 판정 값"의 판정 사유(`EVIDENCE_MISSING` 등)다. 예외가 걸리면 `EXCEPTION_APPLIED`, 만료된 예외만 있으면 `EXCEPTION_EXPIRED`가 붙는다.
 

@@ -198,7 +198,15 @@ async def read_fingerprint(
     source_connection_id: uuid.UUID,
     target_connection_id: uuid.UUID,
 ) -> dict[str, Any]:
-    """지금 상태의 지문. connections 는 서비스의 살아 있는 연결(잠근 것)이다."""
+    """지금 상태의 지문. connections 는 서비스의 살아 있는 연결(잠근 것)이다.
+
+    connections 항목에서 배포 없는 연결(현재 배포 없음 + 비율 0 = 역할 NONE)은 뺀다. 그런 연결은
+    서비스 중·예비가 아니라 이전의 출발·도착·진입점 가중치·예비 따라가기 어디에도 관여하지 않는다
+    (첫 배포 전 변수 넣기(API 서버 10-4)·첫 배포 실패가 만든다). 넣어 두면 무관한 환경에 변수 하나만
+    넣어도 승인된 이전(재난 자동 대피 포함)이 시작 직전 STALE 로 끝난다. 이전에 관여할 수 있는
+    변화는 그대로 잡힌다: 배포가 생기면(첫 배포) 항목이 새로 나타나고, 배포·비율이 바뀌거나 연결이
+    지워지면 항목이 바뀌거나 사라진다. 첫 배포 접수 자체도 openDeployRequests 로 잡힌다.
+    """
     repository = ServiceEnvironmentRepository(session)
     source = await repository.find_by_id(source_connection_id)
     target = await repository.find_by_id(target_connection_id)
@@ -213,6 +221,7 @@ async def read_fingerprint(
                 item.traffic_weight,
             ]
             for item in sorted(connections, key=lambda item: str(item.id))
+            if item.current_deployment_id is not None or item.traffic_weight != 0
         ],
         FINGERPRINT_SOURCE_ENVIRONMENT: _environment_fingerprint(source.environment),
         FINGERPRINT_TARGET_ENVIRONMENT: _environment_fingerprint(target.environment),
@@ -221,8 +230,25 @@ async def read_fingerprint(
 
 
 def fingerprint_changes(saved: dict[str, Any], current: dict[str, Any]) -> list[str]:
-    """항목별로 비교해 달라진 항목 이름을 정해진 순서로 돌려준다."""
+    """항목별로 비교해 달라진 항목 이름을 정해진 순서로 돌려준다.
+
+    배포 없는 연결을 빼기 전에 저장한 지문(이 규칙 이전에 만든 계획)도 같은 규칙으로 걸러 비교한다.
+    """
+    saved = _without_undeployed_connections(saved)
+    current = _without_undeployed_connections(current)
     return [key for key in FINGERPRINT_KEYS if saved.get(key) != current.get(key)]
+
+
+def _without_undeployed_connections(fingerprint: dict[str, Any]) -> dict[str, Any]:
+    items = fingerprint.get(FINGERPRINT_CONNECTIONS)
+    if not isinstance(items, list):
+        return fingerprint
+    kept = [
+        item
+        for item in items
+        if not (isinstance(item, list) and len(item) == 3 and item[1] is None and item[2] == 0)
+    ]
+    return {**fingerprint, FINGERPRINT_CONNECTIONS: kept}
 
 
 @dataclass(frozen=True)

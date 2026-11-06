@@ -33,6 +33,7 @@ async def search_service_variables(
         data=ServiceVariableListResponse(
             items=[ServiceVariableResponse.from_view(item) for item in result.items],
             simulated=result.simulated,
+            deployed=result.deployed,
         )
     )
 

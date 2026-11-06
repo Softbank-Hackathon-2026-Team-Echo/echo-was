@@ -515,6 +515,9 @@ class ServiceMetricsService:
                         ),
                     )
                     for item in connections
+                    # 배포 없는 연결(첫 배포 전 변수 넣기·첫 배포 실패)은 앱이 없어 시리즈 대상이
+                    # 아니다. 넣으면 같은 공급자의 서비스 중 연결과 겹쳐 둘 다 빈 점이 된다.
+                    if item.current_deployment_id is not None or item.traffic_weight != 0
                 ),
                 lag_targets=lag_targets(service, connections),
             )

@@ -7,7 +7,12 @@
 - 넣기·지우기는 감사 로그에 남는다(`SERVICE_VARIABLE_SET`·`SERVICE_VARIABLE_DELETED`, [audit-logs.md](audit-logs.md)). 누가 어떤 키를 바꿨는지만 적고 값·비밀 참조·버전은 적지 않는다.
 - **앱은 다시 배포해야 바뀐다**(자동 재시작 없음). 응답 `pendingRedeploy` 로 보인다.
 - `environmentId` 는 환경 id(서비스 상세의 `environments[].environment.id`)다. 연결(`serviceEnvironmentId`)이 아니다.
-- **연결은 그 환경의 첫 배포 요청 때 생긴다.** 그 전에는 404 `SERVICE_ENVIRONMENT_NOT_FOUND` 다.
+- **첫 배포 전에도 넣을 수 있다**(API 서버 10-4, [SPEC](../../specs/api-10-4-vars-before-first-deploy.md), 이슈 #93). 서비스 × 환경 연결이 아직 없으면 `PUT` 이 **배포 없는 연결**(`trafficWeight = 0`, 현재 배포 없음, 서비스 상세 `role = NONE`)을 만든 뒤 저장하고, 그 환경의 첫 배포 요청은 이 연결을 그대로 쓴다(넣은 값이 첫 배포의 `config_snapshot.envVars` 에 고정된다). 조건은 환경이 **서비스와 같은 조직에 살아 있는 것**뿐이다(환경 접속 확인 실패여도 넣을 수 있다 — 배포 접수가 따로 막는다). 다른 조직·없는·지운 환경이면 404 `SERVICE_ENVIRONMENT_NOT_FOUND` 다.
+  - `GET` 은 연결을 만들지 않는다. 연결이 없으면 `{ "items": [], "deployed": false }` 다. `DELETE` 도 만들지 않고 404 `ENV_VAR_NOT_FOUND` 다.
+  - 배포 없는 연결은 서비스 중·예비가 아니다: 대표 주소·진입점 가중치·예비 따라가기·보안 매트릭스·C-SEC-1 기준·이전 도착(409 `TARGET_NOT_READY`)·이전 계획 지문(`connections`)·대시보드 지표 시리즈 어디에도 잡히지 않는다. 첫 배포에 실패한 연결과 같은 모양이다.
+  - 서비스에 실행 중인 이전 계획(APPROVED·RUNNING·ROLLING_BACK, 재난 자동 대피 포함)이 있으면 **연결을 새로 만드는** `PUT` 은 첫 배포 접수와 같은 409 `MIGRATION_IN_PROGRESS` 다. 이미 연결이 있는 환경의 `PUT`·`DELETE` 는 막지 않는다(값은 다시 배포해야 반영되므로 이전에 영향이 없다). 승인 대기 계획은 막지 않고, 그때 만든 배포 없는 연결은 지문에 잡히지 않아 계획을 STALE 로 만들지 않는다.
+  - 연결을 만들 때 환경별 주소가 정해진다(배포 접수와 같은 규칙, 겹치면 409 `PUBLIC_HOST_CONFLICT`). 살아 있는 연결이 있는 환경은 지울 수 없으므로(409 `ENVIRONMENT_IN_USE`) 변수만 넣은 환경도 서비스를 지워야 환경을 지울 수 있다.
+  - **필수 변수 누락 검사는 후속이다.** 배포 요청 전에 저장소의 `.env.example`·`echo.yaml` 선언과 비교해 빠진 키를 알리고 막는 일은 이 범위가 아니다(별도 이슈).
 - **이전 보안 통제 C-SEC-1 이 키 이름을 본다**(값은 안 본다). 서비스 중 환경에 있는 키가 이전 도착 환경에 없으면 그 도착으로의 이전이 막힌다(매트릭스 `encryption` 칸 FAIL, 게이트 409). 대기 환경에도 같은 키를 넣어 둔다([security.md](security.md)).
 
 ## 엔드포인트
@@ -16,8 +21,8 @@
 
 | 메서드 · 경로 | 요청 | 성공 | 실패 | 최소 역할 |
 |---|---|---|---|---|
-| `GET …/variables` | — | 200 `{ items, simulated }` | 404 `SERVICE_NOT_FOUND`·`SERVICE_ENVIRONMENT_NOT_FOUND` | 뷰어·에이전트 |
-| `PUT …/variables/{key}` | `{ "value": "<문자열>" }` | 새 키 201, 있던 키 200. 항목 + `simulated` | 아래 표 | 개발자(사람) |
+| `GET …/variables` | — | 200 `{ items, simulated, deployed }` | 404 `SERVICE_NOT_FOUND`·`SERVICE_ENVIRONMENT_NOT_FOUND` | 뷰어·에이전트 |
+| `PUT …/variables/{key}` | `{ "value": "<문자열>" }` | 새 키 201, 있던 키 200. 항목 + `simulated`·`deployed` | 아래 표 | 개발자(사람) |
 | `DELETE …/variables/{key}` | — | 204 | 404 `ENV_VAR_NOT_FOUND` 외 아래 표 | 어드민(사람) |
 
 에이전트 토큰은 키 이름 목록(`GET`)만 볼 수 있고 `PUT`·`DELETE` 는 403 `AGENT_READ_ONLY` 다.
@@ -45,6 +50,7 @@
 | `appliedVersion` | 연결의 현재 배포 기록에 고정된 버전. 없으면(아직 배포 안 함, 이 키가 없던 배포) null |
 | `pendingRedeploy` | `appliedVersion ≠ version`. 다시 배포해야 반영된다 |
 | `simulated` | (목록·PUT 응답) 가짜 보관함(`APP_SECRET_STORE_MODE=fake`)이면 true |
+| `deployed` | (목록·PUT 응답) 그 환경 연결에 현재 배포가 있는가. 첫 배포 전(연결 없음·배포 없는 연결)이면 false — 넣은 값은 첫 배포 때 적용된다(API 서버 10-4) |
 
 지운 키는 목록에서 사라지지만 지금 돌고 있는 앱의 Secret 에서는 **다음 배포 때** 빠진다.
 
@@ -64,7 +70,9 @@
 | 422 `ENV_VAR_VALUE_INVALID` | 빈 값, 16,384바이트 초과. `details[].field = "value"` |
 | 422 `ENV_VAR_LIMIT_EXCEEDED` | 41번째 키 |
 | 422 `VALIDATION_ERROR` | 본문 형식 오류(`value` 가 문자열이 아님, 모르는 칸은 칸 이름을 되돌리지 않고 `field = "body"`) |
-| 404 `SERVICE_NOT_FOUND` · `SERVICE_ENVIRONMENT_NOT_FOUND` · `ENV_VAR_NOT_FOUND` | 서비스 없음(다른 조직 포함) · 그 환경에 연결 없음 · 지울 키 없음 |
+| 404 `SERVICE_NOT_FOUND` · `SERVICE_ENVIRONMENT_NOT_FOUND` · `ENV_VAR_NOT_FOUND` | 서비스 없음(다른 조직 포함) · 환경이 서비스와 같은 조직에 없음(없음·지움·다른 조직, 연결도 없음) · 지울 키 없음(첫 배포 전 연결이 없는 환경 포함) |
+| 409 `PUBLIC_HOST_CONFLICT` | (`PUT` 이 연결을 만들 때) 환경별 주소가 살아 있는 다른 연결과 겹친다. 배포 접수와 같은 규칙([deploy-requests.md](deploy-requests.md)) |
+| 409 `MIGRATION_IN_PROGRESS` | (`PUT` 이 연결을 만들 때) 서비스에 실행 중인 이전 계획이 있다. `details[0].value` 는 계획 id. 배포 접수와 같은 규칙 |
 | 409 `SERVICE_DELETING` | 서비스 삭제 중 |
 | 409 `SECRET_STORE_NOT_CONFIGURED` | 실제 실행기인데 보관함이 가짜다(`APP_SECRET_STORE_MODE=fake` + `EXECUTOR_MODE=real`). 값을 받지 않고 행도 만들지 않는다 |
 | 502 `SECRET_STORE_UNAVAILABLE` · `SECRET_STORE_FORBIDDEN` | 보관함 장애·10초 초과 · 권한 거절. 응답에 값·비밀 이름 없음. 다시 시도하면 새 버전이 더해질 수 있다 |

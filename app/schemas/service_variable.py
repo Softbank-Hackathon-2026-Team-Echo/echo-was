@@ -65,13 +65,20 @@ class ServiceVariableListResponse(ApiModel):
     items: list[ServiceVariableResponse]
     # 가짜 보관함(APP_SECRET_STORE_MODE=fake)이면 true.
     simulated: bool
+    # 그 환경 연결에 현재 배포가 있는가. 첫 배포 전이면 false(넣은 값은 첫 배포 때 적용된다).
+    deployed: bool
 
 
 class SavedServiceVariableResponse(ServiceVariableResponse):
     simulated: bool
+    deployed: bool
 
     @classmethod
     def from_saved(cls, saved: SavedServiceVariable) -> Self:
         return cls.model_validate(
-            {**cls._fields_from_view(saved.variable), "simulated": saved.simulated}
+            {
+                **cls._fields_from_view(saved.variable),
+                "simulated": saved.simulated,
+                "deployed": saved.deployed,
+            }
         )
