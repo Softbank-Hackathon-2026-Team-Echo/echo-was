@@ -24,6 +24,14 @@ class AgentPatchApprovalRepository:
             .execution_options(populate_existing=True)
         )
 
+    async def find_by_apply_run(self, apply_run_id: uuid.UUID) -> AgentPatchApproval | None:
+        """반영 실행을 만든 승인 행. 반영 결과를 받을 때 지문을 대조한다."""
+        return await self._session.scalar(
+            select(AgentPatchApproval)
+            .where(AgentPatchApproval.apply_run_id == apply_run_id)
+            .execution_options(populate_existing=True)
+        )
+
     async def search_by_run(self, run_id: uuid.UUID) -> list[AgentPatchApproval]:
         statement = (
             select(AgentPatchApproval)

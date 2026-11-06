@@ -35,7 +35,13 @@ from app.enums import (
 from app.models.agent_run_event import AGENT_RUN_EVENT_MESSAGE_MAX_LENGTH
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.services.agent_run_service import ClaimedRun, RunEventCommand
-from app.services.run_result import NormalizedRunResult, normalize_run_result
+from app.services.run_result import (
+    NormalizedApplyResult,
+    NormalizedRunResult,
+    compute_patch_hash,
+    normalize_apply_result,
+    normalize_run_result,
+)
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_EVENTS_PER_REQUEST = 100
@@ -51,6 +57,8 @@ MAX_MODEL_ID_LENGTH = 64
 MAX_PROMPT_VERSION_LENGTH = 32
 FAILURE_CODE_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
 PATCH_HASH_PATTERN = "^sha256:[0-9a-f]{64}$"
+COMMIT_SHA_PATTERN = "^[0-9a-f]{40}$"
+MAX_BRANCH_LENGTH = 255
 CHECK_RESULT_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
 PROCESSING_LOCATION_PATTERN = "^[a-z][a-z0-9-]{0,15}/[a-z0-9-]{1,40}$"
 PROCESSING_MODEL_PATTERN = "^[A-Za-z0-9._:/@-]{1,64}$"
@@ -108,8 +116,8 @@ def parse_runner_payload[T: ApiRequestModel](raw: bytes, model: type[T]) -> T:
     return parsed
 
 
-def openapi_request_body(model: type[ApiRequestModel]) -> dict[str, Any]:
-    """FastAPI 본문 인자가 아닌 경로의 OpenAPI 요청 본문. `$defs` 참조를 그 자리에 풀어 넣는다."""
+def _inline_schema(model: type[ApiRequestModel]) -> dict[str, Any]:
+    """모델의 JSON 스키마. `$defs` 참조를 그 자리에 풀어 넣는다."""
     schema = model.model_json_schema()
     definitions = schema.pop("$defs", {})
 
@@ -123,10 +131,18 @@ def openapi_request_body(model: type[ApiRequestModel]) -> dict[str, Any]:
             return inline(definitions[reference.rsplit("/", 1)[-1]])
         return {key: inline(item) for key, item in value.items()}
 
+    inlined: dict[str, Any] = inline(schema)
+    return inlined
+
+
+def openapi_request_body(*models: type[ApiRequestModel]) -> dict[str, Any]:
+    """FastAPI 본문 인자가 아닌 경로의 OpenAPI 요청 본문. 모델이 여럿이면 oneOf 다."""
+    schemas = [_inline_schema(model) for model in models]
+    schema = schemas[0] if len(schemas) == 1 else {"oneOf": schemas}
     return {
         "requestBody": {
             "required": True,
-            "content": {"application/json": {"schema": inline(schema)}},
+            "content": {"application/json": {"schema": schema}},
         }
     }
 
@@ -309,6 +325,13 @@ class RunPatchRequest(ApiRequestModel):
             raise ValueError(f"diff must be at most {MAX_DIFF_BYTES} bytes")
         return value
 
+    @model_validator(mode="after")
+    def _check_patch_hash_matches_diff(self) -> Self:
+        """PD-14: patchHash 는 diff 의 해시여야 한다. 승인 지문이 diff 에 묶이게 다시 계산한다."""
+        if self.patch_hash != compute_patch_hash(self.diff):
+            raise ValueError("patchHash must be sha256 of diff")
+        return self
+
 
 class RunBlockedAttemptRequest(ApiRequestModel):
     action: Text
@@ -384,6 +407,37 @@ class RunResultRequest(ApiRequestModel):
 
     def to_normalized(self) -> NormalizedRunResult:
         return normalize_run_result(self.model_dump(mode="json", by_alias=True))
+
+
+class ApplyPatchResultRequest(ApiRequestModel):
+    """반영 실행(APPLY_PATCH) 결과(PD-9). 계약 2.1 `{appliedCommitSha, branch}` + 공통 칸 + 지문.
+
+    patchHash 는 러너가 반영한 패치의 해시(입력 사본 patch.patchHash)다. 승인 행과 대조는 서비스.
+    성공이면 커밋 SHA·브랜치가 필수이고, 실패면 둘 다 null 이어도 된다.
+    """
+
+    status: ResultStatus
+    failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
+    simulated: bool
+    patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
+    applied_commit_sha: Annotated[str, Field(pattern=COMMIT_SHA_PATTERN)] | None = None
+    branch: Annotated[str, Field(min_length=1, max_length=MAX_BRANCH_LENGTH)] | None = None
+
+    @model_validator(mode="after")
+    def _check_status_fields(self) -> Self:
+        if self.status == AgentRunStatus.SUCCEEDED:
+            if self.failure_code is not None:
+                raise ValueError("failureCode must be null when status is SUCCEEDED")
+            if self.applied_commit_sha is None or self.branch is None:
+                raise ValueError(
+                    "appliedCommitSha and branch are required when status is SUCCEEDED"
+                )
+        if self.status == AgentRunStatus.FAILED and self.failure_code is None:
+            raise ValueError("failureCode is required when status is FAILED")
+        return self
+
+    def to_normalized(self) -> NormalizedApplyResult:
+        return normalize_apply_result(self.model_dump(mode="json", by_alias=True))
 
 
 class SubmitRunResultResponse(ApiModel):

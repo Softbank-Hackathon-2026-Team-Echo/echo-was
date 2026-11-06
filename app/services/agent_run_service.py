@@ -21,8 +21,10 @@ from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.auth.tokens import hash_token, new_run_token
 from app.core.clock import Clock
 from app.core.exceptions import (
+    ErrorField,
     RequestFieldInvalidError,
     ResultAlreadySubmittedError,
+    ResultInvalidError,
     RunNotActiveError,
 )
 from app.core.log_masking import mask_secrets, mask_secrets_in_json
@@ -35,11 +37,12 @@ from app.enums import (
     AuditResult,
     LogLevel,
 )
-from app.models import AgentRun, AgentRunner
+from app.models import AgentPatchApproval, AgentRun, AgentRunner
 from app.models.agent_run import OPEN_STATUSES
+from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
 from app.repositories.agent_run_event_repository import AgentRunEventRepository
 from app.repositories.agent_run_repository import AgentRunRepository
-from app.services.run_result import NormalizedRunResult
+from app.services.run_result import NormalizedApplyResult, NormalizedRunResult, compute_patch_hash
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,11 @@ RUN_LEASE = timedelta(seconds=60)
 RUN_DEADLINE = timedelta(minutes=15)
 EXPIRE_BATCH_SIZE = 100
 RUNNER_ID_MISMATCH_REASON = "RUNNER_ID_MISMATCH"
+# 러너가 가져갈 수 있는 종류(PD-8). CHANGE_PROPOSAL 은 만드는 곳이 없어(P1) 주지 않는다.
+CLAIMABLE_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH)
+PATCH_HASH_MISMATCH_REASON = "PATCH_HASH_MISMATCH"
+APPROVAL_NOT_FOUND_REASON = "APPROVAL_NOT_FOUND"
+BRANCH_MISMATCH_REASON = "BRANCH_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -120,20 +128,25 @@ class AgentRunService:
         self._clock = clock
         self._runs = AgentRunRepository(session)
         self._events = AgentRunEventRepository(session)
+        self._approvals = AgentPatchApprovalRepository(session)
         self._audit = AuditRecorder(session, clock)
 
     async def claim_run(
         self, runner: AgentRunner, runner_id: str, capabilities: Sequence[str]
     ) -> ClaimedRun | None:
-        """가져갈 사전 점검 하나를 준다. 없으면 None. 만료 전환은 어느 쪽이든 커밋한다."""
+        """capabilities 에 든 종류(PRECHECK·APPLY_PATCH) 중 가장 오래된 대기 실행 하나를 준다(PD-8).
+
+        없으면 None. 만료 전환은 어느 쪽이든 커밋한다.
+        """
         if runner_id != runner.name:
             raise RequestFieldInvalidError("runnerId", RUNNER_ID_MISMATCH_REASON)
         now = self._clock.now()
+        kinds = [kind for kind in CLAIMABLE_KINDS if kind in capabilities]
         async with self._session.begin():
             await expire_overdue_runs(self._runs, self._audit, now)
-            if AgentRunKind.PRECHECK not in capabilities:
+            if not kinds:
                 return None
-            run = await self._runs.lock_next_queued(now)
+            run = await self._runs.lock_next_queued(now, kinds)
             if run is None:
                 return None
             token = new_run_token()
@@ -151,7 +164,7 @@ class AgentRunService:
                 actor=AuditActor.system(AuditComponent.AI_RUNNER),
                 action=AuditAction.AGENT_RUN_CLAIMED,
                 target=run_target(run),
-                details={"runnerName": runner.name},
+                details={"runnerName": runner.name, "kind": AgentRunKind(run.kind).value},
             )
             fresh = await self._runs.find_by_id(run.id)
         if fresh is None:
@@ -186,6 +199,13 @@ class AgentRunService:
             raise RunNotActiveError(str(run_id))
         return accepted_up_to
 
+    async def find_run_kind(self, run_id: uuid.UUID) -> AgentRunKind | None:
+        """결과 본문 모델을 고르려고 실행 종류만 읽는다(트랜잭션 없음)."""
+        run = await self._runs.find_by_id(run_id)
+        kind = AgentRunKind(run.kind) if run is not None else None
+        await self._session.rollback()
+        return kind
+
     async def submit_result(
         self, run_id: uuid.UUID, normalized: NormalizedRunResult
     ) -> AgentRunStatus:
@@ -195,8 +215,8 @@ class AgentRunService:
             run = await self._runs.find_by_id(run_id)
             if run is None or run.status not in OPEN_STATUSES:
                 raise ResultAlreadySubmittedError(str(run_id))
-            is_finished = await self._runs.finish(
-                run_id,
+            is_finished = await self._finish_or_expire(
+                run,
                 now,
                 {
                     "status": normalized.status,
@@ -210,12 +230,6 @@ class AgentRunService:
             )
             if is_finished:
                 self._record_finished(run, normalized)
-            else:
-                # 조건부 UPDATE 사이에 다른 호출이 끝냈으면 저장할 것 없이 끝난 실행으로 답한다.
-                fresh = await self._runs.find_by_id(run_id)
-                if fresh is None or fresh.status not in OPEN_STATUSES:
-                    raise ResultAlreadySubmittedError(str(run_id))
-                await expire_overdue_runs(self._runs, self._audit, now, run_id=run_id)
         if not is_finished:
             raise RunNotActiveError(str(run_id))
         logger.info(
@@ -229,6 +243,58 @@ class AgentRunService:
         )
         return normalized.status
 
+    async def submit_apply_result(
+        self, run_id: uuid.UUID, normalized: NormalizedApplyResult
+    ) -> AgentRunStatus:
+        """반영 실행 결과를 저장한다(PD-9). 지문이 승인 행과 다르면 422, 그 밖은 결과 저장과 같다.
+
+        - 본문 patchHash ≠ 승인 행 patch_hash → 422 PATCH_HASH_MISMATCH(실패 결과도).
+        - 성공인데 WAS 가 입력 사본 diff 로 다시 계산한 해시 ≠ 승인 행 → 422(가린 diff 등, PD-14).
+        - branch 가 입력 사본 값(applied/<runId>)과 다름 → 422 BRANCH_MISMATCH.
+        """
+        now = self._clock.now()
+        async with self._session.begin():
+            run = await self._runs.find_by_id(run_id)
+            if run is None or run.status not in OPEN_STATUSES:
+                raise ResultAlreadySubmittedError(str(run_id))
+            approval = await self._approvals.find_by_apply_run(run.id)
+            _check_apply_fingerprint(run, approval, normalized)
+            is_finished = await self._finish_or_expire(
+                run,
+                now,
+                {
+                    "status": normalized.status,
+                    "failure_code": normalized.failure_code,
+                    "result": normalized.result,
+                    "simulated": normalized.simulated,
+                },
+            )
+            if is_finished:
+                self._record_apply_finished(run, normalized)
+        if not is_finished:
+            raise RunNotActiveError(str(run_id))
+        logger.info(
+            "agent apply run finished",
+            extra={
+                "action": "submit_apply_result",
+                "run_id": str(run_id),
+                "status": normalized.status,
+                "failure_code": normalized.failure_code,
+            },
+        )
+        return normalized.status
+
+    async def _finish_or_expire(self, run: AgentRun, now: datetime, values: dict[str, Any]) -> bool:
+        """결과를 적는다. 못 적었으면(임대·마감 지남) 만료 전환하고 False, 이미 끝났으면 409."""
+        if await self._runs.finish(run.id, now, values):
+            return True
+        # 조건부 UPDATE 사이에 다른 호출이 끝냈으면 저장할 것 없이 끝난 실행으로 답한다.
+        fresh = await self._runs.find_by_id(run.id)
+        if fresh is None or fresh.status not in OPEN_STATUSES:
+            raise ResultAlreadySubmittedError(str(run.id))
+        await expire_overdue_runs(self._runs, self._audit, now, run_id=run.id)
+        return False
+
     async def _extend_lease(self, run_id: uuid.UUID, now: datetime) -> AgentRun | None:
         """임대를 늘린 실행. 끝났거나 임대·마감이 지났으면(이때 만료 전환) None."""
         run = await self._runs.find_by_id(run_id)
@@ -239,8 +305,32 @@ class AgentRunService:
         await expire_overdue_runs(self._runs, self._audit, now, run_id=run_id)
         return None
 
+    def _record_apply_finished(self, run: AgentRun, normalized: NormalizedApplyResult) -> None:
+        details: dict[str, Any] = {
+            "kind": AgentRunKind(run.kind).value,
+            "status": normalized.status.value,
+            "simulated": normalized.simulated,
+            "aiReviewed": False,
+            "appliedCommitSha": normalized.applied_commit_sha,
+        }
+        if normalized.failure_code is not None:
+            details["failureCode"] = normalized.failure_code
+        self._audit.record(
+            organization_id=run.organization_id,
+            actor=AuditActor.system(AuditComponent.AI_RUNNER),
+            action=AuditAction.AGENT_RUN_FINISHED,
+            result=(
+                AuditResult.SUCCEEDED
+                if normalized.status is AgentRunStatus.SUCCEEDED
+                else AuditResult.FAILED
+            ),
+            target=run_target(run),
+            details=details,
+        )
+
     def _record_finished(self, run: AgentRun, normalized: NormalizedRunResult) -> None:
         details: dict[str, Any] = {
+            "kind": AgentRunKind(run.kind).value,
             "status": normalized.status.value,
             "simulated": normalized.simulated,
             "aiReviewed": normalized.is_ai_reviewed,
@@ -261,6 +351,30 @@ class AgentRunService:
             target=run_target(run),
             details=details,
         )
+
+
+def _check_apply_fingerprint(
+    run: AgentRun, approval: AgentPatchApproval | None, normalized: NormalizedApplyResult
+) -> None:
+    """반영 결과가 승인한 그 패치의 것인지 본다. 다르면 422 RESULT_INVALID(저장 없음).
+
+    승인 행이 없으면(만들 때 같은 트랜잭션이라 정상 흐름에는 없다) 지문을 댈 곳이 없어 거부한다.
+    """
+    result = normalized.result
+    if approval is None:
+        raise ResultInvalidError([ErrorField("patchHash", APPROVAL_NOT_FOUND_REASON)])
+    if result["patchHash"] != approval.patch_hash:
+        raise ResultInvalidError([ErrorField("patchHash", PATCH_HASH_MISMATCH_REASON)])
+    patch = run.input_snapshot.get("patch") or {}
+    if normalized.status is AgentRunStatus.SUCCEEDED and (
+        compute_patch_hash(patch.get("diff", "")) != approval.patch_hash
+    ):
+        raise ResultInvalidError(
+            [ErrorField("inputSnapshot.patch.diff", PATCH_HASH_MISMATCH_REASON)]
+        )
+    branch = result["branch"]
+    if branch is not None and branch != run.input_snapshot.get("branch"):
+        raise ResultInvalidError([ErrorField("branch", BRANCH_MISMATCH_REASON)])
 
 
 def _event_row(run_id: uuid.UUID, event: RunEventCommand, now: datetime) -> dict[str, Any]:

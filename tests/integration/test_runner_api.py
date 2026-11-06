@@ -754,10 +754,15 @@ async def test_runner_actions_are_system_ai_runner(
         assert row.component == "ai-runner"
         assert row.organization_id == migration.harness.organization.id
         assert (row.target_type, row.target_label) == ("agent_run", "shop-api")
-    assert claim_line.details == {"runnerName": runner.runner.name}
+    assert claim_line.details == {"runnerName": runner.runner.name, "kind": "PRECHECK"}
     assert claim_line.route == f"POST {CLAIM_PATH}"
     assert finish_line.result == AuditResult.SUCCEEDED
-    assert finish_line.details == {"status": "SUCCEEDED", "simulated": False, "aiReviewed": False}
+    assert finish_line.details == {
+        "kind": "PRECHECK",
+        "status": "SUCCEEDED",
+        "simulated": False,
+        "aiReviewed": False,
+    }
 
 
 async def test_runner_failed_result_audit_line_has_failure_code_and_failed_result(
@@ -773,6 +778,7 @@ async def test_runner_failed_result_audit_line_has_failure_code_and_failed_resul
     finish_line = (await run_audit_rows(migration, claimed.run_id))[-1]
     assert finish_line.result == AuditResult.FAILED
     assert finish_line.details == {
+        "kind": "PRECHECK",
         "status": "FAILED",
         "failureCode": "BOOM",
         "simulated": False,
@@ -792,6 +798,7 @@ async def test_runner_result_audit_line_carries_processing_only_when_reported(
     assert response.status_code == 200, response.text
     finish_line = (await run_audit_rows(migration, claimed.run_id))[-1]
     assert finish_line.details == {
+        "kind": "PRECHECK",
         "status": "SUCCEEDED",
         "simulated": False,
         "aiReviewed": False,

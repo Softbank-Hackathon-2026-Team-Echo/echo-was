@@ -26,6 +26,7 @@ from app.enums import (
 )
 from app.models import AgentRun, AuditLog, Service, ServiceEnvironment
 from app.repositories.agent_run_repository import AgentRunRepository
+from app.services.run_result import compute_patch_hash
 from app.services.security_finding_service import SecurityFindingService
 from app.services.security_rules import SecurityScope
 from tests.integration.auth_support import (
@@ -407,7 +408,7 @@ async def test_input_snapshot_carries_recent_real_findings_of_the_service_only(
 async def test_get_precheck_returns_result_fields_and_computed_steps(
     migration: Migration, runner: RunnerFixture
 ) -> None:
-    patch_hash = "sha256:" + "b" * 64
+    patch_hash = compute_patch_hash("--- a/Dockerfile\n")
     created = await create_precheck(migration)
     claimed = await claim_run(runner)
     await claimed.post(

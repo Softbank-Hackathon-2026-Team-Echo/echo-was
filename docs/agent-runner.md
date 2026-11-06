@@ -2,7 +2,7 @@
 
 샌드박스 VM 의 러너가 WAS 를 부르는 방법이다. **러너가 WAS 를 폴링한다.** WAS 는 러너를 부르지 않는다. 사람 쪽 API 는 [docs/api/prechecks.md](api/prechecks.md) 다. 근거: SPEC [specs/api-runner-prechecks.md](../specs/api-runner-prechecks.md), echo-ai-agent `specs/ai-1-appendix-a-was-runner-contract.md` v1(계약과 다르면 SPEC 이 이긴다, 아래 "계약과 다른 점").
 
-경로 접두어 `/api/v1/runner/runs`, 응답은 공통 봉투 `ApiResponse`, 본문·응답은 camelCase 다. 이번 범위는 `PRECHECK` 뿐이다(`APPLY_PATCH`·`CHANGE_PROPOSAL` 은 가져가지 못한다).
+경로 접두어 `/api/v1/runner/runs`, 응답은 공통 봉투 `ApiResponse`, 본문·응답은 camelCase 다. 가져갈 수 있는 종류는 `PRECHECK`·`APPLY_PATCH` 다(`CHANGE_PROPOSAL` 은 가져가지 못한다). 반영 실행은 [아래 절](#반영-실행-apply_patch)과 SPEC [specs/api-10-2-apply-patch-run.md](../specs/api-10-2-apply-patch-run.md) 다.
 
 ## 자격 증명
 
@@ -27,13 +27,13 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `POST :claim` | 러너 | `{runnerId, capabilities}` | 200 `{run, runToken}` · 없으면 `{run: null, runToken: null}` | 401 · 403 · 422 `VALIDATION_ERROR` |
 | `POST /{id}/heartbeat` | 실행 | `{}` | 200 `{status, leaseUntil}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` |
 | `POST /{id}/events` | 실행 | `{events: [...]}` 1~100개 | 200 `{acceptedUpTo}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
-| `POST /{id}/result` | 실행 | `RunResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
+| `POST /{id}/result` | 실행 | `RunResult` · 반영 실행이면 `ApplyPatchResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
 
 ### 가져가기 `POST :claim`
 
 - `runnerId` 는 토큰의 러너 이름과 같아야 한다(다르면 422, `details: [{field: "runnerId", reason: "RUNNER_ID_MISMATCH"}]`).
-- `capabilities` 에 `PRECHECK` 가 없으면 `run: null` 이다.
-- 대기 실행을 오래된 순으로 하나 준다(`FOR UPDATE SKIP LOCKED` + 조건부 UPDATE). 동시에 불러도 한 러너만 받는다. 없으면 5초쯤 쉬고 다시 부른다.
+- `capabilities` 에 든 종류(`PRECHECK`·`APPLY_PATCH`, 대소문자 그대로)만 준다. 둘 다 없으면 `run: null` 이다. `["PRECHECK"]` 만 보내는 러너는 반영 실행을 받지 않는다.
+- 고른 종류의 대기 실행을 오래된 순으로 하나 준다(종류 사이 우선순위 없음, `FOR UPDATE SKIP LOCKED` + 조건부 UPDATE). 동시에 불러도 한 러너만 받는다. 없으면 5초쯤 쉬고 다시 부른다.
 
 ```json
 {
@@ -111,7 +111,7 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `severity` | `INFO`·`WARN`·`FAIL` |
 | finding `result` | `PASS`·`WARN`·`FAIL`·`UNKNOWN`. **`AI` 면 PASS 금지(422)**, `RULE` 의 PASS 는 받는다 |
 | `configDiff[].source·target` | 아무 JSON 값(문자열·숫자·배열·null). 값마다 JSON 2,000자까지 |
-| 패치 | `{id(유일), patchHash(sha256:…), files[], diff, reason, touchesProtectedFiles, checks[], origin?}`. `origin` 은 선택(`RULE`·`AI`, 빠지면 `AI` 로 저장, 다른 값 422). `status` 를 보내면 모르는 칸(422)이다. WAS 가 다시 계산한다. `checks[]`: `{name, result, toolVersion?, policyVersion?, summary?}`. `result` 가 `PASS` 가 아니면 막는다 |
+| 패치 | `{id(유일), patchHash(sha256:…), files[], diff, reason, touchesProtectedFiles, checks[], origin?}`. **`patchHash` 는 `"sha256:" + sha256(diff 의 UTF-8 바이트)` 여야 한다**(PD-14, WAS 가 다시 계산해 다르면 422. 비밀값 가리기 전 원문으로 본다). `origin` 은 선택(`RULE`·`AI`, 빠지면 `AI` 로 저장, 다른 값 422). `status` 를 보내면 모르는 칸(422)이다. WAS 가 다시 계산한다. `checks[]`: `{name, result, toolVersion?, policyVersion?, summary?}`. `result` 가 `PASS` 가 아니면 막는다 |
 | 상한 | findings 100 · patches 10 · diff 하나 200KB · configDiff 200 · featureGaps 100 · blockedAttempts 50 · 문자열 2,000자 · 본문 1MB |
 | 거부 | 모르는 칸·snake_case 이름·NUL 문자·JSON 아님 → 422 `RESULT_INVALID`(`details` 에 칸 경로와 이유만) |
 | 저장 | 모든 문자열의 비밀값 모양을 `***` 로 바꾼 뒤 저장한다(`mask_secrets`). `status`·`failureCode`·`simulated`·`processing` 은 표의 칸으로만 둔다(`result` JSON 에 넣지 않는다) |
@@ -142,14 +142,47 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 {"location": "gcp/asia-northeast3", "sandbox": true, "modelProvider": "ANTHROPIC", "model": "claude-opus-5-5", "modelRegion": null, "dataClasses": ["CONFIG", "FINDINGS"], "externalTransfer": true, "externalTransferBytes": 18432}
 ```
 
+## 반영 실행 `APPLY_PATCH`
+
+사람이 승인한 패치를 echo-ai-agent 시나리오 사본 브랜치 `applied/<반영 실행 id>` 에 반영하는 실행이다(계약 v1 2.1·4절). 스위치 `PATCH_APPLY_ENABLED`(기본 꺼짐)가 켜져 있을 때만 승인이 만든다. 러너 자격은 같다(러너 토큰으로 가져가고 실행 토큰으로 heartbeat·events·result). 운영 저장소·운영 환경·레지스트리에는 쓰지 않는다.
+
+- 가져가기: `capabilities` 에 `APPLY_PATCH` 를 넣는다. 응답 `run.kind = "APPLY_PATCH"`, 반영에 쓸 값은 `inputSnapshot` 에 다 있다:
+
+```json
+{"schemaVersion": 1, "parentRunId": "<부모 사전 점검 id>",
+ "patch": {"id": "p1", "patchHash": "sha256:…", "files": ["…"], "diff": "--- a/…", "origin": "RULE"},
+ "repo": "Softbank-Hackathon-2026-Team-Echo/echo-ai-agent", "branch": "applied/<반영 실행 id>"}
+```
+
+- 러너는 반영 전에 `patch.diff` 의 해시를 다시 계산해 `patch.patchHash` 와 같은지 본다(계약 2.1). 다르면 반영하지 않고 `FAILED`·`failureCode: "PATCH_HASH_MISMATCH"` 로 낸다.
+- 결과 `POST /{id}/result` — `ApplyPatchResult`(반영 실행에 `RunResult` 를 보내면 422):
+
+```json
+{"status": "SUCCEEDED", "failureCode": null, "simulated": false,
+ "patchHash": "sha256:…", "appliedCommitSha": "0123456789abcdef0123456789abcdef01234567", "branch": "applied/<반영 실행 id>"}
+```
+
+| 칸 | 규칙 |
+|---|---|
+| `status` · `failureCode` · `simulated` | `RunResult` 와 같다(`SUCCEEDED` 면 `failureCode` null, `FAILED` 면 필수) |
+| `patchHash` | 필수. 입력 사본 `patch.patchHash`. 승인 행과 다르면 422 `details: [{field: "patchHash", reason: "PATCH_HASH_MISMATCH"}]`(실패 결과도) |
+| `appliedCommitSha` | `^[0-9a-f]{40}$`. `SUCCEEDED` 면 필수, `FAILED` 면 null 가능 |
+| `branch` | `SUCCEEDED` 면 필수, `FAILED` 면 null 가능. 값이 있으면 입력 사본 `branch` 와 같아야 한다(다르면 422 `BRANCH_MISMATCH`) |
+| 서버 재계산 | `SUCCEEDED` 면 WAS 가 입력 사본 `patch.diff` 로 해시를 다시 계산해 승인 행과 다르면 422 `details: [{field: "inputSnapshot.patch.diff", reason: "PATCH_HASH_MISMATCH"}]` |
+| 모르는 칸 | 422 `RESULT_INVALID` |
+
+- 422 는 저장하지 않고 실행을 연 채로 둔다(마감 안에 고쳐 다시 낼 수 있다). 끝난 실행·임대 지남·두 번째 제출 규칙은 위와 같다.
+- 사람은 부모 사전 점검 상세의 `patches[].apply` 로 본다([prechecks.md](api/prechecks.md#precheckpatch)): 결과 뒤 패치 `status` 는 `APPLIED`(성공)·`APPLY_FAILED`(실패·시간 초과).
+- 반영 성공 뒤 새 배포로 잇지 않는다. 고객 저장소 반영은 사람이 한다.
+
 ## 감사
 
 러너 행동은 SYSTEM + `component = ai-runner` 줄이고(새 행위자 종류 없음) 조직은 실행의 조직, 대상은 `agent_run` 이다. heartbeat·events 는 줄을 쓰지 않는다. 경로 → 이름은 `app/audit/actions.py` 의 `RUNNER_ROUTE_ACTIONS` 다.
 
 | 이름 | 언제 | 결과 | `details` |
 |---|---|---|---|
-| `AGENT_RUN_CLAIMED` | `:claim` 이 실행을 줌 | `SUCCEEDED` | `{runnerName}` |
-| `AGENT_RUN_FINISHED` | result 저장 | 상태대로 | `{status, failureCode?, simulated, aiReviewed, processing?}`. `processing` 은 저장한 기록 그대로이고 기록이 있을 때만 있다 |
+| `AGENT_RUN_CLAIMED` | `:claim` 이 실행을 줌 | `SUCCEEDED` | `{runnerName, kind}` |
+| `AGENT_RUN_FINISHED` | result 저장 | 상태대로 | `{kind, status, failureCode?, simulated, aiReviewed, processing?}`. `processing` 은 저장한 기록 그대로이고 기록이 있을 때만 있다. 반영 실행이면 `aiReviewed: false` + `appliedCommitSha` |
 | `AGENT_RUN_TIMED_OUT` | 부를 때 만료 | `FAILED` | `{failureCode}` |
 
 ## 러너 토큰 발급
@@ -174,5 +207,6 @@ python -m app.scripts.issue_runner_token --revoke echo-sandbox-runner # 철회(�
 | 데이터 레지던시 | 없음 | `RunResult.processing` 선택 칸(SPEC [specs/ai-3-residency.md](../specs/ai-3-residency.md)). `:claim` 응답은 그대로다 |
 | `blockedAttempts` 확인 | 감사 줄과 맞춰 `auditLogId` | 2차. 늘 `auditLogId: null`, `confirmed: false` |
 | 패치 승인 | 있음 | 사람 쪽 승인·거절 API 가 있다([prechecks.md](api/prechecks.md#패치-승인거절)). 스위치 `PATCH_APPLY_ENABLED`(기본 꺼짐)를 켜야 반영 실행을 만든다 |
-| `APPLY_PATCH` 가져가기·반영 결과 | 있음 | 아직 없다. `:claim` 은 `PRECHECK` 만 주고 `ApplyPatchResult` 를 받지 않는다 |
-| 패치 `origin` | 없음 | 선택 칸 하나 추가(기본 `AI`). `patchHash` 재계산 검사는 아직 없다 |
+| `APPLY_PATCH` 결과 | `{appliedCommitSha, branch}` | `ApplyPatchResult {status, failureCode, simulated, patchHash, appliedCommitSha, branch}`(PD-9). `checks[]`·산출물 요약·`nextStep`·`processing` 칸은 없다(계약 보완 필요, SPEC api-10-2 7절) |
+| 패치 `origin` | 없음 | 선택 칸 하나 추가(기본 `AI`) |
+| `patchHash` 정의 | "무엇의 해시"가 없음 | `sha256:` + diff UTF-8 해시(PD-14). 사전 점검 결과·반영 결과 모두 WAS 가 다시 계산한다 |

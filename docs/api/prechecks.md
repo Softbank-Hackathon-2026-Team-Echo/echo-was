@@ -19,7 +19,7 @@
 
 - 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행과 `PRECHECK` 가 아닌 실행은 404 다.
 - 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다. 최근 실행과 레지던시 기록은 조직 요약 [ai-residency.md](ai-residency.md) 의 `recentRuns` 로 본다.
-- 러너가 반영 실행(`APPLY_PATCH`)을 가져가는 길과 반영 결과 받기는 아직 없다(별도 작업).
+- 러너는 반영 실행(`APPLY_PATCH`)을 `:claim` 으로 가져가고 `ApplyPatchResult` 로 결과를 낸다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch), SPEC [api-10-2](../../specs/api-10-2-apply-patch-run.md)). 반영 성공 뒤 새 배포로 잇기는 없다(사람이 고객 저장소에 커밋).
 - 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
 
 ## 만들기 `POST /prechecks`
@@ -93,7 +93,7 @@
 {id, patchHash, files[], diff, reason, touchesProtectedFiles, checks[],
  origin, status, blockReason, verification: {passed, total},
  approval: {decision, decidedByUserId, decidedAt, reason} | null,
- apply: {runId, status, failureCode, finishedAt} | null}
+ apply: {runId, status, failureCode, finishedAt, appliedCommitSha, branch, simulated} | null}
 ```
 
 | 칸 | 뜻 |
@@ -103,7 +103,7 @@
 | `blockReason` | 보호 파일(`PROTECTED_FILES_TOUCHED`), 검사 없음(`CHECKS_MISSING`), PASS 아닌 검사(`CHECK_NOT_PASSED`). 러너 값을 받지 않고 결과를 저장할 때 다시 계산한 값이다 |
 | `verification` | `checks` 중 PASS 수와 전체 수(저장 안 함) |
 | `approval` | 사람의 결정. 없으면 null |
-| `apply` | 반영 실행. `status` 는 그 실행의 상태(`QUEUED`…`TIMED_OUT`)다. 실행이 없으면 null(스위치 꺼짐·거절) |
+| `apply` | 반영 실행. `status` 는 그 실행의 상태(`QUEUED`→`CLAIMED`→`RUNNING`→`SUCCEEDED`·`FAILED`·`TIMED_OUT`)다. `appliedCommitSha`·`branch` 는 러너 결과(결과 전·실패면 null, 브랜치는 `applied/<반영 실행 id>`), `simulated` 는 러너 가짜 모드면 true(배지). 실행이 없으면 null(스위치 꺼짐·거절). `GET` 은 만료를 쓰지 않아 임대가 지났어도 다음 쓰기 호출 전까지 옛 상태일 수 있다 |
 
 상태 계산(`compute_patch_status`, 위에서부터 처음 맞는 것):
 
@@ -149,7 +149,7 @@
 | 승인 | 결정 행만. 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기") | 결정 행 + 반영 실행(`APPLY_PATCH`, `QUEUED`, 마감 15분, `parentRunId` = 부모). `apply.runId`·`apply.status` 가 찬다 |
 | 서비스 영향 | 없음 | 반영 실행이 열려 있는 동안 그 서비스의 새 사전 점검·다음 승인이 409 `PRECHECK_IN_PROGRESS` |
 
-**러너가 반영 실행을 가져가는 길이 생기기 전에는 켜지 않는다.** 실행이 `QUEUED` 로 15분 머문 뒤 `TIMED_OUT` 이 되고(패치는 `APPLY_FAILED`) 그동안 위 409 가 난다. 반영 실행은 `GET /prechecks/{id}` 로 직접 열리지 않는다(404). 입력 사본:
+WAS 는 반영 실행을 `capabilities` 에 `APPLY_PATCH` 를 넣은 러너에게만 준다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch)). **그런 러너가 배포되기 전에는 켜지 않는다** — 그 전에 켜면 실행이 `QUEUED` 로 15분 머문 뒤 `TIMED_OUT` 이 되고(패치는 `APPLY_FAILED`) 그동안 위 409 가 난다. 반영 실행은 `GET /prechecks/{id}` 로 직접 열리지 않는다(404). 입력 사본:
 
 ```json
 {"schemaVersion": 1, "parentRunId": "<부모 id>",
