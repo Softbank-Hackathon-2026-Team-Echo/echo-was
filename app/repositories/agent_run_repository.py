@@ -84,6 +84,44 @@ class AgentRunRepository:
             statement = statement.with_for_update()
         return await self._session.scalar(statement)
 
+    async def find_patch_parent(
+        self, organization_id: uuid.UUID, run_id: uuid.UUID, *, lock: bool = False
+    ) -> AgentRun | None:
+        """그 조직의 패치를 내는 실행(사전 점검·배포 실패 진단). lock=True 는 `FOR UPDATE` 다."""
+        statement = (
+            select(AgentRun)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.organization_id == organization_id,
+                AgentRun.kind.in_([AgentRunKind.PRECHECK, AgentRunKind.CHANGE_PROPOSAL]),
+            )
+            .execution_options(populate_existing=True)
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return await self._session.scalar(statement)
+
+    async def find_diagnosis(self, deploy_request_id: uuid.UUID) -> AgentRun | None:
+        """그 배포 요청의 진단(CHANGE_PROPOSAL). 요청마다 하나뿐이다(부분 unique)."""
+        return await self._session.scalar(
+            select(AgentRun)
+            .where(
+                AgentRun.deploy_request_id == deploy_request_id,
+                AgentRun.kind == AgentRunKind.CHANGE_PROPOSAL,
+            )
+            .execution_options(populate_existing=True)
+        )
+
+    async def merge_result(self, run_id: uuid.UUID, now: datetime, result: dict[str, Any]) -> bool:
+        """성공한 실행의 결과 JSON 을 바꾼다(WAS 가 덧붙이는 칸, 예: 재배포 연결). 성공일 때만."""
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [AgentRun.status == AgentRunStatus.SUCCEEDED],
+            {"result": result, "updated_at": now},
+        )
+
     async def find_in_organization(
         self, organization_id: uuid.UUID, run_id: uuid.UUID, kinds: Collection[AgentRunKind]
     ) -> AgentRun | None:

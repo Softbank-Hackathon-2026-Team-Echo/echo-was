@@ -12,6 +12,7 @@ from pydantic import StringConstraints, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from app.enums import (
+    AgentRunStatus,
     BuildStatus,
     DeployRequestCancelReason,
     DeployRequestErrorCode,
@@ -47,6 +48,18 @@ def _validate_branch(value: str) -> str:
     ):
         raise PydanticCustomError("invalid_branch", INVALID_BRANCH_REASON)
     return value
+
+
+class DiagnosisSimulateRequest(ApiRequestModel):
+    """배포 실패 진단의 가짜 결과 모양(SPEC api-98). 러너 없이 WAS 가 바로 끝낸다(simulated)."""
+
+    result: Literal["DIAGNOSED", "INSUFFICIENT_EVIDENCE"] = "DIAGNOSED"
+
+
+class CreateDiagnosisRequest(ApiRequestModel):
+    """진단 만들기 본문(비워도 된다). simulate 밖의 칸은 422 다."""
+
+    simulate: DiagnosisSimulateRequest | None = None
 
 
 class SimulateRequest(ApiRequestModel):
@@ -188,6 +201,13 @@ class FailureResponse(ApiModel):
         )
 
 
+class DeployDiagnosisResponse(ApiModel):
+    """이 요청의 AI 진단 실행(SPEC api-98). 결과는 GET /prechecks/{runId} 의 diagnosis 칸이다."""
+
+    run_id: uuid.UUID
+    status: AgentRunStatus
+
+
 class DeployRequestDetailResponse(DeployRequestSummaryResponse):
     repo_url: str
     superseded_by_id: uuid.UUID | None
@@ -195,6 +215,8 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
     # 실패한 요청의 원인·컨테이너 진단(API 서버 4-1). 실패가 아니면 null. 나중에 더한 칸이라
     # OpenAPI 에서는 선택 칸(required 아님)이다 — 응답에는 data 안 칸 관례대로 null 로 늘 싣는다.
     failure: FailureResponse | None = None
+    # AI 진단(SPEC api-98). 진단 전이면 null. failure 와 같이 선택 칸이고 응답에는 늘 싣는다.
+    diagnosis: DeployDiagnosisResponse | None = None
     build: BuildRefResponse | None
     deployment_id: uuid.UUID | None
     urls: UrlsResponse
@@ -213,6 +235,13 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
             error_message=ERROR_MESSAGES[error_code] if error_code is not None else None,
             failure=(
                 FailureResponse.from_detail(view.failure) if view.failure is not None else None
+            ),
+            diagnosis=(
+                DeployDiagnosisResponse(
+                    run_id=view.diagnosis.id, status=AgentRunStatus(view.diagnosis.status)
+                )
+                if view.diagnosis is not None
+                else None
             ),
             build=(
                 BuildRefResponse(

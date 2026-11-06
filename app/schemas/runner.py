@@ -29,6 +29,9 @@ from app.enums import (
     AgentRunSeverity,
     AgentRunStatus,
     AgentRunStep,
+    DiagnosisCategory,
+    DiagnosisEvidenceSource,
+    DiagnosisResult,
     LogLevel,
     SecurityResult,
 )
@@ -40,6 +43,7 @@ from app.services.run_result import (
     NormalizedRunResult,
     compute_patch_hash,
     normalize_apply_result,
+    normalize_diagnosis_result,
     normalize_run_result,
 )
 
@@ -53,6 +57,8 @@ MAX_FEATURE_GAPS = 100
 MAX_FINDINGS = 100
 MAX_PATCHES = 10
 MAX_BLOCKED_ATTEMPTS = 50
+MAX_EVIDENCE = 20
+MAX_EVIDENCE_LINE = 10_000_000
 MAX_MODEL_ID_LENGTH = 64
 MAX_PROMPT_VERSION_LENGTH = 32
 FAILURE_CODE_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
@@ -407,6 +413,66 @@ class RunResultRequest(ApiRequestModel):
 
     def to_normalized(self) -> NormalizedRunResult:
         return normalize_run_result(self.model_dump(mode="json", by_alias=True))
+
+
+class RunDiagnosisEvidenceRequest(ApiRequestModel):
+    """진단 근거 한 줄. LOG 는 실패 로그(logTail)의 줄 번호, FILE 은 저장소 파일 경로·줄 번호다."""
+
+    source: DiagnosisEvidenceSource
+    line: Annotated[int, Field(ge=1, le=MAX_EVIDENCE_LINE)] | None = None
+    path: Annotated[str, Field(min_length=1, max_length=MAX_STRING_LENGTH)] | None = None
+    text: Text
+
+    @model_validator(mode="after")
+    def _check_file_has_path(self) -> Self:
+        if self.source is DiagnosisEvidenceSource.FILE and self.path is None:
+            raise ValueError("path is required when source is FILE")
+        return self
+
+
+class RunDiagnosisRequest(ApiRequestModel):
+    """배포 실패 진단(SPEC api-98). deployRequestId·environmentId·sourceCommitSha 는 WAS 가 채운다.
+
+    - DIAGNOSED 면 category·cause 가 필수다. 그 밖의 결론이면 fixable 이 false 다.
+    - fixable 이 false 면 unfixableReason 이 필수다(화면이 패치 대신 사유를 보인다).
+    """
+
+    result: DiagnosisResult
+    category: DiagnosisCategory | None = None
+    cause: OptionalText = None
+    fixable: StrictBool
+    unfixable_reason: OptionalText = None
+    evidence: Annotated[list[RunDiagnosisEvidenceRequest], Field(max_length=MAX_EVIDENCE)] = []
+
+    @model_validator(mode="after")
+    def _check_result_fields(self) -> Self:
+        if self.result is DiagnosisResult.DIAGNOSED:
+            if self.category is None or not self.cause:
+                raise ValueError("category and cause are required when result is DIAGNOSED")
+        elif self.fixable:
+            raise ValueError("fixable must be false unless result is DIAGNOSED")
+        if not self.fixable and not self.unfixable_reason:
+            raise ValueError("unfixableReason is required when fixable is false")
+        return self
+
+
+class DiagnosisRunResultRequest(RunResultRequest):
+    """배포 실패 진단(CHANGE_PROPOSAL) 결과: RunResult + diagnosis(SPEC api-98).
+
+    diagnosis 를 빼면(진단을 못 하는 러너) WAS 가 근거 부족(INSUFFICIENT_EVIDENCE)으로 마무리한다.
+    패치는 DIAGNOSED·fixable 진단에만 붙일 수 있다. 패치 모양·검사는 사전 점검과 같다.
+    """
+
+    diagnosis: RunDiagnosisRequest | None = None
+
+    @model_validator(mode="after")
+    def _check_patches_need_fixable_diagnosis(self) -> Self:
+        if self.patches and (self.diagnosis is None or not self.diagnosis.fixable):
+            raise ValueError("patches require a fixable DIAGNOSED diagnosis")
+        return self
+
+    def to_normalized(self) -> NormalizedRunResult:
+        return normalize_diagnosis_result(self.model_dump(mode="json", by_alias=True))
 
 
 class ApplyPatchResultRequest(ApiRequestModel):

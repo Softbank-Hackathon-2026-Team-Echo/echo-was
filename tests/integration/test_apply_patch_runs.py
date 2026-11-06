@@ -162,6 +162,9 @@ async def test_apply_patch_round_trip(migration: Migration, runner: RunnerFixtur
         "appliedCommitSha": COMMIT_SHA,
         "branch": f"applied/{apply_run_id}",
         "simulated": False,
+        "pullRequestUrl": None,
+        "redeployRequestId": None,
+        "redeployRejectedCode": None,
     }
     row = await run_row(migration, apply_run_id)
     assert row.status == AgentRunStatus.SUCCEEDED
@@ -566,13 +569,16 @@ async def test_apply_run_token_is_scoped_and_other_credentials_are_refused(
     assert (await run_row(migration, apply_run_id)).status == AgentRunStatus.CLAIMED
 
 
-def test_openapi_result_body_documents_both_shapes() -> None:
+def test_openapi_result_body_documents_all_shapes() -> None:
+    """RunResult(사전 점검)·ApplyPatchResult(반영)·DiagnosisRunResult(배포 실패 진단, api-98)."""
     operation = app.openapi()["paths"]["/api/v1/runner/runs/{run_id}/result"]["post"]
     schema = operation["requestBody"]["content"]["application/json"]["schema"]
 
     shapes = schema["oneOf"]
-    assert len(shapes) == 2
+    assert len(shapes) == 3
     assert "patches" in shapes[0]["properties"]
+    assert "diagnosis" not in shapes[0]["properties"]
+    assert set(shapes[2]["properties"]) == set(shapes[0]["properties"]) | {"diagnosis"}
     assert set(shapes[1]["properties"]) == {
         "status",
         "failureCode",

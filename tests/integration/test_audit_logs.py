@@ -144,11 +144,12 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 33
+    assert len(WRITE_ROUTE_ACTIONS) == 34
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 33개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개) ---
+# --- AC-2: 쓰기 34개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 배포 실패 진단 1개) ---
 
 
 @dataclass
@@ -671,6 +672,35 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         )
     )
 
+    # 배포 실패 진단(SPEC api-98): 실패한 배포에서 개발자가 만든다. 같은 요청을 다시 보내면 200 이고
+    # 줄을 쓰지 않는다. 러너 스위치가 꺼져 있어(기본) 가짜 진단이다.
+    failed = await deploy_and_finish(
+        harness, migration.service_id, migration.aws.id, simulate={"failAt": "VERIFYING"}
+    )
+    assert failed["status"] == "FAILED"
+    await ledger.skip()
+    diagnosis_path = org_path(team_id, f"/deploy-requests/{failed['id']}/diagnosis")
+    diagnosis = await migration.author_client.post(diagnosis_path)
+    assert diagnosis.status_code == 201, diagnosis.text
+    await ledger.expect_one(
+        diagnosis,
+        AuditAction.DIAGNOSIS_REQUESTED,
+        migration.author.user,
+        team_id,
+        "agent_run",
+        _data(diagnosis)["id"],
+        migration.service["name"],
+        {
+            "serviceId": migration.service_id,
+            "deployRequestId": failed["id"],
+            "environmentId": str(migration.aws.id),
+            "simulated": True,
+        },
+    )
+    again = await migration.author_client.post(diagnosis_path)
+    assert again.status_code == 200, again.text
+    await ledger.expect_none(again)
+
     # 재난(API 서버 9): 태평양 한가운데의 기준 미달 지진이라 계획이 생기지 않고 재난 줄 하나다.
     disasters_path = org_path(team_id, "/disasters")
     disaster = await migration.author_client.post(
@@ -704,7 +734,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 33개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # 34개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(

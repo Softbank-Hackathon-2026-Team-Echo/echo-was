@@ -1,10 +1,15 @@
 import uuid
+from dataclasses import replace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.guards import HumanDeveloperAccess, ViewerAccess
-from app.dependencies import get_precheck_patch_service, get_precheck_service
+from app.dependencies import (
+    get_diagnosis_service,
+    get_precheck_patch_service,
+    get_precheck_service,
+)
 from app.schemas.precheck import (
     DEFAULT_LOG_PAGE_SIZE,
     MAX_LOG_PAGE_SIZE,
@@ -15,6 +20,7 @@ from app.schemas.precheck import (
     PrecheckPatchResponse,
 )
 from app.schemas.response import ApiResponse
+from app.services.diagnosis_service import DiagnosisService
 from app.services.precheck_patch_service import PrecheckPatchService
 from app.services.precheck_service import PrecheckService
 
@@ -24,6 +30,7 @@ router = APIRouter(prefix="/api/v1/orgs/{org_id}/prechecks", tags=["precheck"])
 
 Prechecks = Annotated[PrecheckService, Depends(get_precheck_service)]
 PrecheckPatches = Annotated[PrecheckPatchService, Depends(get_precheck_patch_service)]
+Diagnoses = Annotated[DiagnosisService, Depends(get_diagnosis_service)]
 
 
 @router.post(
@@ -81,6 +88,7 @@ async def approve_precheck_patch(
     patch_id: str,
     request: DecidePrecheckPatchRequest,
     patches: PrecheckPatches,
+    diagnoses: Diagnoses,
 ) -> ApiResponse[PrecheckPatchResponse]:
     view = await patches.approve_patch(
         access.organization_id,
@@ -90,6 +98,12 @@ async def approve_precheck_patch(
         request.patch_hash,
         request.reason,
     )
+    if view.apply_run is not None:
+        # 가짜 진단의 반영은 승인 때 바로 성공으로 끝나므로 여기서 재배포를 잇는다(SPEC api-98).
+        # 진단이 아니거나 아직 안 끝난 반영이면 아무 것도 하지 않는다.
+        linked = await diagnoses.redeploy_after_apply(view.apply_run.id)
+        if linked is not None:
+            view = replace(view, apply_run=linked)
     return ApiResponse(data=PrecheckPatchResponse.from_view(view))
 
 

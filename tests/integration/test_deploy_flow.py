@@ -50,6 +50,8 @@ DETAIL_KEYS = {
     "rollbackOfRequestId",
     # API 서버 4-1: 실패 원인·컨테이너 진단
     "failure",
+    # 이슈 #98: AI 진단 실행 연결
+    "diagnosis",
 }
 
 

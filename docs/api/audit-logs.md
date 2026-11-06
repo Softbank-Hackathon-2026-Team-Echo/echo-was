@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 33개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 34개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·배포 실패 진단 1개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -110,7 +110,7 @@
 | `SERVICE_DELETE_REQUESTED` | `DELETE /services/{id}` | `service` | `{retry?}`. 다시 내리기가 실제로 시작된 재요청이면 `retry: true` |
 | `SERVICE_VARIABLE_SET` | `PUT /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
 | `SERVICE_VARIABLE_DELETED` | `DELETE /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
-| `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests` | `deploy_request` | `{environmentId, ref, commitSha}` |
+| `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests`. 배포 실패 진단의 반영 성공 뒤 자동 재배포도 이 줄이다(행위자 = 승인한 사람, 경로 = 승인 요청 또는 러너 결과 요청, 이슈 #98) | `deploy_request` | `{environmentId, ref, commitSha}`, 자동 재배포면 `diagnosisApplyRunId` 가 더해진다 |
 | `ROLLBACK_REQUESTED` | `POST /deploy-requests/{id}/rollback` | `deploy_request` | `{rollbackOfId, environmentId}` |
 | `MIGRATION_PLAN_CREATED` | `POST /services/{id}/migration-plans`, 재난 트리거 | `migration_plan` | `{sourceEnvironmentId, targetEnvironmentId}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |
 | `MIGRATION_PLAN_APPROVED` | `POST /migration-plans/{id}/approve`, 재난 트리거의 자기 승인 | `migration_plan` | `{selfApproved}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |
@@ -124,6 +124,7 @@
 | `PRECHECK_CANCELLED` | `POST /prechecks/{id}/cancel` | `agent_run` | `{serviceId, targetEnvironmentId}` |
 | `AGENT_PATCH_APPROVED` | `POST /prechecks/{id}/patches/{patchId}/approve`(같은 승인을 다시 보낸 200 은 기록 안 함) | `agent_run`(부모 실행) | `{patchId, patchHash, applyRunId}`(`applyRunId` 는 null 가능, 사유 원문은 결정 행에만) |
 | `AGENT_PATCH_REJECTED` | `POST /prechecks/{id}/patches/{patchId}/reject`(같은 거절을 다시 보낸 200 은 기록 안 함) | `agent_run`(부모 실행) | `{patchId, patchHash}` |
+| `DIAGNOSIS_REQUESTED` | `POST /deploy-requests/{id}/diagnosis`(이미 있어 200 이면 기록 안 함, 이슈 #98) | `agent_run`(진단 실행) | `{serviceId, deployRequestId, environmentId, simulated}` |
 | `DISASTER_DECLARED` | `POST /disasters` | `disaster`(이름표 `EARTHQUAKE M7.2`) | `{type, magnitude, radiusKm, meetsThreshold, affectedEnvironmentIds}`. 건너뛴 서비스가 있으면 같은 대상에 둘째 줄 `{skippedPlans: [{serviceId, planId, reason}]}`([disasters.md](disasters.md#감사)) |
 | `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName, kind}` |

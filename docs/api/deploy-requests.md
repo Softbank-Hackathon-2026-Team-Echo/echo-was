@@ -196,6 +196,7 @@ stateDiagram-v2
 | `supersededById` | uuid \| null | 이 요청을 밀어낸 요청 |
 | `errorMessage` | string \| null | 오류 코드별 **고정 문장**(외부 응답 원문은 싣지 않는다) |
 | `failure` | `Failure` \| null | `FAILED` 일 때만. 원인과 컨테이너 진단(API 서버 4-1, 아래). 다른 상태는 null. OpenAPI 에서는 선택 칸(required 아님)이지만 응답에는 늘 실린다 |
+| `diagnosis` | `{runId, status}` \| null | 이 요청의 AI 진단 실행(이슈 #98, `POST /deploy-requests/{id}/diagnosis`). 진단 전이면 null. 결과는 `GET /prechecks/{runId}` — [deploy-diagnosis.md](deploy-diagnosis.md). `failure` 와 같이 선택 칸이고 응답에는 늘 실린다 |
 | `build` | `{id, status, imageRepository, imageDigest, reused}` \| null | 쓰는 빌드. `reused = true` 면 이 요청이 새로 만든 빌드가 아니다(되돌리기·예비 따라가기는 늘 true) |
 | `deploymentId` | uuid \| null | 빌드 성공 뒤 만든 배포 기록 |
 | `urls` | `{main, environment}` | 대표 주소, 환경별 주소(접수 때 사본) |

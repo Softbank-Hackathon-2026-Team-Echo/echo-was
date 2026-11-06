@@ -11,7 +11,7 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.core.log_masking import mask_secrets_in_json
@@ -23,9 +23,13 @@ from app.enums import (
     AgentRunOrigin,
     AgentRunStatus,
     AiFindingConfirmation,
+    DiagnosisResult,
 )
 
 CHECK_PASSED = "PASS"
+# 진단 결과 없이 끝난 진단 실행의 unfixableReason(고정 문장, 화면에 그대로 보인다).
+DIAGNOSIS_MISSING_REASON = "Runner did not report a diagnosis."
+DIAGNOSIS_RUN_FAILED_REASON = "Diagnosis run failed"
 _PASSTHROUGH_KEYS = ("sandbox", "model", "configDiff", "featureGaps")
 _OPEN_APPLY_STATUSES = frozenset(
     {AgentRunStatus.QUEUED, AgentRunStatus.CLAIMED, AgentRunStatus.RUNNING}
@@ -139,6 +143,38 @@ def _normalized_processing(processing: Mapping[str, Any] | None) -> dict[str, An
     )
     masked: dict[str, Any] = mask_secrets_in_json({**processing, "dataClasses": data_classes})
     return masked
+
+
+def missing_diagnosis(reason: str = DIAGNOSIS_MISSING_REASON) -> dict[str, Any]:
+    """러너가 진단을 보내지 않았거나(지금 러너) 실패로 끝났을 때 저장하는 진단: 근거 부족."""
+    return {
+        "result": DiagnosisResult.INSUFFICIENT_EVIDENCE.value,
+        "category": None,
+        "cause": None,
+        "fixable": False,
+        "unfixableReason": reason,
+        "evidence": [],
+    }
+
+
+def normalize_diagnosis_result(payload: Mapping[str, Any]) -> NormalizedRunResult:
+    """검사를 통과한 진단 결과(RunResult + diagnosis)를 저장할 값으로 바꾼다(SPEC api-98).
+
+    diagnosis 가 없으면 근거 부족(INSUFFICIENT_EVIDENCE)으로 마무리한다. 이때 요청 스키마가 패치를
+    이미 막았다(패치는 DIAGNOSED·fixable 진단에만 붙는다). 모든 문자열의 비밀값 모양을 가린다.
+    """
+    base = normalize_run_result(payload)
+    diagnosis = payload.get("diagnosis")
+    if diagnosis is None:
+        reason = (
+            DIAGNOSIS_MISSING_REASON
+            if payload["status"] == AgentRunStatus.SUCCEEDED
+            else f"{DIAGNOSIS_RUN_FAILED_REASON}: {payload['failureCode']}"
+        )
+        stored = missing_diagnosis(reason)
+    else:
+        stored = mask_secrets_in_json(dict(diagnosis))
+    return replace(base, result={**base.result, "diagnosis": stored})
 
 
 def normalize_run_result(payload: Mapping[str, Any]) -> NormalizedRunResult:

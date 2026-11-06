@@ -17,9 +17,10 @@
 | `POST /prechecks/{id}/patches/{patchId}/approve` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 | `POST /prechecks/{id}/patches/{patchId}/reject` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 
-- 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행은 404 다. 조회·이벤트는 `PRECHECK`·`APPLY_PATCH`, 취소·패치 승인·거절은 `PRECHECK` 만 받는다(그 밖의 종류는 404).
+- 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행은 404 다. 조회·이벤트는 `PRECHECK`·`APPLY_PATCH`·`CHANGE_PROPOSAL`, 취소·패치 승인·거절은 `PRECHECK`·`CHANGE_PROPOSAL` 만 받는다(그 밖의 종류는 404).
+- **배포 실패 AI 진단**(`kind = CHANGE_PROPOSAL`, 이슈 #98)도 이 API 로 읽고 승인한다. 만들기는 `POST /deploy-requests/{id}/diagnosis`, 상세의 `diagnosis` 칸·`apply` 의 `pullRequestUrl`·`redeployRequestId`·`redeployRejectedCode` 는 [deploy-diagnosis.md](deploy-diagnosis.md) 를 본다.
 - 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다. 최근 실행과 레지던시 기록은 조직 요약 [ai-residency.md](ai-residency.md) 의 `recentRuns` 로 본다.
-- 러너는 반영 실행(`APPLY_PATCH`)을 `:claim` 으로 가져가고 `ApplyPatchResult` 로 결과를 낸다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch), SPEC [api-10-2](../../specs/api-10-2-apply-patch-run.md)). 반영 성공 뒤 새 배포로 잇기는 없다(사람이 고객 저장소에 커밋).
+- 러너는 반영 실행(`APPLY_PATCH`)을 `:claim` 으로 가져가고 `ApplyPatchResult` 로 결과를 낸다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch), SPEC [api-10-2](../../specs/api-10-2-apply-patch-run.md)). 사전 점검 패치는 반영 성공 뒤 새 배포로 잇지 않는다(사람이 고객 저장소에 커밋). 배포 실패 진단의 패치만 같은 환경 재배포를 자동으로 만든다([deploy-diagnosis.md](deploy-diagnosis.md)).
 - 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
 
 ## 만들기 `POST /prechecks`
@@ -68,7 +69,9 @@
  findings: [{control, environmentId, result, title, reason, origin, suggestedFix, confirmation}],
  patches: [PrecheckPatch],
  blockedAttempts: [{action, target, at, reason, auditLogId, confirmed}],
- apply: {parentRunId, patchId, patchHash, repo, branch, appliedCommitSha} | null}
+ apply: {parentRunId, patchId, patchHash, repo, branch, appliedCommitSha} | null,
+ diagnosis: {result, category, cause, fixable, unfixableReason, evidence[],
+             deployRequestId, environmentId, sourceCommitSha} | null}
 ```
 
 | 칸 | 뜻 |
@@ -96,8 +99,11 @@
 {id, patchHash, files[], diff, reason, touchesProtectedFiles, checks[],
  origin, status, blockReason, verification: {passed, total},
  approval: {decision, decidedByUserId, decidedAt, reason} | null,
- apply: {runId, status, failureCode, finishedAt, appliedCommitSha, branch, simulated} | null}
+ apply: {runId, status, failureCode, finishedAt, appliedCommitSha, branch, simulated,
+         pullRequestUrl, redeployRequestId, redeployRejectedCode} | null}
 ```
+
+`pullRequestUrl`·`redeployRequestId`·`redeployRejectedCode` 는 배포 실패 진단의 패치에서만 값이 생긴다(사전 점검 패치는 늘 null, [deploy-diagnosis.md](deploy-diagnosis.md#승인-뒤-반영--재배포-patchesapply)).
 
 | 칸 | 뜻 |
 |---|---|

@@ -54,7 +54,8 @@ from app.enums import (
 )
 from app.executors import ExecutorSet
 from app.executors.base import InvalidLogCursor, LogChunk, LogLine
-from app.models import Build, DeployRequest, Environment, Service, ServiceEnvironment
+from app.models import AgentRun, Build, DeployRequest, Environment, Service, ServiceEnvironment
+from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.build_repository import BuildRepository
 from app.repositories.deploy_request_log_repository import DeployRequestLogRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
@@ -90,6 +91,8 @@ class CreateDeployCommand:
     ref_type: RefType
     ref_value: str
     simulate_fail_at: SimulatedFailureStage | None
+    # 배포 실패 진단의 패치 반영 뒤 자동 재배포면 그 반영 실행(SPEC api-98). 감사 details 에 싣는다.
+    diagnosis_apply_run_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,8 @@ class DeployRequestView:
     rollbackable: bool = False
     # 상세만 채운다. 실패한 요청의 원인·컨테이너 진단(API 서버 4-1).
     failure: FailureDetail | None = None
+    # 상세만 채운다. 이 요청의 AI 진단 실행(CHANGE_PROPOSAL, SPEC api-98). 진단 전이면 None.
+    diagnosis: AgentRun | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +239,11 @@ class DeployRequestService:
                     "environmentId": str(environment.id),
                     "ref": command.ref_value,
                     "commitSha": commit_sha,
+                    **(
+                        {"diagnosisApplyRunId": str(command.diagnosis_apply_run_id)}
+                        if command.diagnosis_apply_run_id is not None
+                        else {}
+                    ),
                 },
             )
         _log_accepted("deploy request accepted", "create_deploy_request", request, superseded_id)
@@ -370,6 +380,8 @@ class DeployRequestService:
         async with self._session.begin():
             request = await self._get_in_organization(organization_id, deploy_request_id)
             view = (await self._views([request]))[0]
+            diagnosis = await AgentRunRepository(self._session).find_diagnosis(request.id)
+            view = replace(view, diagnosis=diagnosis)
             if request.status != DeployRequestStatus.FAILED:
                 return view
             rows = await self._logs.search_by_codes(request.id, FAILURE_LOG_CODES)
