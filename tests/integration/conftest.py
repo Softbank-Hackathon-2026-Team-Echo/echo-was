@@ -86,6 +86,8 @@ TABLES = (
     "migration_plan_logs",
     "migration_plans",
     "disasters",
+    # --- API 서버 18: 실제 재난 피드 상태 ---
+    "disaster_feed_states",
     # --- API 서버 4: 배포 작업 로그 ---
     "deploy_request_logs",
     "deploy_requests",

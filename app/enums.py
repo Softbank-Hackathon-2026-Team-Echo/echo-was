@@ -347,9 +347,26 @@ class DisasterType(StrEnum):
 
 
 class DisasterSource(StrEnum):
-    """재난 정보 출처. 지금은 사람이 버튼으로 낸 시뮬레이션뿐이다."""
+    """재난 정보 출처(API 서버 9·18).
+
+    - SIMULATED: 사람이 재난 버튼으로 낸 시뮬레이션(simulated=true, 만든 사람 있음).
+    - LIVE_FEED: 실제 지진 피드(USGS)에서 서버가 만든 재난(simulated=false, 만든 사람 없음).
+    - FEED_INJECTED: 시연용으로 피드에 넣은 가짜 지진이 피드와 같은 경로로 만든
+      재난(simulated=true).
+    """
 
     SIMULATED = "SIMULATED"
+    LIVE_FEED = "LIVE_FEED"
+    FEED_INJECTED = "FEED_INJECTED"
+
+
+class LiveFeedConnectionStatus(StrEnum):
+    """실제 재난 피드 연결 상태(GET /disasters/feed). 스위치가 꺼져 있으면 DISABLED 다."""
+
+    DISABLED = "DISABLED"
+    WAITING = "WAITING"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
 
 
 class DisasterStatus(StrEnum):

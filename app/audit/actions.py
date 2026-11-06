@@ -45,6 +45,8 @@ class AuditAction(StrEnum):
     DIAGNOSIS_REQUESTED = "DIAGNOSIS_REQUESTED"
     DISASTER_DECLARED = "DISASTER_DECLARED"
     DISASTER_ENDED = "DISASTER_ENDED"
+    DISASTER_EVACUATION_REQUESTED = "DISASTER_EVACUATION_REQUESTED"
+    DISASTER_FEED_INJECTED = "DISASTER_FEED_INJECTED"
     # --- 서버(SYSTEM): 끝 상태 ---
     DEPLOY_FINISHED = "DEPLOY_FINISHED"
     ROLLBACK_FINISHED = "ROLLBACK_FINISHED"
@@ -82,6 +84,7 @@ class AuditComponent(StrEnum):
     MIGRATION_WORKER = "migration-worker"
     TEARDOWN_WORKER = "teardown-worker"
     AI_RUNNER = "ai-runner"
+    LIVE_DISASTER_FEED = "live-disaster-feed"
     # 플랫폼 자기 시험(보안 5-3): 일회용 에이전트 토큰 발급·폐기.
     SECURITY_SELF_TEST = "security-self-test"
 
@@ -145,6 +148,10 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ),
     ("POST", f"{_ORG}/disasters"): AuditAction.DISASTER_DECLARED,
     ("POST", f"{_ORG}/disasters/{{disaster_id}}/end"): AuditAction.DISASTER_ENDED,
+    ("POST", f"{_ORG}/disasters/{{disaster_id}}/evacuate"): (
+        AuditAction.DISASTER_EVACUATION_REQUESTED
+    ),
+    ("POST", f"{_ORG}/disasters/feed:inject"): AuditAction.DISASTER_FEED_INJECTED,
 }
 
 _RUNNER = "/api/v1/runner/runs"

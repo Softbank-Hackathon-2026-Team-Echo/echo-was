@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.audit.actions import AuditAction, AuditComponent
+from app.audit.route_coverage import agent_probe_routes
 from app.enums import (
     ActorType,
     AgentRunKind,
@@ -54,6 +55,8 @@ APPROVE_ROUTES = {
     "POST /api/v1/orgs/{org_id}/prechecks/{precheck_id}/patches/{patch_id}/approve",
 }
 LEAKY_ROUTE = "POST /api/v1/orgs/{org_id}/migration-plans/{plan_id}/approve"
+# 에이전트 토큰으로 부르는 쓰기 경로 수(라우터에서 계산 — 경로가 늘어도 숫자를 고치지 않는다).
+PROBE_COUNT = len(agent_probe_routes(app.routes))
 # 시험 시작 직전 유예를 지나 도메인 줄이 대조 범위에 들어오게 하는 시간(초).
 PAST_GRACE = IN_FLIGHT_GRACE.total_seconds() + 1
 
@@ -146,12 +149,12 @@ async def test_self_test_records_passing_evidence_with_was_version_scope(
         assert finding.expires_at - finding.collected_at == EVIDENCE_TTL
     assert iam.reason == SecurityFindingReason.AGENT_WRITES_DENIED
     labels = {item["item_id"]: item for item in iam.items}
-    assert iam.total_items == len(labels) == 35
+    assert iam.total_items == len(labels) == PROBE_COUNT
     assert APPROVE_ROUTES <= set(labels)
     assert all(item["target"] == "403 AGENT_READ_ONLY" for item in labels.values())
     assert audit.reason == SecurityFindingReason.AUDIT_TRAIL_COMPLETE
     summary = {item["item_id"]: item["target"] for item in audit.items}
-    assert summary["denial:AGENT_READ_ONLY"] == "35/35"
+    assert summary["denial:AGENT_READ_ONLY"] == f"{PROBE_COUNT}/{PROBE_COUNT}"
 
 
 async def test_self_test_token_is_revoked_and_every_step_is_audited(
@@ -176,7 +179,7 @@ async def test_self_test_token_is_revoked_and_every_step_is_audited(
         (AuditAction.AGENT_TOKEN_REVOKED, AuditComponent.SECURITY_SELF_TEST, token.id),
     ]
     denials = [row for row in rows if row.actor_type == ActorType.AGENT]
-    assert len(denials) == 35
+    assert len(denials) == PROBE_COUNT
     assert {(row.result, row.reason, row.actor_agent_token_id) for row in denials} == {
         (AuditResult.DENIED, "AGENT_READ_ONLY", token.id)
     }
@@ -197,7 +200,7 @@ async def test_agent_write_that_passes_fails_iam_evidence(harness: DeployHarness
         "target": "202 OK",
         "reason": SecurityFindingReason.AGENT_WRITE_NOT_DENIED.value,
     }
-    assert sum(item["reason"] == "AGENT_WRITES_DENIED" for item in iam.items) == 34
+    assert sum(item["reason"] == "AGENT_WRITES_DENIED" for item in iam.items) == PROBE_COUNT - 1
 
 
 async def test_failed_evidence_blocks_matrix_even_after_older_pass(harness: DeployHarness) -> None:

@@ -10,6 +10,8 @@ import re
 import uuid
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,6 +137,14 @@ async def create_personal_organization(
     raise RuntimeError("no personal organization slug available")
 
 
+@dataclass(frozen=True)
+class LiveFeedThresholdChange:
+    """실제 재난 피드 조직 기준 변경(API 서버 18). None 인 칸은 그대로 둔다."""
+
+    min_magnitude: Decimal | None
+    radius_km: int | None
+
+
 class OrganizationService:
     def __init__(
         self, session: AsyncSession, clock: Clock, reserved_slugs: Collection[str]
@@ -200,8 +210,9 @@ class OrganizationService:
         actor_user_id: uuid.UUID,
         role: OrganizationRole | None,
         allow_self_approval: bool,
+        live_feed: LiveFeedThresholdChange | None = None,
     ) -> OrganizationView:
-        """조직 행을 `FOR NO KEY UPDATE` 로 잠그고 자기 승인 스위치를 바꾼다.
+        """조직 행을 `FOR NO KEY UPDATE` 로 잠그고 자기 승인 스위치(와 피드 기준)를 바꾼다.
 
         어드민 검사는 라우트의 검사기가 한다. 값이 그대로면 감사 줄을 쓰지 않는다.
         """
@@ -210,11 +221,27 @@ class OrganizationService:
             organization = await self._organizations.find_by_id(organization_id, lock=True)
             if organization is None:
                 raise OrganizationNotFoundError
+            changes: dict[str, Any] = {}
             previous = organization.allow_self_approval
+            if previous != allow_self_approval:
+                changes["allowSelfApproval"] = {"from": previous, "to": allow_self_approval}
             organization.allow_self_approval = allow_self_approval
+            if live_feed is not None and live_feed.min_magnitude is not None:
+                before = organization.live_feed_min_magnitude
+                if before != live_feed.min_magnitude:
+                    changes["liveFeedMinMagnitude"] = {
+                        "from": float(before),
+                        "to": float(live_feed.min_magnitude),
+                    }
+                organization.live_feed_min_magnitude = live_feed.min_magnitude
+            if live_feed is not None and live_feed.radius_km is not None:
+                before_radius = organization.live_feed_radius_km
+                if before_radius != live_feed.radius_km:
+                    changes["liveFeedRadiusKm"] = {"from": before_radius, "to": live_feed.radius_km}
+                organization.live_feed_radius_km = live_feed.radius_km
             organization.updated_at = now
             await self._session.flush()
-            if previous != allow_self_approval:
+            if changes:
                 self._audit.record(
                     organization_id=organization_id,
                     actor=AuditActor.user(actor_user_id),
@@ -222,7 +249,7 @@ class OrganizationService:
                     target=AuditTarget(
                         AuditTargetType.ORGANIZATION, organization_id, organization.name
                     ),
-                    details={"allowSelfApproval": {"from": previous, "to": allow_self_approval}},
+                    details=changes,
                 )
         logger.info(
             "organization settings changed",
