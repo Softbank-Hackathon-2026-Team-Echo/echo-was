@@ -260,6 +260,18 @@ class Settings(BaseSettings):
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
 
+    # 실제 재난 피드(API 서버 18). 켜면 일꾼이 interval 마다 USGS 지진 피드(GeoJSON, 인증 없음)를
+    # 읽어 조직 기준(규모·반경)에 맞는 지진으로 재난(source = LIVE_FEED)을 만든다. 기본은 꺼짐이고,
+    # 꺼져 있으면 일꾼이 피드를 부르지 않는다. 시연 주입(POST /disasters/feed:inject)은 스위치와
+    # 상관없다.
+    live_disaster_feed_enabled: bool = False
+    live_disaster_feed_url: str = Field(
+        default="https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
+        min_length=1,
+    )
+    live_disaster_feed_interval_seconds: int = Field(default=60, ge=30, le=3600)
+    live_disaster_feed_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
     @field_validator("public_base_domain")
     @classmethod
     def _check_public_base_domain(cls, value: str) -> str:

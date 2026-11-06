@@ -144,7 +144,7 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 34
+    assert len(WRITE_ROUTE_ACTIONS) == 36
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
@@ -718,6 +718,37 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
             "affectedEnvironmentIds": [],
         },
     )
+    # 실제 재난 피드(API 서버 18): 대피 시작(기준 미달이라 계획 없음)과 시연 주입(기준 미달)
+    await ledger.expect_one(
+        await migration.author_client.post(f"{disasters_path}/{disaster_id}/evacuate"),
+        AuditAction.DISASTER_EVACUATION_REQUESTED,
+        migration.author.user,
+        team_id,
+        "disaster",
+        disaster_id,
+        "EARTHQUAKE M6.0",
+        {"source": "SIMULATED", "plans": []},
+    )
+    injected = await migration.author_client.post(
+        f"{disasters_path}/feed:inject",
+        json={"magnitude": 5.0, "epicenter": {"lat": 0, "lng": 0}},
+    )
+    await ledger.expect_one(
+        injected,
+        AuditAction.DISASTER_FEED_INJECTED,
+        migration.author.user,
+        team_id,
+        "organization",
+        team_id,
+        harness.organization.name,
+        {
+            "feedEventId": _data(injected)["feedEventId"],
+            "magnitude": 5.0,
+            "epicenter": {"lat": 0.0, "lng": 0.0},
+            "matched": False,
+            "reason": "BELOW_THRESHOLD",
+        },
+    )
     await ledger.expect_one(
         await migration.author_client.post(f"{disasters_path}/{disaster_id}/end"),
         AuditAction.DISASTER_ENDED,
@@ -728,7 +759,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 33개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
+    # 36개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
     everything = await _rows(harness)
     dumped = json.dumps(
