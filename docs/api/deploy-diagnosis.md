@@ -104,11 +104,11 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 
 | 칸 | 뜻 |
 |---|---|
-| `pullRequestUrl` | 저장소 반영 PR. **러너가 push 하지 않아 지금은 늘 null** |
+| `pullRequestUrl` | 저장소 반영 PR. `AI_APPLY_COMMIT_ENABLED` 가 켜져 있고 WAS 가 서비스 저장소에 커밋·PR 을 만들었을 때만 찬다(아래 「저장소 반영」). 꺼짐·가짜 반영·실패면 null |
 | `redeployRequestId` | 반영이 `SUCCEEDED` 가 된 뒤 WAS 가 같은 환경에 만든 재배포 요청 id. 화면은 이 값이 생기면 배포 진행 화면(`GET /deploy-requests/{id}`)으로 잇는다. 반영 전·실패·사전 점검 패치·접수 거절이면 null |
 | `redeployRejectedCode` (가칭, 이슈에 없던 칸) | 재배포 접수가 거절된 오류 코드(예: `MIGRATION_IN_PROGRESS`·`SERVICE_DELETING`). 거절이 없으면 null. 이 값이 있으면 화면은 "재배포를 시작하지 못함"을 보이고 사람이 다시 배포한다 |
 
-재배포 요청은 기존 배포 접수 규칙(`POST /services/{id}/deploy-requests`)을 그대로 거친다: `trigger: MANUAL`, `ref: {type: COMMIT, value: <실패한 요청의 commitSha>}`, 같은 환경, 요청자 = 승인한 사람, 감사 `DEPLOY_REQUESTED` 의 `details.diagnosisApplyRunId` = 반영 실행 id. **지금은 원래 실패 커밋을 다시 배포한다** — 러너가 고친 커밋을 고객 저장소에 push 하지 않기 때문이다(push·PR 이 생기면 그 커밋으로 바꾼다, SPEC 7절). 반영 성공을 다시 받아도(같은 결정 재전송, 결과 재전송, **같은 패치 동시 승인**) 재배포는 한 번만 만든다 — 반영 실행 행을 잠그고 확인·접수·연결을 한 트랜잭션으로 하므로 동시에 온 두 요청의 응답도 같은 살아 있는 재배포 id 를 싣는다.
+재배포 요청은 기존 배포 접수 규칙(`POST /services/{id}/deploy-requests`)을 그대로 거친다: `trigger: MANUAL`, `ref: {type: COMMIT, value: <실패한 요청의 commitSha>}`, 같은 환경, 요청자 = 승인한 사람, 감사 `DEPLOY_REQUESTED` 의 `details.diagnosisApplyRunId` = 반영 실행 id. 스위치 `AI_APPLY_COMMIT_ENABLED` 가 꺼져 있으면(기본) 원래 실패 커밋을 다시 배포한다. 켜져 있으면 WAS 가 저장소에 만든 **고친 커밋**(`appliedCommitSha`)을 배포한다(아래 「저장소 반영」, SPEC api-19). 반영 성공을 다시 받아도(같은 결정 재전송, 결과 재전송, **같은 패치 동시 승인**) 재배포는 한 번만 만든다 — 반영 실행 행을 잠그고 확인·접수·연결을 한 트랜잭션으로 하므로 동시에 온 두 요청의 응답도 같은 살아 있는 재배포 id 를 싣는다.
 
 언제 이어지나: 가짜 진단은 승인 응답 안에서, 러너 반영은 러너가 `ApplyPatchResult(SUCCEEDED)` 를 낸 결과 요청 안에서 만든다. 접수 거절은 결과 응답을 실패로 만들지 않는다 — 승인 응답은 200 그대로이고 `apply.status: SUCCEEDED`·`redeployRequestId: null`·`redeployRejectedCode: <코드>` 가 저장된다(재배포 행은 생기지 않는다).
 
@@ -178,6 +178,28 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 ### 반영 실행(APPLY_PATCH) 입력 차이
 
 진단 패치의 반영 실행 입력 사본은 사전 점검 반영과 같고 두 가지가 다르다: `repo` = 서비스 저장소(`owner/name`, 사전 점검은 echo-ai-agent 시나리오 사본), 그리고 `diagnosis: {deployRequestId, environmentId, sourceCommitSha}` 가 더해진다. 결과(`ApplyPatchResult`)는 그대로다. 러너가 `sourceCommitSha` 에서 패치를 적용·빌드·스캔·healthz 를 확인하고 `SUCCEEDED` 를 내면 WAS 가 재배포를 만든다.
+
+## 저장소 반영 (SPEC api-19, 스위치 `AI_APPLY_COMMIT_ENABLED`, 기본 꺼짐)
+
+러너(샌드박스 VM)는 읽기 자격뿐이라 push 하지 않는다. 러너가 진단 패치 반영(`APPLY_PATCH`)을 `SUCCEEDED` 로 낸 결과 요청 안에서, 재배포를 만들기 직전에 WAS 가 GitHub App 설치 토큰(`contents: write`, `pull_requests: write`, 그 저장소만)으로:
+
+0. diff 경로를 검사한다: 저장소 안의 정규화된 상대 경로만(`..`·절대 경로·빈 조각·NUL·백슬래시 거절), `.github/`·`.git/` 아래 금지, 모드 바꾸기·이름 바꾸기 머리 금지, 승인 화면의 `files` 와 diff 경로 집합이 같아야 한다. 실패 커밋 tree 에서 대상이 일반 파일(100644·100755)이 아니면(심볼릭 링크·서브모듈) 거절. 모두 `REPO_PATH_REJECTED`(GitHub 에 쓰지 않음, 재배포 없음).
+1. 실패 커밋(`diagnosis.sourceCommitSha`)의 대상 파일을 읽어 승인된 diff 를 엄격히 적용한다(러너와 같은 규칙).
+2. 브랜치 `echoport/fix-<반영 실행 id 앞 8자>` + 커밋 1개(파일 모드는 원래 것 보존, 부모 = 실패 커밋, 작성자 `EchoPort bot <bot@echoport.uk>`, 메시지에 진단 원인·분류·승인자 `@login`·진단/반영 실행 id·실패 배포·패치 지문).
+3. PR 을 연다(base = 실패 배포의 브랜치, 커밋 ref 였으면 저장소 기본 브랜치). **병합하지 않는다.**
+4. 반영 실행 결과를 바꾼다: `appliedCommitSha` = 저장소 커밋, `branch` = `echoport/fix-…`, `pullRequestUrl` = PR 주소(러너의 로컬 값은 `sandboxCommitSha`·`sandboxBranch` 로 남는다). 재배포 ref = 그 커밋.
+
+| 경우 | 반영 실행(`apply`) | 재배포 |
+|---|---|---|
+| 스위치 꺼짐 | #98 그대로(`branch: applied/…`, `pullRequestUrl: null`) | 원래 실패 커밋 |
+| 가짜 진단(simulate) | GitHub 를 부르지 않음(가짜 sha, `pullRequestUrl: null`) | 원래 실패 커밋 |
+| 성공 | `SUCCEEDED`, 위 4칸 | 고친 커밋 |
+| 저장소 쓰기 성공 뒤 재배포 접수 거절(예: `SERVICE_DELETING`·`MIGRATION_IN_PROGRESS`) | `SUCCEEDED`, 위 4칸 그대로, `redeployRequestId: null`, `redeployRejectedCode: <코드>`. **브랜치·PR 은 저장소에 남는다**(WAS 가 되돌리지 않음) — 사람이 그 커밋으로 다시 배포하거나 PR·브랜치를 정리한다 | 만들지 않음 |
+| 실패 | **`FAILED`**, `failureCode` = `REPO_WRITE_FORBIDDEN`(App 권한·설치 대상 없음) · `REPO_APP_NOT_INSTALLED` · `REPO_FILE_NOT_FOUND` · `REPO_FILE_NOT_TEXT` · `REPO_PATCH_CONFLICT`(실패 커밋 파일에 diff 가 안 맞음) · `REPO_WRITE_FAILED` · `REPO_WRITE_UNAVAILABLE`(App 미설정) · `REPO_PATH_REJECTED`(위 0번) · `REPO_BRANCH_CONFLICT`(같은 이름 브랜치가 다른 내용), `appliedCommitSha: null`, 패치 상태 `APPLY_FAILED` | **만들지 않음** |
+
+같은 반영 결과를 다시 받아도(재전송) 이미 기록된 커밋을 쓰고 GitHub 를 다시 부르지 않는다. 러너 결과와 재승인이 동시에 와도 반영 실행 행을 잠가 `commitState: IN_PROGRESS` 를 먼저 잡은 요청 하나만 GitHub 에 쓰고(잠금은 GitHub 호출 전에 푼다) 재배포까지 잇는다 — 다른 요청은 재배포 없이 200 으로 돌아가고, 커밋·PR 생성 1회·재배포 1개다. 결과 칸은 부분 갱신이라 먼저 기록된 `redeployRequestId` 를 지우지 않는다. 브랜치가 이미 있으면 그 head 의 부모가 실패 커밋이고 tree 가 승인 패치 적용 결과와 같을 때만 쓰고, 아니면 `REPO_BRANCH_CONFLICT`. PR 이 이미 있으면 그것을 쓴다.
+
+**켜기 전 필요한 것:** GitHub App `echoport-deploy` 에 Repository permissions `Contents: Read and write`, `Pull requests: Read and write` 추가 → 조직 설치 화면에서 새 권한 승인 → 설치 대상 저장소에 서비스 저장소(시연: `echo-demo-app`)가 들어 있는지 확인. 2026-11-07 기준 App 권한은 `contents: read`·`actions: write`·`members: read`·`metadata: read` 라 켜면 `REPO_WRITE_FORBIDDEN` 이다.
 
 ## C-AI-1 · 레지던시
 
