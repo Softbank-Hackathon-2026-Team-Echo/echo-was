@@ -350,8 +350,14 @@ class DisasterService:
         """승인에 실패해도 계획은 남는다. 실패 뒤에는 계획을 다시 읽어 지금 상태를 돌려준다."""
         reason: str | None = None
         try:
+            # 긴급 이전 계획에 DB 쓰기 전환(승격 허용)이 들어가는 것은 서버 설정
+            # MIGRATION_DB_CUTOVER_ON_DISASTER=true(기본 꺼짐)일 때뿐이다. 그 설정을 켠 것이
+            # 운영자의 승격 사전 동의라 자동 승인은 동의를 함께 넘긴다(승인 감사 줄에 남는다).
             await self._migration_plans.approve_plan(
-                context.organization_id, plan_id, context.actor_user_id
+                context.organization_id,
+                plan_id,
+                context.actor_user_id,
+                acknowledge_promote=True,
             )
         except SelfApprovalForbiddenError:
             # 트리거가 스위치를 읽은 뒤 어드민이 끈 경우.

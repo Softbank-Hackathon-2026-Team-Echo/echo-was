@@ -37,7 +37,8 @@ OPEN_PLAN_UNIQUE_INDEX = "uq_migration_plans_service_id_open"
 PREVENT_DELETE_TRIGGER = "trg_migration_plans_prevent_delete"
 MIN_OBSERVE_SECONDS = 1
 MAX_OBSERVE_SECONDS = 600
-LAST_STEP_INDEX = 4
+# 단계 번호 상한. 고정 5단계(0~4) + DB 쓰기 전환(5, includeCutover 계획만. API 서버 17).
+LAST_STEP_INDEX = 5
 
 
 def _values(values: Iterable[StrEnum]) -> str:
@@ -57,7 +58,8 @@ class MigrationPlan(UuidPrimaryKeyMixin, TimestampMixin, Base):
     """이전 계획 하나: 서비스의 트래픽을 출발 연결(지금 100%)에서 도착 연결(같은 이미지의 예비)로
     옮기는 계획과 그 실행 기록. 지우지 않는다(DELETE 금지 트리거).
 
-    - steps 는 만들 때 한 번 쓰고 바꾸지 않는다(고정 5단계와 단계별 예상 시간).
+    - steps 는 만들 때 한 번 쓰고 바꾸지 않는다(고정 5단계와 단계별 예상 시간. includeCutover
+      계획은 맨 뒤에 DB 쓰기 전환 단계를 더해 6단계).
     - step_results 는 steps 와 같은 길이이고, 바꿀 때 새 리스트를 통째로 다시 넣는다.
     - fingerprint 는 만든 순간의 상태다. 승인과 일꾼 시작 때 다시 계산해 다르면 STALE 로 끝낸다.
       비밀값·설정 값 자체는 넣지 않고 해시만 넣는다.

@@ -447,7 +447,7 @@ CREATE TABLE public.migration_plan_logs (
     CONSTRAINT ck_migration_plan_logs_data_is_object CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT ck_migration_plan_logs_level_valid CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character varying, 'ERROR'::character varying])::text[]))),
     CONSTRAINT ck_migration_plan_logs_seq_positive CHECK ((seq >= 1)),
-    CONSTRAINT ck_migration_plan_logs_step_range CHECK (((step >= 0) AND (step <= 4)))
+    CONSTRAINT ck_migration_plan_logs_step_range CHECK (((step >= 0) AND (step <= 5)))
 );
 
 CREATE TABLE public.migration_plans (
@@ -489,9 +489,9 @@ CREATE TABLE public.migration_plans (
     mode character varying(16) DEFAULT 'PLANNED'::character varying NOT NULL,
     disaster_id uuid,
     CONSTRAINT ck_migration_plans_approved_consistency CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL))),
-    CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 4))),
+    CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 5))),
     CONSTRAINT ck_migration_plans_error_code_consistency CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying])::text[])) = (error_code IS NOT NULL))),
-    CONSTRAINT ck_migration_plans_error_code_valid CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, 'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, 'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, 'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, 'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, 'TARGET_NOT_RECEIVING'::character varying, 'SECURITY_GATE_BLOCKED'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_error_code_valid CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, 'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, 'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, 'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, 'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, 'TARGET_NOT_RECEIVING'::character varying, 'SECURITY_GATE_BLOCKED'::character varying, 'DB_CUTOVER_FAILED'::character varying, 'DB_CUTOVER_TIMEOUT'::character varying, 'DB_CUTOVER_PARTIAL'::character varying, 'DATA_INTEGRITY_FAILED'::character varying, 'DB_CUTOVER_UNKNOWN'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_expected_seconds_non_negative CHECK ((expected_seconds >= 0)),
     CONSTRAINT ck_migration_plans_fingerprint_is_object CHECK ((jsonb_typeof(fingerprint) = 'object'::text)),
     CONSTRAINT ck_migration_plans_finished_at_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[])) = (finished_at IS NOT NULL))),
@@ -499,7 +499,7 @@ CREATE TABLE public.migration_plans (
     CONSTRAINT ck_migration_plans_observe_seconds_range CHECK (((observe_seconds >= 1) AND (observe_seconds <= 600))),
     CONSTRAINT ck_migration_plans_rollback_attempts_non_negative CHECK ((rollback_attempts >= 0)),
     CONSTRAINT ck_migration_plans_rollback_conditions_is_object CHECK ((jsonb_typeof(rollback_conditions) = 'object'::text)),
-    CONSTRAINT ck_migration_plans_rollback_status_valid CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'NOT_NEEDED'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_rollback_status_valid CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'NOT_NEEDED'::character varying, 'SKIPPED'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_simulate_is_object CHECK ((jsonb_typeof(simulate) = 'object'::text)),
     CONSTRAINT ck_migration_plans_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying, 'SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_step_phase_valid CHECK (((step_phase)::text = ANY ((ARRAY['APPLY'::character varying, 'OBSERVE'::character varying, 'JUDGE'::character varying])::text[]))),
