@@ -113,7 +113,7 @@
 |---|---|
 | 빌드 검사 C-IMG-1·C-IMG-2 (`TRIVY_*`·`GITLEAKS`) | 서비스마다 **새 커밋으로 한 번 다시 빌드**(재사용 빌드는 다시 모으지 않는다) |
 | TLS 주기 시험 C-TLS-1 (`TLS_PROBE`) | 일꾼이 주기(기본 30분, `SECURITY_TLS_PROBE_INTERVAL_SECONDS`)마다 다시 쌓는다. 빨리 필요하면 일꾼 재시작 |
-| WAS 시험·감사 기록 C-IAM-2·C-AUD-1 (`WAS_TEST`·`AUDIT_LOG`) | **앱 안에 만드는 경로가 없다**(수집기는 #32). 사람이 넣은 증거였다면 다시 넣거나, 그 WAS 버전 범위 기한부 예외로 둔다 |
+| WAS 시험·감사 기록 C-IAM-2·C-AUD-1 (`WAS_TEST`·`AUDIT_LOG`) | (11/7, 5-3 SPEC `specs/sec-5-platform-evidence.md`) 일꾼의 플랫폼 자기 시험이 시작 때와 주기(기본 6시간, `SECURITY_PLATFORM_SELF_TEST_INTERVAL_SECONDS`)마다 다시 쌓는다. 빨리 필요하면 일꾼 재시작. `WAS_VERSION` 을 바꿔도 같다 |
 | 사람 점검 기록 (`MANUAL_REVIEW`, C-TLS-2·C-NET-*·C-IAM-1·C-CI-1 등) | 다시 기록한다 |
 | 그 밖의 출처 (`TRIVY_CONFIG`·`CLOUD_API`·`KUBERNETES_API`·`GITHUB_API`) | 지금 앱 안에 만드는 경로가 없다. 넣은 적이 있으면 다시 넣는다 |
 
