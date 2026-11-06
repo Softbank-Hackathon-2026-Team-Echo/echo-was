@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.actions import AuditAction
+from app.audit.actions import AuditAction, AuditComponent
 from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
 from app.core.exceptions import (
@@ -37,7 +37,12 @@ from app.models import AgentPatchApproval, AgentRun
 from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.organization_repository import OrganizationRepository
-from app.services.agent_run_service import RUN_DEADLINE, expire_overdue_runs, run_target
+from app.services.agent_run_service import (
+    RUN_DEADLINE,
+    expire_overdue_runs,
+    record_run_finished,
+    run_target,
+)
 from app.services.integrity import violated_constraint_name
 from app.services.precheck_service import (
     PrecheckPatchView,
@@ -146,6 +151,7 @@ class PrecheckPatchService:
                 raise PatchAlreadyDecidedError(approval.decision)
             if is_new:
                 self._record_decision(run, stored, approval, actor_user_id, decision)
+                await self._record_simulated_apply_finished(run, approval)
             decisions = await load_patch_decisions(self._approvals, self._runs, run.id)
             view = decisions.patch_view(stored)
         if is_new:
@@ -247,6 +253,28 @@ class PrecheckPatchService:
             action=_AUDIT_ACTION_BY_DECISION[decision],
             target=run_target(run),
             details=details,
+        )
+
+    async def _record_simulated_apply_finished(
+        self, run: AgentRun, approval: AgentPatchApproval
+    ) -> None:
+        """가짜 진단의 승인은 반영 실행을 끝난 채로 넣는다. 러너 결과 제출과 같은 종료 줄을 쓴다.
+
+        C-AUD-1 자기 시험은 끝난 실행마다 AGENT_RUN_FINISHED 를 요구한다(가짜 실행도 예외 없음).
+        """
+        if approval.apply_run_id is None or not is_simulated_diagnosis(run):
+            return
+        apply_run = await self._runs.find_by_id(approval.apply_run_id)
+        if apply_run is None or not apply_run.simulated:
+            return
+        record_run_finished(
+            self._audit,
+            apply_run,
+            actor=AuditActor.system(AuditComponent.API),
+            status=AgentRunStatus(apply_run.status),
+            simulated=True,
+            ai_reviewed=False,
+            extra={"appliedCommitSha": (apply_run.result or {}).get("appliedCommitSha")},
         )
 
 

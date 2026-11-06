@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.actions import AuditAction
+from app.audit.actions import AuditAction, AuditComponent
 from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
 from app.core.exceptions import (
@@ -62,7 +62,12 @@ from app.repositories.service_environment_variable_repository import (
     ServiceEnvironmentVariableRepository,
 )
 from app.repositories.service_repository import ServiceRepository
-from app.services.agent_run_service import RUN_DEADLINE, expire_overdue_runs, run_target
+from app.services.agent_run_service import (
+    RUN_DEADLINE,
+    expire_overdue_runs,
+    record_run_finished,
+    run_target,
+)
 from app.services.apply_commit_service import ApplyCommitService
 from app.services.container_diagnostics import (
     FAILURE_LOG_CODES,
@@ -204,6 +209,16 @@ class DiagnosisService:
                     "simulated": run.simulated,
                 },
             )
+            if simulate is not None:
+                # 러너 결과 제출과 같은 종료 줄(C-AUD-1 은 끝난 실행마다 이 줄을 요구한다).
+                record_run_finished(
+                    self._audit,
+                    run,
+                    actor=AuditActor.system(AuditComponent.API),
+                    status=AgentRunStatus(run.status),
+                    simulated=True,
+                    ai_reviewed=False,
+                )
             view = await load_precheck_view(self._session, run)
         logger.info(
             "diagnosis requested",
