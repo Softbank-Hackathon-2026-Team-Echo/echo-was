@@ -38,6 +38,9 @@ class AuditAction(StrEnum):
     SECURITY_EXCEPTION_REQUESTED = "SECURITY_EXCEPTION_REQUESTED"
     SECURITY_EXCEPTION_APPROVED = "SECURITY_EXCEPTION_APPROVED"
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
+    CVE_WATCH_CHECKED = "CVE_WATCH_CHECKED"
+    CVE_WATCH_INJECTED = "CVE_WATCH_INJECTED"
+    CVE_DIAGNOSIS_REQUESTED = "CVE_DIAGNOSIS_REQUESTED"
     PRECHECK_REQUESTED = "PRECHECK_REQUESTED"
     PRECHECK_CANCELLED = "PRECHECK_CANCELLED"
     AGENT_PATCH_APPROVED = "AGENT_PATCH_APPROVED"
@@ -55,6 +58,8 @@ class AuditAction(StrEnum):
     MIGRATION_DB_CUTOVER_STARTED = "MIGRATION_DB_CUTOVER_STARTED"
     MIGRATION_DB_CUTOVER_FINISHED = "MIGRATION_DB_CUTOVER_FINISHED"
     SERVICE_DELETED = "SERVICE_DELETED"
+    # --- 서버(SYSTEM, component = cve-watch): 주기 CVE 감시가 새 증거를 남김 ---
+    CVE_WATCH_FINDINGS_RECORDED = "CVE_WATCH_FINDINGS_RECORDED"
     # --- 서버(SYSTEM, component = ai-runner): AI 실행 ---
     AGENT_RUN_CLAIMED = "AGENT_RUN_CLAIMED"
     AGENT_RUN_FINISHED = "AGENT_RUN_FINISHED"
@@ -77,6 +82,7 @@ class AuditTargetType(StrEnum):
     SECURITY_EXCEPTION = "security_exception"
     AGENT_RUN = "agent_run"
     DISASTER = "disaster"
+    FINDING = "finding"
 
 
 class AuditComponent(StrEnum):
@@ -87,6 +93,7 @@ class AuditComponent(StrEnum):
     MIGRATION_WORKER = "migration-worker"
     TEARDOWN_WORKER = "teardown-worker"
     AI_RUNNER = "ai-runner"
+    CVE_WATCH = "cve-watch"
     LIVE_DISASTER_FEED = "live-disaster-feed"
     # 플랫폼 자기 시험(보안 5-3): 일회용 에이전트 토큰 발급·폐기.
     SECURITY_SELF_TEST = "security-self-test"
@@ -137,6 +144,12 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ),
     ("POST", f"{_ORG}/security/exceptions/{{exception_id}}/revoke"): (
         AuditAction.SECURITY_EXCEPTION_REVOKED
+    ),
+    ("POST", f"{_ORG}/security/cve-watch:check"): AuditAction.CVE_WATCH_CHECKED,
+    ("POST", f"{_ORG}/security/cve-watch:inject"): AuditAction.CVE_WATCH_INJECTED,
+    # 이슈 #98(CHANGE_PROPOSAL) 병합 전에는 501 이라 성공 줄이 없다(SPEC sec-6-cve-watch 2-d).
+    ("POST", f"{_ORG}/security/findings/{{finding_id}}/diagnosis"): (
+        AuditAction.CVE_DIAGNOSIS_REQUESTED
     ),
     ("POST", f"{_ORG}/prechecks"): AuditAction.PRECHECK_REQUESTED,
     ("POST", f"{_ORG}/prechecks/{{precheck_id}}/cancel"): AuditAction.PRECHECK_CANCELLED,

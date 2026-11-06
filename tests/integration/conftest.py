@@ -76,6 +76,8 @@ TABLES = (
     "service_environment_variables",
     # --- 보안·거버넌스 2: 보안 증거 ---
     "findings",
+    # --- 보안 6: CVE 감시 의존성 목록 ---
+    "service_dependency_snapshots",
     # --- 보안·AI 기반 스키마: 기한부 예외·AI 실행 ---
     "security_exceptions",
     "agent_patch_approvals",

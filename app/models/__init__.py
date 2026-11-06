@@ -21,6 +21,7 @@ from app.models.migration_plan_log import MigrationPlanLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.security_exception import SecurityException
 from app.models.service import Service
+from app.models.service_dependency_snapshot import ServiceDependencySnapshot
 from app.models.service_environment import ServiceEnvironment
 from app.models.service_environment_variable import ServiceEnvironmentVariable
 from app.models.user import User
@@ -50,6 +51,7 @@ __all__ = [
     "OrganizationMember",
     "SecurityException",
     "Service",
+    "ServiceDependencySnapshot",
     "ServiceEnvironment",
     "ServiceEnvironmentVariable",
     "User",

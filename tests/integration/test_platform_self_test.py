@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.audit.actions import AuditAction, AuditComponent
+from app.audit.actions import WRITE_ROUTE_ACTIONS, AuditAction, AuditComponent
 from app.audit.route_coverage import agent_probe_routes
 from app.enums import (
     ActorType,
@@ -149,7 +149,7 @@ async def test_self_test_records_passing_evidence_with_was_version_scope(
         assert finding.expires_at - finding.collected_at == EVIDENCE_TTL
     assert iam.reason == SecurityFindingReason.AGENT_WRITES_DENIED
     labels = {item["item_id"]: item for item in iam.items}
-    assert iam.total_items == len(labels) == PROBE_COUNT
+    assert iam.total_items == len(labels) == PROBE_COUNT == len(WRITE_ROUTE_ACTIONS)
     assert APPROVE_ROUTES <= set(labels)
     assert all(item["target"] == "403 AGENT_READ_ONLY" for item in labels.values())
     assert audit.reason == SecurityFindingReason.AUDIT_TRAIL_COMPLETE

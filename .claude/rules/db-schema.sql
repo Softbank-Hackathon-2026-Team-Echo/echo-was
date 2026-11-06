@@ -379,6 +379,8 @@ CREATE TABLE public.findings (
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    remediation jsonb,
+    dedupe_key character varying(400),
     CONSTRAINT ck_findings_ai_confirmation_consistency CHECK ((((source)::text = 'AI_REVIEW'::text) = (confirmation IS NOT NULL))),
     CONSTRAINT ck_findings_ai_result_not_pass CHECK ((((source)::text <> 'AI_REVIEW'::text) OR ((result)::text = ANY ((ARRAY['WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying])::text[])))),
     CONSTRAINT ck_findings_confirmation_valid CHECK (((confirmation IS NULL) OR ((confirmation)::text = ANY ((ARRAY['UNCONFIRMED'::character varying, 'ESCALATED'::character varying, 'DISMISSED'::character varying])::text[])))),
@@ -388,8 +390,9 @@ CREATE TABLE public.findings (
     CONSTRAINT ck_findings_items_is_array CHECK ((jsonb_typeof(items) = 'array'::text)),
     CONSTRAINT ck_findings_manual_review_has_basis CHECK ((((source)::text <> 'MANUAL_REVIEW'::text) OR ((reviewer_user_id IS NOT NULL) AND (basis_url IS NOT NULL)))),
     CONSTRAINT ck_findings_mode_valid CHECK (((mode)::text = ANY ((ARRAY['REAL'::character varying, 'CACHE'::character varying, 'SIMULATED'::character varying])::text[]))),
+    CONSTRAINT ck_findings_remediation_is_object CHECK (((remediation IS NULL) OR (jsonb_typeof(remediation) = 'object'::text))),
     CONSTRAINT ck_findings_result_valid CHECK (((result)::text = ANY ((ARRAY['PASS'::character varying, 'WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying, 'NA'::character varying])::text[]))),
-    CONSTRAINT ck_findings_source_valid CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, 'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, 'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, 'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, 'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, 'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, 'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, 'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, 'AI_REVIEW'::character varying])::text[]))),
+    CONSTRAINT ck_findings_source_valid CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, 'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, 'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, 'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, 'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, 'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, 'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, 'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, 'AI_REVIEW'::character varying, 'CVE_WATCH'::character varying])::text[]))),
     CONSTRAINT ck_findings_total_items_non_negative CHECK ((total_items >= 0))
 );
 
@@ -559,6 +562,24 @@ CREATE TABLE public.security_exceptions (
     CONSTRAINT ck_security_exceptions_revocation_consistency CHECK (((revoked_by_user_id IS NULL) = (revoked_at IS NULL)))
 );
 
+CREATE TABLE public.service_dependency_snapshots (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    image_digest character varying(71) NOT NULL,
+    source character varying(16) NOT NULL,
+    source_ref character varying(500),
+    packages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    package_count integer DEFAULT 0 NOT NULL,
+    collected_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_service_dependency_snapshots_image_digest_format CHECK (((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT ck_service_dependency_snapshots_package_count_non_negative CHECK ((package_count >= 0)),
+    CONSTRAINT ck_service_dependency_snapshots_packages_is_array CHECK ((jsonb_typeof(packages) = 'array'::text)),
+    CONSTRAINT ck_service_dependency_snapshots_source_valid CHECK (((source)::text = ANY ((ARRAY['BUILD_SCAN'::character varying, 'RUNNER_SBOM'::character varying])::text[])))
+);
+
 CREATE TABLE public.service_environment_variables (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     service_environment_id uuid NOT NULL,
@@ -706,6 +727,9 @@ ALTER TABLE ONLY public.organizations
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT pk_security_exceptions PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT pk_service_dependency_snapshots PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.service_environment_variables
     ADD CONSTRAINT pk_service_environment_variables PRIMARY KEY (id);
 
@@ -781,6 +805,8 @@ CREATE INDEX ix_disasters_organization_id_status_created_at ON public.disasters 
 
 CREATE INDEX ix_findings_organization_id_control_id_collected_at ON public.findings USING btree (organization_id, control_id, collected_at);
 
+CREATE INDEX ix_findings_organization_id_dedupe_key ON public.findings USING btree (organization_id, dedupe_key) WHERE (dedupe_key IS NOT NULL);
+
 CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_id);
 
 CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
@@ -792,6 +818,8 @@ CREATE INDEX ix_migration_plans_service_id_created_at ON public.migration_plans 
 CREATE INDEX ix_organization_members_user_id ON public.organization_members USING btree (user_id);
 
 CREATE INDEX ix_security_exceptions_organization_id_control_id_expires_at ON public.security_exceptions USING btree (organization_id, control_id, expires_at);
+
+CREATE INDEX ix_service_dependency_snapshots_service_digest_collected ON public.service_dependency_snapshots USING btree (service_id, image_digest, collected_at);
 
 CREATE INDEX ix_service_environment_variables_connection_key ON public.service_environment_variables USING btree (service_environment_id, key);
 
@@ -1021,6 +1049,12 @@ ALTER TABLE ONLY public.security_exceptions
 
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT fk_security_exceptions_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT fk_service_dependency_snapshots_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT fk_service_dependency_snapshots_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.service_environment_variables
     ADD CONSTRAINT fk_service_environment_variables_connection FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;

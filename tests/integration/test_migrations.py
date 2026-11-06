@@ -530,7 +530,10 @@ EXPECTED_CONSTRAINTS = {
         "'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, "
         "'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, "
         "'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, "
-        "'AI_REVIEW'::character varying])::text[])))"
+        "'AI_REVIEW'::character varying, 'CVE_WATCH'::character varying])::text[])))"
+    ),
+    ("findings", "ck_findings_remediation_is_object"): (
+        "CHECK (((remediation IS NULL) OR (jsonb_typeof(remediation) = 'object'::text)))"
     ),
     ("findings", "ck_findings_total_items_non_negative"): "CHECK ((total_items >= 0))",
     ("findings", "fk_findings_environment_id_environments"): (
@@ -546,6 +549,29 @@ EXPECTED_CONSTRAINTS = {
         "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
     ),
     ("findings", "pk_findings"): "PRIMARY KEY (id)",
+    # --- 보안 6: CVE 감시 의존성 목록(9d7fe177bcaf) ---
+    ("service_dependency_snapshots", "ck_service_dependency_snapshots_image_digest_format"): (
+        "CHECK (((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text))"
+    ),
+    (
+        "service_dependency_snapshots",
+        "ck_service_dependency_snapshots_package_count_non_negative",
+    ): "CHECK ((package_count >= 0))",
+    ("service_dependency_snapshots", "ck_service_dependency_snapshots_packages_is_array"): (
+        "CHECK ((jsonb_typeof(packages) = 'array'::text))"
+    ),
+    ("service_dependency_snapshots", "ck_service_dependency_snapshots_source_valid"): (
+        "CHECK (((source)::text = ANY ((ARRAY['BUILD_SCAN'::character varying, "
+        "'RUNNER_SBOM'::character varying])::text[])))"
+    ),
+    (
+        "service_dependency_snapshots",
+        "fk_service_dependency_snapshots_organization_id_organizations",
+    ): "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT",
+    ("service_dependency_snapshots", "fk_service_dependency_snapshots_service_id_services"): (
+        "FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT"
+    ),
+    ("service_dependency_snapshots", "pk_service_dependency_snapshots"): "PRIMARY KEY (id)",
     # --- 보안·AI 기반 스키마(201cf5419f4d) ---
     ("agent_patch_approvals", "ck_agent_patch_approvals_apply_run_only_when_approved"): (
         "CHECK ((((decision)::text = 'APPROVED'::text) OR (apply_run_id IS NULL)))"
@@ -993,6 +1019,19 @@ EXPECTED_INDEXES = {
         "USING btree (organization_id, control_id, collected_at)"
     ),
     "pk_findings": "CREATE UNIQUE INDEX pk_findings ON findings USING btree (id)",
+    # --- 보안 6: CVE 감시(9d7fe177bcaf) ---
+    "ix_findings_organization_id_dedupe_key": (
+        "CREATE INDEX ix_findings_organization_id_dedupe_key ON findings USING btree "
+        "(organization_id, dedupe_key) WHERE (dedupe_key IS NOT NULL)"
+    ),
+    "ix_service_dependency_snapshots_service_digest_collected": (
+        "CREATE INDEX ix_service_dependency_snapshots_service_digest_collected ON "
+        "service_dependency_snapshots USING btree (service_id, image_digest, collected_at)"
+    ),
+    "pk_service_dependency_snapshots": (
+        "CREATE UNIQUE INDEX pk_service_dependency_snapshots ON service_dependency_snapshots "
+        "USING btree (id)"
+    ),
     # --- 보안·AI 기반 스키마(201cf5419f4d) ---
     "ix_agent_runs_organization_id_created_at": (
         "CREATE INDEX ix_agent_runs_organization_id_created_at ON agent_runs USING btree "
@@ -1148,10 +1187,13 @@ AGENT_RUN_DEPLOY_REQUEST_REVISION = "9d8e1f2a3b4c"
 # 실제 재난 피드(API 서버 18)를 더하기 전(배포 실패 진단) 시점.
 BEFORE_LIVE_DISASTER_FEED = AGENT_RUN_DEPLOY_REQUEST_REVISION
 LIVE_DISASTER_FEED_REVISION = "8748e995387a"
-# DB 쓰기 전환 단계(API 서버 17) CHECK 넓히기 전(실제 재난 피드) 시점과 지금 head.
+# DB 쓰기 전환 단계(API 서버 17) CHECK 넓히기 전(실제 재난 피드) 시점과 그 리비전.
 BEFORE_DB_CUTOVER_STEP = LIVE_DISASTER_FEED_REVISION
 DB_CUTOVER_STEP_REVISION = "7c2e5a9d4b18"
-HEAD_REVISION = DB_CUTOVER_STEP_REVISION
+# CVE 감시(보안 6)의 의존성 목록 표·findings 칸. DB 쓰기 전환 단계 위에 잇는다. 지금 head.
+BEFORE_CVE_WATCH = DB_CUTOVER_STEP_REVISION
+CVE_WATCH_REVISION = "9d7fe177bcaf"
+HEAD_REVISION = CVE_WATCH_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1321,6 +1363,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "organization_members",
         "organizations",
         "security_exceptions",
+        "service_dependency_snapshots",
         "service_environment_variables",
         "service_environments",
         "services",
@@ -1789,7 +1832,10 @@ async def test_db_cutover_step_revision_round_trip_and_blocks_downgrade_with_ste
             )
         )
         await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
-        await transaction.commit()
+        # 되돌린다(commit 하지 않는다): 이 내리기는 CVE 감시 리비전(findings 칸 지우고
+        # 다시 더하기)도 지나가므로 commit 하면 칸 순번(attnum)이 밀려 모델-마이그레이션
+        # 카탈로그 비교가 깨진다.
+        await transaction.rollback()
     migration.harness.use_settings(db_cutover_executor_mode="fake")
     plan = await migration.create_plan(includeCutover=True)
     await migration.approve(plan["id"])
@@ -2049,6 +2095,9 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
     deploy_request = scripts.get_revision(AGENT_RUN_DEPLOY_REQUEST_REVISION)
     assert deploy_request is not None
     assert deploy_request.down_revision == AGENT_RUN_PROCESSING_REVISION
+    cve_watch = scripts.get_revision(CVE_WATCH_REVISION)
+    assert cve_watch is not None
+    assert cve_watch.down_revision == BEFORE_CVE_WATCH
     processing = scripts.get_revision(AGENT_RUN_PROCESSING_REVISION)
     assert processing is not None and processing.down_revision == BEFORE_AGENT_RUN_PROCESSING
     disasters = scripts.get_revision(DISASTERS_REVISION)
@@ -2081,8 +2130,14 @@ async def test_service_variables_revision_only_adds_a_table_and_has_no_value_col
         await connection.run_sync(run_alembic(command.check))
         await transaction.rollback()
 
-    # 그 뒤 리비전이 더한 재난 표도 함께 내려간다.
-    assert up - down == {SERVICE_VARIABLES_TABLE, "disasters", "disaster_feed_states"}
+    # 그 뒤 리비전이 더한 재난 표·실제 재난 피드 상태 표·CVE 감시 의존성 목록 표도
+    # 함께 내려간다.
+    assert up - down == {
+        SERVICE_VARIABLES_TABLE,
+        "disasters",
+        "disaster_feed_states",
+        "service_dependency_snapshots",
+    }
     assert down - up == set()
     assert columns == {
         "id",
@@ -2134,7 +2189,8 @@ async def test_disasters_revision_downgrade_removes_only_additions_and_upgrade_r
 
     assert down_state == (False, False, 0)
     assert up_state == (True, True, 1)
-    assert up - down == {"disasters", "disaster_feed_states"}
+    # 그 뒤 리비전(실제 재난 피드·CVE 감시)이 더한 표도 함께 내려간다.
+    assert up - down == {"disasters", "disaster_feed_states", "service_dependency_snapshots"}
     assert function_count == 1
 
 
@@ -2346,6 +2402,43 @@ async def test_agent_runs_revision_downgrade_removes_tables_and_upgrade_restores
 
     assert down == set()
     assert up == AGENT_TABLES
+
+
+def _cve_watch_state(connection: Connection) -> tuple[bool, bool, bool, bool]:
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("findings")}
+    checks = {check["name"] for check in inspector.get_check_constraints("findings")}
+    indexes = {index["name"] for index in inspector.get_indexes("findings")}
+    return (
+        "service_dependency_snapshots" in inspector.get_table_names(),
+        {"remediation", "dedupe_key"} <= columns,
+        "ck_findings_remediation_is_object" in checks,
+        "ix_findings_organization_id_dedupe_key" in indexes,
+    )
+
+
+async def test_cve_watch_revision_downgrade_removes_additions_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_CVE_WATCH))
+        )
+        down_state = await connection.run_sync(_cve_watch_state)
+        deploy_request_kept = await connection.run_sync(_agent_run_deploy_request_state)
+        live_feed_kept = await connection.run_sync(_live_feed_schema_state)
+        down_version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up_state = await connection.run_sync(_cve_watch_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down_state == (False, False, False, False)
+    assert deploy_request_kept == (True, True, True)
+    assert live_feed_kept == (True, True, True, True)
+    assert down_version == BEFORE_CVE_WATCH
+    assert up_state == (True, True, True, True)
 
 
 def _live_feed_schema_state(connection: Connection) -> tuple[bool, bool, bool, bool]:

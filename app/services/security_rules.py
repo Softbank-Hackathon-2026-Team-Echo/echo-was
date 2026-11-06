@@ -277,7 +277,8 @@ RULES: tuple[SecurityControlRule, ...] = (
         is_mandatory=True,
         phases=_PREP_AND_EXEC,
         scope_keys=frozenset({_K.IMAGE_DIGEST}),
-        sources=frozenset({_S.TRIVY_IMAGE}),
+        # CVE_WATCH: 배포된 이미지 의존성에 새로 나온 HIGH·CRITICAL 권고(SPEC sec-6-cve-watch).
+        sources=frozenset({_S.TRIVY_IMAGE, _S.CVE_WATCH}),
         max_age=_PREPARATION_MAX_AGE,
         time_budget=timedelta(seconds=1),
     ),

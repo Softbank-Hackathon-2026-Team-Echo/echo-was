@@ -144,12 +144,12 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 37
+    assert len(WRITE_ROUTE_ACTIONS) == 40
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 37개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
-# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개) ---
+# --- AC-2: 쓰기 40개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개) ---
 
 
 @dataclass
@@ -625,6 +625,46 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "C-DB-1",
     )
 
+    # CVE 감시(보안 6): 즉시 조회·가짜 권고 주입은 조직 대상 줄 하나. 의존성 목록이 없어 피드는
+    # 부르지 않는다. 진단 요청(#98 전 501)은 성공 줄이 없어 아래 seen 비교에서 뺀다.
+    harness.use_settings(cve_watch_enabled=True)
+    checked = await migration.author_client.post(org_path(team_id, "/security/cve-watch:check"))
+    await ledger.expect_one(
+        checked,
+        AuditAction.CVE_WATCH_CHECKED,
+        migration.author.user,
+        team_id,
+        "organization",
+        team_id,
+        harness.organization.name,
+        {
+            "simulated": False,
+            "targets": _data(checked)["targets"],
+            "created": 0,
+            "duplicates": 0,
+            "findingIds": [],
+        },
+    )
+    injected = await migration.author_client.post(org_path(team_id, "/security/cve-watch:inject"))
+    await ledger.expect_one(
+        injected,
+        AuditAction.CVE_WATCH_INJECTED,
+        migration.author.user,
+        team_id,
+        "organization",
+        team_id,
+        harness.organization.name,
+        {
+            "simulated": True,
+            "targets": _data(injected)["targets"],
+            "created": 0,
+            "duplicates": 0,
+            "findingIds": [],
+            "advisoryId": "SIM-NODE2SHELL-0001",
+            "package": "npm/react-server-dom-webpack",
+        },
+    )
+
     # AI 사전 점검(러너 레인 A): 만들기·취소는 만든 개발자
     prechecks_path = org_path(team_id, "/prechecks")
     precheck_details = {
@@ -789,8 +829,9 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 37개를 모두 지났다. 어느 줄에도 토큰 원문·환경 변수 값·비밀 참조가 없다.
-    assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values())
+    # 40개 가운데 39개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 환경 변수 값·비밀 참조가 없다.
+    assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)
     dumped = json.dumps(
         [

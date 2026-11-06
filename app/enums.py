@@ -643,6 +643,23 @@ class SecurityFindingSource(StrEnum):
     GITHUB_API = "GITHUB_API"
     # AI 에이전트가 낸 결과. PASS 를 만들 수 없고, 사람이 확인하기 전에는 WARN 으로만 쓴다.
     AI_REVIEW = "AI_REVIEW"
+    # 공개 취약점 피드(OSV)를 서비스 의존성 목록과 맞춰 본 결과(SPEC sec-6-cve-watch). C-IMG-1.
+    CVE_WATCH = "CVE_WATCH"
+
+
+class RemediationKind(StrEnum):
+    """증거에 붙는 고칠 방법의 종류(SPEC sec-6-cve-watch). 지금은 의존성 버전 올리기 하나다."""
+
+    DEPENDENCY_BUMP = "DEPENDENCY_BUMP"
+
+
+class DependencySnapshotSource(StrEnum):
+    """서비스 의존성 목록을 어디서 얻었나(SPEC sec-6-cve-watch)."""
+
+    # 고객 빌드 보안 검사의 Trivy 원문(`trivy-image.json`, `--list-all-pkgs` 면 전체 패키지).
+    BUILD_SCAN = "BUILD_SCAN"
+    # 러너 사전 점검 결과의 CycloneDX SBOM(echo-ai-agent 후속, 받는 칸은 아직 없다).
+    RUNNER_SBOM = "RUNNER_SBOM"
 
 
 class AiFindingConfirmation(StrEnum):

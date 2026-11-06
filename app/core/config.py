@@ -303,6 +303,17 @@ class Settings(BaseSettings):
     # (SPEC api-19). App 에 contents·pull_requests 쓰기 권한이 있어야 한다. 꺼지면 #98 동작 그대로
     # (원래 실패 커밋을 다시 배포). 가짜 반영(simulated)은 켜져 있어도 GitHub 를 부르지 않는다.
     ai_apply_commit_enabled: bool = False
+    # CVE 감시(SPEC sec-6-cve-watch). 켜면 일꾼이 cve_watch_interval_seconds 마다 서비스 의존성을
+    # OSV 로 조회해 새 HIGH·CRITICAL 취약점을 C-IMG-1 증거(source CVE_WATCH)로 남기고, 즉시 조회
+    # API(`POST /security/cve-watch:check`)도 열린다. 끄면 둘 다 없다(조회 API 409).
+    cve_watch_enabled: bool = False
+    cve_watch_interval_seconds: int = Field(default=21600, ge=300, le=86400)
+    # 가짜 권고 주입 API(`POST /security/cve-watch:inject`, simulated 증거 — 판정에 쓰지 않음).
+    cve_watch_simulate_enabled: bool = True
+    cve_watch_osv_url: str = "https://api.osv.dev"
+    cve_watch_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    # 한 번에 상세를 받는 취약점 수 상한. 넘는 것은 미처리 목록에 남겨 다음 조회 때 먼저 본다.
+    cve_watch_max_advisories: int = Field(default=200, ge=1, le=2000)
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
 
