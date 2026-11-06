@@ -295,6 +295,11 @@ class Settings(BaseSettings):
     # (echo-ai-agent #22)가 배포되기 전에 켜면 실행이 마감(15분)까지 QUEUED 로 머물고 그동안 그
     # 서비스의 새 사전 점검이 409 다.
     ai_diagnosis_runner_enabled: bool = False
+    # 켜면 러너가 검증한 진단 패치 반영(APPLY_PATCH SUCCEEDED)을 WAS 가 GitHub App 으로 서비스
+    # 저장소에 브랜치 echoport/fix-<run8> + 커밋 + PR 로 넣고, 재배포를 그 커밋으로 만든다
+    # (SPEC api-19). App 에 contents·pull_requests 쓰기 권한이 있어야 한다. 꺼지면 #98 동작 그대로
+    # (원래 실패 커밋을 다시 배포). 가짜 반영(simulated)은 켜져 있어도 GitHub 를 부르지 않는다.
+    ai_apply_commit_enabled: bool = False
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
 

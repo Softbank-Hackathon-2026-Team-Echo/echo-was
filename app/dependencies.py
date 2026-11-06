@@ -12,6 +12,7 @@ from app.clients.app_secret_store import AppSecretStore, build_app_secret_store
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
 from app.clients.prometheus_client import PrometheusClient
+from app.clients.repo_commit_writer import GithubAppRepoCommitWriter, RepoCommitWriter
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
 from app.clients.tls_probe import PublicHostTlsChecker
@@ -36,6 +37,7 @@ from app.repositories.environment_repository import EnvironmentRepository
 from app.services.agent_run_service import AgentRunService
 from app.services.agent_token_service import AgentTokenService
 from app.services.ai_residency_service import AiResidencyService
+from app.services.apply_commit_service import ApplyCommitService
 from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
@@ -579,11 +581,41 @@ def get_agent_run_service(
     return AgentRunService(session, clock)
 
 
+def build_repo_commit_writer(settings: Settings, clock: Clock) -> RepoCommitWriter | None:
+    """서비스 저장소 쓰기 클라이언트(SPEC api-19). GitHub App 이 설정돼 있을 때만, 아니면 None.
+
+    스위치(AI_APPLY_COMMIT_ENABLED)는 ApplyCommitService 가 본다. 켜졌는데 None 이면 반영 실행이
+    REPO_WRITE_UNAVAILABLE 로 실패한다(조용히 원래 커밋을 다시 배포하지 않는다).
+    """
+    if (
+        settings.source_client_mode is not SourceClientMode.GITHUB
+        or not settings.github_app_id
+        or not settings.github_app_private_key_ref
+    ):
+        return None
+    return GithubAppRepoCommitWriter(
+        api_base_url=settings.github_api_base_url,
+        app_id=settings.github_app_id,
+        private_key_ref=parse_secret_ref(settings.github_app_private_key_ref),
+        secret_client=EnvVarSecretClient(),
+        timeout_seconds=settings.github_request_timeout_seconds,
+        clock=clock,
+    )
+
+
+def get_repo_commit_writer(
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> RepoCommitWriter | None:
+    return build_repo_commit_writer(settings, clock)
+
+
 def get_diagnosis_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
     deploy_requests: Annotated[DeployRequestService, Depends(get_deploy_request_service)],
+    repo_writer: Annotated[RepoCommitWriter | None, Depends(get_repo_commit_writer)],
 ) -> DiagnosisService:
     return DiagnosisService(
         session,
@@ -591,4 +623,7 @@ def get_diagnosis_service(
         deploy_requests,
         simulate_enabled=settings.ai_diagnosis_simulate_enabled,
         runner_enabled=settings.ai_diagnosis_runner_enabled,
+        apply_commit=ApplyCommitService(
+            session, clock, repo_writer, enabled=settings.ai_apply_commit_enabled
+        ),
     )

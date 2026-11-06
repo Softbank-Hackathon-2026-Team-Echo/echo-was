@@ -135,7 +135,8 @@ class PrecheckPatchApplyResponse(ApiModel):
     applied_commit_sha: str | None
     branch: str | None
     simulated: bool
-    # 저장소 반영 PR. 러너가 push 하지 않아 지금은 늘 null 이다(SPEC api-98).
+    # 저장소 반영 PR(SPEC api-19). AI_APPLY_COMMIT_ENABLED 가 켜져 있고 WAS 가 서비스 저장소에
+    # 커밋·PR 을 만들었을 때만 찬다. 꺼짐·가짜 반영·실패면 null.
     pull_request_url: str | None = None
     # 배포 실패 진단의 패치 반영이 성공한 뒤 WAS 가 같은 환경에 만든 재배포 요청(SPEC api-98).
     # 진단이 아닌 사전 점검 패치·반영 전·실패·접수 거절이면 null 이다.
@@ -206,7 +207,7 @@ def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
         applied_commit_sha=result.get("appliedCommitSha"),
         branch=result.get("branch"),
         simulated=apply_run.simulated,
-        pull_request_url=None,
+        pull_request_url=result.get("pullRequestUrl"),
         redeploy_request_id=result.get("redeployRequestId"),
         redeploy_rejected_code=result.get("redeployRejectedCode"),
     )
