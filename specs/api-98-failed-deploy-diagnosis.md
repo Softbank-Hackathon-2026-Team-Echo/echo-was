@@ -52,15 +52,17 @@
 - 반영 실행 입력 사본: 사전 점검 반영 + `repo` = 서비스 저장소, `diagnosis{deployRequestId, environmentId, sourceCommitSha}`.
 - 가짜 진단의 패치: `PATCH_APPLY_ENABLED` 와 상관없이 반영 실행을 `SUCCEEDED`·`simulated = true`(지어낸 `appliedCommitSha`, `branch = applied/<id>`)로 넣는다. 승인 응답 안에서 재배포까지 잇는다.
 - 러너 진단의 패치: `PATCH_APPLY_ENABLED` 가 켜져 있어야 반영 실행(`QUEUED`)이 생긴다. 러너가 `ApplyPatchResult(SUCCEEDED)` 를 내면 결과 요청 안에서 재배포를 잇는다.
-- 재배포(`redeploy_after_apply`): 반영 실행이 `SUCCEEDED` 이고 부모가 진단이며 아직 연결이 없을 때 한 번만. 기존 배포 접수(`create_deploy_request`)로 같은 환경·`ref = COMMIT <실패한 commitSha>`·요청자 = 승인자, 감사 `details.diagnosisApplyRunId`. 성공하면 반영 실행 `result.redeployRequestId`, 접수 거절(AppError)이면 `result.redeployRejectedCode` 를 남긴다(결과·승인 응답은 성공 그대로).
+- 재배포(`redeploy_after_apply`): 반영 실행이 `SUCCEEDED` 이고 부모가 진단이며 아직 연결이 없을 때 한 번만. 기존 배포 접수 규칙(`create_deploy_request` 두 번째 단계 = `create_redeploy_in_transaction`: 서비스 삭제 중·환경 접속·이전 진행 중 거절, 대기 요청 SUPERSEDED)으로 같은 환경·`ref = COMMIT <실패한 commitSha>`(이미 고정된 커밋이라 GitHub ref 해석 없음)·요청자 = 승인자, 감사 `details.diagnosisApplyRunId`. 성공하면 반영 실행 `result.redeployRequestId`, 접수 거절(AppError)이면 `result.redeployRejectedCode` 를 남긴다(결과·승인 응답은 성공 그대로).
+- 동시성(검증 반영): **한 트랜잭션**으로 반영 실행 행 `SELECT … FOR UPDATE` → 연결 확인 → 접수 → `result` 연결을 한다. 같은 반영을 두 요청이 함께 이어도(같은 패치 동시 승인, 러너 결과와 승인 경합) 뒤 요청은 앞 커밋을 기다렸다가 이미 연결된 값을 읽어 그대로 돌려준다 — 재배포는 정확히 하나, 두 응답 모두 살아 있는(QUEUED) 그 요청 id. 잠금 순서: 반영 실행 → 환경 → 서비스 → 연결 → 요청 → 할 일(끝난 반영 실행 행을 서비스 잠금 뒤에 잡는 경로는 없다).
+- 거절 격리(검증 반영): 접수는 savepoint(`begin_nested`) 안에서 한다. 거절이면 savepoint 만 되돌리고 같은 트랜잭션에서 `redeployRejectedCode` 를 쓴다(접수 전에 필요한 값을 미리 빼 두어 만료 객체를 읽지 않는다). 그 밖의 예외는 `INTERNAL_ERROR` 로 남긴다.
 
 ### 3-5. 러너 결과 (CHANGE_PROPOSAL)
 
-`DiagnosisRunResult = RunResult + diagnosis?`. 검사: DIAGNOSED ⇒ category·cause 필수 / 그 밖 ⇒ fixable false / fixable false ⇒ unfixableReason 필수 / patches 는 fixable 진단에만 / evidence ≤ 20, line ≥ 1, FILE ⇒ path. 위반·모르는 칸 422 `RESULT_INVALID`. `diagnosis` 가 없으면 근거 부족으로 저장(`FAILED` 면 사유에 failureCode). OpenAPI 결과 본문 `oneOf` 는 3모양(RunResult·ApplyPatchResult·DiagnosisRunResult).
+결과 본문은 `RunResult` 이고 선택 칸 `diagnosis` 를 쓴다(진단 전용 검사는 서버가 실행 종류로 `DiagnosisRunResultRequest` 를 골라 더한다). 사전 점검 실행이 `diagnosis` 를 보내면(null 이어도) 422 `RESULT_INVALID`(`details: [{field: diagnosis, reason: DIAGNOSIS_NOT_ALLOWED}]`). 검사: DIAGNOSED ⇒ category·cause 필수 / 그 밖 ⇒ fixable false / fixable false ⇒ unfixableReason 필수 / patches 는 fixable 진단에만 / evidence ≤ 20, line ≥ 1, FILE ⇒ path. 위반·모르는 칸 422 `RESULT_INVALID`. `diagnosis` 가 없으면 근거 부족으로 저장(`FAILED` 면 사유에 failureCode). OpenAPI 결과 본문 `oneOf` 는 기존 2모양(RunResult·ApplyPatchResult) 그대로이고 RunResult 에 선택 칸 `diagnosis` 가 더해진다 — 진단 결과를 3번째 모양으로 두면 diagnosis 없는 본문이 RunResult·DiagnosisRunResult 에 함께 맞아 oneOf 가 겹친다(검증 반영).
 
 ### 3-6. C-AI-1 · 레지던시
 
-게이트 증거는 `kind = PRECHECK` 만 읽는다(변경 없음, 시험으로 고정). `summarize_residency` 가 `RESIDENCY_EXCLUDED_KINDS = {CHANGE_PROPOSAL}` 을 뺀다.
+게이트 증거는 `kind = PRECHECK` 만 읽는다(변경 없음, 시험으로 고정). `RESIDENCY_EXCLUDED_KINDS = {CHANGE_PROPOSAL}` 을 **조회 조건에서 먼저 빼고(LIMIT 전)** 5,000건 상한을 건다(`search_finished_for_residency(excluded_kinds=…)`) — 진단이 상한을 먹어 기존 사전 점검을 가리지 않는다(검증 반영). `summarize_residency` 의 같은 제외는 순수 함수 방어로 남긴다.
 
 ## 4. 러너 연동 요구 형식 (echo-ai-agent #22)
 
@@ -78,8 +80,8 @@ USER `DIAGNOSIS_REQUESTED`(쓰기 경로 35개 중 하나, `WRITE_ROUTE_ACTIONS`
 ## 6. 시험
 
 - 단위: `tests/test_diagnosis_result.py`(결과 검사·가림·근거 부족·가짜 진단이 러너 스키마 통과), `tests/test_ai_residency.py::test_change_proposal_runs_are_not_counted`.
-- 통합: `tests/integration/test_failed_deploy_diagnosis.py` — 실패 배포 → 진단 201 → 배포 상세 diagnosis → 가짜 결과 → 중복 200 → 승인 → 가짜 반영 → redeployRequestId → 재배포 성공 / 근거 부족 / 409 `DEPLOY_NOT_FAILED`·404·422 / simulate 스위치 / C-AI-1·레지던시 미산입 / 러너 경로(입력 failure·결과 diagnosis·APPLY_PATCH 입력·재배포) / 진단 없는 러너 결과.
-- 기존 시험 갱신: 마이그레이션 카탈로그·head·down/up, 감사 쓰기 경로 35개, OpenAPI 결과 본문 3모양, `apply` 칸 3개.
+- 통합: `tests/integration/test_failed_deploy_diagnosis.py` — 실패 배포 → 진단 201 → 배포 상세 diagnosis → 가짜 결과 → 중복 200 → 승인 → 가짜 반영 → redeployRequestId → 재배포 성공 / 근거 부족 / 409 `DEPLOY_NOT_FAILED`·404·422 / simulate 스위치 / C-AI-1·레지던시 미산입 / 러너 경로(입력 failure·결과 diagnosis·APPLY_PATCH 입력·재배포) / 진단 없는 러너 결과 / (검증 반영) 같은 패치 동시 승인 → 재배포 1개·두 응답 같은 QUEUED id / 실제 접수 함수 거절(이전 계획 APPROVED·서비스 DELETING) → 승인 200·`redeployRejectedCode`·재배포 행 0 / 레지던시 상한 1 경계(옛 PRECHECK 1 + 최신 진단 1 → total 1·truncated false) / 사전 점검 결과의 `diagnosis` 칸 422.
+- 기존 시험 갱신: 마이그레이션 카탈로그·head·down/up, 감사 쓰기 경로 35개, OpenAPI 결과 본문 2모양(RunResult 에 선택 `diagnosis`), `apply` 칸 3개.
 
 ## 7. 알려진 한계 (지금 하지 않음)
 

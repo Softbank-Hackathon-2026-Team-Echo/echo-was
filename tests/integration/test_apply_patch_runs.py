@@ -570,15 +570,19 @@ async def test_apply_run_token_is_scoped_and_other_credentials_are_refused(
 
 
 def test_openapi_result_body_documents_all_shapes() -> None:
-    """RunResult(사전 점검)·ApplyPatchResult(반영)·DiagnosisRunResult(배포 실패 진단, api-98)."""
+    """RunResult(사전 점검·배포 실패 진단, diagnosis 선택 칸)·ApplyPatchResult(반영) 두 모양.
+
+    진단 결과를 따로 된 모양으로 두면 diagnosis 없는 RunResult 본문이 두 모양에 함께 맞아 oneOf
+    가 겹친다(api-98 검증 반영). diagnosis 는 RunResult 의 선택 칸이다.
+    """
     operation = app.openapi()["paths"]["/api/v1/runner/runs/{run_id}/result"]["post"]
     schema = operation["requestBody"]["content"]["application/json"]["schema"]
 
     shapes = schema["oneOf"]
-    assert len(shapes) == 3
+    assert len(shapes) == 2
     assert "patches" in shapes[0]["properties"]
-    assert "diagnosis" not in shapes[0]["properties"]
-    assert set(shapes[2]["properties"]) == set(shapes[0]["properties"]) | {"diagnosis"}
+    assert "diagnosis" in shapes[0]["properties"]
+    assert "diagnosis" not in shapes[0].get("required", [])
     assert set(shapes[1]["properties"]) == {
         "status",
         "failureCode",

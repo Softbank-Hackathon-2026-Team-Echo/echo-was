@@ -27,7 +27,7 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 | `POST :claim` | 러너 | `{runnerId, capabilities}` | 200 `{run, runToken}` · 없으면 `{run: null, runToken: null}` | 401 · 403 · 422 `VALIDATION_ERROR` |
 | `POST /{id}/heartbeat` | 실행 | `{}` | 200 `{status, leaseUntil}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` |
 | `POST /{id}/events` | 실행 | `{events: [...]}` 1~100개 | 200 `{acceptedUpTo}` | 401 · 403 · 409 `RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
-| `POST /{id}/result` | 실행 | `RunResult` · 반영 실행이면 `ApplyPatchResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
+| `POST /{id}/result` | 실행 | `RunResult`(배포 실패 진단이면 선택 칸 `diagnosis`) · 반영 실행이면 `ApplyPatchResult` | 200 `{status}` | 401 · 403 · 409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE` · 422 `RESULT_INVALID` |
 
 ### 가져가기 `POST :claim`
 

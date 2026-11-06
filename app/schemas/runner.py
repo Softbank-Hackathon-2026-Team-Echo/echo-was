@@ -74,6 +74,9 @@ MAX_PROCESSING_DATA_CLASSES = 5
 MAX_EXTERNAL_TRANSFER_BYTES = 2**63 - 1
 BODY_TOO_LARGE_REASON = "BODY_TOO_LARGE"
 NUL_CHARACTER_REASON = "NUL_CHARACTER"
+# RunResult.diagnosis 는 배포 실패 진단(CHANGE_PROPOSAL) 실행만 보낸다(SPEC api-98).
+DIAGNOSIS_FIELD = "diagnosis"
+DIAGNOSIS_NOT_ALLOWED_REASON = "DIAGNOSIS_NOT_ALLOWED"
 _BODY_FIELD = "body"
 
 Text = Annotated[str, Field(min_length=1, max_length=MAX_STRING_LENGTH)]
@@ -383,38 +386,6 @@ class RunProcessingRequest(ApiRequestModel):
         return self
 
 
-class RunResultRequest(ApiRequestModel):
-    """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다."""
-
-    status: ResultStatus
-    failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
-    simulated: bool
-    sandbox: RunSandboxRequest | None = None
-    model: RunModelRequest | None = None
-    processing: RunProcessingRequest | None = None
-    config_diff: Annotated[list[RunConfigDiffRequest], Field(max_length=MAX_CONFIG_DIFFS)] = []
-    feature_gaps: Annotated[list[RunFeatureGapRequest], Field(max_length=MAX_FEATURE_GAPS)] = []
-    findings: Annotated[list[RunFindingRequest], Field(max_length=MAX_FINDINGS)] = []
-    patches: Annotated[list[RunPatchRequest], Field(max_length=MAX_PATCHES)] = []
-    blocked_attempts: Annotated[
-        list[RunBlockedAttemptRequest], Field(max_length=MAX_BLOCKED_ATTEMPTS)
-    ] = []
-
-    @model_validator(mode="after")
-    def _check_failure_code_and_patch_ids(self) -> Self:
-        if self.status == AgentRunStatus.SUCCEEDED and self.failure_code is not None:
-            raise ValueError("failureCode must be null when status is SUCCEEDED")
-        if self.status == AgentRunStatus.FAILED and self.failure_code is None:
-            raise ValueError("failureCode is required when status is FAILED")
-        patch_ids = [patch.id for patch in self.patches]
-        if len(patch_ids) != len(set(patch_ids)):
-            raise ValueError("patch id must be unique")
-        return self
-
-    def to_normalized(self) -> NormalizedRunResult:
-        return normalize_run_result(self.model_dump(mode="json", by_alias=True))
-
-
 class RunDiagnosisEvidenceRequest(ApiRequestModel):
     """진단 근거 한 줄. LOG 는 실패 로그(logTail)의 줄 번호, FILE 은 저장소 파일 경로·줄 번호다."""
 
@@ -456,14 +427,52 @@ class RunDiagnosisRequest(ApiRequestModel):
         return self
 
 
-class DiagnosisRunResultRequest(RunResultRequest):
-    """배포 실패 진단(CHANGE_PROPOSAL) 결과: RunResult + diagnosis(SPEC api-98).
+class RunResultRequest(ApiRequestModel):
+    """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다.
 
+    diagnosis 는 배포 실패 진단(CHANGE_PROPOSAL) 실행에만 보낸다(SPEC api-98). 사전 점검 실행이
+    이 칸을 보내면(null 이어도) 422 RESULT_INVALID 다(경로가 실행 종류로 가른다). OpenAPI 에서
+    진단 결과를 따로 된 모양으로 두지 않는 것은 oneOf 가 겹치지 않게 하려는 것이다.
+    """
+
+    status: ResultStatus
+    failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
+    simulated: bool
+    sandbox: RunSandboxRequest | None = None
+    model: RunModelRequest | None = None
+    processing: RunProcessingRequest | None = None
+    config_diff: Annotated[list[RunConfigDiffRequest], Field(max_length=MAX_CONFIG_DIFFS)] = []
+    feature_gaps: Annotated[list[RunFeatureGapRequest], Field(max_length=MAX_FEATURE_GAPS)] = []
+    findings: Annotated[list[RunFindingRequest], Field(max_length=MAX_FINDINGS)] = []
+    patches: Annotated[list[RunPatchRequest], Field(max_length=MAX_PATCHES)] = []
+    blocked_attempts: Annotated[
+        list[RunBlockedAttemptRequest], Field(max_length=MAX_BLOCKED_ATTEMPTS)
+    ] = []
+    diagnosis: RunDiagnosisRequest | None = None
+
+    @model_validator(mode="after")
+    def _check_failure_code_and_patch_ids(self) -> Self:
+        if self.status == AgentRunStatus.SUCCEEDED and self.failure_code is not None:
+            raise ValueError("failureCode must be null when status is SUCCEEDED")
+        if self.status == AgentRunStatus.FAILED and self.failure_code is None:
+            raise ValueError("failureCode is required when status is FAILED")
+        patch_ids = [patch.id for patch in self.patches]
+        if len(patch_ids) != len(set(patch_ids)):
+            raise ValueError("patch id must be unique")
+        return self
+
+    def to_normalized(self) -> NormalizedRunResult:
+        return normalize_run_result(self.model_dump(mode="json", by_alias=True))
+
+
+class DiagnosisRunResultRequest(RunResultRequest):
+    """배포 실패 진단(CHANGE_PROPOSAL) 결과 읽기: RunResult 와 같은 칸 + 진단 검사(SPEC api-98).
+
+    OpenAPI 에는 따로 싣지 않는다(RunResult 의 diagnosis 칸이 그 모양이다). 서버가 실행 종류로
+    이 모델을 골라 진단 전용 검사를 더한다.
     diagnosis 를 빼면(진단을 못 하는 러너) WAS 가 근거 부족(INSUFFICIENT_EVIDENCE)으로 마무리한다.
     패치는 DIAGNOSED·fixable 진단에만 붙일 수 있다. 패치 모양·검사는 사전 점검과 같다.
     """
-
-    diagnosis: RunDiagnosisRequest | None = None
 
     @model_validator(mode="after")
     def _check_patches_need_fixable_diagnosis(self) -> Self:
