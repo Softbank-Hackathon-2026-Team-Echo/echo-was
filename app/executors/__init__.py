@@ -255,5 +255,6 @@ def _real_executors(
         clock=clock,
         sleep=transports.sleep,
         image_pull_grace_seconds=settings.deploy_image_pull_grace_seconds,
+        diagnostics_timeout_seconds=settings.container_diagnostics_timeout_seconds,
     )
     return build, runtime

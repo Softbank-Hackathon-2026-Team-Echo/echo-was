@@ -15,7 +15,7 @@
 | | `read_logs(external_ref, cursor, limit)` | `LogChunk(lines, next_cursor, has_more)` · `InvalidLogCursor` (API 서버 4) |
 | `BuildSecurityScanReader` (실제 빌드 실행기만) | `read_security_scan(external_ref)` | `BuildSecurityScan` · `None`(없음·모양 틀림, 예외 없음) (보안·거버넌스 2·11) |
 | `DeployExecutor` | `apply(deployment, target, idempotency_key) -> external_ref` | |
-| | `poll(external_ref)` | `DeployPending` · `DeployApplied` · `DeployFailed(code)` |
+| | `poll(external_ref)` | `DeployPending` · `DeployApplied` · `DeployFailed(code, diagnostics)` |
 | | `revert(target, previous_deployment \| None, idempotency_key)` | `Reverted(external_ref)` · `RevertFailed(code)` |
 | | `read_runtime_logs(target, deployment, external_ref, cursor, limit)` | `LogChunk` · `InvalidLogCursor` (API 서버 4. `external_ref` = 요청의 `deploy_external_ref`) |
 | `MainRouteExecutor` | `route_main(route, target, idempotency_key)` | `RouteApplied(applied_at)` · `RouteFailed(code)` |
@@ -70,6 +70,7 @@
 
 - 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot, env_values)`(`env_values` 는 아래 "앱 환경 변수"), `DeployTarget(service, service_environment, environment kind·이름·config·secret_ref, public_host(환경별), main_public_host(대표), container_port)`.
 - `apply` 는 그 연결(클러스터의 그 서비스)에 digest 이미지를 반영한다. `DeployApplied` 는 "클러스터가 새 버전을 받아들였다"이다. 사용자 트래픽 확인은 일꾼의 헬스체크가 환경별 퍼블릭 주소로 한다.
+- `poll` 의 `DeployFailed.diagnostics` 는 선택이다(컨테이너 실패를 판정한 실행기만 채운다). 처리기는 그 배포의 앱 환경 변수 값으로 `log_tail` 을 가린 **뒤에** 한 줄을 400자로 자르고(실행기는 줄을 자르지 않는다 — 먼저 자르면 잘린 값이 남는다) 배포 작업 로그(`CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG`)에 쓰고 `FAILED` 문장에 원인 한 줄을 붙인다(API 서버 4-1). 가짜 실행기는 배포 실패 때 `crash_log_tail`(기본: `ValidationError: database_url` 로 끝나는 7줄)로 같은 모양을 낸다.
 - `revert(target, previous, key)` 는 실패한 새 버전을 거두고 `previous`(연결의 현재 배포, 없으면 아무것도 없는 상태)를 유지한다. 실패해도 일꾼은 요청의 `errorCode` 를 바꾸지 않고 `revertStatus = FAILED` 만 적는다.
 - 실제 구현(API 서버 3-2): 쿠버네티스 직접 서버 측 apply(아래 "쿠버네티스 직접 반영"). GitOps(Argo CD)는 2단계.
 
@@ -274,6 +275,7 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
   - 없거나 어노테이션 배포 번호가 ref 와 다르면 `DeployFailed(DEPLOY_FAILED)`(그사이 다른 반영이 덮음)
   - `observedGeneration ≥ generation` 이고 `updatedReplicas == spec.replicas == replicas == availableReplicas` 면 `DeployApplied`
   - 그 배포 번호 파드의 대기 이유가 `ImagePullBackOff`·`InvalidImageName`·`ErrImageNeverPull` 이거나 `ErrImagePull` 이 파드 생성 뒤 `DEPLOY_IMAGE_PULL_GRACE_SECONDS`(30)를 넘으면 `DeployFailed(IMAGE_PULL_FAILED)`, `CrashLoopBackOff` 면 `DeployFailed(CONTAINER_START_FAILED)`
+  - 실패를 판정하면 **되돌리기 전에** `DeployFailed.diagnostics`(`ContainerDiagnostics`, API 서버 4-1)를 채운다: 판정한 컨테이너의 `state.waiting.reason`, `state.terminated` 또는 `lastState.terminated` 의 `reason`·`exitCode`, `restartCount`, 그리고 `CONTAINER_START_FAILED` 면 로그 마지막 50줄(`GET …/pods/{pod}/log?container=app&tailLines=51&limitBytes=262144`, 재시작했으면 `previous=true` 먼저 → 비면 지금 컨테이너). 51번째 줄이 있으면 `log_truncated`. 비밀값 모양은 `mask_secrets` 로 가리고 한 줄 길이는 자르지 않는다(처리기가 환경 변수 값을 가린 뒤 400자로 자른다). 로그 읽기가 401·403·5xx·400·404 여도 실패 판정은 그대로이고 `log_tail` 만 비며 경고 `CONTAINER_LOGS_UNAVAILABLE`. 진단 전체는 `CONTAINER_DIAGNOSTICS_TIMEOUT_SECONDS`(10초) 절대 상한 안에서 끝나야 하고(처리기의 환경 변수 재조회 포함, 같은 마감 시각 `deadline`), 넘거나 예상 못 한 예외면 경고 `CONTAINER_DIAGNOSTICS_TIMEOUT`·`CONTAINER_DIAGNOSTICS_FAILED` 와 함께 진단 없이(`diagnostics = None`) 실패 처리를 계속한다. 이 읽기에는 앱 네임스페이스의 `pods/log` `get` 권한이 필요하다
   - 401·403(토큰을 한 번 새로 받아 다시 불러도) → `DeployFailed(CLUSTER_UNAUTHORIZED)`, 닿지 못함 → `DeployPending` + 경고 `CLUSTER_UNREACHABLE`, 그 밖 → `DeployPending`
 - `revert(target, previous, key)`: previous 가 있으면 그 배포 기록으로 같은 apply(어노테이션 = previous 번호) → `Reverted("k8s-revert:{환경}:{ns}:{previous id}")`. 없으면 Ingress·Service·Deployment 를 지운다(네임스페이스·Secret 은 남긴다).
 - `read_runtime_logs`: 네임스페이스에서 라벨 `echo.deployment-id=<배포 기록 id>` 파드(가장 최근)의 `app` 컨테이너 로그(`timestamps=true`, 최대 1MB). cursor = `"{파드 이름}|{마지막 줄 시각}|{그 시각 줄 수}"`. 파드가 없으면 빈 청크, 창구 오류도 빈 청크 + 경고.

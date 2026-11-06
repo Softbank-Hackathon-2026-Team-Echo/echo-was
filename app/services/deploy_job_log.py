@@ -40,7 +40,12 @@ class DeployJobLog:
         *,
         error_code: DeployRequestErrorCode | None = None,
         env_keys: Sequence[str] = (),
+        message: str | None = None,
     ) -> None:
+        """message 를 주면 고정 문장 대신 쓴다(실패 진단 줄, 이미 가린 값만).
+
+        길이 상한에서 자른다.
+        """
         last_seq = await self._logs.find_last_seq(request.id)
         if last_seq >= MAX_DEPLOY_LOG_LINES:
             return
@@ -48,11 +53,13 @@ class DeployJobLog:
         entry = DEPLOY_LOG_ENTRIES[code]
         if seq == MAX_DEPLOY_LOG_LINES:
             truncated = DEPLOY_LOG_ENTRIES[DeployLogCode.LOG_TRUNCATED]
-            code, level, message = DeployLogCode.LOG_TRUNCATED, truncated.level, truncated.message
+            code, level, text = DeployLogCode.LOG_TRUNCATED, truncated.level, truncated.message
         else:
-            level, message = entry.level, deploy_log_message(code, error_code)
+            level, text = entry.level, deploy_log_message(code, error_code)
             if code is DeployLogCode.ENV_VARS_APPLIED:
-                message = env_vars_applied_message(env_keys, DEPLOY_LOG_MESSAGE_MAX_LENGTH)
+                text = env_vars_applied_message(env_keys, DEPLOY_LOG_MESSAGE_MAX_LENGTH)
+            elif message is not None:
+                text = message[:DEPLOY_LOG_MESSAGE_MAX_LENGTH]
         self._logs.add(
             DeployRequestLog(
                 deploy_request_id=request.id,
@@ -61,7 +68,7 @@ class DeployJobLog:
                 level=level,
                 stage=entry.stage,
                 code=code,
-                message=message,
+                message=text,
                 simulated=request.simulated,
                 created_at=now,
             )

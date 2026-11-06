@@ -8,6 +8,8 @@
   external_ref = `k8s:{환경 id}:{네임스페이스}:{배포 기록 id}`.
 - poll: Deployment 어노테이션이 이 배포 번호이고 새 파드가 모두 준비되면 DeployApplied. 이미지 받기
   실패·CrashLoopBackOff 는 바로 실패 코드. 401·403 은 CLUSTER_UNAUTHORIZED, 닿지 못하면 진행 중.
+  실패면 되돌리기 전에 그 컨테이너의 사유·종료 코드·재시작 수와 로그 마지막 50줄을 진단으로 담는다
+  (API 서버 4-1, 로그를 못 읽어도 실패 판정은 그대로).
 - revert: previous 가 있으면 그 배포 기록으로 다시 apply, 없으면
   Deployment·Service·Ingress 를 지운다.
 - 내리기: 네임스페이스 삭제(+온프레 DNS 레코드), poll 은 네임스페이스가 사라지면 TeardownRemoved.
@@ -16,11 +18,12 @@
 external_ref·실패 코드·로그에 토큰·비밀값을 넣지 않는다.
 """
 
+import asyncio
 import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Any
@@ -32,7 +35,9 @@ from app.core.log_masking import mask_secrets
 from app.core.secrets import SecretValue
 from app.enums import DeployRequestErrorCode, LogLevel, TeardownErrorCode
 from app.executors.base import (
+    CONTAINER_LOG_TAIL_LINES,
     ClusterEnvironment,
+    ContainerDiagnostics,
     DeployApplied,
     DeployApplyError,
     DeployFailed,
@@ -89,6 +94,12 @@ DNS_UNAUTHORIZED = "DNS_UNAUTHORIZED"
 DEPLOY_REF_UNKNOWN = "DEPLOY_REF_UNKNOWN"
 DEPLOYMENT_REPLACED = "DEPLOYMENT_REPLACED"
 PULL_SECRET_REFRESH_FAILED = "PULL_SECRET_REFRESH_FAILED"
+CONTAINER_LOGS_UNAVAILABLE = "CONTAINER_LOGS_UNAVAILABLE"
+CONTAINER_DIAGNOSTICS_TIMEOUT = "CONTAINER_DIAGNOSTICS_TIMEOUT"
+CONTAINER_DIAGNOSTICS_FAILED = "CONTAINER_DIAGNOSTICS_FAILED"
+# 실패 진단(로그 읽기 + 처리기 환경 변수 재조회) 전체 상한 기본값(초).
+# 운영 값은 설정 container_diagnostics_timeout_seconds.
+DEFAULT_CONTAINER_DIAGNOSTICS_TIMEOUT_SECONDS = 10.0
 
 # 온프레에서 RoleBinding 을 막 만든 직후의 403 은 권한 캐시 반영 지연이다. 2초 간격 5번(10초).
 ROLE_BINDING_RETRY_DELAYS_SECONDS = (2.0, 2.0, 2.0, 2.0, 2.0)
@@ -103,6 +114,9 @@ _LOG_CURSOR = re.compile(
     r"^([a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?)\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z)\|(\d{1,9})$"
 )
 _LOG_LIMIT_BYTES = "1048576"
+# 실패 진단 로그 꼬리(최대 51줄)를 받을 때의 바이트 상한.
+# 쿠버네티스는 tailLines 로 고른 뒤 앞에서부터 자르므로 줄 수 × 줄 길이보다 넉넉히 둔다.
+_TAIL_LIMIT_BYTES = "262144"
 # 앱 Secret 을 쓰는 사이 다른 쪽이 바꾸면(409) GET 부터 다시 한다.
 ENV_SECRET_WRITE_ATTEMPTS = 3
 
@@ -133,6 +147,7 @@ class KubernetesRuntime:
         clock: Clock,
         sleep: Sleep,
         image_pull_grace_seconds: float,
+        diagnostics_timeout_seconds: float = DEFAULT_CONTAINER_DIAGNOSTICS_TIMEOUT_SECONDS,
     ) -> None:
         self.provider = provider
         self.clients = clients
@@ -142,6 +157,7 @@ class KubernetesRuntime:
         self.clock = clock
         self.sleep = sleep
         self.image_pull_grace = timedelta(seconds=image_pull_grace_seconds)
+        self.diagnostics_timeout_seconds = diagnostics_timeout_seconds
         self._lookup = environment_lookup
         self._environments: dict[uuid.UUID, ClusterEnvironment] = {}
 
@@ -358,8 +374,16 @@ class KubernetesDeployExecutor:
         except (TransientError, KubeRequestError):
             _warn_ref(CLUSTER_UNREACHABLE)
             return DeployPending()
-        code = _pod_failure(pods, self._runtime.clock.now(), self._runtime.image_pull_grace)
-        return DeployFailed(code) if code is not None else DeployPending()
+        found = _failing_container(pods, self._runtime.clock.now(), self._runtime.image_pull_grace)
+        if found is None:
+            return DeployPending()
+        # 처리기가 곧 되돌리기로 이 파드들을 지운다. 그 전에 마지막 기록을 읽는다(API 서버 4-1).
+        return DeployFailed(
+            found.code,
+            await _read_diagnostics(
+                api, ref.namespace, found, self._runtime.diagnostics_timeout_seconds
+            ),
+        )
 
     # --- revert ---
 
@@ -671,31 +695,160 @@ def _is_rolled_out(deployment: dict[str, Any]) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _FailingContainer:
+    """실패를 판정한 파드·컨테이너 상태(containerStatuses 한 항목)."""
+
+    code: DeployRequestErrorCode
+    pod: str | None
+    status: dict[str, Any]
+
+
 def _pod_failure(
     pods: dict[str, Any] | None, now: datetime, image_pull_grace: timedelta
 ) -> DeployRequestErrorCode | None:
+    found = _failing_container(pods, now, image_pull_grace)
+    return found.code if found is not None else None
+
+
+def _failing_container(
+    pods: dict[str, Any] | None, now: datetime, image_pull_grace: timedelta
+) -> _FailingContainer | None:
     for pod in (pods or {}).get("items") or []:
         if not isinstance(pod, dict):
             continue
-        created_at = _parse_time((pod.get("metadata") or {}).get("creationTimestamp"))
+        metadata = pod.get("metadata") or {}
+        name = metadata.get("name")
+        pod_name = name if isinstance(name, str) else None
+        created_at = _parse_time(metadata.get("creationTimestamp"))
         status = pod.get("status") or {}
         for container in [
             *(status.get("initContainerStatuses") or []),
             *(status.get("containerStatuses") or []),
         ]:
-            waiting = ((container or {}).get("state") or {}).get("waiting") or {}
+            if not isinstance(container, dict):
+                continue
+            waiting = (container.get("state") or {}).get("waiting") or {}
             reason = waiting.get("reason")
-            if reason in _IMAGE_PULL_REASONS:
-                return DeployRequestErrorCode.IMAGE_PULL_FAILED
-            if (
+            code: DeployRequestErrorCode | None = None
+            if reason in _IMAGE_PULL_REASONS or (
                 reason == "ErrImagePull"
                 and created_at is not None
                 and now - created_at > image_pull_grace
             ):
-                return DeployRequestErrorCode.IMAGE_PULL_FAILED
-            if reason in _CRASH_REASONS:
-                return DeployRequestErrorCode.CONTAINER_START_FAILED
+                code = DeployRequestErrorCode.IMAGE_PULL_FAILED
+            elif reason in _CRASH_REASONS:
+                code = DeployRequestErrorCode.CONTAINER_START_FAILED
+            if code is not None:
+                return _FailingContainer(code=code, pod=pod_name, status=container)
     return None
+
+
+async def _read_diagnostics(
+    api: KubeApi, namespace: str, found: _FailingContainer, timeout_seconds: float
+) -> ContainerDiagnostics | None:
+    """실패 진단을 읽되 배포 실패 처리를 절대 막지 않는다(API 서버 4-1).
+
+    - 전체 절대 상한 timeout_seconds(설정 container_diagnostics_timeout_seconds). HTTP 요청마다의
+      시간 제한은 바이트가 조금씩 오면 늘어나므로 진단 전체를 따로 묶는다. 넘으면 경고
+      CONTAINER_DIAGNOSTICS_TIMEOUT 을 남기고 진단 없이(None) 돌려준다.
+    - 예상하지 못한 예외(Exception 전부)도 경고 CONTAINER_DIAGNOSTICS_FAILED 를 남기고 None.
+      예외 문장은 비밀값을 담을 수 있어 로그에 쓰지 않고 예외 이름만 쓴다.
+    - 같은 마감 시각을 진단에 담아(deadline) 처리기의 환경 변수 재조회도 그 안에서 끝낸다.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    try:
+        async with asyncio.timeout_at(deadline):
+            diagnostics = await _collect_diagnostics(api, namespace, found)
+    except TimeoutError:
+        _warn_ref(CONTAINER_DIAGNOSTICS_TIMEOUT)
+        return None
+    except Exception as error:
+        logger.warning(
+            "kubernetes executor poll failed",
+            extra={
+                "action": "kubernetes_executor",
+                "error_code": CONTAINER_DIAGNOSTICS_FAILED,
+                "error_type": type(error).__name__,
+            },
+        )
+        return None
+    return replace(diagnostics, deadline=deadline)
+
+
+async def _collect_diagnostics(
+    api: KubeApi, namespace: str, found: _FailingContainer
+) -> ContainerDiagnostics:
+    """실패한 컨테이너의 사유·종료 코드·재시작 수와 로그 마지막 줄(API 서버 4-1).
+
+    상태 값은 이미 읽은 파드 목록에서 꺼낸다. 로그는 컨테이너가 시작했던 실패
+    (CONTAINER_START_FAILED)에서만 읽는다: 재시작했으면 직전 컨테이너(`previous=true`)를 먼저,
+    없으면 지금 컨테이너. 로그를 못 읽어도(권한·닿지 못함) 상태 값만 담아 돌려준다 — 배포 실패
+    처리를 막지 않는다.
+    """
+    status = found.status
+    name = status.get("name")
+    container = name if isinstance(name, str) else None
+    state = status.get("state") or {}
+    waiting = state.get("waiting") or {}
+    terminated = state.get("terminated") or (status.get("lastState") or {}).get("terminated") or {}
+    restart_count = _optional_int(status.get("restartCount"))
+    tail: tuple[str, ...] = ()
+    truncated = False
+    if (
+        found.code is DeployRequestErrorCode.CONTAINER_START_FAILED
+        and found.pod is not None
+        and container is not None
+    ):
+        try:
+            tail, truncated = await _read_log_tail(
+                api, namespace, found.pod, container, previous=bool(restart_count or terminated)
+            )
+        except (ClusterAuthError, ClusterConfigError, TransientError, KubeRequestError):
+            _warn_ref(CONTAINER_LOGS_UNAVAILABLE)
+    return ContainerDiagnostics(
+        container=container,
+        reason=_optional_str(waiting.get("reason")),
+        termination_reason=_optional_str(terminated.get("reason")),
+        exit_code=_optional_int(terminated.get("exitCode")),
+        restart_count=restart_count,
+        log_tail=tail,
+        log_truncated=truncated,
+    )
+
+
+async def _read_log_tail(
+    api: KubeApi, namespace: str, pod: str, container: str, *, previous: bool
+) -> tuple[tuple[str, ...], bool]:
+    """(마지막 줄들, 앞 줄이 더 있었나). 한 줄 더 받아 잘림을 안다. 비밀값 모양은 가린다.
+
+    개인 키 블록이 여러 줄에 걸칠 수 있어 줄로 나누기 전에 글 전체를 가린다. 한 줄 길이는 여기서
+    자르지 않는다 — 처리기가 환경 변수 값을 가린 뒤 자른다(mask_container_log). 먼저 자르면 잘린
+    값 앞부분이 전체 값 비교에 안 맞아 남는다.
+    """
+    for use_previous in (True, False) if previous else (False,):
+        params = {
+            "container": container,
+            "tailLines": str(CONTAINER_LOG_TAIL_LINES + 1),
+            "limitBytes": _TAIL_LIMIT_BYTES,
+        }
+        if use_previous:
+            params["previous"] = "true"
+        text = await api.get_text(manifests.pod_log_path(namespace, pod), params=params)
+        if not text:
+            continue
+        lines = mask_secrets(text).splitlines()
+        return tuple(lines[-CONTAINER_LOG_TAIL_LINES:]), len(lines) > CONTAINER_LOG_TAIL_LINES
+    return (), False
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 async def _latest_pod(api: KubeApi, namespace: str, deployment_id: uuid.UUID) -> str | None:

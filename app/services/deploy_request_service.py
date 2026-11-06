@@ -21,7 +21,7 @@ trigger = ROLLBACK 요청을 넣는다. 접수 순간 연결의 현재 배포를
 import logging
 import uuid
 from collections.abc import Awaitable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +63,11 @@ from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.container_diagnostics import (
+    FAILURE_LOG_CODES,
+    FailureDetail,
+    build_failure_detail,
+)
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
@@ -105,6 +110,8 @@ class DeployRequestView:
     build: Build | None
     is_current: bool = False
     rollbackable: bool = False
+    # 상세만 채운다. 실패한 요청의 원인·컨테이너 진단(API 서버 4-1).
+    failure: FailureDetail | None = None
 
 
 @dataclass(frozen=True)
@@ -362,7 +369,14 @@ class DeployRequestService:
     ) -> DeployRequestView:
         async with self._session.begin():
             request = await self._get_in_organization(organization_id, deploy_request_id)
-            return (await self._views([request]))[0]
+            view = (await self._views([request]))[0]
+            if request.status != DeployRequestStatus.FAILED:
+                return view
+            rows = await self._logs.search_by_codes(request.id, FAILURE_LOG_CODES)
+        failure = build_failure_detail(
+            request.status, request.error_code, [(row.code, row.message) for row in rows]
+        )
+        return replace(view, failure=failure)
 
     async def get_deploy_request_logs(
         self,
@@ -405,7 +419,8 @@ class DeployRequestService:
                 source=LogSource.DEPLOY_JOB,
                 simulated=request.simulated,
                 lines=[
-                    LogLine(at=row.logged_at, level=row.level, message=row.message) for row in page
+                    LogLine(at=row.logged_at, level=row.level, message=row.message, code=row.code)
+                    for row in page
                 ],
                 next_cursor=str(page[-1].seq) if page else cursor,
                 has_more=len(rows) > limit,
@@ -599,7 +614,9 @@ def _masked(page: LogPageView) -> LogPageView:
         source=page.source,
         simulated=page.simulated,
         lines=[
-            LogLine(at=line.at, level=line.level, message=mask_secrets(line.message))
+            LogLine(
+                at=line.at, level=line.level, message=mask_secrets(line.message), code=line.code
+            )
             for line in page.lines
         ],
         next_cursor=page.next_cursor,

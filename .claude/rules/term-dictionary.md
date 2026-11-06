@@ -85,7 +85,8 @@
 | 주소 suffix | Host suffix | `services.host_suffix` | 대표·환경별 주소 끝의 소문자·숫자 무작위 8자. 서비스를 만들 때 한 번 정하고 바꾸지 않는다(지운 서비스의 주소를 같은 이름의 새 서비스가 잇지 못하게). 레이블이 63자를 넘으면 앞부분을 54자로 자르고 suffix 는 남긴다 | API 3-1 |
 | 실행기 | Executor | `app/executors/` (`BuildExecutor`·`DeployExecutor`·`MainRouteExecutor`·`HealthChecker`·`TeardownExecutor`) | 빌드·배포·대표 주소 연결·헬스체크·내리기와 빌드·실행 로그 읽기를 실제로 하는 쪽. 기본은 가짜(`simulated`), `EXECUTOR_MODE=real` 이면 GitHub Actions 빌드(`GithubActionsBuildExecutor`) + 쿠버네티스 직접 반영(`KubernetesDeployExecutor`·`KubernetesTeardownExecutor`, API 서버 3-2) | F1 |
 | 멱등 키 | Idempotency key | 빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt` | 외부 작업을 두 번 만들지 않게 우리가 먼저 정해 넘기는 키. 같은 키 재호출은 같은 작업 | F1 |
-| 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다 | F1·D7 |
+| 되돌리기 결과 | Revert status | `deploy_requests.revert_status` | 배포 기록이 생긴 뒤 실패했을 때 직전 버전을 유지하려고 부른 되돌리기의 결과. 사용자가 하는 되돌리기(`rollback_of_id`, API 서버 4)와 다르다. 직전 배포가 없었으면(첫 배포 실패) 로그 코드 `REVERT_SUCCEEDED_NO_PREVIOUS` — **실행 중인 버전 없음** | F1·D7 |
+| 실패 진단 | Container diagnostics | `ContainerDiagnostics`, 로그 코드 `CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG`, 응답 `failure` | 배포 실행기가 컨테이너 실패를 판정한 순간, 되돌리기 전에 읽은 사유(`CrashLoopBackOff`·`OOMKilled` 등)·종료 코드·재시작 수·로그 마지막 50줄(비밀값 가림). 실패 상세 `failure` 칸으로 보이고 에러 수정 에이전트가 읽는다 | F1, API 4-1 |
 | 소스 저장소 클라이언트 | Source repository client | `SourceRepositoryClient` (`app/clients/source_repository.py`) | 저장소 접근 확인·브랜치/커밋 → 40자 SHA·빌드용 읽기 토큰. 가짜와 GitHub App 구현 | F1·D9 |
 | GitHub App 개인키 참조 | GitHub App private key ref | 설정 `github_app_private_key_ref` | 서버에 두는 비밀값(App 개인키)의 보관 위치. 값은 저장·로그·응답에 넣지 않는다 | D9·F16 |
 | 사용자 | User | `User` / `users` | GitHub 로 로그인한 사람. GitHub 숫자 번호(`github_id`)로 같은 사람을 가린다. 아이디(`github_login`)는 바뀔 수 있다 | F4 |
@@ -208,9 +209,9 @@
 | 값 목록 | 표·칸 | 뜻 |
 |---|---|---|
 | `DEPLOY_JOB` · `BUILD` · `RUNTIME` | 로그 API `source` (`LogSource`) | 배포 작업 로그(DB) · 빌드 로그 · 실행 로그(실행기 즉석 조회) |
-| `INFO` · `WARN` · `ERROR` | `deploy_request_logs.level`, 응답 `level` (`LogLevel`) | `FAILED`·`REVERT_FAILED` 는 ERROR, 헬스 실패 줄은 WARN |
+| `INFO` · `WARN` · `ERROR` | `deploy_request_logs.level`, 응답 `level` (`LogLevel`) | `FAILED`·`REVERT_FAILED`·`CONTAINER_DIAGNOSTICS` 는 ERROR, 헬스 실패 줄은 WARN |
 | 요청 상태 7개 · `REVERT` | `deploy_request_logs.stage` (`DeployLogStage`) | 줄이 속한 단계 |
-| `REQUEST_ACCEPTED` · `STARTED` · `BUILD_ATTACHED` · `BUILD_REUSED` · `DEPLOYMENT_CREATED` · `DEPLOY_REQUESTED` · `ENV_VARS_APPLIED` · `DEPLOY_APPLIED` · `HEALTH_PROBE_OK` · `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` · `SUCCEEDED` · `STANDBY_SYNC_REQUESTED` · `FAILED` · `REVERT_SUCCEEDED` · `REVERT_FAILED` · `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` · `LOG_TRUNCATED` | `deploy_request_logs.code` (`DeployLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/deploy_log_messages.py` |
+| `REQUEST_ACCEPTED` · `STARTED` · `BUILD_ATTACHED` · `BUILD_REUSED` · `DEPLOYMENT_CREATED` · `DEPLOY_REQUESTED` · `ENV_VARS_APPLIED` · `DEPLOY_APPLIED` · `HEALTH_PROBE_OK` · `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` · `SUCCEEDED` · `STANDBY_SYNC_REQUESTED` · `CONTAINER_DIAGNOSTICS` · `CONTAINER_LOG` · `FAILED` · `REVERT_SUCCEEDED` · `REVERT_SUCCEEDED_NO_PREVIOUS` · `REVERT_FAILED` · `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` · `LOG_TRUNCATED` | `deploy_request_logs.code` (`DeployLogCode`, DB CHECK 없음) | 코드별 고정 문장은 `app/services/deploy_log_messages.py` |
 
 ### 빌드·할 일·서비스 상태
 

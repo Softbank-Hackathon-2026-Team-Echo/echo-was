@@ -9,7 +9,9 @@
   호출 → external_ref 저장"이다. 다시 시작한 일꾼은 요청함 시각만 있고 external_ref 가 없으면 같은
   키로 다시 부른다. 가짜 대표 주소 라우터만 I/O 가 없어 성공 처리 트랜잭션 안에서 부른다.
 - 배포 기록이 생긴 뒤의 실패는 모두 되돌리기를 불러 직전 버전을 유지하고 결과를 revert_status 에
-  적는다.
+  적는다. 직전 버전이 없으면 실패한 버전만 거두고 '실행 중인 버전 없음' 줄을 쓴다.
+- 실행기가 컨테이너 실패 진단(사유·종료 코드·로그 마지막 50줄)을 돌려주면 되돌리기 전에
+  환경 변수 값을 가려 배포 작업 로그에 남긴다(API 서버 4-1).
 - 배포 작업 로그는 그 줄을 일으킨 전환과 같은 트랜잭션에서, 전환이 반영됐을 때만 쓴다(DeployJobLog).
 - 되돌리기 요청(trigger = ROLLBACK)은 시작할 때 연결의 현재 배포가 접수 때 값
   (rollback_base_deployment_id)와 다르면 CANCELLED(BASE_CHANGED) 로 끝난다. 빌드는 대상 요청의
@@ -17,9 +19,10 @@
   만든다.
 """
 
+import asyncio
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -55,6 +58,7 @@ from app.executors.base import (
     BuildSpec,
     BuildStartError,
     BuildSucceeded,
+    ContainerDiagnostics,
     DeployApplied,
     DeployApplyError,
     DeployFailed,
@@ -64,9 +68,11 @@ from app.executors.base import (
     HealthOk,
     MainRoute,
     Reverted,
+    RevertResult,
     RouteApplied,
     SourceAccess,
 )
+from app.executors.fake import FAKE_CRASH_LOG_TAIL, fake_crash_diagnostics
 from app.models import Build, Deployment, DeployRequest, Environment, Service, ServiceEnvironment
 from app.models.build import ACTIVE_BUILD_UNIQUE_INDEX
 from app.repositories.build_repository import BuildRepository
@@ -79,6 +85,11 @@ from app.repositories.service_environment_variable_repository import (
 )
 from app.repositories.service_repository import ServiceRepository
 from app.services.app_env_values import AppEnvResolver, EnvSecretUnavailableError
+from app.services.container_diagnostics import (
+    diagnostics_message,
+    failed_message,
+    mask_container_log,
+)
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
@@ -543,7 +554,10 @@ class DeployRequestProcessor:
 
     async def _deploy(self, request: DeployRequest) -> JobOutcome:
         if _simulated_failure(request) is SimulatedFailureStage.DEPLOYING:
-            return await self._fail(DeployRequestErrorCode.DEPLOY_FAILED)
+            # 가짜 실행기 경로도 실제와 같은 진단 칸을 낸다(API 서버 4-1, 시연·시험용).
+            return await self._fail(
+                DeployRequestErrorCode.DEPLOY_FAILED, fake_crash_diagnostics(FAKE_CRASH_LOG_TAIL)
+            )
         now = self._clock.now()
         timeout = timedelta(seconds=self._settings.deploy_timeout_seconds)
         assert request.deploying_at is not None and request.deployment_id is not None
@@ -611,8 +625,8 @@ class DeployRequestProcessor:
         match result:
             case DeployPending():
                 return self._next_run_after_poll()
-            case DeployFailed(code=code):
-                return await self._fail(code)
+            case DeployFailed(code=code, diagnostics=diagnostics):
+                return await self._fail(code, await self._masked_diagnostics(request, diagnostics))
             case DeployApplied():
                 async with self._session.begin():
                     await self._lock()
@@ -841,7 +855,71 @@ class DeployRequestProcessor:
 
     # --- 실패·되돌리기·일꾼 상실 ---
 
-    async def _fail(self, code: DeployRequestErrorCode) -> JobOutcome:
+    async def _masked_diagnostics(
+        self, request: DeployRequest, diagnostics: ContainerDiagnostics | None
+    ) -> ContainerDiagnostics | None:
+        """로그 꼬리에서 그 배포의 앱 환경 변수 값을 가린 뒤 줄을 자른다(API 서버 4-1).
+
+        - 값을 꺼내지 못하면 가릴 수 없으니 로그 꼬리는 버리고 상태 값(사유·종료 코드)만 남긴다.
+        - 환경 변수 재조회는 진단 마감(diagnostics.deadline, 없으면 지금 +
+          container_diagnostics_timeout_seconds) 안에서 끝낸다. 넘거나 예상하지 못한 예외면 경고를
+          남기고 진단 없이(None) 실패 처리를 계속한다.
+        """
+        if diagnostics is None or not diagnostics.log_tail:
+            return diagnostics
+        assert request.deployment_id is not None
+        async with self._session.begin():
+            deployment = await self._deployments.find_by_id(request.deployment_id)
+        assert deployment is not None
+        await self._lease.extend()
+        loop = asyncio.get_running_loop()
+        deadline = diagnostics.deadline
+        if deadline is None:
+            deadline = loop.time() + self._settings.container_diagnostics_timeout_seconds
+        try:
+            async with asyncio.timeout_at(deadline):
+                env_values = await self._env_resolver.resolve(deployment.config_snapshot)
+        except TimeoutError:
+            self._warn_diagnostics_dropped(request, "CONTAINER_DIAGNOSTICS_TIMEOUT")
+            return None
+        except (EnvSecretUnavailableError, ExecutorUnavailableError):
+            logger.warning(
+                "container log tail withheld",
+                extra={
+                    "action": "mask_container_log",
+                    "deploy_request_id": str(request.id),
+                    "error_code": DeployRequestErrorCode.ENV_SECRET_UNAVAILABLE,
+                },
+            )
+            return replace(diagnostics, log_tail=(), log_truncated=False)
+        except Exception as error:
+            self._warn_diagnostics_dropped(
+                request, "CONTAINER_DIAGNOSTICS_FAILED", type(error).__name__
+            )
+            return None
+        return replace(diagnostics, log_tail=mask_container_log(diagnostics.log_tail, env_values))
+
+    def _warn_diagnostics_dropped(
+        self, request: DeployRequest, code: str, error_type: str | None = None
+    ) -> None:
+        """진단을 버리고 실패 처리를 계속할 때의 경고.
+
+        예외 문장은 비밀값을 담을 수 있어 쓰지 않고 예외 이름만 쓴다."""
+        logger.warning(
+            "container diagnostics dropped",
+            extra={
+                "action": "mask_container_log",
+                "deploy_request_id": str(request.id),
+                "error_code": code,
+                "error_type": error_type,
+            },
+        )
+
+    async def _fail(
+        self, code: DeployRequestErrorCode, diagnostics: ContainerDiagnostics | None = None
+    ) -> JobOutcome:
+        """요청을 FAILED 로 끝낸다. 진단이 있으면 FAILED 줄 앞에 컨테이너 상태·로그 줄을 쓰고
+        FAILED 문장 뒤에 원인 한 줄을 붙인다(API 서버 4-1). 진단은 이미 가린 값이어야 한다."""
         now = self._clock.now()
         async with self._session.begin():
             locked = await self._lock(lock_build=True)
@@ -859,7 +937,24 @@ class DeployRequestProcessor:
                     "updated_at": now,
                 },
             ):
-                await self._job_log.append(request, DeployLogCode.FAILED, now, error_code=code)
+                if diagnostics is not None:
+                    await self._job_log.append(
+                        request,
+                        DeployLogCode.CONTAINER_DIAGNOSTICS,
+                        now,
+                        message=diagnostics_message(diagnostics),
+                    )
+                    for line in diagnostics.log_tail:
+                        await self._job_log.append(
+                            request, DeployLogCode.CONTAINER_LOG, now, message=line
+                        )
+                await self._job_log.append(
+                    request,
+                    DeployLogCode.FAILED,
+                    now,
+                    error_code=code,
+                    message=failed_message(code, diagnostics),
+                )
                 await record_deploy_request_finished(
                     self._session,
                     self._clock,
@@ -941,13 +1036,7 @@ class DeployRequestProcessor:
                     "updated_at": reverted_at,
                 },
             ):
-                await self._job_log.append(
-                    request,
-                    DeployLogCode.REVERT_SUCCEEDED
-                    if revert_status is RevertStatus.SUCCEEDED
-                    else DeployLogCode.REVERT_FAILED,
-                    reverted_at,
-                )
+                await self._job_log.append(request, _revert_log_code(result, previous), reverted_at)
         logger.info(
             "deploy request reverted",
             extra={
@@ -1042,6 +1131,15 @@ class DeployRequestProcessor:
                 "status": status,
             },
         )
+
+
+def _revert_log_code(result: RevertResult, previous: Deployment | None) -> DeployLogCode:
+    """되돌리기 결과 줄. 이전 배포가 없었으면 '실행 중인 버전 없음'(API 서버 4-1)."""
+    if not isinstance(result, Reverted):
+        return DeployLogCode.REVERT_FAILED
+    if previous is None:
+        return DeployLogCode.REVERT_SUCCEEDED_NO_PREVIOUS
+    return DeployLogCode.REVERT_SUCCEEDED
 
 
 def _needs_revert(request: DeployRequest) -> bool:
