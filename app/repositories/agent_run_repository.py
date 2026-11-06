@@ -1,5 +1,5 @@
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -82,6 +82,21 @@ class AgentRunRepository:
         )
         if lock:
             statement = statement.with_for_update()
+        return await self._session.scalar(statement)
+
+    async def find_in_organization(
+        self, organization_id: uuid.UUID, run_id: uuid.UUID, kinds: Collection[AgentRunKind]
+    ) -> AgentRun | None:
+        """그 조직의 실행 중 kinds 에 든 종류(읽기 전용). 다른 조직·다른 종류는 None."""
+        statement = (
+            select(AgentRun)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.organization_id == organization_id,
+                AgentRun.kind.in_(list(kinds)),
+            )
+            .execution_options(populate_existing=True)
+        )
         return await self._session.scalar(statement)
 
     async def search_by_ids(self, run_ids: Sequence[uuid.UUID]) -> list[AgentRun]:

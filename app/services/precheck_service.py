@@ -1,5 +1,7 @@
 """사람 쪽 유스케이스: AI 사전 점검 만들기·조회·이벤트 조회·취소, 입력 사본 만들기.
 
+- 조회·이벤트는 패치의 반영 실행(APPLY_PATCH)도 연다(같은 조직만). 취소·패치 결정은 사전 점검만.
+
 - 만들기는 서비스 행을 잠근 뒤 만료 → 열린 실행 확인 → INSERT 순서다. 같은 서비스의 열린 실행은
   하나뿐이다(부분 unique). 도착은 아직 연결하지 않은 환경도 받는다.
 - 입력 사본(input_snapshot)에는 비밀값·비밀 참조·변수 값을 넣지 않는다. 변수는 이름만 싣는다.
@@ -63,6 +65,8 @@ INPUT_FINDING_LIMIT = 50
 SAME_ENVIRONMENT_REASON = "SAME_ENVIRONMENT"
 _LEVEL_RANK = {LogLevel.INFO: 0, LogLevel.WARN: 1, LogLevel.ERROR: 2}
 _SECRET_REF_KEYS = frozenset({"secretRef", "secret_ref"})
+# 사람 쪽 상세·이벤트로 열 수 있는 실행 종류. CHANGE_PROPOSAL(P1)은 404 다.
+READABLE_RUN_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH)
 
 
 @dataclass(frozen=True)
@@ -216,14 +220,15 @@ class PrecheckService:
     async def get_precheck(
         self, organization_id: uuid.UUID, precheck_id: uuid.UUID
     ) -> PrecheckView:
+        """사전 점검 또는 그 패치의 반영 실행(APPLY_PATCH) 하나. 응답의 kind 로 구분한다."""
         async with self._session.begin():
-            return await self._view(await self._get(organization_id, precheck_id))
+            return await self._view(await self._get_readable(organization_id, precheck_id))
 
     async def search_logs(
         self, organization_id: uuid.UUID, precheck_id: uuid.UUID, after: int, size: int
     ) -> PrecheckLogPage:
         async with self._session.begin():
-            run = await self._get(organization_id, precheck_id)
+            run = await self._get_readable(organization_id, precheck_id)
             items = await self._events.search_after(run.id, after, size)
         return PrecheckLogPage(items, items[-1].seq if items else after)
 
@@ -250,6 +255,13 @@ class PrecheckService:
         run = await self._runs.find_precheck(organization_id, precheck_id)
         if run is None:
             raise PrecheckNotFoundError(str(precheck_id))
+        return run
+
+    async def _get_readable(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> AgentRun:
+        """조회·이벤트만: 사전 점검과 반영 실행. 취소·패치 결정은 `_get`(사전 점검만)을 쓴다."""
+        run = await self._runs.find_in_organization(organization_id, run_id, READABLE_RUN_KINDS)
+        if run is None:
+            raise PrecheckNotFoundError(str(run_id))
         return run
 
     async def _view(self, run: AgentRun) -> PrecheckView:

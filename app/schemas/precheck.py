@@ -14,6 +14,7 @@ from pydantic import Field, JsonValue, field_validator
 from app.enums import (
     AgentPatchDecision,
     AgentPatchStatus,
+    AgentRunKind,
     AgentRunOrigin,
     AgentRunSeverity,
     AgentRunStatus,
@@ -207,8 +208,43 @@ class PrecheckBlockedAttemptResponse(ApiModel):
     confirmed: bool = False
 
 
+class PrecheckApplyRunResponse(ApiModel):
+    """kind = APPLY_PATCH 인 실행의 반영 정보(SPEC api-10-3). 사전 점검이면 상세의 `apply` 가 null.
+
+    patchId·patchHash·repo·branch 는 만들 때 고정한 입력 사본 값이라 결과 전에도 있다.
+    appliedCommitSha 는 러너 결과 값이라 결과 전·실패·커밋 없는 성공이면 null 이다.
+    """
+
+    parent_run_id: uuid.UUID | None
+    patch_id: str | None
+    patch_hash: str | None
+    repo: str | None
+    branch: str | None
+    applied_commit_sha: str | None
+
+    @classmethod
+    def from_run(cls, run: AgentRun) -> Self:
+        snapshot = run.input_snapshot or {}
+        patch = snapshot.get("patch") or {}
+        result = run.result or {}
+        return cls(
+            parent_run_id=run.parent_run_id,
+            patch_id=patch.get("id"),
+            patch_hash=patch.get("patchHash"),
+            repo=snapshot.get("repo"),
+            branch=snapshot.get("branch"),
+            applied_commit_sha=result.get("appliedCommitSha"),
+        )
+
+
 class PrecheckDetailResponse(ApiModel):
+    """사전 점검(kind = PRECHECK) 또는 반영 실행(kind = APPLY_PATCH)의 상세.
+
+    반영 실행이면 `apply` 가 차고 사전 점검 결과 칸(configDiff·findings·patches 등)은 비어 있다.
+    """
+
     id: uuid.UUID
+    kind: AgentRunKind
     service_id: uuid.UUID
     source_environment_id: uuid.UUID | None
     target_environment_id: uuid.UUID | None
@@ -233,15 +269,21 @@ class PrecheckDetailResponse(ApiModel):
     findings: list[PrecheckFindingResponse]
     patches: list[PrecheckPatchResponse]
     blocked_attempts: list[PrecheckBlockedAttemptResponse]
+    apply: PrecheckApplyRunResponse | None
 
     @classmethod
     def from_view(cls, view: PrecheckView) -> Self:
         run = view.run
+        kind = AgentRunKind(run.kind)
         result = run.result or {}
         sandbox = result.get("sandbox")
         model = result.get("model")
         return cls(
             id=run.id,
+            kind=kind,
+            apply=(
+                PrecheckApplyRunResponse.from_run(run) if kind == AgentRunKind.APPLY_PATCH else None
+            ),
             service_id=run.service_id,
             source_environment_id=run.source_environment_id,
             target_environment_id=run.target_environment_id,

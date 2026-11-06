@@ -11,13 +11,13 @@
 | 메서드 · 경로 | 성공 | 주요 실패 | 역할 |
 |---|---|---|---|
 | `POST /prechecks` `{serviceId, targetEnvironmentId}` | 201 `PrecheckDetail`(`QUEUED`) | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409 `SERVICE_DELETING`·`SOURCE_NOT_SINGLE`·`PRECHECK_IN_PROGRESS`, 422 `VALIDATION_ERROR` | 개발자(사람) |
-| `GET /prechecks/{id}` | 200 `PrecheckDetail` | 404 `PRECHECK_NOT_FOUND` | 뷰어 |
-| `GET /prechecks/{id}/logs?after=&size=` | 200 `{items, nextAfter}` | 404 `PRECHECK_NOT_FOUND`, 422 | 뷰어 |
+| `GET /prechecks/{id}` | 200 `PrecheckDetail`(사전 점검·[반영 실행](#반영-실행-상세이벤트-조회)) | 404 `PRECHECK_NOT_FOUND` | 뷰어 |
+| `GET /prechecks/{id}/logs?after=&size=` | 200 `{items, nextAfter}`(사전 점검·반영 실행) | 404 `PRECHECK_NOT_FOUND`, 422 | 뷰어 |
 | `POST /prechecks/{id}/cancel` | 200 `PrecheckDetail`(`CANCELLED`) | 404, 409 `RUN_NOT_ACTIVE` | 개발자(사람) |
 | `POST /prechecks/{id}/patches/{patchId}/approve` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 | `POST /prechecks/{id}/patches/{patchId}/reject` `{patchHash, reason?}` | 200 `PrecheckPatch` | [패치 승인·거절](#패치-승인거절) | 개발자(사람) |
 
-- 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행과 `PRECHECK` 가 아닌 실행은 404 다.
+- 에이전트 토큰은 조회만 한다(쓰기 403 `AGENT_READ_ONLY`). 다른 조직의 실행은 404 다. 조회·이벤트는 `PRECHECK`·`APPLY_PATCH`, 취소·패치 승인·거절은 `PRECHECK` 만 받는다(그 밖의 종류는 404).
 - 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다. 최근 실행과 레지던시 기록은 조직 요약 [ai-residency.md](ai-residency.md) 의 `recentRuns` 로 본다.
 - 러너는 반영 실행(`APPLY_PATCH`)을 `:claim` 으로 가져가고 `ApplyPatchResult` 로 결과를 낸다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch), SPEC [api-10-2](../../specs/api-10-2-apply-patch-run.md)). 반영 성공 뒤 새 배포로 잇기는 없다(사람이 고객 저장소에 커밋).
 - 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
@@ -55,7 +55,7 @@
 ## `PrecheckDetail`
 
 ```text
-{id, serviceId, sourceEnvironmentId, targetEnvironmentId, status, failureCode,
+{id, kind, serviceId, sourceEnvironmentId, targetEnvironmentId, status, failureCode,
  simulated, aiReviewed, requestedByUserId,
  createdAt, claimedAt, startedAt, finishedAt, deadlineAt, leaseUntil,
  inputHash, sandboxId,
@@ -67,11 +67,14 @@
  featureGaps: [{source, target, gap, action, hasReplacement, severity, origin}],
  findings: [{control, environmentId, result, title, reason, origin, suggestedFix, confirmation}],
  patches: [PrecheckPatch],
- blockedAttempts: [{action, target, at, reason, auditLogId, confirmed}]}
+ blockedAttempts: [{action, target, at, reason, auditLogId, confirmed}],
+ apply: {parentRunId, patchId, patchHash, repo, branch, appliedCommitSha} | null}
 ```
 
 | 칸 | 뜻 |
 |---|---|
+| `kind` | `PRECHECK`(사전 점검) · `APPLY_PATCH`(패치 반영 실행). 반영 실행 읽기는 [아래 절](#반영-실행-상세이벤트-조회) |
+| `apply` | 반영 실행일 때만 찬다(사전 점검이면 null) |
 | `status` | `QUEUED → CLAIMED → RUNNING → SUCCEEDED·FAILED·TIMED_OUT·CANCELLED`. `GET` 은 쓰지 않아 저장된 값 그대로다. 임대가 지났어도 다음 쓰기 호출 전까지는 옛 상태일 수 있다(`leaseUntil` 로 판단) |
 | `failureCode` | `FAILED`·`TIMED_OUT` 일 때. 러너 값(`RUNNER_ERROR`·`DEADLINE` 등) 또는 WAS 값 `LEASE_EXPIRED`·`DEADLINE_EXCEEDED` |
 | `simulated` | **결과 값을 지어냈는가.** 실제 입력으로 계산했으면 모델이 없어도 false, 러너의 가짜 모드면 true. true 면 C-AI-1 증거가 아니다(`EVIDENCE_SIMULATED`) |
@@ -103,7 +106,7 @@
 | `blockReason` | 보호 파일(`PROTECTED_FILES_TOUCHED`), 검사 없음(`CHECKS_MISSING`), PASS 아닌 검사(`CHECK_NOT_PASSED`). 러너 값을 받지 않고 결과를 저장할 때 다시 계산한 값이다 |
 | `verification` | `checks` 중 PASS 수와 전체 수(저장 안 함) |
 | `approval` | 사람의 결정. 없으면 null |
-| `apply` | 반영 실행. `status` 는 그 실행의 상태(`QUEUED`→`CLAIMED`→`RUNNING`→`SUCCEEDED`·`FAILED`·`TIMED_OUT`)다. `appliedCommitSha`·`branch` 는 러너 결과(결과 전·실패면 null, 브랜치는 `applied/<반영 실행 id>`), `simulated` 는 러너 가짜 모드면 true(배지). 실행이 없으면 null(스위치 꺼짐·거절). `GET` 은 만료를 쓰지 않아 임대가 지났어도 다음 쓰기 호출 전까지 옛 상태일 수 있다 |
+| `apply` | 반영 실행. `runId` 가 반영 실행 id(= applyRunId)이고 `GET /prechecks/{runId}`·`/logs` 로 상세·이벤트를 연다([반영 실행 상세·이벤트](#반영-실행-상세이벤트-조회)). `status` 는 그 실행의 상태(`QUEUED`→`CLAIMED`→`RUNNING`→`SUCCEEDED`·`FAILED`·`TIMED_OUT`)다. `appliedCommitSha`·`branch` 는 러너 결과(결과 전·실패면 null, 브랜치는 `applied/<반영 실행 id>`), `simulated` 는 러너 가짜 모드면 true(배지). 실행이 없으면 null(스위치 꺼짐·거절). `GET` 은 만료를 쓰지 않아 임대가 지났어도 다음 쓰기 호출 전까지 옛 상태일 수 있다 |
 
 상태 계산(`compute_patch_status`, 위에서부터 처음 맞는 것):
 
@@ -151,13 +154,31 @@
 | 승인 | 결정 행만. 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기") | 결정 행 + 반영 실행(`APPLY_PATCH`, `QUEUED`, 마감 15분, `parentRunId` = 부모). `apply.runId`·`apply.status` 가 찬다 |
 | 서비스 영향 | 없음 | 반영 실행이 열려 있는 동안 그 서비스의 새 사전 점검·다음 승인이 409 `PRECHECK_IN_PROGRESS` |
 
-WAS 는 반영 실행을 `capabilities` 에 `APPLY_PATCH` 를 넣은 러너에게만 준다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch)). **그런 러너가 배포되기 전에는 켜지 않는다** — 그 전에 켜면 실행이 `QUEUED` 로 15분 머문 뒤 `TIMED_OUT` 이 되고(패치는 `APPLY_FAILED`) 그동안 위 409 가 난다. 반영 실행은 `GET /prechecks/{id}` 로 직접 열리지 않는다(404). 입력 사본:
+WAS 는 반영 실행을 `capabilities` 에 `APPLY_PATCH` 를 넣은 러너에게만 준다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch)). **그런 러너가 배포되기 전에는 켜지 않는다** — 그 전에 켜면 실행이 `QUEUED` 로 15분 머문 뒤 `TIMED_OUT` 이 되고(패치는 `APPLY_FAILED`) 그동안 위 409 가 난다. 반영 실행은 `GET /prechecks/{apply.runId}`·`/logs` 로 읽는다(아래 절, 취소·승인·거절은 404). 입력 사본:
 
 ```json
 {"schemaVersion": 1, "parentRunId": "<부모 id>",
  "patch": {"id": "p1", "patchHash": "sha256:…", "files": ["…"], "diff": "--- a/…", "origin": "RULE"},
  "repo": "Softbank-Hackathon-2026-Team-Echo/echo-ai-agent", "branch": "applied/<반영 실행 id>"}
 ```
+
+## 반영 실행 상세·이벤트 조회
+
+SPEC [api-10-3](../../specs/api-10-3-apply-run-detail.md). 부모 상세의 `patches[].apply.runId` 를 그대로 `GET /prechecks/{runId}`(상세)·`GET /prechecks/{runId}/logs`(이벤트)에 넣는다. 권한은 사전 점검 조회와 같다(뷰어 이상·에이전트 읽기, 다른 조직 404 `PRECHECK_NOT_FOUND`). 새 경로·러너 계약 변경·마이그레이션은 없다.
+
+응답은 같은 `PrecheckDetail` 이고 `kind: "APPLY_PATCH"` 로 구분한다:
+
+| 칸 | 반영 실행에서 |
+|---|---|
+| `status`·`failureCode`·`simulated` | 반영 실행의 값. `failureCode` 는 러너 값(`IMAGE_BUILD_FAILED`·`IMAGE_SCAN_FAILED`·`HEALTHZ_FAILED`·`PATCH_HASH_MISMATCH`·`PATCH_APPLY_FAILED`·`RUNNER_ERROR` 등, WAS 는 형식만 본다) 또는 WAS `LEASE_EXPIRED`·`DEADLINE_EXCEEDED` |
+| `startedAt`·`finishedAt` | 시작(러너의 첫 heartbeat·이벤트로 `RUNNING` 이 된 시각, 그 전이면 null)·종료 시각 |
+| `steps` | 반영 실행 이벤트에서 계산(러너는 `INPUT_LOAD`·`SANDBOX_CREATE`·`PATCH_VERIFY`·`SANDBOX_DELETE` 를 쓴다) |
+| `apply.parentRunId`·`patchId`·`patchHash`·`repo`·`branch` | 만들 때 고정한 입력 사본 값이라 결과 전에도 있다. `branch` 는 반영 대상 `applied/<반영 실행 id>` |
+| `apply.appliedCommitSha` | 러너 결과의 커밋 SHA. 결과 전·실패·커밋 없는 성공이면 null |
+| `aiReviewed`·`model`·`processing`·`sandboxId` | false·null·null·null |
+| `configDiff`·`featureGaps`·`findings`·`patches`·`blockedAttempts` | 빈 배열 |
+
+이벤트는 아래 [이벤트](#이벤트-get-prechecksidlogs) 모양 그대로다. 러너가 `data` 에 싣는 값: 빌드 `image built {seconds}`, 스캔 `image scanned {fixableHigh, fixableCritical}`, healthz `healthz passed {attempts}`, 실패 `image build failed {exitCode, tail}`·`apply failed; nothing pushed {failureCode, reason}`. 모든 문자열은 저장 전에 `mask_secrets` 를 거쳐 토큰 모양이 `***` 다. 입력 사본 원문(`diff`)은 싣지 않는다 — 패치 원문은 부모 상세 `patches[]` 에 있다.
 
 ## 이벤트 `GET /prechecks/{id}/logs`
 
