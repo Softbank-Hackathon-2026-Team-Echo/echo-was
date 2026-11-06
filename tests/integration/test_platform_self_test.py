@@ -9,8 +9,10 @@ import json
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from fastapi.routing import APIRoute
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.audit.actions import AuditAction, AuditComponent
@@ -29,6 +31,8 @@ from app.main import app
 from app.models import AgentToken, AuditLog, Finding, SecurityException
 from app.services.platform_self_test import (
     EVIDENCE_TTL,
+    FAIL_RENEW_MARGIN,
+    IN_FLIGHT_GRACE,
     SELF_TEST_SOURCE_REF,
     SELF_TEST_TOKEN_NAME,
     PlatformSelfTest,
@@ -46,6 +50,8 @@ APPROVE_ROUTES = {
     "POST /api/v1/orgs/{org_id}/prechecks/{precheck_id}/patches/{patch_id}/approve",
 }
 LEAKY_ROUTE = "POST /api/v1/orgs/{org_id}/migration-plans/{plan_id}/approve"
+# 시험 시작 직전 유예를 지나 도메인 줄이 대조 범위에 들어오게 하는 시간(초).
+PAST_GRACE = IN_FLIGHT_GRACE.total_seconds() + 1
 
 
 def _self_test(
@@ -230,6 +236,7 @@ async def test_recent_activity_with_audit_rows_passes(migration: Migration) -> N
     plan = await migration.create_plan()
     await migration.approve(plan["id"])
 
+    harness.clock.advance(PAST_GRACE)
     # 이 하네스는 보안 게이트가 꺼져 있어 승인 때 게이트 실행 로그가 없다. 게이트 대조는 끈다.
     await _self_test(harness, gate_enabled=False).run_once()
 
@@ -249,6 +256,7 @@ async def test_approval_without_gate_log_fails_when_gate_is_on(migration: Migrat
     harness = migration.harness
     plan = await migration.create_plan()
     await migration.approve(plan["id"])
+    harness.clock.advance(PAST_GRACE)
 
     await _self_test(harness, gate_enabled=True).run_once()
 
@@ -278,6 +286,7 @@ async def test_exception_without_audit_row_fails_audit_evidence(harness: DeployH
     )
     async with harness.session_factory() as session, session.begin():
         session.add(exception)
+    harness.clock.advance(PAST_GRACE)
 
     await _self_test(harness).run_once()
 
@@ -292,6 +301,167 @@ async def test_exception_without_audit_row_fails_audit_evidence(harness: DeployH
         (f"exception:{AuditAction.SECURITY_EXCEPTION_REQUESTED}", str(exception.id)),
         (f"approval:{AuditAction.SECURITY_EXCEPTION_APPROVED}", str(exception.id)),
     }
+
+
+# --- C-AUD-1: 정상 동시 요청과의 경합(검증 P1) ---
+
+
+async def _audit_findings(harness: DeployHarness) -> list[Finding]:
+    async with harness.session_factory() as session:
+        return list(
+            (
+                await session.scalars(
+                    select(Finding)
+                    .where(
+                        Finding.source_ref == SELF_TEST_SOURCE_REF,
+                        Finding.control_id == SecurityControlId.AUD_1,
+                    )
+                    .order_by(Finding.collected_at)
+                )
+            ).all()
+        )
+
+
+@pytest.mark.parametrize(
+    "after_sql",
+    [
+        # 예전 순서의 재현: 감사 줄을 읽은 직후 정상 요청(예외 생성·승인)이
+        # 도메인 줄과 감사 줄을 커밋한다.
+        "FROM audit_logs",
+        # 도메인 줄(예외)을 읽은 직후, 감사 줄을 읽기 전에 커밋된다.
+        "FROM security_exceptions",
+    ],
+)
+async def test_concurrent_valid_request_during_audit_check_passes(
+    migration: Migration, monkeypatch: pytest.MonkeyPatch, after_sql: str
+) -> None:
+    harness = migration.harness
+    original_execute = AsyncSession.execute
+    injected: dict[str, Any] = {}
+
+    async def interleaved(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original_execute(self, statement, *args, **kwargs)
+        sql = str(statement)
+        if not injected and after_sql in sql and "WHERE" in sql and "organization_id" in sql:
+            injected["sql"] = sql
+            injected["exception"] = await _create_and_approve_exception(migration)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", interleaved)
+    runner = _self_test(harness, gate_enabled=False)
+    await runner.run_once()
+    monkeypatch.setattr(AsyncSession, "execute", original_execute)
+
+    assert injected, "경합 지점에 요청을 끼워 넣지 못했다"
+    exception_id = injected["exception"]["id"]
+    async with harness.session_factory() as session:
+        actions = set(
+            (
+                await session.scalars(
+                    select(AuditLog.action).where(AuditLog.target_id == exception_id)
+                )
+            ).all()
+        )
+    assert {
+        AuditAction.SECURITY_EXCEPTION_REQUESTED,
+        AuditAction.SECURITY_EXCEPTION_APPROVED,
+    } <= actions
+    (first,) = await _audit_findings(harness)
+    assert first.result == SecurityResult.PASS, first.items
+
+    # 다음 주기에는 그 요청도 대조 범위에 들어오고, 감사 줄이 있으므로 그대로 PASS 다.
+    harness.clock.advance(PAST_GRACE)
+    await runner.run_once()
+    latest = (await _audit_findings(harness))[-1]
+    assert latest.result == SecurityResult.PASS, latest.items
+    summary = {item["item_id"]: item["target"] for item in latest.items}
+    assert summary[f"exception:{AuditAction.SECURITY_EXCEPTION_REQUESTED}"] == "1/1"
+    assert summary[f"approval:{AuditAction.SECURITY_EXCEPTION_APPROVED}"] == "1/1"
+
+
+async def test_in_flight_row_is_deferred_and_real_missing_audit_still_fails(
+    harness: DeployHarness,
+) -> None:
+    await harness.add_environment("aws-seoul")
+    approver = await create_user(harness.session_factory, "exception-approver")
+    now = harness.clock.now()
+    # 시험 시작 직전(유예 안)에 감사 줄 없이 생긴 예외: 진행 중 요청과 구분할 수 없어 이번엔 뺀다.
+    exception = SecurityException(
+        organization_id=harness.organization.id,
+        control_id=SecurityControlId.AUD_1,
+        was_version=WAS_VERSION,
+        reason="감사 줄 없이 넣은 예외",
+        requested_by_user_id=harness.admin.user.id,
+        approved_by_user_id=approver.id,
+        approved_at=now,
+        expires_at=now + timedelta(days=1),
+        created_at=now,
+        updated_at=now,
+    )
+    async with harness.session_factory() as session, session.begin():
+        session.add(exception)
+    runner = _self_test(harness)
+
+    await runner.run_once()
+    (deferred,) = await _audit_findings(harness)
+    assert deferred.result == SecurityResult.PASS, deferred.items
+
+    # 유예가 지난 다음 시험에서는 진짜 누락으로 FAIL 이다.
+    harness.clock.advance(PAST_GRACE)
+    await runner.run_once()
+    latest = (await _audit_findings(harness))[-1]
+    assert latest.result == SecurityResult.FAIL
+    assert latest.reason == SecurityFindingReason.AUDIT_RECORD_MISSING
+    missing = {
+        item["item_id"]
+        for item in latest.items
+        if item["reason"] == "AUDIT_RECORD_MISSING" and item["target"] == str(exception.id)
+    }
+    assert missing == {
+        f"exception:{AuditAction.SECURITY_EXCEPTION_REQUESTED}",
+        f"approval:{AuditAction.SECURITY_EXCEPTION_APPROVED}",
+    }
+
+
+async def test_fail_evidence_expires_after_next_cycle_so_later_pass_unblocks(
+    harness: DeployHarness,
+) -> None:
+    await harness.add_environment("aws-seoul")
+
+    async def endpoint() -> None:
+        return None
+
+    extra = APIRoute("/api/v1/orgs/{org_id}/unnamed-thing", endpoint, methods=["POST"])
+    await _self_test(harness, routes=[*app.routes, extra]).run_once()
+    (failed,) = await _audit_findings(harness)
+    interval = timedelta(seconds=harness.settings.security_platform_self_test_interval_seconds)
+    assert failed.result == SecurityResult.FAIL
+    # FAIL 은 24시간이 아니라 다음 주기 + 여유까지만 쓴다.
+    assert failed.expires_at - failed.collected_at == interval + FAIL_RENEW_MARGIN < EVIDENCE_TTL
+    blocked = _control(
+        (await _matrix(harness))["rows"][0]["cells"]["auditLog"], SecurityControlId.AUD_1
+    )
+    assert blocked["gateStatus"] == SecurityGateStatus.BLOCKED.value
+
+    # 다음 주기: 원인이 사라져 PASS. FAIL 이 아직 유효한 동안은 보수적으로 막힌 채다.
+    harness.clock.advance(interval.total_seconds())
+    await _self_test(harness).run_once()
+    passed = (await _audit_findings(harness))[-1]
+    assert passed.result == SecurityResult.PASS
+    assert passed.expires_at - passed.collected_at == EVIDENCE_TTL
+    still = _control(
+        (await _matrix(harness))["rows"][0]["cells"]["auditLog"], SecurityControlId.AUD_1
+    )
+    assert still["result"] == SecurityResult.FAIL.value
+
+    # 여유가 지나면 FAIL 이 만료되고 최신 PASS 만 남아 게이트가 열린다(24시간 기다리지 않는다).
+    harness.clock.advance(FAIL_RENEW_MARGIN.total_seconds())
+    control = _control(
+        (await _matrix(harness))["rows"][0]["cells"]["auditLog"], SecurityControlId.AUD_1
+    )
+    assert control["result"] == SecurityResult.PASS.value
+    assert control["gateStatus"] == SecurityGateStatus.PASS.value
+    assert control["findingIds"] == [str(passed.id)]
 
 
 # --- 범위·매트릭스 ---

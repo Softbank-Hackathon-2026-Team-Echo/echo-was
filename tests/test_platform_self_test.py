@@ -18,6 +18,7 @@ from app.enums import (
 from app.main import app
 from app.services.platform_self_test import (
     EVIDENCE_TTL,
+    FAIL_RENEW_MARGIN,
     AuditCheck,
     RouteProbe,
     fill_route,
@@ -156,6 +157,22 @@ def test_unnamed_write_route_fails_audit_trail() -> None:
 
     assert normalized.finding.result == SecurityResult.FAIL
     assert normalized.reason == SecurityFindingReason.AUDIT_ROUTE_UNNAMED
+
+
+def test_fail_evidence_uses_short_ttl_but_pass_keeps_full_ttl() -> None:
+    short = timedelta(hours=6) + FAIL_RENEW_MARGIN
+    missing = [AuditCheck("approval:MIGRATION_PLAN_APPROVED", ("a",), ("a",))]
+
+    failed = judge_audit_trail((), missing, SCOPE, NOW, short).finding
+    passed = judge_audit_trail((), [], SCOPE, NOW, short).finding
+    leaked = judge_agent_writes([RouteProbe("POST", APPROVE, 202, "OK")], SCOPE, NOW, short)
+
+    assert (failed.result, failed.expires_at) == (SecurityResult.FAIL, NOW + short)
+    assert (passed.result, passed.expires_at) == (SecurityResult.PASS, NOW + EVIDENCE_TTL)
+    assert leaked.finding.expires_at == NOW + short
+    # 24시간보다 긴 값은 24시간으로 자른다.
+    capped = judge_audit_trail((), missing, SCOPE, NOW, timedelta(days=2)).finding
+    assert capped.expires_at == NOW + EVIDENCE_TTL
 
 
 # --- 간격 ---

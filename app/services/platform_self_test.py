@@ -85,8 +85,16 @@ AUDIT_WINDOW = timedelta(hours=24)
 EVIDENCE_TTL = timedelta(hours=24)
 # 근거 줄 상한(나머지는 total_items 로 센다).
 ITEM_LIMIT = 50
+# FAIL 증거는 다음 주기 시험이 덮도록 「주기 + 이 여유」 뒤에 만료한다(24시간을 넘지 않는다).
+# 규칙표는 미만료 증거 중 가장 나쁜 값을 쓰므로, FAIL 이 24시간 남으면 다음 PASS 가 가리지 못한다.
+# 여유는 한 주기의 시험 소요(조직 순차)보다 길게 잡아 FAIL 과 다음 결과 사이에
+# 빈틈(UNKNOWN)이 없게 한다.
+FAIL_RENEW_MARGIN = timedelta(minutes=10)
 # 같은 트랜잭션의 줄이라도 시각이 조금 다를 수 있어 감사 줄을 읽는 범위를 조금 넓힌다.
 _AUDIT_SLACK = timedelta(minutes=5)
+# 감사 대조의 도메인 줄 상한 = 시험 시작 시각 - 이 유예. 시험 무렵 진행 중인 요청(도메인 줄과
+# 감사 줄이 아직 커밋되지 않았거나 한쪽만 보이는 요청)은 이번 대조에서 빼고 다음 주기에 대조한다.
+IN_FLIGHT_GRACE = timedelta(seconds=60)
 # 경로 변수 중 uuid 가 아닌 것(앱 환경 변수 키).
 _STRING_PATH_PARAMS = {"key": "SELF_TEST_KEY"}
 _PATH_PARAM = re.compile(r"{([^}:]+)(?::[^}]*)?}")
@@ -133,7 +141,10 @@ def fill_route(route: str, organization_id: uuid.UUID) -> str:
 
 
 def judge_agent_writes(
-    probes: Sequence[RouteProbe], scope: SecurityScope, collected_at: datetime
+    probes: Sequence[RouteProbe],
+    scope: SecurityScope,
+    collected_at: datetime,
+    fail_ttl: timedelta = EVIDENCE_TTL,
 ) -> NormalizedFinding:
     """C-IAM-2: 모두 403 AGENT_READ_ONLY 면 PASS. 부른 경로가 없으면 확인하지 못한 것(UNKNOWN)."""
     failed = [probe for probe in probes if not probe.is_denied]
@@ -166,6 +177,7 @@ def judge_agent_writes(
         collected_at,
         items,
         len(probes),
+        fail_ttl,
     )
 
 
@@ -174,6 +186,7 @@ def judge_audit_trail(
     checks: Sequence[AuditCheck],
     scope: SecurityScope,
     collected_at: datetime,
+    fail_ttl: timedelta = EVIDENCE_TTL,
 ) -> NormalizedFinding:
     """C-AUD-1: 이름표에 없는 쓰기 경로도, 빠진 감사 줄도 없으면 PASS."""
     missing_items = [
@@ -220,6 +233,7 @@ def judge_audit_trail(
         collected_at,
         tuple(items[:ITEM_LIMIT]),
         len(items),
+        fail_ttl,
     )
 
 
@@ -232,7 +246,9 @@ def _normalized(
     collected_at: datetime,
     items: tuple[FindingItem, ...],
     total_items: int,
+    fail_ttl: timedelta,
 ) -> NormalizedFinding:
+    ttl = min(fail_ttl, EVIDENCE_TTL) if result == SecurityResult.FAIL else EVIDENCE_TTL
     finding = SecurityFinding(
         finding_id=uuid.uuid4(),
         control_id=control_id,
@@ -241,7 +257,7 @@ def _normalized(
         source=source,
         scope=scope,
         collected_at=collected_at,
-        expires_at=collected_at + EVIDENCE_TTL,
+        expires_at=collected_at + ttl,
         policy_version=POLICY_VERSION,
     )
     return NormalizedFinding(finding, reason, items, total_items, None)
@@ -276,6 +292,7 @@ class PlatformSelfTest:
         self._was_version = settings.was_version
         self._gate_enabled = settings.security_gate_enabled
         self._interval = settings.security_platform_self_test_interval_seconds
+        self._fail_ttl = timedelta(seconds=self._interval) + FAIL_RENEW_MARGIN
         self._app = app
         routes = list(routes)
         self._probe_routes = agent_probe_routes(routes)
@@ -330,11 +347,15 @@ class PlatformSelfTest:
         collected_at = self._clock.now()
         scope = SecurityScope(organization_id, was_version=self._was_version)
         checks = await self._audit_checks(
-            organization_id, issued.token_id, probes, started_at - AUDIT_WINDOW
+            organization_id,
+            issued.token_id,
+            probes,
+            since=started_at - AUDIT_WINDOW,
+            until=started_at - IN_FLIGHT_GRACE,
         )
         findings = [
-            judge_agent_writes(probes, scope, collected_at),
-            judge_audit_trail(self._unnamed_routes, checks, scope, collected_at),
+            judge_agent_writes(probes, scope, collected_at, self._fail_ttl),
+            judge_audit_trail(self._unnamed_routes, checks, scope, collected_at, self._fail_ttl),
         ]
         async with self._session_factory() as session:
             await SecurityFindingService(session).record_all(
@@ -403,9 +424,90 @@ class PlatformSelfTest:
         organization_id: uuid.UUID,
         token_id: uuid.UUID,
         probes: Sequence[RouteProbe],
+        *,
         since: datetime,
+        until: datetime,
     ) -> list[AuditCheck]:
+        """도메인 줄을 먼저, 감사 줄을 나중에 읽는다.
+
+        기본 격리(READ COMMITTED)는 SELECT 마다 보이는 커밋이 다르다. 감사 줄을 먼저 읽으면 그 뒤에
+        커밋된 정상 요청의 도메인 줄만 보여 감사 누락으로 잘못 판정한다. 도메인 줄을 먼저 읽으면, 그
+        도메인 줄과 같은 트랜잭션(또는 그보다 먼저)에 커밋된 감사 줄은 나중 SELECT 에 반드시 보인다.
+        도메인 줄은 [since, until) 만 대조해 시험 시작 무렵 진행 중인 요청은 다음 주기로 미룬다.
+        """
         async with self._session_factory() as session, session.begin():
+            plans = (
+                (
+                    await session.execute(
+                        select(MigrationPlan.id)
+                        .join(Service, Service.id == MigrationPlan.service_id)
+                        .where(
+                            Service.organization_id == organization_id,
+                            MigrationPlan.approved_at >= since,
+                            MigrationPlan.approved_at < until,
+                            MigrationPlan.approved_by_user_id.is_not(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            patch_decisions = (
+                await session.execute(
+                    select(AgentPatchApproval.run_id, AgentPatchApproval.decision)
+                    .join(AgentRun, AgentRun.id == AgentPatchApproval.run_id)
+                    .where(
+                        AgentRun.organization_id == organization_id,
+                        AgentPatchApproval.decided_at >= since,
+                        AgentPatchApproval.decided_at < until,
+                    )
+                )
+            ).all()
+            runs = (
+                await session.execute(
+                    select(AgentRun.id, AgentRun.status, AgentRun.claimed_at, AgentRun.finished_at)
+                    .where(AgentRun.organization_id == organization_id)
+                    .where(
+                        ((AgentRun.claimed_at >= since) & (AgentRun.claimed_at < until))
+                        | ((AgentRun.finished_at >= since) & (AgentRun.finished_at < until))
+                    )
+                )
+            ).all()
+            exceptions = (
+                await session.execute(
+                    select(
+                        SecurityException.id,
+                        SecurityException.created_at,
+                        SecurityException.approved_at,
+                        SecurityException.revoked_at,
+                    ).where(
+                        SecurityException.organization_id == organization_id,
+                        (
+                            (SecurityException.created_at >= since)
+                            & (SecurityException.created_at < until)
+                        )
+                        | (
+                            (SecurityException.approved_at >= since)
+                            & (SecurityException.approved_at < until)
+                        )
+                        | (
+                            (SecurityException.revoked_at >= since)
+                            & (SecurityException.revoked_at < until)
+                        ),
+                    )
+                )
+            ).all()
+            # 감사 줄과 게이트 실행 로그는 도메인 줄보다 나중에 읽는다(위 설명).
+            gate_logged = set(
+                (
+                    await session.execute(
+                        select(MigrationPlanLog.migration_plan_id).where(
+                            MigrationPlanLog.migration_plan_id.in_(plans),
+                            MigrationPlanLog.code == MigrationLogCode.SECURITY_GATE_PASSED,
+                        )
+                    )
+                ).scalars()
+            )
             audit_rows = (
                 await session.execute(
                     select(
@@ -422,63 +524,9 @@ class PlatformSelfTest:
                     )
                 )
             ).all()
-            plans = (
-                (
-                    await session.execute(
-                        select(MigrationPlan.id)
-                        .join(Service, Service.id == MigrationPlan.service_id)
-                        .where(
-                            Service.organization_id == organization_id,
-                            MigrationPlan.approved_at >= since,
-                            MigrationPlan.approved_by_user_id.is_not(None),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            gate_logged = set(
-                (
-                    await session.execute(
-                        select(MigrationPlanLog.migration_plan_id).where(
-                            MigrationPlanLog.migration_plan_id.in_(plans),
-                            MigrationPlanLog.code == MigrationLogCode.SECURITY_GATE_PASSED,
-                        )
-                    )
-                ).scalars()
-            )
-            patch_decisions = (
-                await session.execute(
-                    select(AgentPatchApproval.run_id, AgentPatchApproval.decision)
-                    .join(AgentRun, AgentRun.id == AgentPatchApproval.run_id)
-                    .where(
-                        AgentRun.organization_id == organization_id,
-                        AgentPatchApproval.decided_at >= since,
-                    )
-                )
-            ).all()
-            runs = (
-                await session.execute(
-                    select(AgentRun.id, AgentRun.status, AgentRun.claimed_at, AgentRun.finished_at)
-                    .where(AgentRun.organization_id == organization_id)
-                    .where((AgentRun.claimed_at >= since) | (AgentRun.finished_at >= since))
-                )
-            ).all()
-            exceptions = (
-                await session.execute(
-                    select(
-                        SecurityException.id,
-                        SecurityException.created_at,
-                        SecurityException.approved_at,
-                        SecurityException.revoked_at,
-                    ).where(
-                        SecurityException.organization_id == organization_id,
-                        (SecurityException.created_at >= since)
-                        | (SecurityException.approved_at >= since)
-                        | (SecurityException.revoked_at >= since),
-                    )
-                )
-            ).all()
+
+        def within(value: datetime | None) -> bool:
+            return value is not None and since <= value < until
 
         def recorded(action: str) -> set[uuid.UUID]:
             return {
@@ -527,12 +575,12 @@ class PlatformSelfTest:
             [
                 _check(
                     f"approval:{AuditAction.SECURITY_EXCEPTION_APPROVED}",
-                    (row.id for row in exceptions if _within(row.approved_at, since)),
+                    (row.id for row in exceptions if within(row.approved_at)),
                     recorded(AuditAction.SECURITY_EXCEPTION_APPROVED),
                 ),
                 _check(
                     f"agent:{AuditAction.AGENT_RUN_CLAIMED}",
-                    (row.id for row in runs if _within(row.claimed_at, since)),
+                    (row.id for row in runs if within(row.claimed_at)),
                     recorded(AuditAction.AGENT_RUN_CLAIMED),
                 ),
                 _check(
@@ -540,7 +588,7 @@ class PlatformSelfTest:
                     (
                         row.id
                         for row in runs
-                        if _within(row.finished_at, since)
+                        if within(row.finished_at)
                         and row.status in (AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED)
                     ),
                     recorded(AuditAction.AGENT_RUN_FINISHED),
@@ -550,19 +598,18 @@ class PlatformSelfTest:
                     (
                         row.id
                         for row in runs
-                        if _within(row.finished_at, since)
-                        and row.status == AgentRunStatus.TIMED_OUT
+                        if within(row.finished_at) and row.status == AgentRunStatus.TIMED_OUT
                     ),
                     recorded(AuditAction.AGENT_RUN_TIMED_OUT),
                 ),
                 _check(
                     f"exception:{AuditAction.SECURITY_EXCEPTION_REQUESTED}",
-                    (row.id for row in exceptions if _within(row.created_at, since)),
+                    (row.id for row in exceptions if within(row.created_at)),
                     recorded(AuditAction.SECURITY_EXCEPTION_REQUESTED),
                 ),
                 _check(
                     f"exception:{AuditAction.SECURITY_EXCEPTION_REVOKED}",
-                    (row.id for row in exceptions if _within(row.revoked_at, since)),
+                    (row.id for row in exceptions if within(row.revoked_at)),
                     recorded(AuditAction.SECURITY_EXCEPTION_REVOKED),
                 ),
             ]
@@ -582,10 +629,6 @@ class PlatformSelfTest:
                 await asyncio.wait_for(stop.wait(), timeout=self._interval)
             except TimeoutError:
                 pass
-
-
-def _within(value: datetime | None, since: datetime) -> bool:
-    return value is not None and value >= since
 
 
 def _code_of(response: httpx.Response) -> str | None:

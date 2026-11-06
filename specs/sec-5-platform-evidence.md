@@ -9,7 +9,7 @@
 ## 1. 왜 하나
 
 - 두 통제는 필수(`예`)인데 증거를 만드는 경로가 없어 늘 UNKNOWN 이었다. 운영은 WAS 버전 범위 기한부 예외(11/12 만료)로 덮어 두었다. 심사에서 "증거 없음 → 예외"는 약한 답이다.
-- 실제로는 지켜지고 있다: 에이전트 토큰의 쓰기는 검사기에서 403 `AGENT_READ_ONLY`(`app/auth/guards.py`), 조직 안 쓰기 34경로는 감사 이름표(`WRITE_ROUTE_ACTIONS`)와 시험(`test_every_write_route_has_an_action_name`)으로 묶여 있다. 이것을 **운영에서 주기적으로 직접 확인해 증거로 남기면** 예외 없이 PASS 가 된다.
+- 실제로는 지켜지고 있다: 에이전트 토큰의 쓰기는 검사기에서 403 `AGENT_READ_ONLY`(`app/auth/guards.py`), 조직 안 쓰기 35경로는 감사 이름표(`WRITE_ROUTE_ACTIONS`)와 시험(`test_every_write_route_has_an_action_name`)으로 묶여 있다. 이것을 **운영에서 주기적으로 직접 확인해 증거로 남기면** 예외 없이 PASS 가 된다.
 
 ## 2. 결정
 
@@ -22,7 +22,8 @@
 | D-5 | **C-AUD-1 = 감사 기록 대조(`AUDIT_LOG`)**: (a) 앱의 쓰기 경로가 모두 감사 행동 이름표에 있는가(기존 시험과 같은 계산을 `app/audit/route_coverage.py` 로 옮겨 씀), (b) 최근 24시간에 일어난 일마다 그 대상(실행) id 로 감사 줄이 있는가 — 3절 표, (c) D-2 의 거부 요청이 모두 그 토큰 id 의 `DENIED`·`AGENT_READ_ONLY` 줄로 남았는가. 빠진 것이 하나라도 있으면 FAIL, 없으면 PASS. 그 시간에 일이 없던 종류는 `0/0` 으로 보이고 결과를 바꾸지 않는다 | 지시(11/7) |
 | D-6 | 증거 범위 = 조직 + WAS 버전(`SecurityScope(org, was_version=WAS_VERSION)`), 환경·서비스 칸 없음. 매트릭스는 환경 행마다 같은 조직 증거를 쓰므로 **환경 3개 공통**이다(기존 WAS 버전 범위 예외가 모든 환경 행에 붙던 것과 같은 관례 — `test_organization_exception_marks_audit_cell_in_every_environment`). `WAS_VERSION` 이 비면 판정에 쓸 수 없어 돌지 않는다 | sec-3 AD-4 |
 | D-7 | 정책 버전은 지금 규칙표 `POLICY_VERSION`(`sec-rules-2026.11.06`). 규칙표는 바꾸지 않는다 | 지시(11/7) |
-| D-8 | 증거 만료 = 수집 + **24시간**(규칙 유효기간 7일보다 짧게). 한 통제에 증거가 여럿이면 가장 나쁜 값이라, 한 번의 FAIL 이 7일 동안 남지 않게 하고 일꾼이 멈추면 하루 뒤 UNKNOWN 으로 돌아가게 한다. 간격 상한 8시간 = 유효기간 안에 3번 이상 돈다 | AI-default |
+| D-8 | 증거 만료 = 수집 + **24시간**(규칙 유효기간 7일보다 짧게). 한 통제에 증거가 여럿이면 가장 나쁜 값이라, 한 번의 FAIL 이 7일 동안 남지 않게 하고 일꾼이 멈추면 하루 뒤 UNKNOWN 으로 돌아가게 한다. 간격 상한 8시간 = 유효기간 안에 3번 이상 돈다. **FAIL 증거만은 수집 + (간격 + 10분)(최대 24시간)에 만료**한다 — 규칙표는 최신이 아니라 가장 나쁜 값을 쓰므로, 원인이 사라져 다음 주기가 PASS 를 남기면 그 직후 FAIL 이 빠져 게이트가 열린다. 진짜 결함이면 다음 주기도 FAIL 을 남겨 계속 막는다. 10분 여유는 한 주기 시험 소요보다 길게 잡아 FAIL 과 다음 결과 사이에 UNKNOWN 빈틈이 없게 한 것이다 | AI-default, 검증 P1(11/7) |
+| D-8a | **C-AUD-1 대조는 도메인 행을 먼저, 감사 줄·게이트 실행 로그를 나중에 읽는다.** 기본 격리(READ COMMITTED)에서는 SELECT 마다 보이는 커밋이 달라, 감사 줄을 먼저 읽으면 그 사이 커밋된 정상 요청의 도메인 행만 보여 거짓 `AUDIT_RECORD_MISSING` 이 된다. 도메인 행과 감사 줄은 같은 트랜잭션에 커밋되므로 도메인 행이 보이면 나중 SELECT 에서 감사 줄도 보인다. 또 도메인 행은 **[시험 시작 − 24시간, 시험 시작 − 60초)** 만 대조해, 시험 무렵 진행 중인 요청은 다음 주기(창 24시간 안)에 대조한다 | 검증 P1(11/7) |
 | D-9 | 시험 자체가 예외로 끝나면 증거를 남기지 않고 로그만 남긴다(다음 주기에 다시). 조직 하나의 실패가 다른 조직을 막지 않는다 | `periodic_tls_probe.py` 관례 |
 | D-10 | **예외는 건드리지 않는다.** 규칙표 `evaluate_control` 은 결과가 FAIL·UNKNOWN 일 때만 예외를 적용한다. 증거가 PASS 면 `effective_result = PASS`, `gateStatus = PASS`, 예외 표시 없음이고, 기존 예외는 그대로 11/12 에 만료된다 | 코드 확인 |
 | D-11 | 일회용 토큰 발급·폐기는 SYSTEM 감사 줄(`component = security-self-test`, `AGENT_TOKEN_ISSUED`·`AGENT_TOKEN_REVOKED`)로 남긴다. 사람 행동이 아니므로 USER 로 쓰지 않는다 | AI-default |
@@ -44,7 +45,7 @@
 
 근거 줄(`items`, 최대 50): 빠진 것(`AUDIT_RECORD_MISSING`, `target` = 대상 id · `AUDIT_ROUTE_UNNAMED`, `itemId` = 경로)을 먼저, 그다음 종류마다 `확인/전체`(`target = "3/3"`).
 
-보지 않는 것: 사람이 취소한 AI 실행(`CANCELLED`), 실행 시작 때의 게이트 판정(일꾼 `_start` 의 실행 로그), 배포·되돌리기 요청(실행 ID 가 아니라 배포 요청 id — 이미 `test_audit_logs.py` 가 34경로 전부를 시험한다), 데모 시드(감사 대상 아님).
+보지 않는 것: 사람이 취소한 AI 실행(`CANCELLED`), 실행 시작 때의 게이트 판정(일꾼 `_start` 의 실행 로그), 배포·되돌리기 요청(실행 ID 가 아니라 배포 요청 id — 이미 `test_audit_logs.py` 가 쓰기 경로 전부를 시험한다), 데모 시드(감사 대상 아님).
 
 ## 4. 바뀌는 것
 
@@ -62,8 +63,8 @@
 
 1. 병합 = 운영 자동 배포 → 일꾼 재시작 → **시작하자마자** 살아 있는 환경이 있는 조직마다 C-IAM-2·C-AUD-1 증거 2건(`sourceRef = self-test:platform`, `wasVersion = 2026.11.05`, 유효 24시간).
 2. 그 즉시 매트릭스의 aws·gcp·onprem 세 행 모두 `iam`·`auditLog` 칸의 두 통제가 `result = PASS`·`gateStatus = PASS`·예외 표시 없음이 된다(C-AUD-1 이 PASS 일 때). 기존 예외는 남아 있지만 적용되지 않고 11/12 에 만료된다.
-3. 확인 방법(읽기만): `GET /api/v1/orgs/{org}/security/findings?controlId=C-IAM-2`·`C-AUD-1` 의 최신 행 `result`·`items`, `GET …/security/matrix` 의 두 통제 `exception = null`. 감사 로그에 `security-self-test` SYSTEM 줄 2개 + 에이전트 거부 34줄이 6시간마다 생긴다.
-4. C-AUD-1 이 FAIL 이면 근거 줄의 `target`(대상 id)이 감사 줄 없이 생긴 행이다. 24시간 뒤 그 행이 창을 벗어나고 다음 시험이 PASS 를 남겨도 FAIL 증거는 만료(24시간)까지 남는다. 예외가 유효한 동안은 WARN + 예외로 보인다.
+3. 확인 방법(읽기만): `GET /api/v1/orgs/{org}/security/findings?controlId=C-IAM-2`·`C-AUD-1` 의 최신 행 `result`·`items`, `GET …/security/matrix` 의 두 통제 `exception = null`. 감사 로그에 `security-self-test` SYSTEM 줄 2개 + 에이전트 거부 35줄이 6시간마다 생긴다.
+4. C-AUD-1 이 FAIL 이면 근거 줄의 `target`(대상 id)이 감사 줄 없이 생긴 행이다. 감사 줄이 정말 없으면 그 행이 창(24시간)을 벗어날 때까지 매 주기 FAIL 이 이어진다. 그 뒤 다음 시험이 PASS 를 남기면 마지막 FAIL 은 수집 + (간격 + 10분)에 만료되어 게이트가 열린다(D-8). 예외가 유효한 동안은 WARN + 예외로 보인다.
 
 ## 6. 인수 조건
 
@@ -71,12 +72,14 @@
 |---|---|---|
 | AC-1 | 모든 쓰기 경로가 403 `AGENT_READ_ONLY` 면 C-IAM-2 PASS(`WAS_TEST`, 조직 + WAS 버전 범위, 정책 버전, 만료 24시간), 승인 경로 3개가 포함된다 | `test_self_test_records_passing_evidence_with_was_version_scope`, `test_agent_probe_routes_cover_every_human_write_route_including_approvals`, `test_all_denied_writes_pass_iam` |
 | AC-2 | 쓰기 하나라도 통과(2xx·404·다른 403·500)하면 FAIL, 통과한 경로가 근거 첫 줄 | `test_agent_write_that_passes_fails_iam_evidence`, `test_any_write_that_is_not_agent_read_only_fails_iam`, `test_no_probe_is_unknown_not_pass` |
-| AC-3 | 일회용 토큰은 폐기되고 발급·폐기·거부 34건이 감사 줄로 남는다 | `test_self_test_token_is_revoked_and_every_step_is_audited` |
+| AC-3 | 일회용 토큰은 폐기되고 발급·폐기·거부 35건이 감사 줄로 남는다 | `test_self_test_token_is_revoked_and_every_step_is_audited` |
 | AC-4 | 최근 활동(승인·AI 실행·예외)이 감사 줄과 맞으면 C-AUD-1 PASS, 감사 줄 없이 생긴 예외·게이트 로그 없는 승인·이름표에 없는 쓰기 경로는 FAIL | `test_recent_activity_with_audit_rows_passes`, `test_exception_without_audit_row_fails_audit_evidence`, `test_approval_without_gate_log_fails_when_gate_is_on`, `test_unnamed_write_route_fails_audit_evidence`, 단위 `test_missing_audit_row_*`·`test_unnamed_write_route_*` |
 | AC-5 | 매트릭스 환경 3개 모두 두 통제가 PASS, 유효한 예외가 있어도 적용되지 않고 예외 행은 그대로 | `test_matrix_uses_pass_evidence_in_every_environment_before_exception` |
 | AC-6 | 새 FAIL 은 앞선 PASS 가 있어도 막는다 | `test_failed_evidence_blocks_matrix_even_after_older_pass` |
 | AC-7 | `WAS_VERSION` 이 없거나 환경이 없는 조직은 시험하지 않는다(토큰도 만들지 않는다) | `test_self_test_skips_when_was_version_is_empty_or_no_environment` |
 | AC-8 | 간격이 증거 유효기간 안에 3번 이상, 범위 밖 값은 거절 | `test_default_interval_*`, `test_interval_outside_range_is_rejected` |
+| AC-9 | 대조 중(감사 줄을 읽은 직후·도메인 행을 읽은 직후)에 커밋된 정상 요청은 거짓 FAIL 을 만들지 않고, 다음 주기에 대조되어 PASS 다. 유예(60초) 안의 감사 누락 행은 이번엔 빼고 다음 주기에 FAIL 이다 | `test_concurrent_valid_request_during_audit_check_passes`(2경우), `test_in_flight_row_is_deferred_and_real_missing_audit_still_fails` |
+| AC-10 | FAIL 증거는 간격 + 10분에 만료(PASS 는 24시간), 다음 주기 PASS 뒤 여유가 지나면 매트릭스·게이트가 PASS 로 돌아온다 | `test_fail_evidence_expires_after_next_cycle_so_later_pass_unblocks`, 단위 `test_fail_evidence_uses_short_ttl_but_pass_keeps_full_ttl` |
 
 ## 7. 리스크
 
