@@ -56,6 +56,11 @@ MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
         "The database writer moved to the target, but the ledger check found missing or duplicate "
         "rows (or no result). Nothing was rolled back automatically."
     ),
+    MigrationErrorCode.DB_CUTOVER_UNKNOWN: (
+        "The result of the database cutover could not be confirmed (which database is the writer "
+        "is unknown). Traffic and the database were left as they are; a person must check the "
+        "writer before changing anything."
+    ),
 }
 
 # 트래픽 적음으로 통과한 JUDGE_PASSED 줄(data.lowTraffic = true)에 붙이는 문장.
@@ -109,6 +114,11 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
         _INFO, "Data replication lag is within the rollback condition."
     ),
     _C.DATA_SYNC_FAILED: MigrationLogEntry(_WARN, "Data replication check failed."),
+    _C.DATA_SYNC_SKIPPED: MigrationLogEntry(
+        _WARN,
+        "Emergency migration: the source database could not be reached, so the replication check "
+        "was skipped. The database cutover may promote the target (approved by the operator).",
+    ),
     _C.SUCCEEDED: MigrationLogEntry(
         _INFO, "Migration succeeded. The target environment now serves all traffic."
     ),

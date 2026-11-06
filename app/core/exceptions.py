@@ -400,6 +400,16 @@ class MigrationPlanOpenError(ConflictError):
         super().__init__("service already has an open migration plan", details=details)
 
 
+class PromoteAckRequiredError(InvalidInputError):
+    """재난 긴급 이전 + DB 쓰기 전환 계획은 승격(되돌릴 수 없음)에 동의해야 승인할 수 있다.
+
+    승인 본문 `{"acknowledgePromote": true}` 가 없으면 422.
+    계획 상세의 promoteWarning 이 그 내용이다.
+    """
+
+    code = "PROMOTE_ACK_REQUIRED"
+
+
 class DbCutoverDisabledError(ConflictError):
     """includeCutover=true 인데 DB 쓰기 전환 실행기가 꺼져 있다(실행기 disabled)."""
 

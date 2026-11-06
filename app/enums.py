@@ -466,6 +466,11 @@ class MigrationErrorCode(StrEnum):
     # 전환은 끝났지만 장부 대조에서 누락·중복이 있거나 결과 행을 읽지 못했다. 쓰기 담당은 도착이라
     # 자동으로 되돌리지 않는다(12.0 결정 3).
     DATA_INTEGRITY_FAILED = "DATA_INTEGRITY_FAILED"
+    # 컷오버 결과(쓰기 담당)를 확인하지 못했다: Job 생성 응답 유실 뒤 조회 불가,
+    # 종료 1 인데 출발이 쓰기 담당이라는 근거 없음, 상태 조회가 계속 실패.
+    # 트래픽·DB 를 그대로 두고(rollbackStatus SKIPPED)
+    # 사람이 쓰기 담당을 확인한다(트래픽과 쓰기 담당이 갈리는 것을 막는다).
+    DB_CUTOVER_UNKNOWN = "DB_CUTOVER_UNKNOWN"
 
 
 class MigrationRollbackStatus(StrEnum):
@@ -551,6 +556,9 @@ class MigrationLogCode(StrEnum):
     DB_CUTOVER_FAILED = "DB_CUTOVER_FAILED"
     # 자동으로 되돌리지 않고 끝냈다(rollbackStatus SKIPPED). 사람이 확인한다.
     DB_CUTOVER_MANUAL_REQUIRED = "DB_CUTOVER_MANUAL_REQUIRED"
+    # 재난 긴급 이전 + DB 쓰기 전환에서 원본 DB 에 닿지 못해 데이터 확인을 건너뛰었다(경고).
+    # data.reason = EMERGENCY_SOURCE_UNREACHABLE. 승격은 승인 때 동의했다(acknowledgePromote).
+    DATA_SYNC_SKIPPED = "DATA_SYNC_SKIPPED"
 
 
 # --- 보안 판정 (보안·거버넌스 3) ---

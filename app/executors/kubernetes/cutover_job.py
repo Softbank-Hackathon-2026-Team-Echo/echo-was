@@ -10,7 +10,11 @@ command·args 없음, 환경 변수는 `KIND`·`PLAN_ID`·`ALLOW_PROMOTE` 값만
   읽는다(회전돼도 그대로). echo-was KSA `echo-was/echo-was` 의 권한은 echo-infra `echo-ops.yaml`
   Role `echo-was-cutover-jobs`(jobs create·get·list·watch, pods get·list, pods/log get)다.
 - 상태: Job 조건 Complete → 종료 0, Failed → 파드 컨테이너 종료 코드. 종료 0 이면 파드 로그 끝에서
-  건너뜀 이유(ALREADY_WRITER·ALREADY_DONE)·승격(PROMOTED)을 읽는다. 로그·토큰 원문은 남기지 않는다.
+  건너뜀 이유(ALREADY_WRITER·ALREADY_DONE)·승격(PROMOTED)을, 종료 1 이면 「바뀐 것 없음」 표식
+  (NO_CHANGE·PRECHECK_FAILED, 인프라가 찍기로 한 것)을 읽는다. 로그·토큰 원문은 남기지 않는다.
+- 생성 결과: 창구가 분명히 거절한 것(401·403·400·422·이름 충돌)만 「Job 없음」이다. 요청 전에 끝난
+  것(접속 실패·토큰 파일 읽기 실패·429)은 not_sent, 응답을 잃은 것(읽기 시간 초과·끊김·5xx)은
+  「만들었을 수 있음」이라 처리기가 find_job(같은 이름 GET)으로 다시 확인한다.
 - 결과 행은 고객 DB 결과 표(`PostgresCutoverRunReader.find_by_plan`)에서 읽는다.
 """
 
@@ -28,6 +32,10 @@ from app.executors.base import (
     CutoverRunTarget,
     CutoverRunUnavailable,
     DbCutoverFinished,
+    DbCutoverJobAbsent,
+    DbCutoverJobFound,
+    DbCutoverJobLookup,
+    DbCutoverJobUnknown,
     DbCutoverLost,
     DbCutoverPollResult,
     DbCutoverRequest,
@@ -57,12 +65,20 @@ JOB_NAME_CONFLICT = "JOB_NAME_CONFLICT"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
 RESULT_READER_MISSING = "CUTOVER_RESULT_READER_MISSING"
 
+JOB_LOOKUP_UNREACHABLE = "JOB_LOOKUP_UNREACHABLE"
+JOB_LOOKUP_FAILED = "JOB_LOOKUP_FAILED"
 # 스크립트가 찍는 건너뜀·승격 표시(common.sh preflight, promote.sh). 로그에서 이것만 찾는다.
+# NO_CHANGE·PRECHECK_FAILED 는 종료 1 의 뜻을 가르는 표식이다(도현 확인 항목: 인프라 스크립트가
+# 「출발이 쓰기 담당 그대로, RESUME 까지 끝남」일 때만 NO_CHANGE 를 찍는다). 앞의 것이 먼저 맞는다.
 _LOG_REASONS = (
     ("ALREADY_WRITER", "ALREADY_WRITER"),
     ("ALREADY_DONE", "ALREADY_DONE"),
     ("승격 완료", "PROMOTED"),
+    ("PRECHECK_FAILED", "PRECHECK_FAILED"),
+    ("NO_CHANGE", "NO_CHANGE"),
 )
+# 요청이 창구에 닿기 전에 끝난 접속 오류(만들어졌을 리 없다).
+_NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol)
 
 
 class PlanCutoverRunReader(Protocol):
@@ -210,26 +226,53 @@ class KubernetesDbCutoverExecutor:
         manifest = cutover_job_manifest(request, namespace=self._namespace, image=self._image)
         try:
             response = await self._client.request("POST", self._jobs_path, json_body=manifest)
-            if response.status_code == 409:
-                existing = await self._client.request("GET", f"{self._jobs_path}/{name}")
-                if existing.status_code == 200 and _same_job(_json(existing), request):
-                    return DbCutoverStarted(name)
-                if existing.status_code >= 500:
-                    return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True)
-                return DbCutoverStartFailed(JOB_NAME_CONFLICT)
+        except OSError:
+            # 토큰 파일을 못 읽음: 요청을 보내지 않았다.
+            return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True, not_sent=True)
+        except _NOT_SENT_ERRORS:
+            return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True, not_sent=True)
         except httpx.TransportError:
+            # 보낸 뒤 응답을 잃었다: 창구가 이미 만들었을 수 있다.
             return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True)
+        if response.status_code == 409:
+            lookup = await self.find_job(request)
+            if isinstance(lookup, DbCutoverJobFound):
+                return DbCutoverStarted(name)
+            if isinstance(lookup, DbCutoverJobUnknown) and lookup.code != JOB_NAME_CONFLICT:
+                return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True)
+            return DbCutoverStartFailed(JOB_NAME_CONFLICT)
         if response.is_success:
             return DbCutoverStarted(name)
         if response.status_code in (401, 403):
             return DbCutoverStartFailed(JOB_CREATE_UNAUTHORIZED)
-        if response.status_code >= 500 or response.status_code == 429:
+        if response.status_code == 429:
+            return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True, not_sent=True)
+        if response.status_code >= 500:
+            # 504 등은 저장 뒤에 날 수 있다(만들었을 수 있음).
             return DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True)
         # 400·422: VAP 거부(이미지 digest 가 다름 등). 다시 불러도 같다.
         _log_rejected(name, response.status_code)
         return DbCutoverStartFailed(JOB_CREATE_REJECTED)
 
+    async def find_job(self, request: DbCutoverRequest) -> DbCutoverJobLookup:
+        name = cutover_job_name(request)
+        try:
+            response = await self._client.request("GET", f"{self._jobs_path}/{name}")
+        except (OSError, httpx.TransportError):
+            return DbCutoverJobUnknown(JOB_LOOKUP_UNREACHABLE)
+        if response.status_code == 404:
+            return DbCutoverJobAbsent()
+        if response.status_code == 200:
+            if _same_job(_json(response), request):
+                return DbCutoverJobFound(name)
+            return DbCutoverJobUnknown(JOB_NAME_CONFLICT)
+        return DbCutoverJobUnknown(JOB_LOOKUP_FAILED)
+
     async def poll(self, job_name: str) -> DbCutoverPollResult:
+        """창구 불통·5xx 는 Running. 토큰 파일 읽기 실패(OSError)는 올린다.
+
+        처리기가 예외를 흡수해 연속 횟수로 끊는다.
+        """
         try:
             response = await self._client.request("GET", f"{self._jobs_path}/{job_name}")
         except httpx.TransportError:
@@ -242,7 +285,9 @@ class KubernetesDbCutoverExecutor:
         if conditions.get("Complete") == "True":
             return DbCutoverFinished(0, await self._reason(job_name))
         if conditions.get("Failed") == "True":
-            return DbCutoverFinished(await self._exit_code(job_name))
+            exit_code = await self._exit_code(job_name)
+            reason = await self._reason(job_name) if exit_code == 1 else None
+            return DbCutoverFinished(exit_code, reason)
         return DbCutoverRunning()
 
     async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:

@@ -428,10 +428,21 @@ class DbCutoverStarted:
 
 @dataclass(frozen=True)
 class DbCutoverStartFailed:
-    """Job 을 만들지 못했다. retryable 이면 다음 확인 때 같은 이름으로 다시 만든다."""
+    """Job 을 만들었다는 답을 받지 못했다. retryable 이면 다음 확인 때 같은 이름으로 다시 만든다.
+
+    retryable 이 아니면 창구가 분명히 거절한 것(권한·VAP·이름 충돌)이라 Job 은 없다. retryable 인데
+    not_sent 가 아니면(응답 유실·시간 초과·5xx) 창구가 이미 받아 Job 을 만들었을 수 있다 — 처리기는
+    이 경우 원복 전에 같은 이름의 Job 과 결과 행을 다시 확인한다. not_sent 는 요청이 창구에
+    닿기 전에 끝났다는 뜻이다(접속 실패·토큰 파일 읽기 실패·429).
+    """
 
     code: str
     retryable: bool = False
+    not_sent: bool = False
+
+    @property
+    def maybe_created(self) -> bool:
+        return self.retryable and not self.not_sent
 
 
 @dataclass(frozen=True)
@@ -457,8 +468,28 @@ class DbCutoverLost:
     code: str
 
 
+@dataclass(frozen=True)
+class DbCutoverJobFound:
+    """같은 계획(PLAN_ID·KIND)의 Job 이 그 이름으로 있다."""
+
+    job_name: str
+
+
+@dataclass(frozen=True)
+class DbCutoverJobAbsent:
+    """그 이름의 Job 이 없다(창구가 404 로 답했다)."""
+
+
+@dataclass(frozen=True)
+class DbCutoverJobUnknown:
+    """있는지 확인하지 못했다(창구 불통·권한·다른 계획이 이름을 씀). code 는 고정 코드."""
+
+    code: str
+
+
 type DbCutoverStartResult = DbCutoverStarted | DbCutoverStartFailed
 type DbCutoverPollResult = DbCutoverRunning | DbCutoverFinished | DbCutoverLost
+type DbCutoverJobLookup = DbCutoverJobFound | DbCutoverJobAbsent | DbCutoverJobUnknown
 
 
 def check_weights_total(weights: tuple[WeightedTarget, ...]) -> None:
@@ -710,6 +741,15 @@ class DbCutoverExecutor(Protocol):
         """이 계획(plan_id)·종류의 결과 행. 없으면 NotFound, 읽지 못하면 Unavailable."""
         ...
 
+    async def find_job(self, request: DbCutoverRequest) -> DbCutoverJobLookup:
+        """결정적 이름(`echo-cutover-<계획 8자>-1`)의 Job 이 이 계획 것으로 있는지.
+
+        예외를 올리지 않는다.
+
+        생성 응답을 잃었을 때(start 가 maybe_created) 처리기가 원복 전에 부른다.
+        """
+        ...
+
 
 class DisabledDbCutoverExecutor:
     """기본 구현(DB_CUTOVER_EXECUTOR_MODE=disabled). 계획 만들기가 먼저 막으므로 부르지 않는다."""
@@ -728,6 +768,9 @@ class DisabledDbCutoverExecutor:
 
     async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:
         return CutoverRunNotFound()
+
+    async def find_job(self, request: DbCutoverRequest) -> DbCutoverJobLookup:
+        return DbCutoverJobAbsent()
 
 
 class NoCutoverRuns:

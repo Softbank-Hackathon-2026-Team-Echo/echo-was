@@ -46,6 +46,9 @@ from app.executors.base import (
     DataSyncResult,
     DataSyncUnavailable,
     DbCutoverFinished,
+    DbCutoverJobFound,
+    DbCutoverJobLookup,
+    DbCutoverJobUnknown,
     DbCutoverLost,
     DbCutoverPollResult,
     DbCutoverRequest,
@@ -619,7 +622,11 @@ class FakeDbCutoverExecutor:
     """가짜 DB 쓰기 전환. 시험은 exit_code·reason·never_finish·start_failure·run 으로 결과를 바꾼다.
 
     run 을 주지 않으면 종료 0 으로 끝났을 때 누락·중복 0 인 결과 행을 만든다(종료 1·2·끝나지 않음·
-    사라짐은 행 없음).
+    사라짐·이 가짜가 시작하지 않은 계획은 행 없음).
+
+    find_job: job_lookup 을 주면 그 값, 아니면 이 가짜가 시작한 계획은 Found, 그 밖은 Unknown 이다
+    (가짜는 자기가 만들지 않은 Job 이 클러스터에 없다고 확정할 수 없다). 시험은 job_lookup 으로
+    DbCutoverJobAbsent 를 줘 「분명히 없음」을 만든다.
     """
 
     def __init__(
@@ -634,6 +641,7 @@ class FakeDbCutoverExecutor:
         start_failure: DbCutoverStartFailed | None = None,
         run: CutoverRun | None = None,
         no_run: bool = False,
+        job_lookup: DbCutoverJobLookup | None = None,
     ) -> None:
         self._clock = clock
         self._step = timedelta(seconds=step_seconds)
@@ -644,6 +652,8 @@ class FakeDbCutoverExecutor:
         self.start_failure = start_failure
         self.run = run
         self.no_run = no_run
+        self.job_lookup = job_lookup
+        self.lookups = 0
         self.started: list[DbCutoverRequest] = []
         self.polls = 0
         self._started_at: dict[uuid.UUID, datetime] = {}
@@ -673,15 +683,16 @@ class FakeDbCutoverExecutor:
     async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:
         if self.run is not None:
             return self.run
+        started_at = self._started_at.get(request.plan_id)
         if (
-            self.no_run
+            started_at is None
+            or self.no_run
             or self.never_finish
             or self.lost
             or self.exit_code != 0
             or self.reason is not None
         ):
             return CutoverRunNotFound()
-        started_at = self._started_at.get(request.plan_id, self._clock.now())
         resumed_at = started_at + timedelta(milliseconds=FAKE_CUTOVER_WRITE_PAUSE_MS)
         return CutoverRun(
             kind=request.result_kind,
@@ -696,3 +707,16 @@ class FakeDbCutoverExecutor:
             duplicate_rows=0,
             mode="NORMAL",
         )
+
+    async def find_job(self, request: DbCutoverRequest) -> DbCutoverJobLookup:
+        self.lookups += 1
+        if self.job_lookup is not None:
+            return self.job_lookup
+        started_at = self._started_at.get(request.plan_id)
+        if started_at is not None:
+            return DbCutoverJobFound(
+                _SEPARATOR.join(
+                    (_FAKE_CUTOVER_PREFIX, str(request.plan_id), started_at.isoformat())
+                )
+            )
+        return DbCutoverJobUnknown("FAKE_JOB_UNKNOWN")

@@ -19,7 +19,10 @@ from app.executors.base import (
     CutoverRunTarget,
     CutoverRunUnavailable,
     DbCutoverFinished,
+    DbCutoverJobAbsent,
+    DbCutoverJobFound,
     DbCutoverJobKind,
+    DbCutoverJobUnknown,
     DbCutoverLost,
     DbCutoverRunning,
     DbCutoverStarted,
@@ -31,6 +34,8 @@ from app.executors.kubernetes.cutover_job import (
     JOB_CREATE_REJECTED,
     JOB_CREATE_UNAUTHORIZED,
     JOB_CREATE_UNREACHABLE,
+    JOB_LOOKUP_FAILED,
+    JOB_LOOKUP_UNREACHABLE,
     JOB_NAME_CONFLICT,
     JOB_NOT_FOUND,
     InClusterKubeClient,
@@ -40,6 +45,11 @@ from app.executors.kubernetes.cutover_job import (
     log_reason,
 )
 from app.services.migration_db_cutover import (
+    REASON_NO_CHANGE,
+    REASON_PRECHECK_FAILED,
+    WRITER_SOURCE,
+    WRITER_TARGET,
+    WRITER_UNKNOWN,
     CutoverRecovery,
     db_cutover_request,
     judge_db_cutover,
@@ -57,7 +67,7 @@ TOKEN = "sa-token-value"
 
 
 def _request(mode: MigrationPlanMode = MigrationPlanMode.PLANNED) -> Any:
-    return db_cutover_request(PLAN_ID, mode, uuid.uuid4(), "gcp")
+    return db_cutover_request(PLAN_ID, mode, uuid.uuid4(), "gcp", promote_consented=True)
 
 
 def _run(**changes: Any) -> CutoverRun:
@@ -244,8 +254,9 @@ async def test_start_transport_error_is_retryable(tmp_path: Path) -> None:
     )
     executor = KubernetesDbCutoverExecutor(client, namespace=NAMESPACE, image=IMAGE, reader=None)
 
+    # 접속 자체가 안 됐다 = 보내지 않았다(만들었을 리 없음).
     assert await executor.start(_request()) == DbCutoverStartFailed(
-        JOB_CREATE_UNREACHABLE, retryable=True
+        JOB_CREATE_UNREACHABLE, retryable=True, not_sent=True
     )
 
 
@@ -319,6 +330,155 @@ def test_log_reason_markers() -> None:
     assert log_reason("[건너뜀] ALREADY_DONE: 이 계획") == "ALREADY_DONE"
     assert log_reason("승격 완료. 쓰기 담당 = B") == "PROMOTED"
     assert log_reason("컷오버 완료. max(n)=3") is None
+    # 종료 1 의 뜻(인프라가 찍기로 한 표식). PRECHECK_FAILED 가 NO_CHANGE 보다 먼저 맞는다.
+    assert log_reason("[실패] NO_CHANGE: 쓰기 담당 A 그대로, RESUME 완료") == "NO_CHANGE"
+    assert log_reason("[실패] PRECHECK_FAILED NO_CHANGE") == "PRECHECK_FAILED"
+
+
+# --- 검증 반영(P1-1·P1-2·P1-4): 생성 응답 유실·재확인·종료 1 표식 ---
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("lost"),
+        httpx.RemoteProtocolError("closed"),
+        httpx.ReadError("reset"),
+    ],
+)
+async def test_start_lost_response_may_have_created(tmp_path: Path, error: Exception) -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    (tmp_path / "token").write_text(TOKEN)
+    client = InClusterKubeClient(
+        "https://kubernetes.default.svc", str(tmp_path), 5.0, transport=httpx.MockTransport(broken)
+    )
+    executor = KubernetesDbCutoverExecutor(client, namespace=NAMESPACE, image=IMAGE, reader=None)
+
+    result = await executor.start(_request())
+
+    assert result == DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True)
+    assert isinstance(result, DbCutoverStartFailed) and result.maybe_created
+
+
+@pytest.mark.parametrize(("status", "maybe_created"), [(500, True), (504, True), (429, False)])
+async def test_start_server_errors_mark_uncertainty(
+    tmp_path: Path, status: int, maybe_created: bool
+) -> None:
+    kube = _Kube({("POST", JOBS): httpx.Response(status, json={})})
+
+    result = await _executor(tmp_path, kube).start(_request())
+
+    assert isinstance(result, DbCutoverStartFailed) and result.retryable
+    assert result.maybe_created is maybe_created
+
+
+async def test_start_without_token_file_was_not_sent(tmp_path: Path) -> None:
+    kube = _Kube({("POST", JOBS): httpx.Response(201, json={})})
+    client = InClusterKubeClient(
+        "https://kubernetes.default.svc", str(tmp_path), 5.0, transport=httpx.MockTransport(kube)
+    )
+    executor = KubernetesDbCutoverExecutor(client, namespace=NAMESPACE, image=IMAGE, reader=None)
+
+    result = await executor.start(_request())
+
+    assert result == DbCutoverStartFailed(JOB_CREATE_UNREACHABLE, retryable=True, not_sent=True)
+    assert kube.requests == []
+
+
+async def test_start_conflict_with_unreadable_job_stays_uncertain(tmp_path: Path) -> None:
+    name = cutover_job_name(_request())
+    kube = _Kube(
+        {
+            ("POST", JOBS): httpx.Response(409, json={}),
+            ("GET", f"{JOBS}/{name}"): httpx.Response(403, json={}),
+        }
+    )
+
+    result = await _executor(tmp_path, kube).start(_request())
+
+    assert isinstance(result, DbCutoverStartFailed) and result.maybe_created
+
+
+async def test_find_job_by_deterministic_name(tmp_path: Path) -> None:
+    name = cutover_job_name(_request())
+    path = f"{JOBS}/{name}"
+    found = _Kube({("GET", path): httpx.Response(200, json=_job())})
+    other = _Kube({("GET", path): httpx.Response(200, json=_job(env_plan=str(uuid.uuid4())))})
+    failing = _Kube({("GET", path): httpx.Response(503, json={})})
+
+    assert await _executor(tmp_path, found).find_job(_request()) == DbCutoverJobFound(name)
+    assert await _executor(tmp_path, _Kube({})).find_job(_request()) == DbCutoverJobAbsent()
+    assert await _executor(tmp_path, other).find_job(_request()) == DbCutoverJobUnknown(
+        JOB_NAME_CONFLICT
+    )
+    assert await _executor(tmp_path, failing).find_job(_request()) == DbCutoverJobUnknown(
+        JOB_LOOKUP_FAILED
+    )
+    [request] = found.requests
+    assert request.url.path == path
+
+
+async def test_find_job_unreachable_or_token_missing_is_unknown(tmp_path: Path) -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("lost")
+
+    client = InClusterKubeClient(
+        "https://kubernetes.default.svc", str(tmp_path), 5.0, transport=httpx.MockTransport(broken)
+    )
+    executor = KubernetesDbCutoverExecutor(client, namespace=NAMESPACE, image=IMAGE, reader=None)
+    # 토큰 파일 없음(OSError).
+    assert await executor.find_job(_request()) == DbCutoverJobUnknown(JOB_LOOKUP_UNREACHABLE)
+    (tmp_path / "token").write_text(TOKEN)
+    assert await executor.find_job(_request()) == DbCutoverJobUnknown(JOB_LOOKUP_UNREACHABLE)
+
+
+async def test_poll_failed_exit_one_reads_no_change_marker(tmp_path: Path) -> None:
+    name = "echo-cutover-0f1e2d3c-1"
+    pods = f"/api/v1/namespaces/{NAMESPACE}/pods"
+    kube = _Kube(
+        {
+            ("GET", f"{JOBS}/{name}"): httpx.Response(
+                200, json=_job(conditions=[{"type": "Failed", "status": "True"}])
+            ),
+            ("GET", pods): httpx.Response(200, json=_pods(1)),
+            ("GET", f"{pods}/echo-cutover-0f1e2d3c-1-abcde/log"): httpx.Response(
+                200, text="[실패] NO_CHANGE: 쓰기 담당 A 그대로\n"
+            ),
+        }
+    )
+
+    assert await _executor(tmp_path, kube).poll(name) == DbCutoverFinished(1, REASON_NO_CHANGE)
+
+
+async def test_poll_token_missing_raises_for_processor(tmp_path: Path) -> None:
+    client = InClusterKubeClient(
+        "https://kubernetes.default.svc",
+        str(tmp_path),
+        5.0,
+        transport=httpx.MockTransport(_Kube({})),
+    )
+    executor = KubernetesDbCutoverExecutor(client, namespace=NAMESPACE, image=IMAGE, reader=None)
+
+    with pytest.raises(FileNotFoundError):
+        await executor.poll("echo-cutover-0f1e2d3c-1")
+
+
+async def test_fake_find_job_only_confirms_jobs_it_started() -> None:
+    clock = TestClock()
+    fake = FakeDbCutoverExecutor(clock, 1.0)
+    assert isinstance(await fake.find_job(_request()), DbCutoverJobUnknown)
+    assert await fake.find_run(_request()) == CutoverRunNotFound()
+    started = await fake.start(_request())
+    assert isinstance(started, DbCutoverStarted)
+    assert await fake.find_job(_request()) == DbCutoverJobFound(started.job_name)
+    absent = FakeDbCutoverExecutor(clock, 1.0, job_lookup=DbCutoverJobAbsent())
+    assert await absent.find_job(_request()) == DbCutoverJobAbsent()
+
+
+async def test_disabled_executor_reports_no_job() -> None:
+    assert await DisabledDbCutoverExecutor().find_job(_request()) == DbCutoverJobAbsent()
 
 
 # --- 판정 규칙 ---
@@ -336,9 +496,41 @@ def test_judge_exit_zero_with_clean_row_passes() -> None:
     ("kwargs", "failure", "recovery"),
     [
         (
-            {"exit_code": 1, "finished": True, "run_result": None},
+            {"exit_code": 1, "finished": True, "run_result": None, "writer": WRITER_SOURCE},
             MigrationErrorCode.DB_CUTOVER_FAILED,
             CutoverRecovery.ROLLBACK_TRAFFIC,
+        ),
+        (
+            {"exit_code": 1, "finished": True, "run_result": None, "reason": REASON_NO_CHANGE},
+            MigrationErrorCode.DB_CUTOVER_FAILED,
+            CutoverRecovery.ROLLBACK_TRAFFIC,
+        ),
+        # 종료 1 만으로는 원복하지 않는다(검증 P1-2): 쓰기 담당을 모르거나 도착이면 사람 확인.
+        (
+            {"exit_code": 1, "finished": True, "run_result": None},
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
+        ),
+        (
+            {"exit_code": 1, "finished": True, "run_result": None, "writer": WRITER_TARGET},
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
+        ),
+        (
+            {
+                "exit_code": 1,
+                "finished": True,
+                "run_result": None,
+                "writer": WRITER_UNKNOWN,
+                "reason": REASON_PRECHECK_FAILED,
+            },
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
+        ),
+        (
+            {"exit_code": None, "run_result": CutoverRunNotFound(), "poll_failed": True},
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
         ),
         (
             {"exit_code": 2, "finished": True, "run_result": _run()},

@@ -46,6 +46,7 @@ from app.core.exceptions import (
     PlanNotPendingError,
     PlanNotRunningError,
     PlanStaleError,
+    PromoteAckRequiredError,
     RequestFieldInvalidError,
     SecurityGateBlockedError,
     SelfApprovalForbiddenError,
@@ -102,9 +103,11 @@ from app.services.migration_plan_support import (
     expected_seconds,
     fingerprint_changes,
     initial_step_results,
+    needs_promote_ack,
     read_fingerprint,
     single_source,
     skip_pending_steps,
+    stamp_promote,
 )
 from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
 
@@ -310,6 +313,9 @@ class MigrationPlanService:
             if disaster is not None:
                 plan.mode = MigrationPlanMode.EMERGENCY
                 plan.disaster_id = disaster.disaster_id
+                if include_db_cutover:
+                    # 긴급 이전의 DB 쓰기 전환은 승격을 허용한다: 승인 때 동의를 받는다.
+                    plan.steps = stamp_promote(plan.steps)
             else:
                 # 서비스 행을 잠근 뒤라 판정 사이에 다른 계획이 끝나거나 생기지 않는다.
                 plan.mode = decide_plan_mode(
@@ -548,11 +554,18 @@ class MigrationPlanService:
     # --- 승인·거절·취소 ---
 
     async def approve_plan(
-        self, organization_id: uuid.UUID, plan_id: uuid.UUID, actor_user_id: uuid.UUID
+        self,
+        organization_id: uuid.UUID,
+        plan_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        *,
+        acknowledge_promote: bool = False,
     ) -> MigrationPlanView:
         """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다.
 
         보안 게이트가 있으면 지문이 같을 때 판정을 남기고, 막혔으면 승인하지 않고 409 를 올린다.
+        재난 긴급 이전 + DB 쓰기 전환 계획(승격 허용)은 acknowledge_promote 가 없으면 아무것도
+        바꾸지 않고 422(PROMOTE_ACK_REQUIRED)다. 동의는 승인 감사 줄에 남긴다.
         """
         async with self._session.begin():
             await self._get_in_organization(organization_id, plan_id)
@@ -571,6 +584,13 @@ class MigrationPlanService:
             locked = await self._lock(plan_id)
             plan = locked.plan
             self._check_pending(plan)
+            promote_ack_required = needs_promote_ack(plan.steps)
+            if promote_ack_required and not acknowledge_promote:
+                raise PromoteAckRequiredError(
+                    "approving this emergency plan promotes the target database; "
+                    "send acknowledgePromote: true",
+                    plan_id=str(plan.id),
+                )
             is_self = plan.created_by_user_id == actor_user_id
             if is_self and not organization.allow_self_approval:
                 raise SelfApprovalForbiddenError
@@ -610,7 +630,11 @@ class MigrationPlanService:
                         plan,
                         organization_id,
                         actor_user_id,
-                        {"selfApproved": is_self, **_disaster_audit_details(plan)},
+                        {
+                            "selfApproved": is_self,
+                            **_disaster_audit_details(plan),
+                            **({"acknowledgePromote": True} if promote_ack_required else {}),
+                        },
                     )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)

@@ -12,7 +12,7 @@
 | `POST /services/{serviceId}/migration-plans` | 201 `MigrationPlanDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409(아래 "만들기"), 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자(사람) |
 | `GET /services/{serviceId}/migration-plans?status&page&size` | 200 `Page[MigrationPlanSummary]`(최신순) | 404 `SERVICE_NOT_FOUND`, 422 | 뷰어·에이전트 |
 | `GET /migration-plans/{planId}` | 200 `MigrationPlanDetail` | 404 `MIGRATION_PLAN_NOT_FOUND` | 뷰어·에이전트 |
-| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED`·`SECURITY_GATE_BLOCKED`(게이트를 켰을 때) | 개발자(사람) |
+| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`). 본문 선택 `{"acknowledgePromote": true}` — `promoteWarning` 이 있는 계획(재난 긴급 이전 + DB 쓰기 전환)은 필수 | 422 `PROMOTE_ACK_REQUIRED`(승격 동의 없음, 계획 그대로), 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED`·`SECURITY_GATE_BLOCKED`(게이트를 켰을 때) | 개발자(사람) |
 | `POST /migration-plans/{planId}/reject` | 200 `MigrationPlanDetail`(`REJECTED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/cancel` | 200 `MigrationPlanDetail`(`CANCELLED`) | 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/abort` | 202 `MigrationPlanDetail`(멱등) | 409 `PLAN_NOT_RUNNING` | 개발자(사람) |
@@ -93,7 +93,8 @@
 | 상황 | 결과 | `rollbackStatus` | 트래픽 |
 |---|---|---|---|
 | 종료 0 + 결과 행 누락 0·중복 0 / 종료 0 + `ALREADY_WRITER` | 통과 | — | 도착 100% |
-| 종료 1(바뀐 것 없음) · Job 을 만들지 못함 | `ROLLED_BACK`(`DB_CUTOVER_FAILED`) | `SUCCEEDED` | 출발 100% 로 되돌림 |
+| 종료 1 + 출발이 쓰기 담당(데이터 확인) 또는 로그 `NO_CHANGE` · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 결과 행 없음) | `ROLLED_BACK`(`DB_CUTOVER_FAILED`) | `SUCCEEDED` | 출발 100% 로 되돌림 |
+| 종료 1 인데 쓰기 담당 미확인·도착 · 생성 응답 유실 뒤 Job·행 확인 불가 · 상태 조회 연속 5번 실패(행 없음) | `FAILED`(`DB_CUTOVER_UNKNOWN`) | `SKIPPED` | 그대로(결과를 모르면 되돌리지 않는다, 사람이 쓰기 담당 확인) |
 | 종료 2 · 알 수 없는 종료 · Job 사라짐(행 없음) | `FAILED`(`DB_CUTOVER_PARTIAL`) | `SKIPPED` | 그대로(사람이 "부분 상태 복구") |
 | 상한 초과(행 없음) | `FAILED`(`DB_CUTOVER_TIMEOUT`) | `SKIPPED` | 그대로 |
 | 누락·중복 > 0 · 종료 0 인데 행 없음·못 읽음 | `FAILED`(`DATA_INTEGRITY_FAILED`) | `SKIPPED` | 그대로(쓰기 담당 = 도착) |
@@ -101,6 +102,8 @@
   종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 그 행으로 판정한다.
 - **중단·일꾼 상실**: Job 을 요청한 뒤에는 Job 이 끝나 판정할 때까지 되돌리지 않는다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난다). 판정이 통과면 중단 요청이 있어도 `SUCCEEDED` 다.
 - **응답**: `steps[5].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
+- **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 3)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.
+- **단계 결과 cutover 추가 칸**: `startUncertain`(생성 응답 유실) · `startConfirmed`(같은 이름 조회로 다시 찾음) · `pollErrors`(상태 조회 연속 실패 수) · `writer`(종료 1 뒤 확인한 쓰기 담당 SOURCE·TARGET·UNKNOWN).
 - **로그 코드**: `DB_CUTOVER_JOB_CREATED` · `DB_CUTOVER_JOB_FINISHED` · `DB_CUTOVER_OK` · `DB_CUTOVER_FAILED`(원인 문장 붙음) · `DB_CUTOVER_MANUAL_REQUIRED`(자동으로 되돌리지 않음). data 에 Job 이름·종류·종료 코드·이유·결과 숫자.
 - **감사**: SYSTEM(`migration-worker`) `MIGRATION_DB_CUTOVER_STARTED`(Job 만듦) · `MIGRATION_DB_CUTOVER_FINISHED`(판정, 실패면 `errorCode`).
 
@@ -252,7 +255,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 단계 결과(`steps[i].result.status`): `PENDING`·`RUNNING`·`PASSED`·`FAILED`·`SKIPPED`. 롤백·실패로 끝나면 남은 단계는 `SKIPPED`, 중단·일꾼 상실로 멈춘 단계는 `FAILED`(`failureCode` = 그 원인).
 
-원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `SECURITY_GATE_BLOCKED`(일꾼 시작 때 보안 게이트가 막음, 트래픽 그대로) · `DB_CUTOVER_FAILED` · `DB_CUTOVER_TIMEOUT` · `DB_CUTOVER_PARTIAL` · `DATA_INTEGRITY_FAILED`(DB 쓰기 전환 단계, 위 표). 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED` · `SKIPPED`(DB 쓰기 전환 실패를 자동으로 되돌리지 않음, 사람 확인).
+원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `SECURITY_GATE_BLOCKED`(일꾼 시작 때 보안 게이트가 막음, 트래픽 그대로) · `DB_CUTOVER_FAILED` · `DB_CUTOVER_TIMEOUT` · `DB_CUTOVER_PARTIAL` · `DATA_INTEGRITY_FAILED` · `DB_CUTOVER_UNKNOWN`(DB 쓰기 전환 단계, 위 표). 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED` · `SKIPPED`(DB 쓰기 전환 실패를 자동으로 되돌리지 않음, 사람 확인).
 
 ## `simulate` (가짜 모드 시연)
 

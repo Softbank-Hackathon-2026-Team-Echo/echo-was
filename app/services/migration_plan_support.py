@@ -149,6 +149,44 @@ def has_db_cutover(steps: Sequence[dict[str, Any]]) -> bool:
     return any(step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value for step in steps)
 
 
+PROMOTE_WARNING = (
+    "Emergency migration with a database cutover: if the source database cannot be reached, the "
+    "cutover job promotes the target database to writer. Promotion cannot be undone "
+    "automatically: writes not yet replicated may be lost (see the cutover rpoEstimateMs), the "
+    "source may still be running if it is only unreachable, and moving back needs a manual "
+    "resync. Approve with acknowledgePromote: true."
+)
+
+
+# DB 쓰기 전환 단계 정의에 만들 때 적는 표시: 재난 긴급 이전으로 만들어 승격(ALLOW_PROMOTE)을
+# 허용하는 단계다. 승인 때 동의(acknowledgePromote)를 받고, 실행 때 이 표시가 있어야만
+# 승격을 허용한다.
+STEP_ALLOW_PROMOTE = "allowPromote"
+
+
+def stamp_promote(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """DB 쓰기 전환 단계에 승격 허용 표시를 단다(재난 긴급 이전 계획을 만들 때만)."""
+    return [
+        {**step, STEP_ALLOW_PROMOTE: True}
+        if step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value
+        else dict(step)
+        for step in steps
+    ]
+
+
+def needs_promote_ack(steps: Sequence[dict[str, Any]]) -> bool:
+    """승격을 허용하는 DB 쓰기 전환 단계가 있다 = 승인 때 동의를 받는다."""
+    return any(
+        step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value and step.get(STEP_ALLOW_PROMOTE)
+        for step in steps
+    )
+
+
+def promote_warning(steps: Sequence[dict[str, Any]]) -> str | None:
+    """승격 동의가 필요한 계획이면 그 위험 고지 문장(응답 promoteWarning), 아니면 None."""
+    return PROMOTE_WARNING if needs_promote_ack(steps) else None
+
+
 def step_required_requests(
     steps: Sequence[dict[str, Any]], index: int, defaults: Sequence[int]
 ) -> int:
