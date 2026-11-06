@@ -145,6 +145,8 @@ class CveWatchRunView:
     feed_errors: int = 0
     # 가짜 증거 상한을 넘어 지운 옛 가짜 증거 수(주입만).
     retired_simulated: int = 0
+    # 가짜 증거 상한 때문에 이번 주입에서 만들지(돌려주지) 않은 매치 수(주입만).
+    omitted_simulated: int = 0
 
     @property
     def created_count(self) -> int:
@@ -358,7 +360,16 @@ class CveWatchService:
             )
             views: list[CveWatchMatchView] = []
             seen: dict[str, uuid.UUID] = {}
+            # 가짜 증거는 이번 주입분까지 합쳐 조직당 SIMULATED_ACTIVE_LIMIT 건을 넘지 않는다.
+            # 이번 응답이 상한보다 많은 증거를 낳으면 상한까지만 만들고(돌려주고) 나머지는 센다.
+            kept_keys: set[str] = set()
+            omitted = 0
             for target, match, key in candidates:
+                if simulated and key not in kept_keys:
+                    if len(kept_keys) >= SIMULATED_ACTIVE_LIMIT:
+                        omitted += 1
+                        continue
+                    kept_keys.add(key)
                 found = existing.get(key) or seen.get(key)
                 created = found is None
                 if found is None:
@@ -390,6 +401,7 @@ class CveWatchService:
             skipped_low_severity=low,
             skipped_known=known_skipped,
             retired_simulated=retired,
+            omitted_simulated=omitted,
         )
         logger.info(
             "cve watch checked",
@@ -430,6 +442,8 @@ class CveWatchService:
             details["feedErrors"] = view.feed_errors
         if view.retired_simulated:
             details["retiredSimulated"] = view.retired_simulated
+        if view.omitted_simulated:
+            details["omittedSimulated"] = view.omitted_simulated
         if advisory is not None:
             details["advisoryId"] = advisory.advisory_id
             details["package"] = f"{advisory.ecosystem}/{advisory.package}"

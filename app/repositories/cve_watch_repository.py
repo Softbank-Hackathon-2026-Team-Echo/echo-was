@@ -90,7 +90,9 @@ class CveWatchRepository:
     ) -> int:
         """살아 있는 가짜(SIMULATED) CVE 증거를 limit 건까지만 남기고 오래된 것부터 지운다.
 
-        keep_ids(이번 주입이 돌려준 증거)는 지우지 않는다. 만료 시각을 당기지 않고 지우는 까닭:
+        keep_ids(이번 주입이 돌려준 증거)는 지우지 않는다. 호출하는 쪽이 keep_ids 를 limit 건
+        이하로 줄여 넘기므로(이번 주입분 포함 총수 ≤ limit) 남는 수는 항상 limit 이하다.
+        만료 시각을 당기지 않고 지우는 까닭:
         `expires_after_collected` CHECK 때문에 같은 시각에 모은 행은 지금으로 만료시킬 수 없고, 가짜
         증거는 판정에 쓰이지 않아 남길 값이 없다. 지운 수를 돌려준다(감사 줄에 남긴다).
         """

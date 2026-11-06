@@ -569,6 +569,52 @@ async def test_inject_flood_keeps_simulated_cap_and_leaves_real_gate_passing(
     assert approval.json()["data"]["status"] == "APPROVED"
 
 
+async def test_single_inject_beyond_cap_keeps_total_simulated_within_limit(
+    migration: Migration,
+) -> None:
+    """설치 버전 11개 × 환경 2 = 22건을 낳는 주입 한 번도 보관 총수는 20건 이하다(재검증 P2)."""
+    versions = [DependencyPackage("PyPI", "starlette", f"0.40.{n}") for n in range(11)]
+    await _seed(migration, versions)
+    body: dict[str, Any] = {
+        "advisory": {
+            "id": "SIM-OLD",
+            "ecosystem": "PyPI",
+            "package": "starlette",
+            "introduced": "0",
+            "fixed": "0.49.1",
+        }
+    }
+    # 먼저 옛 가짜 증거 20건을 채운다(같은 수만큼 만들고 넘친 2건은 상한으로 뺀다).
+    first = await migration.author_client.post(_path(migration, "/cve-watch:inject"), json=body)
+    assert first.status_code == 200, first.text
+    first_data = first.json()["data"]
+    assert (first_data["created"], first_data["omittedSimulated"]) == (20, 2)
+    assert len(first_data["matches"]) == SIMULATED_ACTIVE_LIMIT
+    assert await _active_simulated(migration) == SIMULATED_ACTIVE_LIMIT
+    old_ids = {m["findingId"] for m in first_data["matches"]}
+
+    body["advisory"]["id"] = "SIM-NEW"
+    response = await migration.author_client.post(_path(migration, "/cve-watch:inject"), json=body)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert (data["created"], data["omittedSimulated"]) == (20, 2)
+    assert data["retiredSimulated"] == 20
+    new_ids = {m["findingId"] for m in data["matches"]}
+    assert len(new_ids) == SIMULATED_ACTIVE_LIMIT
+    now = migration.harness.clock.now()
+    alive = {
+        str(f.id)
+        for f in await _cve_findings(migration)
+        if f.mode == SecurityFindingMode.SIMULATED and f.expires_at > now
+    }
+    # 이번 주입분 포함 총수 20건 — 이번 응답이 돌려준 증거만 남고 옛 것은 모두 지워졌다.
+    assert alive == new_ids
+    assert not alive & old_ids
+    rows = await _audit(migration, AuditAction.CVE_WATCH_INJECTED)
+    assert [line.details.get("omittedSimulated") for line in rows] == [2, 2]
+
+
 async def test_judgement_read_keeps_latest_evidence_of_every_control_beyond_search_limit(
     migration: Migration,
 ) -> None:

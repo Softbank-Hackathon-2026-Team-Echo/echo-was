@@ -99,6 +99,8 @@ class CveWatchRunResponse(ApiModel):
     feed_errors: int = 0
     # 가짜 증거 상한(조직당 20건)을 넘어 지운 옛 가짜 증거 수(주입만).
     retired_simulated: int = 0
+    # 이번 주입이 상한(20건)보다 많은 증거를 낳아 만들지·돌려주지 않은 매치 수(주입만).
+    omitted_simulated: int = 0
     matches: list[CveWatchMatchResponse]
 
     @classmethod
@@ -116,5 +118,6 @@ class CveWatchRunResponse(ApiModel):
             deferred_advisories=view.deferred_advisories,
             feed_errors=view.feed_errors,
             retired_simulated=view.retired_simulated,
+            omitted_simulated=view.omitted_simulated,
             matches=[CveWatchMatchResponse.from_view(match) for match in view.matches],
         )
