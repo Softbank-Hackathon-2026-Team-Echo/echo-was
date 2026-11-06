@@ -4,8 +4,8 @@
 가장 나쁘다.
 - P1-1 생성 응답 유실: 같은 이름 Job 조회 → 있으면 기다림, 없고 결과 행도 없을 때만 원복,
   모르면 UNKNOWN
-- P1-2 종료 1: 출발이 쓰기 담당(데이터 확인)이거나 로그 NO_CHANGE 일 때만 원복,
-  아니면 UNKNOWN
+- P1-2 종료 1: 근거 우선순위 결과 행 > 지금 쓰기 담당 > 로그 NO_CHANGE. 도착이 쓰기 담당이면
+  로그가 무엇이든 UNKNOWN, 출발이면 원복, 확인 못 했을 때만 NO_CHANGE 로 원복
 - P1-3 원본 DB 단절 긴급 이전(EMERGENCY + DB 쓰기 전환): 데이터 확인을 건너뛰고(경고)
   승격 Job 에 닿는다
 - P1-4 상태 조회 지속 예외: 흡수해 연속 횟수·시계 상한으로 끝낸다(RUNNING 에 남지 않음)
@@ -208,6 +208,29 @@ async def test_exit_one_with_no_change_marker_rolls_back(migration: Migration) -
     assert _outcome(final) == ("ROLLED_BACK", "DB_CUTOVER_FAILED", "SUCCEEDED")
     assert final["steps"][5]["cutover"]["writer"] == "UNKNOWN"
     assert await migration.weights() == (100, 0)
+
+
+async def test_target_writer_overrides_stale_no_change_marker(migration: Migration) -> None:
+    """근거 우선순위(검증 2회차 P1): 쓰기 담당 확인 > 로그 표식.
+
+    로그가 NO_CHANGE 여도 지금 도착이 쓰기 담당이면 원복하지 않고 사람 확인으로 끝낸다.
+    """
+    _enable(migration)
+    _install(
+        migration,
+        FakeDbCutoverExecutor(migration.harness.clock, 0, exit_code=1, reason="NO_CHANGE"),
+    )
+    checker = _SyncThenWriter(DataSyncLag(seconds=0.0, reason="TARGET_IS_WRITER"))
+    migration.harness.replace_executors(data_sync=checker)
+
+    final = await _run(migration, includeCutover=True)
+    cutover = final["steps"][5]["cutover"]
+
+    assert _outcome(final) == ("FAILED", "DB_CUTOVER_UNKNOWN", "SKIPPED")
+    assert (cutover["writer"], cutover["reason"]) == ("TARGET", "TARGET_IS_WRITER")
+    assert checker.calls == 2
+    assert await migration.weights() == (0, 100)
+    assert not [k for k in migration.traffic_keys() if ":rollback:" in k]
 
 
 async def test_exit_one_with_source_writer_rolls_back(migration: Migration) -> None:

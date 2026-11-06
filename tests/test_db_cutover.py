@@ -516,6 +516,30 @@ def test_judge_exit_zero_with_clean_row_passes() -> None:
             MigrationErrorCode.DB_CUTOVER_UNKNOWN,
             CutoverRecovery.MANUAL,
         ),
+        # 근거 충돌(검증 2회차 P1): 도착이 쓰기 담당이면 오래된 NO_CHANGE 로그로 원복하지 않는다.
+        (
+            {
+                "exit_code": 1,
+                "finished": True,
+                "run_result": None,
+                "writer": WRITER_TARGET,
+                "reason": REASON_NO_CHANGE,
+            },
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
+        ),
+        # 쓰기 담당을 확인 못 했을 때만 NO_CHANGE 가 원복 근거다.
+        (
+            {
+                "exit_code": 1,
+                "finished": True,
+                "run_result": None,
+                "writer": WRITER_UNKNOWN,
+                "reason": REASON_NO_CHANGE,
+            },
+            MigrationErrorCode.DB_CUTOVER_FAILED,
+            CutoverRecovery.ROLLBACK_TRAFFIC,
+        ),
         (
             {
                 "exit_code": 1,

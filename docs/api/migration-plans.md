@@ -93,13 +93,13 @@
 | 상황 | 결과 | `rollbackStatus` | 트래픽 |
 |---|---|---|---|
 | 종료 0 + 결과 행 누락 0·중복 0 / 종료 0 + `ALREADY_WRITER` | 통과 | — | 도착 100% |
-| 종료 1 + 출발이 쓰기 담당(데이터 확인) 또는 로그 `NO_CHANGE` · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 결과 행 없음) | `ROLLED_BACK`(`DB_CUTOVER_FAILED`) | `SUCCEEDED` | 출발 100% 로 되돌림 |
-| 종료 1 인데 쓰기 담당 미확인·도착 · 생성 응답 유실 뒤 Job·행 확인 불가 · 상태 조회 연속 5번 실패(행 없음) | `FAILED`(`DB_CUTOVER_UNKNOWN`) | `SKIPPED` | 그대로(결과를 모르면 되돌리지 않는다, 사람이 쓰기 담당 확인) |
+| 종료 1 + 출발이 쓰기 담당(데이터 확인) 또는 쓰기 담당 확인 불가 + 로그 `NO_CHANGE` · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 결과 행 없음) | `ROLLED_BACK`(`DB_CUTOVER_FAILED`) | `SUCCEEDED` | 출발 100% 로 되돌림 |
+| 종료 1 인데 쓰기 담당이 도착(로그 `NO_CHANGE` 여도) 또는 미확인 + 표식 없음 · 생성 응답 유실 뒤 Job·행 확인 불가 · 상태 조회 연속 5번 실패(행 없음) | `FAILED`(`DB_CUTOVER_UNKNOWN`) | `SKIPPED` | 그대로(결과를 모르면 되돌리지 않는다, 사람이 쓰기 담당 확인) |
 | 종료 2 · 알 수 없는 종료 · Job 사라짐(행 없음) | `FAILED`(`DB_CUTOVER_PARTIAL`) | `SKIPPED` | 그대로(사람이 "부분 상태 복구") |
 | 상한 초과(행 없음) | `FAILED`(`DB_CUTOVER_TIMEOUT`) | `SKIPPED` | 그대로 |
 | 누락·중복 > 0 · 종료 0 인데 행 없음·못 읽음 | `FAILED`(`DATA_INTEGRITY_FAILED`) | `SKIPPED` | 그대로(쓰기 담당 = 도착) |
 
-  종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 그 행으로 판정한다.
+  종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 그 행으로 판정한다. 종료 1 의 근거 우선순위는 **결과 행 > 지금 쓰기 담당 확인 > 로그 표식**이다(로그는 Job 이 끝날 때 기록이라 지금보다 오래될 수 있다). `DB_CUTOVER_UNKNOWN` 뒤 사람이 할 일(쓰기 담당 확인 → 가중치 수동 조정 → 새 계획)은 [SPEC 4-4a](../../specs/api-17-cutover-step.md).
 - **중단·일꾼 상실**: Job 을 요청한 뒤에는 Job 이 끝나 판정할 때까지 되돌리지 않는다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난다). 판정이 통과면 중단 요청이 있어도 `SUCCEEDED` 다.
 - **응답**: `steps[5].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
 - **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 3)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.

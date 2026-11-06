@@ -149,14 +149,28 @@ def judge_db_cutover(
         if run is not None:
             # 이 계획 행이 있으면 전환은 끝났다(종료 코드와 어긋나도 행이 근거다).
             return _judge_run(run, reason)
-        if writer == WRITER_SOURCE or reason == REASON_NO_CHANGE:
+        # 근거 우선순위: 결과 행 > 지금 쓰기 담당 확인 > 로그 표식(NO_CHANGE).
+        # 로그는 Job 이 끝날 때의 기록이라 지금 상태보다 오래될 수 있다. 도착이 쓰기 담당으로
+        # 확인되면 로그가 무엇이든 원복하지 않는다(트래픽만 출발로 돌리면 DB 와 갈린다).
+        if writer == WRITER_TARGET:
+            return _fail(
+                MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+                CutoverRecovery.MANUAL,
+                REASON_TARGET_IS_WRITER,
+            )
+        if writer == WRITER_SOURCE:
+            return _fail(
+                MigrationErrorCode.DB_CUTOVER_FAILED, CutoverRecovery.ROLLBACK_TRAFFIC, reason
+            )
+        # 쓰기 담당을 확인하지 못했을 때만 인프라가 계약한 NO_CHANGE 표식을 보조 근거로 쓴다.
+        if reason == REASON_NO_CHANGE:
             return _fail(
                 MigrationErrorCode.DB_CUTOVER_FAILED, CutoverRecovery.ROLLBACK_TRAFFIC, reason
             )
         return _fail(
             MigrationErrorCode.DB_CUTOVER_UNKNOWN,
             CutoverRecovery.MANUAL,
-            REASON_TARGET_IS_WRITER if writer == WRITER_TARGET else REASON_WRITER_UNCONFIRMED,
+            REASON_WRITER_UNCONFIRMED,
         )
     if finished and exit_code == EXIT_PARTIAL:
         return _fail(MigrationErrorCode.DB_CUTOVER_PARTIAL, CutoverRecovery.MANUAL, None, run)

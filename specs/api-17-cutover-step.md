@@ -62,7 +62,7 @@
 - APPLY: 요청 시각(`traffic_requested_at` 칸 재사용) 저장·커밋 → `start` → Job 이름·종류를 `step_results[5].cutover` 에 적고 OBSERVE(`observe_until = 지금 + 단계 maxWaitSeconds`). 만들기 실패가 retryable 이면 요청 시각 + 상한까지 같은 이름으로 다시(409 면 PLAN_ID 확인 후 같은 Job).
   - **생성 응답 유실(검증 P1-1)**: 실패를 셋으로 가른다. ① 분명한 거절(401·403·400·422·이름 충돌) = Job 없음. ② 보내기 전 실패(접속 실패·토큰 파일 읽기 실패·429, `not_sent`) = Job 없음. ③ 보낸 뒤 결과 불명(읽기 시간 초과·끊김·5xx, `maybe_created`) = 만들었을 수 있음 → 단계 결과에 `startUncertain` 을 적어 두고, 상한까지 끝내 생성 답을 못 받으면 **원복 전에** 결정적 이름(`echo-cutover-<계획 8자>-1`)으로 GET(`find_job`): 있음 → 그 Job 을 기다림(`startConfirmed`), 404 → 결과 표 `cutover_runs`(계획 id)도 없을 때만 `DB_CUTOVER_FAILED`·트래픽 원복(행이 있으면 판정으로), 확인 불가 → `DB_CUTOVER_UNKNOWN`·가중치 그대로·`SKIPPED`.
 - OBSERVE: `MIGRATION_DB_CUTOVER_POLL_SECONDS` 마다 `poll`. 끝남·사라짐·상한 초과면 JUDGE. **poll 예외(검증 P1-4)**는 흡수해 연속 횟수(`pollErrors`)를 적고 시계 상한은 늘 확인한다. 연속 5번이면 상한을 기다리지 않고 JUDGE(행이 없으면 `DB_CUTOVER_UNKNOWN`). 일꾼이 바뀌어도 OBSERVE 는 저장된 Job 이름으로, APPLY 는 같은 이름 409 → GET 으로 다시 붙는다.
-- JUDGE: `find_run`(이 계획 id·kind 행) → `judge_db_cutover`. **종료 1(검증 P1-2)**은 「바뀐 것 없음」의 증거가 아니다(이미 B 가 쓰기 담당인데 사전 확인이 실패해도, PAUSE 뒤 RESUME 이 실패해도 종료 1) → 행이 있으면 행으로 판정, 없으면 데이터 확인 실행기로 지금 쓰기 담당을 본다(출발 `pg_stat_replication` 에 도착 구독 walsender = 출발이 쓰기 담당 / `TARGET_IS_WRITER` = 도착). **출발이 쓰기 담당이거나 파드 로그에 `NO_CHANGE` 표식이 있을 때만** 트래픽 원복, 아니면 `DB_CUTOVER_UNKNOWN`.
+- JUDGE: `find_run`(이 계획 id·kind 행) → `judge_db_cutover`. **종료 1(검증 P1-2)**은 「바뀐 것 없음」의 증거가 아니다(이미 B 가 쓰기 담당인데 사전 확인이 실패해도, PAUSE 뒤 RESUME 이 실패해도 종료 1) → 행이 있으면 행으로 판정, 없으면 데이터 확인 실행기로 지금 쓰기 담당을 본다(출발 `pg_stat_replication` 에 도착 구독 walsender = 출발이 쓰기 담당 / `TARGET_IS_WRITER` = 도착). **근거 우선순위는 결과 행 > 지금 쓰기 담당 확인 > 로그 표식(검증 2회차 P1)**: 도착이 쓰기 담당(`TARGET_IS_WRITER`)이면 로그가 `NO_CHANGE` 여도 원복하지 않고 `DB_CUTOVER_UNKNOWN`(로그는 Job 이 끝날 때 기록이라 지금 상태보다 오래될 수 있다), 출발이 쓰기 담당이면 트래픽 원복, **쓰기 담당을 확인하지 못했을 때만** 파드 로그 `NO_CHANGE` 표식으로 원복, 그 밖은 `DB_CUTOVER_UNKNOWN`.
 - 데이터 확인(단계 3, 검증 P1-3): **EMERGENCY + DB 쓰기 전환** 계획에서 지연을 못 재면(원본 DB 단절) 실패 대신 건너뛰고 `DATA_SYNC_SKIPPED`(WARN, reason `EMERGENCY_SOURCE_UNREACHABLE`) 를 남긴 뒤 승격 Job 까지 간다. 승격은 승인 때 동의를 받았다. DB 쓰기 전환이 없는 EMERGENCY·그 밖의 계획은 그대로 `METRICS_UNAVAILABLE`.
 - Job 을 요청한 뒤(APPLY 요청 시각 이후·OBSERVE·JUDGE)에는 **중단 요청·임대 상실로 트래픽을 되돌리지 않고** 판정까지 간다.
 
@@ -71,13 +71,30 @@
 | 상황 | 결과 | rollbackStatus | 트래픽 | 이유 |
 |---|---|---|---|---|
 | 종료 0 + 행 + 누락 0·중복 0 · 종료 0 + ALREADY_WRITER | 통과 → SUCCEEDED | — | 도착 100% | |
-| 종료 1 + (출발이 쓰기 담당 확인 또는 로그 `NO_CHANGE`) · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 행 없음) | ROLLED_BACK(`DB_CUTOVER_FAILED`) | SUCCEEDED | 출발 100% | 쓰기 담당 그대로 → 기존 롤백이 안전 |
-| 종료 1 + 쓰기 담당 미확인·도착 · 생성 응답 유실 뒤 조회 불가 · poll 연속 실패(행 없음) | FAILED(`DB_CUTOVER_UNKNOWN`) | SKIPPED | 그대로 | **결과를 모르면 가중치를 되돌리지 않는다**(트래픽과 쓰기 담당이 갈리는 것이 최악) → 사람이 쓰기 담당 확인 |
+| 종료 1 + (출발이 쓰기 담당 확인 또는 쓰기 담당 확인 불가 + 로그 `NO_CHANGE`) · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 행 없음) | ROLLED_BACK(`DB_CUTOVER_FAILED`) | SUCCEEDED | 출발 100% | 쓰기 담당 그대로 → 기존 롤백이 안전 |
+| 종료 1 + 쓰기 담당 도착(로그 `NO_CHANGE` 여도) · 종료 1 + 쓰기 담당 미확인 + 표식 없음 · 생성 응답 유실 뒤 조회 불가 · poll 연속 실패(행 없음) | FAILED(`DB_CUTOVER_UNKNOWN`) | SKIPPED | 그대로 | **결과를 모르면 가중치를 되돌리지 않는다**(트래픽과 쓰기 담당이 갈리는 것이 최악) → 사람이 쓰기 담당 확인 |
 | 종료 2 · 알 수 없는 종료(143 등) · Job 사라짐, 행 없음 | FAILED(`DB_CUTOVER_PARTIAL`) | SKIPPED | 그대로 | PgBouncer 가 PAUSE 일 수 있고 rollback.sh 도 판단 불가(종료 2) → 사람이 절차서 |
 | 상한 초과, 행 없음 | FAILED(`DB_CUTOVER_TIMEOUT`) | SKIPPED | 그대로 | 쓰기 담당 모름 |
 | 누락·중복 > 0 · 종료 0 인데 행 없음/못 읽음 | FAILED(`DATA_INTEGRITY_FAILED`) | SKIPPED | 그대로 | 쓰기 담당 = 도착. 되돌리기는 사람 판단(12.0 결정 3) |
 
 종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 전환은 끝난 것이라 행으로 판정한다. 트래픽 위치는 쓰기를 깨지 않는다(두 PgBouncer 가 늘 같은 쓰기 담당을 본다) — 그래서 "모름"일 때 트래픽을 건드리지 않는 쪽을 골랐다.
+
+### 4-4a. `DB_CUTOVER_UNKNOWN` 뒤 사람이 할 일 (복구 절차)
+
+UNKNOWN 은 새 상태가 아니라 `status=FAILED`·`errorCode=DB_CUTOVER_UNKNOWN`·`rollbackStatus=SKIPPED` 다. 트래픽 가중치와 DB 는 판정 때 그대로 두었다(대개 도착 100%). 끝난 계획은 승인·중단이 둘 다 409 이고, 자동 DB rollback Job 도 없다. **FAILED 는 실행 중 보호 목록에 없어서 새 계획이 막히지 않는다 — 아래 1·2 를 끝내기 전에는 같은 서비스에 새 계획을 만들지 않는다.**
+
+1. **지금 쓰기 담당 확인** (읽기만)
+   - 계획 상세 `GET /api/v1/orgs/{orgId}/migration-plans/{planId}` 의 `steps[5].cutover` 에서 `jobName`·`exitCode`·`reason`·`writer`·`pollErrors` 를 읽는다. 로그 `DB_CUTOVER_MANUAL_REQUIRED` 의 data 도 같다.
+   - Job·파드 로그: `kubectl -n echo-ops get job <jobName> -o wide` · `kubectl -n echo-ops logs job/<jobName>` (`NO_CHANGE`·`PRECHECK_FAILED`·`ALREADY_WRITER` 표식, 종료 2 면 PgBouncer PAUSE 여부).
+   - 결과 행: 도착 DB 에서 `SELECT kind, paused_at, resumed_at, rows_total, missing_rows, duplicate_rows, mode FROM echo_ops.cutover_runs WHERE plan_id = '<계획 id>';` (`PostgresCutoverRunReader` 와 같은 칸, 행은 RESUME 뒤 새 쓰기 담당 쪽에 쓰이니 두 DB 모두 본다). 행이 있으면 전환은 끝났다.
+   - 발행자(쓰기 담당) 판별 — 데이터 확인 실행기와 같은 질의: 출발에서 `SELECT application_name, state FROM pg_stat_replication WHERE application_name = '<도착 구독>';` (정방향 B 의 `echo_sub`, 역방향 A 의 `echo_sub_rev`) → 있으면 **출발이 쓰기 담당**. 도착에서 같은 질의를 출발 구독 이름으로 돌려 행이 있거나, 출발 `SELECT subname FROM pg_subscription WHERE subenabled;` 에 출발 구독이 있으면 **도착이 쓰기 담당**. 두 쪽 다 근거가 없거나 서로 어긋나면 멈추고 인프라 담당(도현)에게 넘긴다(부분 상태 복구 절차).
+2. **가중치를 쓰기 담당에 맞춘다** (사람이 수동, 한 번)
+   - 진입점 가중치 API(`ENTRYPOINT_BASE_URL`, 내부 주소)에 Bearer 토큰(Secret Manager `echo-dev-entry-weights-token`)으로 `GET /weights` 로 지금 값을 보고, 쓰기 담당 쪽 100·반대 0 으로 `PUT /weights` 본문 `{"aws": 0, "gcp": 100}`(쓰기 담당이 서울 B 일 때) 또는 `{"aws": 100, "gcp": 0}`(도쿄 A 일 때). 토큰은 셸 기록·로그에 남기지 않는다.
+   - 쓰기 담당이 도착이면 대개 이미 도착 100% 라 바꿀 것이 없다. 출발로 확인되면 출발 100% 로 되돌린다. 확인이 안 되면 바꾸지 않는다.
+   - 종료 2(PgBouncer PAUSE 가능)·결과 행의 누락/중복이 있으면 가중치보다 먼저 인프라 절차서(`replication/cutover-job` README 「Job 이 죽을 때」)로 RESUME·정합을 맞춘다.
+3. **새 계획**
+   - 쓰기 담당과 가중치가 같은 쪽을 가리키는 것을 다시 확인한 뒤, 원래 하려던 일에 맞춰 새 이전 계획을 만든다: 출발이 쓰기 담당이었으면 같은 도착으로 `includeCutover=true` 계획을 다시, 도착이 쓰기 담당이 됐으면 DB 전환은 끝난 것이라 새 계획이 필요 없다(되돌리려면 FAILBACK 계획).
+   - UNKNOWN 이었던 계획 id·확인 결과·손으로 바꾼 가중치를 이슈 댓글에 남긴다(감사 줄은 수동 가중치 변경을 모른다).
 
 ### 4-5. 기록
 
@@ -113,7 +130,7 @@
 - [x] (자동) true + Job 성공 → 6단계 SUCCEEDED, 단계·계획 result 에 writePauseMs·누락·중복·rowsTotal, 감사 2줄
 - [x] (자동) 종료 1·만들기 실패 → 트래픽 롤백 / 종료 2·사라짐·누락·행 없음 → FAILED SKIPPED / 상한 초과 → TIMEOUT SKIPPED / 상한 초과지만 행 있음 → 통과
 - [x] (자동) Job 실행 중 중단 → Job 결과로 판정(트래픽 되돌리지 않음)
-- [x] (자동, 검증 반영) 생성 응답 유실 → 같은 이름 Job 재부착 / 404 + 행 없음만 원복 / 확인 불가 UNKNOWN·SKIPPED · 종료 1 은 출발 쓰기 담당·`NO_CHANGE` 일 때만 원복 · 원본 단절 EMERGENCY 가 승격 Job 에 닿음 · poll 지속 예외 UNKNOWN · 승격 동의 없으면 422
+- [x] (자동, 검증 반영) 생성 응답 유실 → 같은 이름 Job 재부착 / 404 + 행 없음만 원복 / 확인 불가 UNKNOWN·SKIPPED · 종료 1 은 출발 쓰기 담당이거나 (쓰기 담당 확인 불가 + `NO_CHANGE`) 일 때만 원복, 도착 쓰기 담당이면 `NO_CHANGE` 여도 UNKNOWN · 원본 단절 EMERGENCY 가 승격 Job 에 닿음 · poll 지속 예외 UNKNOWN · 승격 동의 없으면 422
 - [ ] (운영) 켜기 PR 뒤 PLANNED 이전 → 자동 컷오버 → FAILBACK 자동 rollback 한 바퀴, 사람 명령 0
 - [ ] (운영) EMERGENCY 승격 경로
 
