@@ -2,7 +2,7 @@ import uuid
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import SecurityControlId, SecurityFindingMode, SecurityFindingSource
@@ -79,6 +79,43 @@ class CveWatchRepository:
                 if isinstance(item, dict) and isinstance(item.get("item_id"), str):
                     known.setdefault(digest, set()).add(item["item_id"])
         return known
+
+    async def retire_simulated_overflow(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        keep_ids: Collection[uuid.UUID],
+        limit: int,
+        now: datetime,
+    ) -> int:
+        """살아 있는 가짜(SIMULATED) CVE 증거를 limit 건까지만 남기고 오래된 것부터 지운다.
+
+        keep_ids(이번 주입이 돌려준 증거)는 지우지 않는다. 만료 시각을 당기지 않고 지우는 까닭:
+        `expires_after_collected` CHECK 때문에 같은 시각에 모은 행은 지금으로 만료시킬 수 없고, 가짜
+        증거는 판정에 쓰이지 않아 남길 값이 없다. 지운 수를 돌려준다(감사 줄에 남긴다).
+        """
+        keep = list(keep_ids)
+        stmt = (
+            select(Finding.id)
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.source == SecurityFindingSource.CVE_WATCH,
+                Finding.mode == SecurityFindingMode.SIMULATED,
+                Finding.expires_at > now,
+            )
+            .order_by(Finding.collected_at.desc(), Finding.created_at.desc(), Finding.id.desc())
+            .offset(max(limit - len(keep), 0))
+        )
+        if keep:
+            stmt = stmt.where(Finding.id.not_in(keep))
+        overflow = list((await self._session.scalars(stmt)).all())
+        if overflow:
+            await self._session.execute(
+                delete(Finding)
+                .where(Finding.id.in_(overflow))
+                .execution_options(synchronize_session=False)
+            )
+        return len(overflow)
 
     async def find_finding(
         self, organization_id: uuid.UUID, finding_id: uuid.UUID

@@ -276,7 +276,7 @@ class Settings(BaseSettings):
     cve_watch_simulate_enabled: bool = True
     cve_watch_osv_url: str = "https://api.osv.dev"
     cve_watch_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    # 한 번에 상세를 받는 취약점 수 상한(넘는 것은 다음 주기).
+    # 한 번에 상세를 받는 취약점 수 상한. 넘는 것은 미처리 목록에 남겨 다음 조회 때 먼저 본다.
     cve_watch_max_advisories: int = Field(default=200, ge=1, le=2000)
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)

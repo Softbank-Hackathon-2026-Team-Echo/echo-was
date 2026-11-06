@@ -6,13 +6,20 @@
   없으면 `severity[]` 의 CVSS v3 벡터로 기본 점수를 계산한다(9.0↑ CRITICAL, 7.0↑ HIGH, 4.0↑ MEDIUM).
   둘 다 없으면 UNKNOWN 이다(지어내지 않는다).
 - 고칠 버전: 그 패키지 `affected[].ranges` 중 설치 버전이 든 범위의 `fixed`.
-- 한 번에 상세를 받는 취약점 수는 `max_details` 로 막는다. 넘으면 나머지는 다음 주기에 본다.
-- 실패(연결·시간 초과·5xx·모양 틀림)는 `AdvisoryFeedUnavailableError`(502)다.
+- 한 번에 상세를 받는 취약점 수는 `max_details` 로 막는다. 넘은 id 는 미처리 목록
+  (`DetailBacklog`, 프로세스 메모리)에 남겨 다음 조회 때 먼저 본다 — 상한이 작아도 돌아가며 모두
+  본다. 이번에 못 본 수는 `last_deferred` 로 알린다(일꾼이 다시 뜨면 미처리 목록은 비어 처음부터).
+- 고칠 버전: 배포판 생태계(`Debian:12`)는 같은 판의 `affected` 만 쓴다(다른 판의 fixed 를 고르지
+  않는다). 판 번호가 없는 `affected` 는 모든 판에 쓴다.
+- 같은 취약점을 가리키는 별칭(OSV id·aliases 가 겹치는 것)은 패키지마다 한 건으로 합친다.
+- 실패(연결·시간 초과·5xx·최상위 모양 틀림)는 `AdvisoryFeedUnavailableError`(502)다. 결과 한 건·
+  상세 한 건의 안쪽 모양이 틀리면 그 건만 건너뛰고 `last_errors` 로 센다.
 """
 
 import asyncio
 import math
-from collections.abc import Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -23,6 +30,7 @@ from app.services.cve_watch_packages import DependencyPackage, package_key
 from app.services.cve_watch_versions import fixed_version_for
 
 QUERY_BATCH_SIZE = 500
+BACKLOG_MAX = 10_000
 DETAIL_CONCURRENCY = 8
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 _GHSA_SEVERITY = {
@@ -36,6 +44,40 @@ _GHSA_SEVERITY = {
 
 class AdvisoryFeedUnavailableError(ExternalError):
     code = "CVE_FEED_UNAVAILABLE"
+
+
+class MalformedAdvisoryError(ValueError):
+    """OSV 결과·상세 한 건의 안쪽 모양이 틀렸다(그 건만 건너뛴다)."""
+
+
+class DetailBacklog:
+    """상세 상한 때문에 못 본 취약점 id(먼저 못 본 순서). 다음 조회 때 앞에 둔다."""
+
+    def __init__(self, max_size: int = BACKLOG_MAX) -> None:
+        self._ids: OrderedDict[str, None] = OrderedDict()
+        self._max_size = max_size
+
+    def select(self, wanted: Iterable[str], limit: int) -> tuple[list[str], int]:
+        """이번에 상세를 받을 id 와 못 본(미뤄진) 수. 미처리 목록의 id 가 먼저다."""
+        wanted_set = set(wanted)
+        first = [vid for vid in self._ids if vid in wanted_set]
+        rest = sorted(wanted_set.difference(first))
+        ordered = first + rest
+        chosen, deferred = ordered[:limit], ordered[limit:]
+        for vid in chosen:
+            self._ids.pop(vid, None)
+        for vid in deferred:
+            self._ids.setdefault(vid, None)
+        while len(self._ids) > self._max_size:
+            self._ids.popitem(last=False)
+        return chosen, len(deferred)
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+
+# 프로세스 하나(일꾼 또는 API 파드)가 함께 쓰는 미처리 목록.
+_SHARED_BACKLOG = DetailBacklog()
 
 
 @dataclass(frozen=True)
@@ -69,13 +111,20 @@ class OsvAdvisoryFeed:
         timeout_seconds: float,
         max_details: int,
         transport: httpx.AsyncBaseTransport | None = None,
+        backlog: DetailBacklog | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._max_details = max_details
         self._transport = transport
+        self._backlog = backlog if backlog is not None else _SHARED_BACKLOG
+        # 마지막 조회에서 상한 때문에 미룬 취약점 수·모양이 틀려 건너뛴 건수.
+        self.last_deferred = 0
+        self.last_errors = 0
 
     async def find(self, packages: Sequence[DependencyPackage]) -> list[AdvisoryMatch]:
+        self.last_deferred = 0
+        self.last_errors = 0
         if not packages:
             return []
         try:
@@ -83,18 +132,25 @@ class OsvAdvisoryFeed:
                 base_url=self._base_url, timeout=self._timeout, transport=self._transport
             ) as client:
                 ids_by_package = await self._query(client, packages)
-                wanted = sorted({vid for ids in ids_by_package.values() for vid in ids})
-                details = await self._details(client, wanted[: self._max_details])
+                wanted = {vid for ids in ids_by_package.values() for vid in ids}
+                chosen, self.last_deferred = self._backlog.select(wanted, self._max_details)
+                details = await self._details(client, chosen)
         except httpx.HTTPError as exc:
             raise AdvisoryFeedUnavailableError(
                 "OSV request failed", error_type=type(exc).__name__
             ) from exc
         matches: list[AdvisoryMatch] = []
         for package, ids in ids_by_package.items():
+            found: list[AdvisoryMatch] = []
             for vid in ids:
                 vuln = details.get(vid)
-                if vuln is not None:
-                    matches.append(match_from_osv(package, vuln))
+                if vuln is None:
+                    continue
+                try:
+                    found.append(match_from_osv(package, vuln))
+                except (MalformedAdvisoryError, TypeError, ValueError, AttributeError):
+                    self.last_errors += 1
+            matches.extend(merge_aliases(found))
         return matches
 
     async def _query(
@@ -119,7 +175,14 @@ class OsvAdvisoryFeed:
                 raise AdvisoryFeedUnavailableError("OSV querybatch response invalid")
             for package, result in zip(chunk, results, strict=True):
                 vulns = result.get("vulns") if isinstance(result, Mapping) else None
-                ids = [str(v["id"]) for v in vulns or [] if isinstance(v, Mapping) and v.get("id")]
+                if vulns is not None and not isinstance(vulns, list):
+                    self.last_errors += 1
+                    continue
+                ids = [
+                    str(v["id"])
+                    for v in vulns or []
+                    if isinstance(v, Mapping) and isinstance(v.get("id"), str) and v.get("id")
+                ]
                 if ids:
                     found[package] = ids
         return found
@@ -139,13 +202,36 @@ class OsvAdvisoryFeed:
         return dict(pairs)
 
 
+def _list_field(body: Mapping[str, Any], name: str) -> list[Any]:
+    """배열이어야 하는 칸. 없으면 빈 목록, 배열이 아니면 MalformedAdvisoryError."""
+    value = body.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise MalformedAdvisoryError(f"OSV field {name} is not a list")
+    return value
+
+
+def _same_release(package_ecosystem: str, affected_ecosystem: str) -> bool:
+    """배포판 생태계(`Debian:12`)는 같은 판이어야 한다. 한쪽에 판 번호가 없으면 같다고 본다."""
+    package_family, _, package_release = package_ecosystem.partition(":")
+    affected_family, _, affected_release = affected_ecosystem.partition(":")
+    if package_family.strip().lower() != affected_family.strip().lower():
+        return False
+    if not package_release or not affected_release:
+        return True
+    return package_release.strip().lower() == affected_release.strip().lower()
+
+
 def match_from_osv(package: DependencyPackage, vuln: Mapping[str, Any]) -> AdvisoryMatch:
-    """OSV 취약점 상세 하나 → 그 패키지에 대한 권고·고칠 버전."""
-    vid = str(vuln.get("id") or "UNKNOWN")
-    aliases = tuple(str(a) for a in vuln.get("aliases") or [] if isinstance(a, str))
+    """OSV 취약점 상세 하나 → 그 패키지의 권고·고칠 버전. 모양이 틀리면 MalformedAdvisoryError."""
+    vid = vuln.get("id")
+    if not isinstance(vid, str) or not vid:
+        raise MalformedAdvisoryError("OSV vuln id missing")
+    aliases = tuple(a for a in _list_field(vuln, "aliases") if isinstance(a, str) and a != vid)
     summary = vuln.get("summary")
     ranges: list[Mapping[str, Any]] = []
-    for affected in vuln.get("affected") or []:
+    for affected in _list_field(vuln, "affected"):
         if not isinstance(affected, Mapping):
             continue
         affected_package = affected.get("package")
@@ -156,7 +242,9 @@ def match_from_osv(package: DependencyPackage, vuln: Mapping[str, Any]) -> Advis
             continue
         if package_key(ecosystem, name) != package.key:
             continue
-        ranges.extend(r for r in affected.get("ranges") or [] if isinstance(r, Mapping))
+        if not _same_release(package.ecosystem, ecosystem):
+            continue
+        ranges.extend(r for r in _list_field(affected, "ranges") if isinstance(r, Mapping))
     advisory = Advisory(
         advisory_id=vid,
         aliases=aliases,
@@ -164,7 +252,56 @@ def match_from_osv(package: DependencyPackage, vuln: Mapping[str, Any]) -> Advis
         severity=severity_of(vuln),
         url=f"https://osv.dev/vulnerability/{vid}",
     )
-    return AdvisoryMatch(package, advisory, fixed_version_for(package.version, ranges))
+    return AdvisoryMatch(
+        package, advisory, fixed_version_for(package.version, ranges, package.ecosystem)
+    )
+
+
+_SEVERITY_RANK = {name: rank for rank, name in enumerate(reversed(SEVERITIES))}
+
+
+def canonical_advisory_id(advisory: Advisory) -> str:
+    """별칭까지 본 대표 id: CVE 가 있으면 가장 작은 CVE, 없으면 가장 작은 id."""
+    ids = {advisory.advisory_id, *advisory.aliases}
+    cves = sorted(vid for vid in ids if vid.upper().startswith("CVE-"))
+    return cves[0] if cves else min(ids)
+
+
+def merge_aliases(matches: Sequence[AdvisoryMatch]) -> list[AdvisoryMatch]:
+    """한 패키지에 걸린 권고 중 id·별칭이 겹치는 것을 한 건으로 합친다.
+
+    대표: 심각도가 높은 것 → 고친 버전이 있는 것 → id 가 작은 것. 별칭은 모두 모은다.
+    """
+    groups: list[tuple[set[str], list[AdvisoryMatch]]] = []
+    for match in matches:
+        ids = {match.advisory.advisory_id, *match.advisory.aliases}
+        joined = [group for group in groups if group[0] & ids]
+        merged_ids, merged_matches = set(ids), [match]
+        for group in joined:
+            merged_ids |= group[0]
+            merged_matches.extend(group[1])
+            groups.remove(group)
+        groups.append((merged_ids, merged_matches))
+    result: list[AdvisoryMatch] = []
+    for ids, members in groups:
+        best = min(
+            members,
+            key=lambda m: (
+                -_SEVERITY_RANK.get(m.advisory.severity, 0),
+                m.fixed_version is None,
+                m.advisory.advisory_id,
+            ),
+        )
+        aliases = tuple(sorted(ids - {best.advisory.advisory_id}))
+        advisory = Advisory(
+            advisory_id=best.advisory.advisory_id,
+            aliases=aliases,
+            summary=best.advisory.summary,
+            severity=best.advisory.severity,
+            url=best.advisory.url,
+        )
+        result.append(AdvisoryMatch(best.package, advisory, best.fixed_version))
+    return result
 
 
 def severity_of(vuln: Mapping[str, Any]) -> str:
@@ -174,7 +311,7 @@ def severity_of(vuln: Mapping[str, Any]) -> str:
         if isinstance(label, str) and label.upper() in _GHSA_SEVERITY:
             return _GHSA_SEVERITY[label.upper()]
     best: float | None = None
-    for entry in vuln.get("severity") or []:
+    for entry in _list_field(vuln, "severity"):
         if not isinstance(entry, Mapping) or entry.get("type") != "CVSS_V3":
             continue
         score = cvss3_base_score(str(entry.get("score") or ""))

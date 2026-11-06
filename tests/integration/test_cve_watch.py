@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.audit.actions import AuditAction
 from app.clients.osv import OsvAdvisoryFeed
@@ -28,12 +28,13 @@ from app.main import app
 from app.models import AuditLog, Finding, ServiceDependencySnapshot, ServiceEnvironment
 from app.services.cve_watch_loop import CveWatchLoop
 from app.services.cve_watch_packages import DependencyPackage
-from app.services.cve_watch_service import CveWatchService
+from app.services.cve_watch_service import SIMULATED_ACTIVE_LIMIT, CveWatchService
 from app.services.security_finding_service import SecurityFindingService
 from app.services.security_normalizers import normalize_trivy_image
 from app.services.security_rules import SecurityScope
 from tests.integration.auth_support import create_member, make_client, org_path
 from tests.integration.migration_support import Migration
+from tests.integration.security_gate_support import prepare_passing_gate
 from tests.integration.test_security_scan_collect import (
     ScanningBuildExecutor,
     _deploy_and_finish,
@@ -252,7 +253,9 @@ async def test_inject_matching_advisory_creates_simulated_findings_once_per_envi
         c for c in matrix["rows"][0]["cells"]["policy"]["controls"] if c["controlId"] == "C-IMG-1"
     )
     assert image["result"] != "FAIL"
-    assert "EVIDENCE_SIMULATED" in image["reasons"]
+    # 판정 조회가 SIMULATED 를 아예 읽지 않는다 — 가짜 증거는 이유로도 나오지 않는다.
+    assert "EVIDENCE_SIMULATED" not in image["reasons"]
+    assert "EVIDENCE_MISSING" in image["reasons"]
 
 
 # --- AC-2 실제 조회(가짜 OSV 응답) → REAL 증거, 낮은 심각도·이미 알려진 것 제외 ---
@@ -501,3 +504,119 @@ async def test_build_scan_records_dependency_snapshot_for_built_digest(harness: 
 def _clear_feed_override() -> Any:
     yield
     app.dependency_overrides.pop(get_advisory_feed, None)
+
+
+# --- 검증 반영: 가짜 증거·대량 증거가 실제 판정을 바꾸지 않는다 ---
+
+
+async def _image_cells(migration: Migration) -> list[dict[str, Any]]:
+    response = await migration.harness.client.get(_path(migration, "/matrix"))
+    assert response.status_code == 200, response.text
+    return [
+        next(c for c in row["cells"]["policy"]["controls"] if c["controlId"] == "C-IMG-1")
+        for row in response.json()["data"]["rows"]
+    ]
+
+
+async def _active_simulated(migration: Migration) -> int:
+    now = migration.harness.clock.now()
+    return sum(
+        1
+        for finding in await _cve_findings(migration)
+        if finding.mode == SecurityFindingMode.SIMULATED and finding.expires_at > now
+    )
+
+
+async def test_inject_flood_keeps_simulated_cap_and_leaves_real_gate_passing(
+    migration: Migration,
+) -> None:
+    await _seed(migration)
+    await prepare_passing_gate(migration)
+    plan = await migration.create_plan()
+    assert [c["result"] for c in await _image_cells(migration)] == ["PASS", "PASS"]
+    body: dict[str, Any] = {
+        "advisory": {
+            "id": "SIM-FLOOD",
+            "ecosystem": "PyPI",
+            "package": "starlette",
+            "introduced": "0",
+            "fixed": "0.49.1",
+        }
+    }
+
+    retired = 0
+    for index in range(15):
+        body["advisory"]["id"] = f"SIM-FLOOD-{index:04}"
+        response = await migration.author_client.post(
+            _path(migration, "/cve-watch:inject"), json=body
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["created"] == 2
+        retired += data["retiredSimulated"]
+
+    # 15번 × 환경 2 = 30건을 만들었지만 살아 있는 가짜 증거는 조직당 20건까지다.
+    assert await _active_simulated(migration) == SIMULATED_ACTIVE_LIMIT
+    assert retired == 30 - SIMULATED_ACTIVE_LIMIT
+    injected = await _audit(migration, AuditAction.CVE_WATCH_INJECTED)
+    assert sum(int(line.details.get("retiredSimulated", 0)) for line in injected) == retired
+    # 판정 불변: 매트릭스 PASS, 실제 이전 승인 통과.
+    cells = await _image_cells(migration)
+    assert [c["result"] for c in cells] == ["PASS", "PASS"]
+    assert all("EVIDENCE_SIMULATED" not in c["reasons"] for c in cells)
+    approval = await migration.act(plan["id"], "approve")
+    assert approval.status_code == 202, approval.text
+    assert approval.json()["data"]["status"] == "APPROVED"
+
+
+async def test_judgement_read_keeps_latest_evidence_of_every_control_beyond_search_limit(
+    migration: Migration,
+) -> None:
+    """판정 조회 상한(500) 너머로 같은 통제·다른 출처의 새 증거나 가짜 증거가 쌓여도
+    통제·출처마다 최신 실제 증거는 남는다."""
+    await prepare_passing_gate(migration)
+    plan = await migration.create_plan()
+    trivy = (await gate_findings_by_source(migration, SecurityFindingSource.TRIVY_IMAGE))[0]
+    columns = [column.name for column in Finding.__table__.columns]
+    overrides = {
+        "id": "gen_random_uuid()",
+        "image_digest": "'sha256:' || md5(g::text) || md5(g::text)",
+        "dedupe_key": "NULL",
+        "collected_at": "collected_at + g * interval '1 millisecond'",
+        "expires_at": "expires_at + g * interval '1 millisecond'",
+        "created_at": "now()",
+        "updated_at": "now()",
+    }
+    select_list = ", ".join(overrides.get(name, name) for name in columns)
+    async with migration.harness.session_factory() as session, session.begin():
+        for source, mode in (("CVE_WATCH", "REAL"), ("CVE_WATCH", "SIMULATED")):
+            await session.execute(
+                text(
+                    f"INSERT INTO findings ({', '.join(columns)}) "
+                    f"SELECT {select_list} "
+                    "FROM findings, generate_series(1, 600) AS g WHERE findings.id = :id"
+                ).bindparams(id=trivy.id)
+            )
+            await session.execute(
+                text(
+                    "UPDATE findings SET source = :source, mode = :mode "
+                    "WHERE source = 'TRIVY_IMAGE' AND id <> :id"
+                ).bindparams(source=source, mode=mode, id=trivy.id)
+            )
+    async with migration.harness.session_factory() as session:
+        total = await session.scalar(text("SELECT count(*) FROM findings"))
+    assert total is not None and total > 1200
+
+    cells = await _image_cells(migration)
+    assert [c["result"] for c in cells] == ["PASS", "PASS"]
+    approval = await migration.act(plan["id"], "approve")
+    assert approval.status_code == 202, approval.text
+    assert approval.json()["data"]["status"] == "APPROVED"
+
+
+async def gate_findings_by_source(
+    migration: Migration, source: SecurityFindingSource
+) -> list[Finding]:
+    async with migration.harness.session_factory() as session:
+        rows = await session.scalars(select(Finding).where(Finding.source == source))
+        return list(rows.all())

@@ -13,7 +13,7 @@
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote
 
@@ -73,12 +73,16 @@ _PURL = re.compile(
 
 @dataclass(frozen=True, order=True)
 class DependencyPackage:
-    """의존성 하나. ecosystem 은 OSV 표기다."""
+    """의존성 하나. ecosystem 은 OSV 표기다.
+
+    같음·정렬은 (생태계, 이름, 버전)만 본다. purl 은 보조 정보라 있는 목록·없는 목록이 섞여도
+    같은 패키지로 치고, None 과 문자열을 비교하다 멈추지 않는다.
+    """
 
     ecosystem: str
     name: str
     version: str
-    purl: str | None = None
+    purl: str | None = field(default=None, compare=False)
 
     def to_json(self) -> dict[str, str]:
         body = {"ecosystem": self.ecosystem, "name": self.name, "version": self.version}
@@ -282,7 +286,8 @@ def _list_of_dicts(value: object) -> list[Mapping[str, Any]]:
 
 
 def _unique(packages: Iterable[DependencyPackage]) -> list[DependencyPackage]:
+    """같은 (생태계, 정규화한 이름, 버전)은 하나로 친다(PyPI `Zope.Interface`·`zope-interface`)."""
     seen: dict[tuple[str, str, str], DependencyPackage] = {}
     for package in packages:
-        seen.setdefault((package.ecosystem, package.name, package.version), package)
+        seen.setdefault((package.ecosystem, package.key[1], package.version), package)
     return sorted(seen.values())[:MAX_PACKAGES]

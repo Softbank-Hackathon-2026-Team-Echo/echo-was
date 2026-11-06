@@ -3,9 +3,18 @@
 import uuid
 from typing import Any
 
+import httpx
 import pytest
 
-from app.clients.osv import AdvisoryMatch, cvss3_base_score, match_from_osv, severity_of
+from app.clients.osv import (
+    AdvisoryMatch,
+    DetailBacklog,
+    OsvAdvisoryFeed,
+    canonical_advisory_id,
+    cvss3_base_score,
+    match_from_osv,
+    severity_of,
+)
 from app.enums import SecurityFindingMode
 from app.services.cve_watch_packages import (
     DependencyPackage,
@@ -262,3 +271,167 @@ def test_dedupe_key_is_stable_and_separates_scope_version_and_mode() -> None:
         dedupe_key(uuid.uuid4(), target, _match("19.0.0"), real),
     }
     assert key not in others and len(others) == 5
+
+
+# --- 검증 반영: semver 사전 배포·빌드 메타, dpkg, 배포판별 고친 버전 ---
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "scheme", "expected"),
+    [
+        ("1.0.0-1", "1.0.0", "semver", -1),
+        ("1.0.0+build.1", "1.0.0", "semver", 0),
+        ("1.0.0-alpha.2", "1.0.0-alpha.10", "semver", -1),
+        ("1.0.0-alpha", "1.0.0-alpha.1", "semver", -1),
+        ("1.0.0-1", "1.0.0-alpha", "semver", -1),
+        ("1.0.0-rc.1+build.5", "1.0.0-rc.1", "semver", 0),
+        ("3.0.11-1~deb12u2", "3.0.11-1~deb12u3", "debian", -1),
+        ("3.0.11-1", "3.0.11", "debian", 1),
+        ("1.0~rc1-1", "1.0-1", "debian", -1),
+        ("1:2.36-9", "2.36-9", "debian", 1),
+        ("2.36-9+deb12u4", "2.36-9", "debian", 1),
+    ],
+)
+def test_compare_versions_by_scheme(left: str, right: str, scheme: str, expected: int) -> None:
+    assert compare_versions(left, right, scheme) == expected
+    assert compare_versions(right, left, scheme) == -expected
+
+
+def test_numeric_prerelease_is_inside_range_and_gets_fixed_version() -> None:
+    events = [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}]
+    assert is_affected("2.0.0-1", events) is True
+    assert is_affected("2.0.0+build.1", events) is False
+    ranges = [{"type": "SEMVER", "events": events}]
+    assert fixed_version_for("2.0.0-1", ranges, "npm") == "2.0.0"
+
+
+def test_fixed_version_uses_only_same_distro_release() -> None:
+    package = DependencyPackage("Debian:12", "openssl", "3.0.11-1~deb12u2")
+    vuln = {
+        "id": "DEBIAN-CVE-2099-1",
+        "database_specific": {"severity": "HIGH"},
+        "affected": [
+            {
+                "package": {"name": "openssl", "ecosystem": "Debian:11"},
+                "ranges": [
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.0.12"}]}
+                ],
+            },
+            {
+                "package": {"name": "openssl", "ecosystem": "Debian:12"},
+                "ranges": [
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.0.13"}]}
+                ],
+            },
+        ],
+    }
+    assert match_from_osv(package, vuln).fixed_version == "3.0.13"
+
+
+def test_git_ranges_are_not_compared_as_versions() -> None:
+    ranges = [{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "9abc0123"}]}]
+    assert fixed_version_for("1.0.0", ranges, "npm") is None
+
+
+# --- 검증 반영: purl 유무가 섞여도 같은 패키지, PyPI 이름 정규화로 중복 제거 ---
+
+
+def test_package_identity_ignores_purl() -> None:
+    plain = DependencyPackage("PyPI", "x", "1")
+    with_purl = DependencyPackage("PyPI", "x", "1", "pkg:pypi/x@1")
+    assert plain == with_purl
+    assert sorted({plain, with_purl}) == [plain]
+
+
+def test_trivy_report_merges_equivalent_pypi_names() -> None:
+    raw = {
+        "Results": [
+            {
+                "Type": "python-pkg",
+                "Class": "lang-pkgs",
+                "Packages": [
+                    {"Name": "Zope.Interface", "Version": "1.0"},
+                    {"Name": "zope-interface", "Version": "1.0"},
+                ],
+            }
+        ]
+    }
+    assert len(packages_from_trivy_report(raw)) == 1
+
+
+# --- 검증 반영: 상세 상한 이월·깨진 응답 건별 건너뛰기·별칭 합치기 ---
+
+
+def _feed(handler: Any, max_details: int = 200) -> OsvAdvisoryFeed:
+    return OsvAdvisoryFeed(
+        "https://osv.test",
+        1.0,
+        max_details,
+        transport=httpx.MockTransport(handler),
+        backlog=DetailBacklog(),
+    )
+
+
+async def test_detail_cap_carries_over_unseen_advisories_to_next_run() -> None:
+    hits: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            ids = [{"id": vid} for vid in ("A", "B", "Z-HIGH")]
+            return httpx.Response(200, json={"results": [{"vulns": ids}]})
+        vid = request.url.path.rsplit("/", 1)[-1]
+        hits.append(vid)
+        severity = "HIGH" if vid == "Z-HIGH" else "LOW"
+        return httpx.Response(200, json={"id": vid, "database_specific": {"severity": severity}})
+
+    feed = _feed(handle, max_details=2)
+    package = DependencyPackage("npm", "x", "1.0.0")
+    first = await feed.find([package])
+    assert (sorted(hits), feed.last_deferred) == (["A", "B"], 1)
+    second = await feed.find([package])
+    assert "Z-HIGH" in hits[2:]
+    assert "Z-HIGH" in {m.advisory.advisory_id for m in second}
+    assert len(first) == 2
+
+
+@pytest.mark.parametrize(
+    ("batch", "detail"),
+    [
+        ({"results": [{"vulns": 1}]}, {"id": "A"}),
+        ({"results": [{"vulns": [{"id": "A"}]}]}, {"id": "A", "affected": 1}),
+        ({"results": [{"vulns": [{"id": "A"}]}]}, {"id": "A", "severity": 1}),
+        ({"results": [{"vulns": [{"id": "A"}]}]}, {"id": "A", "aliases": "CVE-1"}),
+    ],
+)
+async def test_malformed_nested_fields_skip_that_item_and_count_error(
+    batch: dict[str, Any], detail: dict[str, Any]
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json=batch)
+        return httpx.Response(200, json=detail)
+
+    feed = _feed(handle)
+    matches = await feed.find([DependencyPackage("npm", "x", "1.0.0")])
+    assert matches == []
+    assert feed.last_errors == 1
+
+
+async def test_aliases_of_same_cve_merge_into_one_match() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            ids = [{"id": "CVE-2099-1"}, {"id": "GHSA-x"}]
+            return httpx.Response(200, json={"results": [{"vulns": ids}]})
+        vid = request.url.path.rsplit("/", 1)[-1]
+        body = {
+            "id": vid,
+            "aliases": ["CVE-2099-1", "GHSA-x"],
+            "database_specific": {"severity": "HIGH"},
+        }
+        return httpx.Response(200, json=body)
+
+    matches = await _feed(handle).find([DependencyPackage("npm", "x", "1.0.0")])
+    assert len(matches) == 1
+    advisory = matches[0].advisory
+    assert {advisory.advisory_id, *advisory.aliases} == {"CVE-2099-1", "GHSA-x"}
+    assert canonical_advisory_id(advisory) == "CVE-2099-1"

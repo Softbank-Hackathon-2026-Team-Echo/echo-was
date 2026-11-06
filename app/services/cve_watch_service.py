@@ -16,13 +16,17 @@
    주기 감시는 새 증거가 있을 때 SYSTEM(cve-watch) 줄 하나.
 
 가짜 권고 증거는 `mode = SIMULATED` 라 판정(매트릭스·게이트)에 쓰이지 않는다.
+판정 조회는 SIMULATED 를 상한(LIMIT) 전에 뺀다
+(`FindingRepository.search_unexpired_by_organization`).
+주입은 조직마다 살아 있는 가짜 증거를 `SIMULATED_ACTIVE_LIMIT` 건까지만 남긴다(넘으면 오래된 것부터
+지운다).
 """
 
 import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -30,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
 from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
-from app.clients.osv import Advisory, AdvisoryFeed, AdvisoryMatch
+from app.clients.osv import Advisory, AdvisoryFeed, AdvisoryMatch, canonical_advisory_id
 from app.core.clock import Clock
 from app.core.exceptions import (
     FindingNotFoundError,
@@ -50,7 +54,7 @@ from app.models import Organization, ServiceDependencySnapshot
 from app.repositories.cve_watch_repository import CveWatchRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.services.cve_watch_packages import DependencyPackage
-from app.services.cve_watch_versions import fixed_version_for, is_affected
+from app.services.cve_watch_versions import fixed_version_for, is_affected, scheme_for
 from app.services.security_finding_service import to_finding_model
 from app.services.security_normalizers import FindingItem, NormalizedFinding
 from app.services.security_rules import POLICY_VERSION, SecurityFinding, SecurityScope, get_rule
@@ -63,6 +67,8 @@ SIMULATED_TOOL_VERSION = "simulated"
 OSV_SOURCE_REF = "cve-watch:osv"
 SIMULATED_SOURCE_REF_PREFIX = "cve-watch:simulated:"
 AUDIT_FINDING_IDS_LIMIT = 20
+# 조직마다 살아 있는(만료 전) 가짜 CVE 증거 상한. 넘으면 이번 주입이 쓰지 않은 오래된 것부터 지운다.
+SIMULATED_ACTIVE_LIMIT = 20
 DIAGNOSIS_ISSUE_URL = "https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/98"
 
 
@@ -95,10 +101,13 @@ class SimulatedAdvisory:
             url=None,
         )
         ranges = [{"events": self.events()}]
+        scheme = scheme_for(self.ecosystem)
         return [
-            AdvisoryMatch(package, advisory, fixed_version_for(package.version, ranges))
+            AdvisoryMatch(
+                package, advisory, fixed_version_for(package.version, ranges, self.ecosystem)
+            )
             for package in packages
-            if package.key == wanted and is_affected(package.version, self.events())
+            if package.key == wanted and is_affected(package.version, self.events(), scheme)
         ]
 
 
@@ -130,6 +139,12 @@ class CveWatchRunView:
     matches: list[CveWatchMatchView] = field(default_factory=list)
     skipped_low_severity: int = 0
     skipped_known: int = 0
+    # 상세 상한 때문에 이번에 못 보고 다음 조회로 미룬 권고 수.
+    deferred_advisories: int = 0
+    # 피드 응답 안쪽 모양이 틀려 건너뛴 결과·상세 건수.
+    feed_errors: int = 0
+    # 가짜 증거 상한을 넘어 지운 옛 가짜 증거 수(주입만).
+    retired_simulated: int = 0
 
     @property
     def created_count(self) -> int:
@@ -197,6 +212,21 @@ class CveWatchService:
         view = await self._run(
             organization_id, feed.find, simulated=False, service_id=None, advisory=None
         )
+        view = replace(
+            view,
+            deferred_advisories=int(getattr(feed, "last_deferred", 0) or 0),
+            feed_errors=int(getattr(feed, "last_errors", 0) or 0),
+        )
+        if view.deferred_advisories or view.feed_errors:
+            logger.warning(
+                "cve watch incomplete",
+                extra={
+                    "action": "check_cve_watch",
+                    "organization_id": str(organization_id),
+                    "deferred_advisories": view.deferred_advisories,
+                    "feed_errors": view.feed_errors,
+                },
+            )
         await self._audit(organization_id, view, actor_user_id, advisory=None)
         return view
 
@@ -342,6 +372,14 @@ class CveWatchService:
                     found = model.id
                     seen[key] = found
                 views.append(_view(found, created, target, match))
+            retired = 0
+            if simulated:
+                retired = await self._repository.retire_simulated_overflow(
+                    organization_id,
+                    keep_ids={view.finding_id for view in views},
+                    limit=SIMULATED_ACTIVE_LIMIT,
+                    now=now,
+                )
         view = CveWatchRunView(
             simulated=simulated,
             checked_at=now,
@@ -351,6 +389,7 @@ class CveWatchService:
             matches=views,
             skipped_low_severity=low,
             skipped_known=known_skipped,
+            retired_simulated=retired,
         )
         logger.info(
             "cve watch checked",
@@ -385,6 +424,12 @@ class CveWatchService:
             "duplicates": view.duplicate_count,
             "findingIds": created_ids[:AUDIT_FINDING_IDS_LIMIT],
         }
+        if view.deferred_advisories:
+            details["deferredAdvisories"] = view.deferred_advisories
+        if view.feed_errors:
+            details["feedErrors"] = view.feed_errors
+        if view.retired_simulated:
+            details["retiredSimulated"] = view.retired_simulated
         if advisory is not None:
             details["advisoryId"] = advisory.advisory_id
             details["package"] = f"{advisory.ecosystem}/{advisory.package}"
@@ -417,14 +462,18 @@ def dedupe_key(
     match: AdvisoryMatch,
     mode: SecurityFindingMode,
 ) -> str:
-    """같은 조직·서비스·환경·이미지·권고·패키지·설치 버전·모드면 같은 열쇠다(sha256)."""
+    """같은 조직·서비스·환경·이미지·권고·패키지·설치 버전·모드면 같은 열쇠다(sha256).
+
+    권고는 별칭까지 본 대표 id(CVE 우선)로 센다 — OSV 가 같은 취약점을 GHSA·CVE 어느 id 로 돌려줘도
+    같은 열쇠다.
+    """
     raw = "|".join(
         (
             str(organization_id),
             str(target.service_id),
             str(target.environment_id),
             target.image_digest,
-            match.advisory.advisory_id,
+            canonical_advisory_id(match.advisory),
             match.package.ecosystem,
             match.package.name,
             match.package.version,

@@ -93,6 +93,12 @@ class CveWatchRunResponse(ApiModel):
     duplicates: int
     skipped_low_severity: int
     skipped_known: int
+    # 상세 상한 때문에 이번에 못 보고 다음 조회로 미룬 권고 수(0 이 아니면 결과가 불완전하다).
+    deferred_advisories: int = 0
+    # 피드 응답 안쪽 모양이 틀려 건너뛴 결과·상세 건수.
+    feed_errors: int = 0
+    # 가짜 증거 상한(조직당 20건)을 넘어 지운 옛 가짜 증거 수(주입만).
+    retired_simulated: int = 0
     matches: list[CveWatchMatchResponse]
 
     @classmethod
@@ -107,5 +113,8 @@ class CveWatchRunResponse(ApiModel):
             duplicates=view.duplicate_count,
             skipped_low_severity=view.skipped_low_severity,
             skipped_known=view.skipped_known,
+            deferred_advisories=view.deferred_advisories,
+            feed_errors=view.feed_errors,
+            retired_simulated=view.retired_simulated,
             matches=[CveWatchMatchResponse.from_view(match) for match in view.matches],
         )
