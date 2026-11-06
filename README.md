@@ -350,6 +350,7 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `2`·`86400`·`3` | 단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
 | `SECURITY_GATE_ENABLED`·`WAS_VERSION` | `false`·(없음) | 보안 게이트(이전 승인·일꾼 시작 판정, 실행 직전 TLS 시험. API·일꾼 같은 값)·판정 범위의 WAS 버전([docs/api/migration-plans.md](docs/api/migration-plans.md) "보안 게이트") |
 | `SECURITY_TLS_PROBE_INTERVAL_SECONDS` | `1800` | 게이트가 켜진 일꾼의 공개 경로 TLS 주기 시험 간격(60~3000초, C-TLS-1 증거 유효 1시간보다 짧게, [docs/api/security.md](docs/api/security.md)) |
+| `SECURITY_PLATFORM_SELF_TEST_INTERVAL_SECONDS` | `21600` | 게이트가 켜진 일꾼의 플랫폼 자기 시험(C-IAM-2·C-AUD-1 증거, 유효 24시간) 간격(300~28800초, 시작 때 한 번은 바로 돈다. [specs/sec-5-platform-evidence.md](specs/sec-5-platform-evidence.md)) |
 | `PATCH_APPLY_ENABLED` | `false` | AI 패치 승인이 반영 실행을 만드는가. WAS 는 그 실행을 러너에 주고 결과를 받는다(SPEC api-10-2). `APPLY_PATCH` 를 가져가는 러너가 배포되기 전에는 켜지 않는다([docs/api/prechecks.md](docs/api/prechecks.md) "패치 승인·거절") |
 
 `echo`/`echo` 는 로컬 compose 용 더미 계정이다. 실제 비밀값은 커밋하지 않는다.
