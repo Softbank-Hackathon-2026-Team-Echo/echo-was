@@ -231,12 +231,16 @@ class DiagnosisService:
         """
         # 재배포 커밋(SPEC api-19): AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 행 잠금 트랜잭션 밖에서
         # (GitHub 호출) 서비스 저장소에 커밋·PR 을 만들고 그 커밋을 쓴다. 실패면 재배포 없음.
+        # 같은 반영을 두 요청이 이으면 한 요청만 GitHub 에 쓰고(행 잠금으로 IN_PROGRESS 표시),
+        # 다른 요청은 pending 으로 재배포 없이 돌아간다(쓴 요청이 잇는다, SPEC api-19 D-11).
         repo_commit_sha: str | None = None
+        repo_fields: dict[str, Any] | None = None
         if self._apply_commit is not None:
             committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
-            if committed.stopped:
+            if committed.stopped or committed.pending:
                 return committed.run
             repo_commit_sha = committed.ref
+            repo_fields = committed.result_fields
         rejected_code: str | None = None
         redeploy_id: uuid.UUID | None = None
         async with self._session.begin():
@@ -249,8 +253,11 @@ class DiagnosisService:
                 return None
             if apply_run.status != AgentRunStatus.SUCCEEDED:
                 return None
+            if repo_fields:
+                # 저장소 칸만 부분 갱신(이미 기록된 redeployRequestId 등은 그대로 둔다).
+                await self._runs.patch_result(apply_run_id, self._clock.now(), repo_fields)
             if REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {}):
-                return apply_run
+                return await self._runs.find_by_id(apply_run_id)
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
             if parent is None or parent.deploy_request_id is None:
                 return None
@@ -260,7 +267,6 @@ class DiagnosisService:
             # savepoint 를 되돌리면 그 안에서 바꾼 객체가 만료될 수 있으므로 필요한 값을 먼저 뺀다.
             organization_id = apply_run.organization_id
             actor_user_id = apply_run.requested_by_user_id
-            base_result = dict(apply_run.result or {})
             service_id = failed.service_id
             commit_sha = repo_commit_sha or failed.commit_sha
             command = CreateDeployCommand(
@@ -286,11 +292,11 @@ class DiagnosisService:
                     extra={"action": "redeploy_after_apply", "apply_run_id": str(apply_run_id)},
                 )
                 rejected_code = REDEPLOY_INTERNAL_ERROR_CODE
-            await self._runs.merge_result(
+            # 재배포 칸만 부분 갱신(행 잠금 아래, 저장소 칸·러너 결과는 그대로).
+            await self._runs.patch_result(
                 apply_run_id,
                 self._clock.now(),
                 {
-                    **base_result,
                     REDEPLOY_REQUEST_ID_KEY: str(redeploy_id) if redeploy_id else None,
                     REDEPLOY_REJECTED_CODE_KEY: rejected_code,
                 },

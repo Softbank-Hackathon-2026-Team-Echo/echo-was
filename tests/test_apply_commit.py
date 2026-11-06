@@ -6,6 +6,7 @@ GitHub 는 httpx.MockTransport 로만 흉내 낸다(실제 호출 없음).
 import json
 import logging
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,13 +24,22 @@ from app.clients.secret_client import EnvVarSecretClient
 from app.core.repo_url import RepoLocator
 from app.core.secrets import parse_secret_ref
 from app.services.apply_commit_service import (
+    COMMIT_CLAIM_TTL,
     CommitContext,
+    _claim_is_live,
     commit_message,
     fix_branch_name,
     pull_request_body,
     pull_request_title,
 )
-from app.services.patch_text import PatchApplyError, apply_patch, diff_paths
+from app.services.patch_text import (
+    PatchApplyError,
+    UnsafePathError,
+    apply_patch,
+    check_diff_paths,
+    check_path,
+    diff_paths,
+)
 from tests.github_fake import API_BASE, APP_ID, TEST_APP_PRIVATE_KEY_PEM
 
 KEY_ENV = "ECHO_SECRET_GITHUB_APP_PRIVATE_KEY"
@@ -154,6 +164,11 @@ class _GithubWrite:
         self.branch_exists = overrides.get("branch_exists", False)
         self.pr_exists = overrides.get("pr_exists", False)
         self.file_missing = overrides.get("file_missing", False)
+        # 이미 있는 브랜치 head 커밋의 부모·tree(기본: 승인 패치와 같은 내용).
+        self.branch_parents = overrides.get("branch_parents", [BASE_SHA])
+        self.branch_tree = overrides.get("branch_tree", TREE_SHA)
+        self.file_mode = overrides.get("file_mode", "100644")
+        self.tree_truncated = overrides.get("tree_truncated", False)
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -181,6 +196,24 @@ class _GithubWrite:
             return httpx.Response(404, json={})
         if path == f"{repo}/git/commits/{BASE_SHA}":
             return httpx.Response(200, json={"tree": {"sha": BASE_TREE}})
+        if path == f"{repo}/git/commits/{NEW_SHA}":
+            return httpx.Response(
+                200,
+                json={
+                    "tree": {"sha": self.branch_tree},
+                    "parents": [{"sha": sha} for sha in self.branch_parents],
+                },
+            )
+        if path == f"{repo}/git/trees/{BASE_TREE}" and request.method == "GET":
+            assert request.url.params["recursive"] == "1"
+            entries = [
+                {"path": "app", "mode": "040000", "type": "tree"},
+                {"path": "app/static/index.html", "mode": self.file_mode, "type": "blob"},
+                {"path": "link", "mode": "120000", "type": "blob"},
+            ]
+            if self.tree_truncated:
+                entries = entries[:1]
+            return httpx.Response(200, json={"tree": entries, "truncated": self.tree_truncated})
         if path == f"{repo}/git/blobs":
             return httpx.Response(201, json={"sha": BLOB_SHA})
         if path == f"{repo}/git/trees":
@@ -297,3 +330,130 @@ async def test_github_writer_without_private_key_is_unavailable(
     with pytest.raises(RepoCommitError) as caught:
         await _writer(_GithubWrite()).read_files(REPO, BASE_SHA, ["app/static/index.html"])
     assert caught.value.code == "REPO_WRITE_UNAVAILABLE"
+
+
+# --- 검증 반영: 경로 검사(SPEC D-13) ---
+
+
+def _one_file_diff(path: str) -> str:
+    return f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [
+        ("/absolute", "ABSOLUTE_PATH"),
+        ("../escape", "DOT_SEGMENT"),
+        ("dir/../../escape", "DOT_SEGMENT"),
+        ("./Dockerfile", "DOT_SEGMENT"),
+        (".github/workflows/deploy.yml", "PROTECTED_PATH"),
+        (".GitHub/workflows/deploy.yml", "PROTECTED_PATH"),
+        (".git/config", "PROTECTED_PATH"),
+        ("sub/.git/hooks/pre-commit", "PROTECTED_PATH"),
+        ("a//b", "EMPTY_SEGMENT"),
+        ("dir/", "EMPTY_SEGMENT"),
+        ("a\\b", "UNSAFE_CHAR"),
+        ("a\x00b", "UNSAFE_CHAR"),
+        ('"a b"', "UNSAFE_CHAR"),
+    ],
+)
+def test_check_diff_paths_rejects_unsafe_paths(path: str, reason: str) -> None:
+    with pytest.raises(UnsafePathError) as caught:
+        check_diff_paths(_one_file_diff(path), [path])
+    assert caught.value.reason == reason
+
+
+def test_check_diff_paths_rejects_empty_path() -> None:
+    with pytest.raises(UnsafePathError) as caught:
+        check_path("")
+    assert caught.value.reason == "EMPTY_PATH"
+
+
+@pytest.mark.parametrize(
+    ("diff", "files", "reason"),
+    [
+        (DIFF, ["app/static/other.html"], "FILES_MISMATCH"),
+        (DIFF, ["app/static/index.html", "Dockerfile"], "FILES_MISMATCH"),
+        (DIFF, ["../app/static/index.html"], "DOT_SEGMENT"),
+        ("old mode 100644\nnew mode 100755\n" + DIFF, ["app/static/index.html"], "MODE_OR_RENAME"),
+        (
+            "--- a/app/static/index.html\n+++ b/app/static/renamed.html\n@@ -1 +1 @@\n-x\n+y\n",
+            ["app/static/renamed.html"],
+            "RENAME",
+        ),
+        ("--- /dev/null\n+++ b/new\n@@ -0,0 +1 @@\n+x\n", ["new"], "ADD_OR_DELETE"),
+        ("not a diff", ["a"], "NO_FILE"),
+    ],
+)
+def test_check_diff_paths_matches_declared_files(diff: str, files: list[str], reason: str) -> None:
+    with pytest.raises(UnsafePathError) as caught:
+        check_diff_paths(diff, files)
+    assert caught.value.reason == reason
+
+
+def test_check_diff_paths_accepts_matching_relative_paths() -> None:
+    assert check_diff_paths(DIFF, ["app/static/index.html"]) == ["app/static/index.html"]
+
+
+# --- 검증 반영: 파일 모드·기존 브랜치(SPEC D-13·D-14) ---
+
+
+async def test_github_writer_reads_modes_from_base_tree() -> None:
+    github = _GithubWrite(file_mode="100755")
+    modes = await _writer(github).file_modes(REPO, BASE_SHA, ["app/static/index.html", "link"])
+    assert modes == {"app/static/index.html": "100755", "link": "120000"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [({}, "REPO_FILE_NOT_FOUND"), ({"tree_truncated": True}, "REPO_WRITE_FAILED")],
+)
+async def test_github_writer_mode_lookup_fails_closed(overrides: dict[str, Any], code: str) -> None:
+    with pytest.raises(RepoCommitError) as caught:
+        await _writer(_GithubWrite(**overrides)).file_modes(REPO, BASE_SHA, ["missing.txt"])
+    assert caught.value.code == code
+
+
+async def test_github_writer_keeps_existing_file_mode() -> None:
+    github = _GithubWrite()
+    request = replace(_request(), modes={"app/static/index.html": "100755"})
+    await _writer(github).commit_and_open_pull_request(request)
+    tree = next(b for m, p, b in github.calls if m == "POST" and p.endswith("/git/trees"))
+    assert [entry["mode"] for entry in tree["tree"]] == ["100755"]
+
+
+async def test_github_writer_refuses_symlink_mode_before_any_write() -> None:
+    github = _GithubWrite()
+    request = replace(_request(), modes={"app/static/index.html": "120000"})
+    with pytest.raises(RepoCommitError) as caught:
+        await _writer(github).commit_and_open_pull_request(request)
+    assert caught.value.code == "REPO_PATH_REJECTED"
+    assert not any(m == "POST" and "/git/" in p for m, p, _ in github.calls)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"branch_parents": ["9" * 40]},
+        {"branch_tree": "8" * 40},
+        {"branch_parents": [BASE_SHA, "9" * 40]},
+    ],
+)
+async def test_github_writer_refuses_unrelated_existing_branch(overrides: dict[str, Any]) -> None:
+    github = _GithubWrite(branch_exists=True, **overrides)
+    with pytest.raises(RepoCommitError) as caught:
+        await _writer(github).commit_and_open_pull_request(_request(pr_base="release"))
+    assert caught.value.code == "REPO_BRANCH_CONFLICT"
+    paths = github.paths()
+    assert "POST /repos/team-echo/demo-app/git/commits" not in paths
+    assert "POST /repos/team-echo/demo-app/git/refs" not in paths
+    assert "POST /repos/team-echo/demo-app/pulls" not in paths
+
+
+def test_commit_claim_expires_after_ttl() -> None:
+    now = datetime(2026, 11, 7, 3, 0, tzinfo=UTC)
+    live = {"commitState": "IN_PROGRESS", "commitClaimedAt": now.isoformat()}
+    assert _claim_is_live(live, now + COMMIT_CLAIM_TTL / 2)
+    assert not _claim_is_live(live, now + COMMIT_CLAIM_TTL)
+    assert not _claim_is_live({"commitState": "DONE"}, now)
+    assert not _claim_is_live({"commitState": "IN_PROGRESS", "commitClaimedAt": "x"}, now)

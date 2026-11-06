@@ -19,11 +19,13 @@
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.repo_commit_writer import (
+    EDITABLE_MODES,
     RepoCommitError,
     RepoCommitErrorCode,
     RepoCommitRequest,
@@ -37,7 +39,12 @@ from app.models import AgentRun, DeployRequest
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.user_repository import UserRepository
-from app.services.patch_text import PatchApplyError, apply_patch, diff_paths
+from app.services.patch_text import (
+    PatchApplyError,
+    UnsafePathError,
+    apply_patch,
+    check_diff_paths,
+)
 from app.services.run_result import compute_patch_hash
 
 logger = logging.getLogger(__name__)
@@ -50,6 +57,14 @@ PULL_REQUEST_URL_KEY = "pullRequestUrl"
 REPO_COMMIT_KEY = "repoCommitted"
 SANDBOX_COMMIT_SHA_KEY = "sandboxCommitSha"
 SANDBOX_BRANCH_KEY = "sandboxBranch"
+# 저장소 쓰기 표시(SPEC api-19 D-11). 행 잠금 안에서 IN_PROGRESS 를 잡은 요청 하나만 GitHub 에
+# 쓴다. 잡은 요청이 죽으면 TTL 뒤 다른 요청이 다시 잡는다(브랜치 검증 D-14 로 이어 쓰기 안전).
+COMMIT_STATE_KEY = "commitState"
+COMMIT_CLAIMED_AT_KEY = "commitClaimedAt"
+COMMIT_IN_PROGRESS = "IN_PROGRESS"
+COMMIT_DONE = "DONE"
+COMMIT_FAILED = "FAILED"
+COMMIT_CLAIM_TTL = timedelta(minutes=10)
 CAUSE_TITLE_LIMIT = 72
 TEXT_LIMIT = 500
 
@@ -128,13 +143,32 @@ class CommitOutcome:
     """저장소 반영 결과.
 
     - `stopped=False, ref=None`: 반영 안 함(스위치 꺼짐·가짜 반영·진단 반영 아님) → 원래 커밋 재배포
-    - `stopped=False, ref=<sha>`: 저장소 커밋 → 그 커밋 재배포
-    - `stopped=True`: 저장소 반영 실패 → 재배포 없음(run = FAILED 로 바뀐 반영 실행)
+    - `stopped=False, ref=<sha>`: 저장소 커밋 → 그 커밋 재배포. `result_fields` 가 있으면(이번
+      요청이 GitHub 에 썼다) 재배포 잠금 트랜잭션 안에서 반영 실행 result 에 그 칸만 부분 갱신한다
+    - `stopped=True`: 저장소 반영 실패 → 재배포 없음(run = FAILED 로 바뀐 반영 실행), 또는
+      `pending=True`: 다른 요청이 지금 GitHub 에 쓰는 중 → 이 요청은 재배포를 만들지 않는다(그
+      요청이 잇는다). run = 지금의 반영 실행
     """
 
     ref: str | None = None
     run: AgentRun | None = None
     stopped: bool = False
+    pending: bool = False
+    result_fields: dict[str, Any] | None = None
+
+
+def _claim_is_live(result: dict[str, Any], now: datetime) -> bool:
+    """다른 요청이 잡은 저장소 쓰기 표시가 아직 살아 있나(TTL 안)."""
+    if result.get(COMMIT_STATE_KEY) != COMMIT_IN_PROGRESS:
+        return False
+    claimed_at = result.get(COMMIT_CLAIMED_AT_KEY)
+    if not isinstance(claimed_at, str):
+        return False
+    try:
+        started = datetime.fromisoformat(claimed_at)
+    except ValueError:
+        return False
+    return now - started < COMMIT_CLAIM_TTL
 
 
 class ApplyCommitService:
@@ -155,16 +189,24 @@ class ApplyCommitService:
         self._users = UserRepository(session)
 
     async def prepare_redeploy_commit(self, apply_run_id: uuid.UUID) -> CommitOutcome:
-        """재배포 전에 부른다(행 잠금 트랜잭션 밖 — GitHub 호출이 있다).
+        """재배포 전에 부른다(GitHub 호출은 행 잠금 밖에서 한다).
+
+        두 단계(SPEC api-19 D-11):
+        1. 짧은 트랜잭션: 반영 실행 행 `FOR UPDATE` → 이미 저장소에 썼으면(DONE) 그 커밋을
+           돌려주고, 다른 요청이 쓰는 중이면(IN_PROGRESS, TTL 안) `pending` 을 돌려준다. 아니면
+           `commitState=IN_PROGRESS` 를 부분 갱신으로 표시하고 커밋한다(잠금 해제).
+        2. 잠금 없이 GitHub 쓰기. 결과 칸은 여기서 저장하지 않고 `result_fields` 로 넘긴다 —
+           `DiagnosisService.redeploy_after_apply` 의 재배포 잠금 트랜잭션 안에서 부분 갱신한다.
 
         진단 반영이 아니거나·성공이 아니거나·이미 재배포가 연결됐거나·스위치 꺼짐·가짜 반영이면
-        아무 것도 하지 않는다(ref None). 같은 반영을 두 요청이 함께 이어도 브랜치 이름이 반영 실행
-        id 로 정해져 있어 GitHub 에는 브랜치·PR 하나만 생긴다(뒤 요청은 있는 것을 쓴다).
+        아무 것도 하지 않는다(ref None). 그래서 같은 반영을 두 요청이 함께 이어도(러너 결과 +
+        재승인) GitHub 커밋·PR 은 한 번, 재배포는 하나다.
         """
         if not self._enabled:
             return CommitOutcome()
+        now = self._clock.now()
         async with self._session.begin():
-            apply_run = await self._runs.find_by_id(apply_run_id)
+            apply_run = await self._runs.find_by_id(apply_run_id, lock=True)
             if (
                 apply_run is None
                 or apply_run.kind != AgentRunKind.APPLY_PATCH
@@ -174,24 +216,58 @@ class ApplyCommitService:
                 or REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {})
             ):
                 return CommitOutcome()
+            result: dict[str, Any] = dict(apply_run.result or {})
+            if result.get(REPO_COMMIT_KEY) and isinstance(result.get("appliedCommitSha"), str):
+                return CommitOutcome(result["appliedCommitSha"])
+            if _claim_is_live(result, now):
+                return CommitOutcome(run=apply_run, pending=True)
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
             if parent is None or parent.deploy_request_id is None:
                 return CommitOutcome()
             failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
             if failed is None:
                 return CommitOutcome()
-        return await self._commit(apply_run, parent, failed)
+            await self._runs.patch_result(
+                apply_run_id,
+                now,
+                {COMMIT_STATE_KEY: COMMIT_IN_PROGRESS, COMMIT_CLAIMED_AT_KEY: now.isoformat()},
+            )
+        try:
+            return await self._commit(apply_run, result, parent, failed)
+        except BaseException:
+            # 예상 못 한 오류(취소 포함): 표시를 풀어 다음 요청이 TTL 을 기다리지 않게 한다.
+            await self._release(apply_run_id)
+            raise
+
+    async def _release(self, apply_run_id: uuid.UUID) -> None:
+        try:
+            async with self._session.begin():
+                await self._runs.patch_result(
+                    apply_run_id, self._clock.now(), {COMMIT_STATE_KEY: None}
+                )
+        except Exception:
+            logger.exception(
+                "repo commit claim release failed",
+                extra={"action": "apply_commit", "apply_run_id": str(apply_run_id)},
+            )
 
     async def _commit(
-        self, apply_run: AgentRun, parent: AgentRun, failed: DeployRequest
+        self,
+        apply_run: AgentRun,
+        result: dict[str, Any],
+        parent: AgentRun,
+        failed: DeployRequest,
     ) -> CommitOutcome:
-        result: dict[str, Any] = dict(apply_run.result or {})
-        if result.get(REPO_COMMIT_KEY) and isinstance(result.get("appliedCommitSha"), str):
-            return CommitOutcome(result["appliedCommitSha"])
         try:
             request = await self._build_request(apply_run, parent, failed)
             if self._writer is None:
                 raise RepoCommitError(RepoCommitErrorCode.WRITE_UNAVAILABLE)
+            modes = await self._writer.file_modes(
+                request.repo, request.base_commit_sha, list(request.files)
+            )
+            if any(mode not in EDITABLE_MODES for mode in modes.values()):
+                # 심볼릭 링크(120000)·서브모듈(160000)·디렉터리: 내용 덮어쓰기로 종류가 바뀐다.
+                raise RepoCommitError(RepoCommitErrorCode.PATH_REJECTED, "MODE")
             originals = await self._writer.read_files(
                 request.repo, request.base_commit_sha, list(request.files)
             )
@@ -209,6 +285,7 @@ class ApplyCommitService:
                     pr_title=request.pr_title,
                     pr_body=request.pr_body,
                     pr_base=request.pr_base,
+                    modes=modes,
                 )
             )
         except RepoCommitError as exc:
@@ -222,23 +299,15 @@ class ApplyCommitService:
                 },
             )
             return CommitOutcome(run=await self._fail(apply_run.id, exc.code), stopped=True)
-        now = self._clock.now()
-        async with self._session.begin():
-            fresh = await self._runs.find_by_id(apply_run.id)
-            current = dict((fresh.result if fresh else None) or result)
-            await self._runs.merge_result(
-                apply_run.id,
-                now,
-                {
-                    **current,
-                    SANDBOX_COMMIT_SHA_KEY: result.get("appliedCommitSha"),
-                    SANDBOX_BRANCH_KEY: result.get("branch"),
-                    "appliedCommitSha": committed.commit_sha,
-                    "branch": committed.branch,
-                    PULL_REQUEST_URL_KEY: committed.pull_request_url,
-                    REPO_COMMIT_KEY: True,
-                },
-            )
+        fields: dict[str, Any] = {
+            SANDBOX_COMMIT_SHA_KEY: result.get("appliedCommitSha"),
+            SANDBOX_BRANCH_KEY: result.get("branch"),
+            "appliedCommitSha": committed.commit_sha,
+            "branch": committed.branch,
+            PULL_REQUEST_URL_KEY: committed.pull_request_url,
+            REPO_COMMIT_KEY: True,
+            COMMIT_STATE_KEY: COMMIT_DONE,
+        }
         logger.info(
             "apply committed to service repository",
             extra={
@@ -248,7 +317,7 @@ class ApplyCommitService:
                 "branch": committed.branch,
             },
         )
-        return CommitOutcome(committed.commit_sha)
+        return CommitOutcome(committed.commit_sha, result_fields=fields)
 
     async def _build_request(
         self, apply_run: AgentRun, parent: AgentRun, failed: DeployRequest
@@ -263,9 +332,14 @@ class ApplyCommitService:
             repo = parse_repo_url(failed.repo_url)
         except InvalidRepoUrlError:
             raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "REPO_URL") from None
-        paths = diff_paths(diff)
-        if not paths:
-            raise RepoCommitError(RepoCommitErrorCode.PATCH_CONFLICT, "NO_FILE")
+        declared = patch.get("files")
+        if not isinstance(declared, list) or not all(isinstance(name, str) for name in declared):
+            raise RepoCommitError(RepoCommitErrorCode.PATH_REJECTED, "FILES")
+        try:
+            # 경로 검사 + 승인 화면 files 대조(SPEC D-13). GitHub 를 부르기 전에 막는다.
+            paths = check_diff_paths(diff, declared)
+        except UnsafePathError as exc:
+            raise RepoCommitError(RepoCommitErrorCode.PATH_REJECTED, exc.reason) from None
         async with self._session.begin():
             user = await self._users.find_by_id(apply_run.requested_by_user_id)
         approver = (
@@ -302,7 +376,8 @@ class ApplyCommitService:
         """반영 실행을 FAILED·code 로 바꾼다. appliedCommitSha 는 null(계약: 실패면 null)."""
         now = self._clock.now()
         async with self._session.begin():
-            fresh = await self._runs.find_by_id(apply_run_id)
+            # 행 잠금 아래에서 읽고 쓴다(다른 요청이 그 사이 쓴 칸을 덮지 않는다).
+            fresh = await self._runs.find_by_id(apply_run_id, lock=True)
             current = dict((fresh.result if fresh else None) or {})
             await self._runs.fail_after_success(
                 apply_run_id,
@@ -313,6 +388,7 @@ class ApplyCommitService:
                     SANDBOX_COMMIT_SHA_KEY: current.get("appliedCommitSha"),
                     "appliedCommitSha": None,
                     PULL_REQUEST_URL_KEY: None,
+                    COMMIT_STATE_KEY: COMMIT_FAILED,
                 },
             )
             return await self._runs.find_by_id(apply_run_id)

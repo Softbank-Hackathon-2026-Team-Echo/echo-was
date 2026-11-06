@@ -6,11 +6,14 @@
 1. App JWT(RS256) → `GET /repos/{o}/{r}/installation` → `POST /app/installations/{id}/access_tokens`
    (`repositories=[이 저장소]`, `permissions={contents: write, pull_requests: write}`).
    App 에 그 권한이 없으면 GitHub 가 422 로 거절한다 → REPO_WRITE_FORBIDDEN.
-2. 실패 커밋의 파일 읽기: `GET /repos/{o}/{r}/contents/{path}?ref={sha}`(raw).
-3. Git Data API 로 커밋: blob → tree(base_tree = 실패 커밋의 tree) → commit(parents = [실패 커밋],
-   작성자 EchoPort bot) → `refs/heads/echoport/fix-<run8>` 만들기
-   (이미 있으면 그 커밋을 그대로 쓴다).
-4. `POST /repos/{o}/{r}/pulls`(이미 있으면 그 PR 주소).
+2. 실패 커밋 tree 의 대상 파일 모드: `GET git/trees/{tree}?recursive=1`. 일반 파일(100644·100755)
+   만 쓴다 — 심볼릭 링크(120000)·서브모듈(160000)·디렉터리는 REPO_PATH_REJECTED(SPEC D-13).
+3. 실패 커밋의 파일 읽기: `GET /repos/{o}/{r}/contents/{path}?ref={sha}`(raw).
+4. Git Data API 로 커밋: blob → tree(base_tree = 실패 커밋의 tree, 원래 모드 보존) →
+   commit(parents = [실패 커밋], 작성자 EchoPort bot) → `refs/heads/echoport/fix-<run8>` 만들기.
+   브랜치가 이미 있으면 그 커밋의 부모 = [실패 커밋] 이고 tree = 방금 만든 tree 일 때만 쓴다
+   (같은 내용). 아니면 REPO_BRANCH_CONFLICT(SPEC D-14 — 남이 만든 브랜치를 배포하지 않는다).
+5. `POST /repos/{o}/{r}/pulls`(이미 있으면 그 PR 주소).
 
 개인키·JWT·설치 토큰은 SecretValue·지역 변수로만 다루고 로그·예외에 넣지 않는다. 응답 본문도
 로그에 남기지 않는다(상태 코드만). 시험은 httpx.MockTransport 를 transport 로 넣는다.
@@ -37,6 +40,9 @@ COMMIT_AUTHOR_NAME = "EchoPort bot"
 COMMIT_AUTHOR_EMAIL = "bot@echoport.uk"
 WRITE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 FILE_MODE = "100644"
+# 고칠 수 있는 대상(일반 파일). 그 밖의 모드(120000 심볼릭 링크, 160000 서브모듈, 040000 디렉터리)는
+# 거절한다.
+EDITABLE_MODES = frozenset({"100644", "100755"})
 
 _APP_JWT_BACKDATE = timedelta(seconds=60)
 _APP_JWT_LIFETIME = timedelta(minutes=9)
@@ -53,6 +59,8 @@ class RepoCommitErrorCode:
     PATCH_CONFLICT = "REPO_PATCH_CONFLICT"
     WRITE_FAILED = "REPO_WRITE_FAILED"
     WRITE_UNAVAILABLE = "REPO_WRITE_UNAVAILABLE"
+    PATH_REJECTED = "REPO_PATH_REJECTED"
+    BRANCH_CONFLICT = "REPO_BRANCH_CONFLICT"
 
 
 class RepoCommitError(Exception):
@@ -75,6 +83,8 @@ class RepoCommitRequest:
     pr_body: str
     # PR 을 합칠 브랜치. None 이면 저장소 기본 브랜치.
     pr_base: str | None = None
+    # 경로 → 실패 커밋에서의 git 모드(보존한다). 없는 경로는 FILE_MODE(새 파일만 100644).
+    modes: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,15 @@ class RepoCommitResult:
 
 
 class RepoCommitWriter(Protocol):
+    async def file_modes(
+        self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
+    ) -> dict[str, str]:
+        """커밋 tree 에서 각 경로의 git 모드(`100644`·`100755`·`120000`…).
+
+        없으면 REPO_FILE_NOT_FOUND. 판정(일반 파일만)은 부르는 쪽이 한다.
+        """
+        ...
+
     async def read_files(
         self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
     ) -> dict[str, str]:
@@ -95,7 +114,11 @@ class RepoCommitWriter(Protocol):
         ...
 
     async def commit_and_open_pull_request(self, request: RepoCommitRequest) -> RepoCommitResult:
-        """브랜치 + 커밋 + PR. 같은 브랜치가 이미 있으면(재시도) 그 커밋·PR 을 돌려준다."""
+        """브랜치 + 커밋 + PR.
+
+        같은 브랜치가 이미 있으면 그 커밋이 같은 내용(부모·tree 일치)일 때만 그 커밋·PR 을
+        돌려주고, 다르면 REPO_BRANCH_CONFLICT.
+        """
         ...
 
 
@@ -107,8 +130,19 @@ class FakeRepoCommitWriter:
     fail_code: str | None = None
     commit_sha: str = "f1" * 20
     pull_request_url: str | None = "https://github.com/team-echo/shop-api/pull/1"
+    # 경로 → git 모드. 없으면 100644.
+    modes: dict[str, str] = field(default_factory=dict)
     reads: list[tuple[str, str, tuple[str, ...]]] = field(default_factory=list)
     requests: list[RepoCommitRequest] = field(default_factory=list)
+
+    async def file_modes(
+        self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
+    ) -> dict[str, str]:
+        if self.fail_code is not None:
+            raise RepoCommitError(self.fail_code)
+        if any(path not in self.files and path not in self.modes for path in paths):
+            raise RepoCommitError(RepoCommitErrorCode.FILE_NOT_FOUND)
+        return {path: self.modes.get(path, FILE_MODE) for path in paths}
 
     async def read_files(
         self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
@@ -149,6 +183,37 @@ class GithubAppRepoCommitWriter:
         self._transport = transport
         self._tokens: dict[str, SecretValue] = {}
 
+    async def file_modes(
+        self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
+    ) -> dict[str, str]:
+        base = f"/repos/{repo.owner}/{repo.name}"
+        async with self._http() as http:
+            token = await self._write_token(http, repo)
+            tree_sha = await self._commit_tree(http, token, base, commit_sha)
+            listing = await self._send(
+                http, "GET", f"{base}/git/trees/{tree_sha}", token, params={"recursive": "1"}
+            )
+            _raise_for_unexpected(listing, "get_tree")
+            body = _json(listing)
+            entries: dict[str, Any] = {}
+            raw_entries = body.get("tree")
+            for entry in raw_entries if isinstance(raw_entries, list) else []:
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                    entries[entry["path"]] = entry
+            modes: dict[str, str] = {}
+            for path in paths:
+                found = entries.get(path)
+                if found is None:
+                    if body.get("truncated"):
+                        # 큰 저장소라 목록이 잘렸다. 모드를 모르면 쓰지 않는다.
+                        raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "tree_truncated")
+                    raise RepoCommitError(RepoCommitErrorCode.FILE_NOT_FOUND)
+                mode = found.get("mode")
+                if not isinstance(mode, str):
+                    raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "tree_mode")
+                modes[path] = mode
+            return modes
+
     async def read_files(
         self, repo: RepoLocator, commit_sha: str, paths: Sequence[str]
     ) -> dict[str, str]:
@@ -178,11 +243,16 @@ class GithubAppRepoCommitWriter:
         base = f"/repos/{repo.owner}/{repo.name}"
         async with self._http() as http:
             token = await self._write_token(http, repo)
+            # 기대 tree 를 먼저 만든다(ref 를 바꾸지 않는 객체 쓰기). 이미 있는 브랜치가 이 tree
+            # 와 같은 내용인지 대조하는 기준이다.
+            base_tree = await self._commit_tree(http, token, base, request.base_commit_sha)
+            tree_sha = await self._create_tree(http, token, base, base_tree, request)
             existing = await self._find_branch(http, token, base, request.branch)
             if existing is not None:
+                await self._verify_branch_commit(http, token, base, existing, request, tree_sha)
                 commit_sha = existing
             else:
-                commit_sha = await self._create_commit(http, token, base, request)
+                commit_sha = await self._create_commit(http, token, base, request, tree_sha)
                 created = await self._send(
                     http,
                     "POST",
@@ -191,10 +261,11 @@ class GithubAppRepoCommitWriter:
                     json={"ref": f"refs/heads/{request.branch}", "sha": commit_sha},
                 )
                 if created.status_code == 422:
-                    # 동시에 다른 요청이 먼저 만들었다. 그 커밋을 쓴다.
+                    # 그 사이 누가 같은 이름으로 만들었다. 같은 내용일 때만 그 커밋을 쓴다.
                     existing = await self._find_branch(http, token, base, request.branch)
                     if existing is None:
                         raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "create_ref")
+                    await self._verify_branch_commit(http, token, base, existing, request, tree_sha)
                     commit_sha = existing
                 else:
                     _raise_for_unexpected(created, "create_ref")
@@ -211,18 +282,30 @@ class GithubAppRepoCommitWriter:
         )
         return RepoCommitResult(commit_sha, request.branch, url)
 
-    async def _create_commit(
-        self, http: httpx.AsyncClient, token: SecretValue, base: str, request: RepoCommitRequest
+    async def _commit_tree(
+        self, http: httpx.AsyncClient, token: SecretValue, base: str, commit_sha: str
     ) -> str:
-        parent = await self._send(
-            http, "GET", f"{base}/git/commits/{request.base_commit_sha}", token
-        )
+        parent = await self._send(http, "GET", f"{base}/git/commits/{commit_sha}", token)
         _raise_for_unexpected(parent, "get_base_commit")
-        base_tree = _json(parent).get("tree", {}).get("sha")
-        if not isinstance(base_tree, str):
+        tree = _json(parent).get("tree")
+        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
+        if not isinstance(tree_sha, str):
             raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "base_tree")
+        return tree_sha
+
+    async def _create_tree(
+        self,
+        http: httpx.AsyncClient,
+        token: SecretValue,
+        base: str,
+        base_tree: str,
+        request: RepoCommitRequest,
+    ) -> str:
         entries: list[dict[str, str]] = []
         for path, content in sorted(request.files.items()):
+            mode = request.modes.get(path, FILE_MODE)
+            if mode not in EDITABLE_MODES:
+                raise RepoCommitError(RepoCommitErrorCode.PATH_REJECTED, "mode")
             blob = await self._send(
                 http,
                 "POST",
@@ -231,13 +314,21 @@ class GithubAppRepoCommitWriter:
                 json={"content": content, "encoding": "utf-8"},
             )
             _raise_for_unexpected(blob, "create_blob")
-            entries.append(
-                {"path": path, "mode": FILE_MODE, "type": "blob", "sha": _sha(_json(blob))}
-            )
+            entries.append({"path": path, "mode": mode, "type": "blob", "sha": _sha(_json(blob))})
         tree = await self._send(
             http, "POST", f"{base}/git/trees", token, json={"base_tree": base_tree, "tree": entries}
         )
         _raise_for_unexpected(tree, "create_tree")
+        return _sha(_json(tree))
+
+    async def _create_commit(
+        self,
+        http: httpx.AsyncClient,
+        token: SecretValue,
+        base: str,
+        request: RepoCommitRequest,
+        tree_sha: str,
+    ) -> str:
         commit = await self._send(
             http,
             "POST",
@@ -245,13 +336,45 @@ class GithubAppRepoCommitWriter:
             token,
             json={
                 "message": request.message,
-                "tree": _sha(_json(tree)),
+                "tree": tree_sha,
                 "parents": [request.base_commit_sha],
                 "author": {"name": COMMIT_AUTHOR_NAME, "email": COMMIT_AUTHOR_EMAIL},
             },
         )
         _raise_for_unexpected(commit, "create_commit")
         return _sha(_json(commit))
+
+    async def _verify_branch_commit(
+        self,
+        http: httpx.AsyncClient,
+        token: SecretValue,
+        base: str,
+        commit_sha: str,
+        request: RepoCommitRequest,
+        tree_sha: str,
+    ) -> None:
+        """이미 있는 브랜치 head 가 승인된 패치 커밋과 같은 내용인지 본다.
+
+        부모 = [실패 커밋] 이고 tree = 이번에 만든 tree 여야 한다(내용이 바이트 단위로 같다).
+        아니면 REPO_BRANCH_CONFLICT — 남이 먼저 만든 브랜치를 배포하지 않는다.
+        """
+        found = await self._send(http, "GET", f"{base}/git/commits/{commit_sha}", token)
+        _raise_for_unexpected(found, "get_branch_commit")
+        body = _json(found)
+        tree = body.get("tree")
+        parents = body.get("parents")
+        head_tree = tree.get("sha") if isinstance(tree, dict) else None
+        parent_shas = (
+            [item.get("sha") for item in parents if isinstance(item, dict)]
+            if isinstance(parents, list)
+            else None
+        )
+        if head_tree != tree_sha or parent_shas != [request.base_commit_sha]:
+            logger.warning(
+                "existing fix branch does not match approved patch",
+                extra={"action": "verify_branch", "branch": request.branch},
+            )
+            raise RepoCommitError(RepoCommitErrorCode.BRANCH_CONFLICT)
 
     async def _find_branch(
         self, http: httpx.AsyncClient, token: SecretValue, base: str, branch: str

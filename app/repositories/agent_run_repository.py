@@ -3,7 +3,8 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, and_, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -124,6 +125,23 @@ class AgentRunRepository:
             run_id,
             [AgentRun.status == AgentRunStatus.SUCCEEDED],
             {"result": result, "updated_at": now},
+        )
+
+    async def patch_result(self, run_id: uuid.UUID, now: datetime, fields: dict[str, Any]) -> bool:
+        """성공한 실행의 결과 JSON 에 `fields` 칸만 덧쓴다(JSONB `||`, 나머지 칸은 그대로).
+
+        다른 요청이 그 사이 기록한 칸(예: redeployRequestId)을 지우지 않는다(SPEC api-19 D-11).
+        성공일 때만.
+        """
+        merged = func.coalesce(AgentRun.result, literal({}, JSONB)).op("||", return_type=JSONB)(
+            literal(fields, JSONB)
+        )
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [AgentRun.status == AgentRunStatus.SUCCEEDED],
+            {"result": merged, "updated_at": now},
         )
 
     async def fail_after_success(
