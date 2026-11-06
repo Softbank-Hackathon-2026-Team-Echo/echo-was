@@ -79,6 +79,18 @@ class DataSyncCheckerMode(StrEnum):
     POSTGRES = "postgres"
 
 
+class DbCutoverExecutorMode(StrEnum):
+    """DB 쓰기 전환 단계(API 서버 17) 실행기.
+
+    disabled(기본)면 계획 만들기의 includeCutover=true 를 409 로 거절한다. kubernetes 면 같은
+    클러스터(서울 GKE)의 echo-ops 네임스페이스에 인프라 컷오버 Job 을 만든다.
+    """
+
+    DISABLED = "disabled"
+    FAKE = "fake"
+    KUBERNETES = "kubernetes"
+
+
 class SourceClientMode(StrEnum):
     FAKE = "fake"
     GITHUB = "github"
@@ -150,6 +162,22 @@ class Settings(BaseSettings):
     cutover_runs_database: str = "app"
     cutover_results_not_before: AwareDatetime | None = None
     cutover_result_cache_seconds: int = Field(default=5, ge=1)
+    # DB 쓰기 전환 단계(API 서버 17). kubernetes 면 image 는 echo-infra deploy/values.env 의
+    # CUTOVER_IMAGE(@sha256 digest, VAP 가 고정)와 글자까지 같아야 한다. 결과 행은 위 cutover_runs_*
+    # 연결로 계획 id 로 읽으므로 data_sync_checker_mode = postgres 가 필요하다.
+    db_cutover_executor_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED
+    db_cutover_namespace: str = "echo-ops"
+    db_cutover_job_image: str | None = None
+    db_cutover_kube_api_url: str = "https://kubernetes.default.svc"
+    db_cutover_service_account_dir: str = "/var/run/secrets/kubernetes.io/serviceaccount"
+    db_cutover_kube_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Job 을 만든 뒤 끝날 때까지 기다리는 상한(초).
+    # Job 의 activeDeadlineSeconds(120) + 종료 유예(30) 보다 길게 둔다.
+    # 넘으면 DB_CUTOVER_TIMEOUT(자동으로 되돌리지 않음).
+    migration_db_cutover_timeout_seconds: int = Field(default=180, ge=10, le=1800)
+    migration_db_cutover_poll_seconds: int = Field(default=3, ge=1, le=60)
+    # 재난 트리거가 만드는 긴급 이전 계획에도 DB 쓰기 전환(ALLOW_PROMOTE=true)을 넣는가.
+    migration_db_cutover_on_disaster: bool = False
 
     # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
     # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
@@ -455,6 +483,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "entrypoint_base_url and entrypoint_token_ref are required when "
                 "entrypoint_executor_mode is http"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_db_cutover_settings(self) -> "Settings":
+        if self.db_cutover_executor_mode is not DbCutoverExecutorMode.KUBERNETES:
+            return self
+        if not self.db_cutover_job_image or "@sha256:" not in self.db_cutover_job_image:
+            raise ValueError(
+                "db_cutover_job_image must be an image digest (…@sha256:…) when "
+                "db_cutover_executor_mode is kubernetes"
+            )
+        if not self.cutover_results_enabled:
+            raise ValueError(
+                "db_cutover_executor_mode kubernetes needs data_sync_checker_mode postgres and "
+                "cutover_runs_database to read cutover results"
             )
         return self
 

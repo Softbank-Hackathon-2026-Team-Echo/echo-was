@@ -29,10 +29,20 @@
 - 보안 게이트(설정으로 켤 때만 주입)는 실행 시작(APPROVED → RUNNING) 잠금 전에 다시 판정하고,
   잠금 안에서 지문이 같을 때 판정 줄을 남긴다. 막혔으면 트래픽을 바꾸지 않고
   FAILED(SECURITY_GATE_BLOCKED)로 끝낸다.
+- DB 쓰기 전환 단계(API 서버 17, includeCutover 계획의 5번)는 APPLY(요청 시각 저장 → 컷오버 Job
+  만들기 → Job 이름 저장) → OBSERVE(Job 이 끝날 때까지 poll, 상한 = 그 단계 maxWaitSeconds) →
+  JUDGE(이 계획 id 의 결과 행으로 판정, migration_db_cutover.judge_db_cutover).
+  종료 1·Job 을 못 만듦은 기존 트래픽 롤백, 부분 상태·상한 초과·누락·중복은 아무것도
+  자동으로 되돌리지 않고 FAILED(rollbackStatus SKIPPED)로 끝낸다. 롤백 Job 은 자동으로
+  부르지 않는다. Job 을 요청한 뒤에는 중단 요청·임대 상실이 있어도 Job 이 끝나 판정할 때까지
+  기다린다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난 채 끝난다).
+  단계 시작·판정 때 감사 줄을 남긴다.
 - simulate(가짜 모드)는 그 단계에서 실행기를 부르지 않고 처리기가 결과를 만든다. 비율 단계는
   "설정 rps × 비율 × 지난 시간"으로 카운터를 만든다. ERROR_RATE 는 기준값 뒤 5xx 를 허용 + 1 로,
   TARGET_NOT_RECEIVING 은 도착을 고정하고 출발을 100% 로, LOW_TRAFFIC 은 둘 다 고정한다. HEALTH
-  는 헬스 실패, TRAFFIC 은 그 단계 APPLY 실패, DATA_LAG 는 지연 30초다. 저장된 옛 LATENCY 는 아무
+  는 헬스 실패, TRAFFIC 은 그 단계 APPLY 실패, DATA_LAG 는 지연 30초다. DB 쓰기 전환 단계는
+  DB_CUTOVER_FAIL(종료 1)·DB_CUTOVER_PARTIAL(종료 2)·DB_CUTOVER_TIMEOUT(끝나지 않음)·
+  DATA_INTEGRITY(종료 0, 누락 1건)이다. 저장된 옛 LATENCY 는 아무
   실패도 만들지 않는다. 로그·단계 결과에는 만든 값이 그대로 남는다.
 """
 
@@ -44,15 +54,18 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.actions import AuditComponent
-from app.audit.lifecycle import record_migration_plan_finished
+from app.audit.actions import AuditAction, AuditComponent
+from app.audit.lifecycle import record_migration_db_cutover, record_migration_plan_finished
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.enums import (
+    AuditResult,
+    CutoverKind,
     HealthCheckResult,
     MigrationErrorCode,
     MigrationJudgeReason,
     MigrationLogCode,
+    MigrationPlanMode,
     MigrationPlanStatus,
     MigrationRollbackStatus,
     MigrationSimulateReason,
@@ -64,7 +77,22 @@ from app.enums import (
 from app.executors import ExecutorSet
 from app.executors.base import (
     CountsResult,
+    CutoverRun,
+    CutoverRunNotFound,
+    CutoverRunResult,
+    CutoverRunUnavailable,
     DataSyncLag,
+    DbCutoverFinished,
+    DbCutoverJobAbsent,
+    DbCutoverJobFound,
+    DbCutoverJobLookup,
+    DbCutoverJobUnknown,
+    DbCutoverLost,
+    DbCutoverPollResult,
+    DbCutoverRequest,
+    DbCutoverRunning,
+    DbCutoverStarted,
+    DbCutoverStartFailed,
     HealthHttpError,
     HealthOk,
     HealthProbeResult,
@@ -74,7 +102,7 @@ from app.executors.base import (
     TrafficResult,
     WeightedTarget,
 )
-from app.models import MigrationPlan, Service, ServiceEnvironment
+from app.models import Environment, MigrationPlan, Service, ServiceEnvironment
 from app.models.service import DEFAULT_HEALTH_CHECK_PATH
 from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
@@ -87,12 +115,41 @@ from app.services.migration_counting import (
     error_rate_percent,
     judge_counting,
 )
+from app.services.migration_db_cutover import (
+    CUTOVER_ALLOW_PROMOTE,
+    CUTOVER_EXIT_CODE,
+    CUTOVER_FINISHED,
+    CUTOVER_JOB_KIND,
+    CUTOVER_JOB_NAME,
+    CUTOVER_LOST,
+    CUTOVER_POLL_ERRORS,
+    CUTOVER_REASON,
+    CUTOVER_RUN,
+    CUTOVER_START_CONFIRMED,
+    CUTOVER_START_FAILURE,
+    CUTOVER_START_UNCERTAIN,
+    CUTOVER_WRITER,
+    EXIT_DONE,
+    EXIT_NO_CHANGE,
+    EXIT_PARTIAL,
+    REASON_START_UNCONFIRMED,
+    REASON_TARGET_IS_WRITER,
+    WRITER_SOURCE,
+    WRITER_TARGET,
+    WRITER_UNKNOWN,
+    CutoverRecovery,
+    CutoverVerdict,
+    cutover_log_data,
+    db_cutover_request,
+    judge_db_cutover,
+    run_to_json,
+)
 from app.services.migration_plan_log import MigrationPlanLogWriter
 from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
     CONDITION_MAX_REPLICATION_LAG,
-    LAST_STEP,
     RESULT_COUNTING,
+    RESULT_CUTOVER,
     RESULT_FAILURE_CODE,
     RESULT_FINISHED_AT,
     RESULT_JUDGE_REASON,
@@ -101,11 +158,14 @@ from app.services.migration_plan_support import (
     RESULT_STATUS,
     SIMULATE_FAIL_AT_STEP,
     SIMULATE_REASON,
+    STEP_MAX_WAIT_SECONDS,
     STEP_TARGET_WEIGHT,
     MigrationTargets,
     fingerprint_changes,
     iso,
+    last_step,
     load_migration_targets,
+    needs_promote_ack,
     read_fingerprint,
     skip_pending_steps,
     step_kind,
@@ -132,6 +192,22 @@ _COUNT_SIMULATIONS = frozenset(
 )
 # 저장된 옛 계획을 읽을 수 있게 값만 남긴 simulate 이유(아무 실패도 만들지 않는다).
 _IGNORED_SIMULATIONS = frozenset({MigrationSimulateReason.LATENCY})
+# DB 쓰기 전환 단계 simulate: Job 없이 처리기가 Job 끝(종료 코드)을 만든다. None = 끝나지 않음.
+_CUTOVER_SIMULATED_EXIT: dict[MigrationSimulateReason, int | None] = {
+    MigrationSimulateReason.DB_CUTOVER_FAIL: EXIT_NO_CHANGE,
+    MigrationSimulateReason.DB_CUTOVER_PARTIAL: EXIT_PARTIAL,
+    MigrationSimulateReason.DB_CUTOVER_TIMEOUT: None,
+    MigrationSimulateReason.DATA_INTEGRITY: EXIT_DONE,
+}
+SIMULATED_CUTOVER_JOB_PREFIX = "simulated-cutover"
+# 컷오버 Job 상태 조회가 이만큼 연속으로 예외를 내면(토큰 파일 사라짐 등) 상한을 기다리지 않고
+# DB_CUTOVER_UNKNOWN(되돌리지 않음)으로 끝낸다.
+MAX_CUTOVER_POLL_ERRORS = 5
+# 실행기 호출이 예외를 냈을 때 단계 결과에 적는 고정 코드(원문은 남기지 않는다).
+START_RAISED = "CUTOVER_CALL_RAISED"
+# 원본 DB 가 죽은 재난 긴급 이전(EMERGENCY + DB 쓰기 전환)에서 데이터 확인을 건너뛴 이유.
+DATA_SYNC_SKIPPED_EMERGENCY = "EMERGENCY_SOURCE_UNREACHABLE"
+SIMULATED_MISSING_ROWS = 1
 
 type _LogLine = tuple[MigrationLogCode, dict[str, Any]]
 
@@ -325,12 +401,14 @@ class MigrationPlanProcessor:
             if locked.source is None or locked.target is None:
                 await self._fail(plan, MigrationErrorCode.INTERNAL_ERROR, now)
                 return self._closed()
-            if self._lease.is_exhausted:
-                await self._start_rollback(plan, MigrationErrorCode.WORKER_LOST, now)
-                return None
-            if plan.abort_requested_at is not None:
-                await self._start_rollback(plan, MigrationErrorCode.ABORTED, now)
-                return None
+            # 컷오버 Job 을 요청한 뒤에는 판정할 때까지 중단·임대 상실로 되돌리지 않는다.
+            if not _cutover_in_flight(plan):
+                if self._lease.is_exhausted:
+                    await self._start_rollback(plan, MigrationErrorCode.WORKER_LOST, now)
+                    return None
+                if plan.abort_requested_at is not None:
+                    await self._start_rollback(plan, MigrationErrorCode.ABORTED, now)
+                    return None
         index = plan.current_step
         kind = step_kind(plan.steps, index)
         phase = MigrationStepPhase(plan.step_phase) if plan.step_phase else None
@@ -338,6 +416,14 @@ class MigrationPlanProcessor:
             return await self._preflight(plan)
         if kind is MigrationStepKind.DATA_SYNC_CHECK:
             return await self._check_data_sync(plan)
+        if kind is MigrationStepKind.DB_CUTOVER:
+            match phase:
+                case MigrationStepPhase.APPLY:
+                    return await self._cutover_apply(plan)
+                case MigrationStepPhase.OBSERVE:
+                    return await self._cutover_observe(plan)
+                case _:
+                    return await self._cutover_judge(plan)
         match phase:
             case MigrationStepPhase.APPLY:
                 return await self._apply(plan)
@@ -694,8 +780,15 @@ class MigrationPlanProcessor:
             else:
                 lag = None
         failure: MigrationErrorCode | None = None
+        skipped = False
         if lag is None:
-            failure = MigrationErrorCode.METRICS_UNAVAILABLE
+            # 재난 긴급 이전 + DB 쓰기 전환(승격 허용)은 원본 DB 가 죽은 경우가 본래
+            # 목적이라 지연을 못 재도 건너뛰고 경고만 남긴다. 승격은 승인 때 동의했다
+            # (acknowledgePromote). DB 쓰기 전환이 없는 긴급 이전과 다른 계획은 그대로 실패한다.
+            if _emergency_with_cutover(plan):
+                skipped = True
+            else:
+                failure = MigrationErrorCode.METRICS_UNAVAILABLE
         elif lag > max_lag:
             failure = MigrationErrorCode.DATA_LAG_EXCEEDED
         metrics_json = _metrics_json(replication_lag_seconds=lag)
@@ -705,6 +798,16 @@ class MigrationPlanProcessor:
             plan = locked.plan
             if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.JUDGE):
                 return None
+            if skipped:
+                outcome = await self._pass_step(
+                    plan,
+                    metrics_json,
+                    MigrationLogCode.DATA_SYNC_SKIPPED,
+                    now,
+                    log_data={"reason": DATA_SYNC_SKIPPED_EMERGENCY},
+                )
+                self._report("migration data sync check skipped", plan, step=index)
+                return outcome
             if failure is None:
                 return await self._pass_step(
                     plan,
@@ -721,6 +824,484 @@ class MigrationPlanProcessor:
         self._report("migration data sync check failed", plan, step=index, error_code=failure)
         return None
 
+    # --- DB 쓰기 전환 (API 서버 17) ---
+
+    async def _cutover_request(self, plan: MigrationPlan) -> DbCutoverRequest:
+        async with self._session.begin():
+            target = await self._connections.find_by_id(plan.target_service_environment_id)
+            assert target is not None
+            environment = await self._session.get_one(Environment, target.environment_id)
+            return db_cutover_request(
+                plan.id,
+                plan.mode,
+                environment.id,
+                environment.kind,
+                promote_consented=needs_promote_ack(plan.steps),
+            )
+
+    async def _cutover_apply(self, plan: MigrationPlan) -> JobOutcome | None:
+        """요청 시각 저장 → Job 만들기(같은 이름이면 그 Job) → Job 이름·상한 저장(OBSERVE).
+
+        생성 응답을 잃은 적이 있으면(만들었을 수 있음) 그 사실을 단계 결과에 적어 두고, 다시
+        시도하다 끝내 만들었다는 답을 못 받으면 원복 전에 같은 이름 Job·이 계획 결과 행을 확인한다
+        (_settle_uncertain_start). 분명한 거절만 곧바로 트래픽 원복이다.
+        """
+        index = plan.current_step
+        request = await self._cutover_request(plan)
+        timeout = timedelta(seconds=int(plan.steps[index][STEP_MAX_WAIT_SECONDS]))
+        simulated = _simulated_failure(plan, index)
+        stored = dict(plan.step_results[index].get(RESULT_CUTOVER) or {})
+        uncertain = bool(stored.get(CUTOVER_START_UNCERTAIN))
+        if simulated in _CUTOVER_SIMULATED_EXIT:
+            started: DbCutoverStarted | DbCutoverStartFailed = DbCutoverStarted(
+                f"{SIMULATED_CUTOVER_JOB_PREFIX}-{plan.id.hex[:8]}"
+            )
+        else:
+            requested_at = plan.traffic_requested_at
+            if requested_at is None:
+                requested_at = self._clock.now()
+                async with self._session.begin():
+                    await self._lock()
+                    await self._plans.transition(
+                        plan.id,
+                        MigrationPlanStatus.RUNNING,
+                        {"traffic_requested_at": requested_at, "updated_at": requested_at},
+                        _at_conditions(index, MigrationStepPhase.APPLY)
+                        + [MigrationPlan.traffic_requested_at.is_(None)],
+                    )
+            await self._lease.extend()
+            try:
+                started = await self._executors.db_cutover.start(request)
+            except Exception:
+                logger.exception(
+                    "migration db cutover start raised",
+                    extra={"action": "create_cutover_job", "migration_plan_id": str(plan.id)},
+                )
+                started = DbCutoverStartFailed(START_RAISED, retryable=True)
+            if isinstance(started, DbCutoverStartFailed) and started.maybe_created:
+                uncertain = True
+            if uncertain and not stored.get(CUTOVER_START_UNCERTAIN):
+                stored[CUTOVER_START_UNCERTAIN] = True
+                await self._store_cutover(plan, index, MigrationStepPhase.APPLY, stored)
+            if (
+                isinstance(started, DbCutoverStartFailed)
+                and started.retryable
+                and self._clock.now() < requested_at + timeout
+            ):
+                poll = timedelta(seconds=self._settings.migration_db_cutover_poll_seconds)
+                return JobOutcome.again(self._clock.now() + poll)
+        cutover: dict[str, Any] = {
+            CUTOVER_JOB_NAME: started.job_name if isinstance(started, DbCutoverStarted) else None,
+            CUTOVER_JOB_KIND: request.job_kind.value,
+            CUTOVER_ALLOW_PROMOTE: request.allow_promote,
+        }
+        if uncertain:
+            cutover[CUTOVER_START_UNCERTAIN] = True
+        if isinstance(started, DbCutoverStartFailed):
+            cutover[CUTOVER_START_FAILURE] = started.code
+            if not uncertain:
+                verdict = CutoverVerdict(
+                    MigrationErrorCode.DB_CUTOVER_FAILED,
+                    CutoverRecovery.ROLLBACK_TRAFFIC,
+                    None,
+                    None,
+                )
+                return await self._finish_cutover(
+                    plan, index, MigrationStepPhase.APPLY, cutover, verdict
+                )
+            settled = await self._settle_uncertain_start(plan, index, request, cutover)
+            if settled is not None:
+                return settled
+        return await self._enter_observe(plan, index, request, cutover, timeout)
+
+    async def _settle_uncertain_start(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        request: DbCutoverRequest,
+        cutover: dict[str, Any],
+    ) -> JobOutcome | None:
+        """만들었는지 모르는 Job 을 정리한다. None 이면 Job 을 다시 찾았다(cutover 에 이름을 적음).
+
+        같은 이름 Job 있음 → 기다리기(재부착). 없음(404) → 이 계획 결과 행도 없을 때만 FAILED·트래픽
+        원복, 행이 있으면 판정(JUDGE)으로. 어느 쪽이든 확인하지 못하면
+        DB_CUTOVER_UNKNOWN(되돌리지 않음).
+        """
+        await self._lease.extend()
+        lookup: DbCutoverJobLookup
+        try:
+            lookup = await self._executors.db_cutover.find_job(request)
+        except Exception:
+            lookup = DbCutoverJobUnknown(START_RAISED)
+        if isinstance(lookup, DbCutoverJobFound):
+            cutover[CUTOVER_JOB_NAME] = lookup.job_name
+            cutover[CUTOVER_START_CONFIRMED] = True
+            cutover.pop(CUTOVER_START_FAILURE, None)
+            return None
+        run_result: CutoverRunResult = CutoverRunUnavailable(START_RAISED)
+        if isinstance(lookup, DbCutoverJobAbsent):
+            run_result = await self._find_cutover_run(request)
+            if isinstance(run_result, CutoverRunNotFound):
+                verdict = CutoverVerdict(
+                    MigrationErrorCode.DB_CUTOVER_FAILED,
+                    CutoverRecovery.ROLLBACK_TRAFFIC,
+                    None,
+                    None,
+                )
+                return await self._finish_cutover(
+                    plan, index, MigrationStepPhase.APPLY, cutover, verdict
+                )
+            if isinstance(run_result, CutoverRun):
+                # Job 은 없지만 이 계획 행이 있다: 전환이 돌았다. 사라진 Job 으로 판정한다.
+                cutover[CUTOVER_FINISHED] = False
+                cutover[CUTOVER_LOST] = True
+                await self._move_cutover(
+                    plan, index, MigrationStepPhase.APPLY, MigrationStepPhase.JUDGE, cutover
+                )
+                return JobOutcome.again(self._clock.now())
+        verdict = CutoverVerdict(
+            MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+            CutoverRecovery.MANUAL,
+            REASON_START_UNCONFIRMED,
+            None,
+        )
+        cutover[CUTOVER_REASON] = REASON_START_UNCONFIRMED
+        return await self._finish_cutover(plan, index, MigrationStepPhase.APPLY, cutover, verdict)
+
+    async def _enter_observe(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        request: DbCutoverRequest,
+        cutover: dict[str, Any],
+        wait: timedelta,
+    ) -> JobOutcome | None:
+        now = self._clock.now()
+        async with self._session.begin():
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.APPLY):
+                return None
+            if await self._plans.transition(
+                plan.id,
+                MigrationPlanStatus.RUNNING,
+                {
+                    "step_phase": MigrationStepPhase.OBSERVE,
+                    "phase_started_at": now,
+                    "observe_until": now + wait,
+                    "step_results": with_step_result(
+                        plan.step_results, index, **{RESULT_CUTOVER: cutover}
+                    ),
+                    "updated_at": now,
+                },
+                _at_conditions(index, MigrationStepPhase.APPLY),
+            ):
+                data = cutover_log_data(cutover) | {CUTOVER_ALLOW_PROMOTE: request.allow_promote}
+                await self._log.append(
+                    plan, MigrationLogCode.DB_CUTOVER_JOB_CREATED, now, step=index, data=data
+                )
+                await record_migration_db_cutover(
+                    self._session,
+                    self._clock,
+                    plan,
+                    action=AuditAction.MIGRATION_DB_CUTOVER_STARTED,
+                    result=AuditResult.SUCCEEDED,
+                    details=data,
+                )
+        self._report("migration db cutover job created", plan, step=index)
+        return None
+
+    async def _store_cutover(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        phase: MigrationStepPhase,
+        cutover: dict[str, Any],
+    ) -> None:
+        """위치는 그대로 두고 단계 결과의 cutover 칸만 적는다(그 위치일 때만)."""
+        await self._move_cutover(plan, index, phase, phase, cutover)
+
+    async def _move_cutover(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        phase: MigrationStepPhase,
+        next_phase: MigrationStepPhase,
+        cutover: dict[str, Any],
+    ) -> None:
+        now = self._clock.now()
+        async with self._session.begin():
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, phase):
+                return
+            values: dict[str, Any] = {
+                "step_results": with_step_result(
+                    plan.step_results, index, **{RESULT_CUTOVER: cutover}
+                ),
+                "updated_at": now,
+            }
+            if next_phase is not phase:
+                values |= {"step_phase": next_phase, "phase_started_at": now}
+            await self._plans.transition(
+                plan.id, MigrationPlanStatus.RUNNING, values, _at_conditions(index, phase)
+            )
+
+    async def _find_cutover_run(self, request: DbCutoverRequest) -> CutoverRunResult:
+        await self._lease.extend()
+        try:
+            return await self._executors.db_cutover.find_run(request)
+        except Exception:
+            return CutoverRunUnavailable(START_RAISED)
+
+    async def _current_writer(self, plan: MigrationPlan) -> str:
+        """지금 쓰기 담당을 데이터 확인 실행기로 본다(SOURCE·TARGET·UNKNOWN).
+
+        출발 pg_stat_replication 에 도착 구독의 walsender 가 있으면 출발이 발행자(쓰기 담당)이고,
+        도착이 쓰기 담당이라는 근거가 있으면 TARGET_IS_WRITER 다.
+        그 밖(읽기 실패·근거 없음)은 UNKNOWN.
+        """
+        try:
+            targets = await self._targets(plan)
+            await self._lease.extend()
+            result = await self._executors.data_sync.replication_lag(targets.source, targets.target)
+        except Exception:
+            return WRITER_UNKNOWN
+        if not isinstance(result, DataSyncLag):
+            return WRITER_UNKNOWN
+        if result.reason == REASON_TARGET_IS_WRITER:  # 데이터 확인 실행기의 TARGET_IS_WRITER
+            return WRITER_TARGET
+        return WRITER_SOURCE if result.reason is None else WRITER_UNKNOWN
+
+    async def _cutover_observe(self, plan: MigrationPlan) -> JobOutcome | None:
+        """Job 상태 한 번. 끝났거나 사라졌거나 상한을 넘으면 JUDGE, 아니면 다음 확인 시각.
+
+        상태 조회의 예외(토큰 파일 사라짐 등)는 흡수해 연속 횟수를 적는다. 그래서 시계 기준
+        상한은 언제나 돌고, 연속 MAX_CUTOVER_POLL_ERRORS 번이면 상한을 기다리지 않고
+        판정(UNKNOWN)으로 간다.
+        """
+        index = plan.current_step
+        cutover = dict(plan.step_results[index].get(RESULT_CUTOVER) or {})
+        deadline = plan.observe_until
+        assert deadline is not None
+        simulated = _simulated_failure(plan, index)
+        result: DbCutoverPollResult | None
+        if simulated in _CUTOVER_SIMULATED_EXIT:
+            exit_code = _CUTOVER_SIMULATED_EXIT[simulated]
+            result = DbCutoverRunning() if exit_code is None else DbCutoverFinished(exit_code)
+        else:
+            await self._lease.extend()
+            try:
+                result = await self._executors.db_cutover.poll(str(cutover[CUTOVER_JOB_NAME]))
+            except Exception:
+                logger.warning(
+                    "migration db cutover poll raised",
+                    extra={"action": "poll_cutover_job", "migration_plan_id": str(plan.id)},
+                    exc_info=True,
+                )
+                result = None
+        now = self._clock.now()
+        poll = timedelta(seconds=self._settings.migration_db_cutover_poll_seconds)
+        errors = int(cutover.get(CUTOVER_POLL_ERRORS) or 0)
+        if result is None:
+            errors += 1
+            cutover[CUTOVER_POLL_ERRORS] = errors
+            if errors < MAX_CUTOVER_POLL_ERRORS and now < deadline:
+                await self._store_cutover(plan, index, MigrationStepPhase.OBSERVE, cutover)
+                return JobOutcome.again(min(now + poll, deadline))
+            # 상한을 넘었거나 연속 실패가 상한에 닿았다: 판정으로(행이 없으면 되돌리지 않음).
+            result = DbCutoverRunning()
+        elif isinstance(result, DbCutoverRunning) and now < deadline:
+            if errors:
+                cutover[CUTOVER_POLL_ERRORS] = 0
+                await self._store_cutover(plan, index, MigrationStepPhase.OBSERVE, cutover)
+            return JobOutcome.again(min(now + poll, deadline))
+        elif errors:
+            cutover[CUTOVER_POLL_ERRORS] = 0
+        cutover[CUTOVER_FINISHED] = isinstance(result, DbCutoverFinished)
+        cutover[CUTOVER_LOST] = isinstance(result, DbCutoverLost)
+        if isinstance(result, DbCutoverFinished):
+            cutover[CUTOVER_EXIT_CODE] = result.exit_code
+            cutover[CUTOVER_REASON] = result.reason
+        async with self._session.begin():
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.OBSERVE):
+                return None
+            if await self._plans.transition(
+                plan.id,
+                MigrationPlanStatus.RUNNING,
+                {
+                    "step_phase": MigrationStepPhase.JUDGE,
+                    "phase_started_at": now,
+                    "step_results": with_step_result(
+                        plan.step_results, index, **{RESULT_CUTOVER: cutover}
+                    ),
+                    "updated_at": now,
+                },
+                _at_conditions(index, MigrationStepPhase.OBSERVE),
+            ) and not isinstance(result, DbCutoverRunning):
+                await self._log.append(
+                    plan,
+                    MigrationLogCode.DB_CUTOVER_JOB_FINISHED,
+                    now,
+                    step=index,
+                    data=cutover_log_data(cutover) | {CUTOVER_LOST: cutover[CUTOVER_LOST]},
+                )
+        return None
+
+    async def _cutover_judge(self, plan: MigrationPlan) -> JobOutcome | None:
+        """이 계획 id 의 결과 행을 읽어 판정한다. 종료 1 이면 지금 쓰기 담당도 확인한다."""
+        index = plan.current_step
+        cutover = dict(plan.step_results[index].get(RESULT_CUTOVER) or {})
+        finished = bool(cutover.get(CUTOVER_FINISHED))
+        exit_code = cutover.get(CUTOVER_EXIT_CODE)
+        simulated = _simulated_failure(plan, index)
+        run_result: CutoverRunResult | None = None
+        writer: str | None = None
+        if simulated in _CUTOVER_SIMULATED_EXIT:
+            run_result = (
+                _simulated_integrity_run(self._clock.now(), plan)
+                if simulated is MigrationSimulateReason.DATA_INTEGRITY
+                else CutoverRunNotFound()
+            )
+            if finished and exit_code == EXIT_NO_CHANGE:
+                writer = WRITER_SOURCE
+        else:
+            request = await self._cutover_request(plan)
+            run_result = await self._find_cutover_run(request)
+            if finished and exit_code == EXIT_NO_CHANGE and not isinstance(run_result, CutoverRun):
+                writer = await self._current_writer(plan)
+                cutover[CUTOVER_WRITER] = writer
+        poll_errors = int(cutover.get(CUTOVER_POLL_ERRORS) or 0)
+        verdict = judge_db_cutover(
+            exit_code=exit_code,
+            reason=cutover.get(CUTOVER_REASON),
+            finished=finished,
+            lost=bool(cutover.get(CUTOVER_LOST)),
+            timed_out=not finished and not cutover.get(CUTOVER_LOST),
+            run_result=run_result,
+            writer=writer,
+            poll_failed=poll_errors >= MAX_CUTOVER_POLL_ERRORS,
+        )
+        if verdict.reason is not None:
+            cutover[CUTOVER_REASON] = verdict.reason
+        if verdict.run is not None:
+            cutover[CUTOVER_RUN] = run_to_json(verdict.run)
+        return await self._finish_cutover(plan, index, MigrationStepPhase.JUDGE, cutover, verdict)
+
+    async def _finish_cutover(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        phase: MigrationStepPhase,
+        cutover: dict[str, Any],
+        verdict: CutoverVerdict,
+    ) -> JobOutcome | None:
+        """판정을 적는다: 통과면 다음 단계(마지막이면 SUCCEEDED), 실패면 트래픽 롤백·사람 확인."""
+        now = self._clock.now()
+        log_data = cutover_log_data(cutover)
+        metrics_json = _metrics_json()
+        outcome: JobOutcome | None = None
+        async with self._session.begin():
+            locked = await self._lock()
+            plan = locked.plan
+            if not _is_at(plan, MigrationPlanStatus.RUNNING, index, phase):
+                return None
+            results = with_step_result(plan.step_results, index, **{RESULT_CUTOVER: cutover})
+            failure = verdict.failure
+            if failure is None:
+                if phase is not MigrationStepPhase.JUDGE:
+                    return None
+                outcome = await self._pass_step(
+                    plan,
+                    metrics_json,
+                    MigrationLogCode.DB_CUTOVER_OK,
+                    now,
+                    log_data=log_data,
+                    base_results=results,
+                )
+            elif verdict.recovery is CutoverRecovery.ROLLBACK_TRAFFIC:
+                await self._fail_step(
+                    plan,
+                    index,
+                    metrics_json,
+                    failure,
+                    MigrationLogCode.DB_CUTOVER_FAILED,
+                    now,
+                    base_results=results,
+                    log_data=log_data,
+                    conditions=[MigrationPlan.step_phase == phase],
+                )
+            else:
+                await self._finish_manual(plan, index, phase, results, failure, log_data, now)
+                outcome = self._closed()
+            await record_migration_db_cutover(
+                self._session,
+                self._clock,
+                plan,
+                action=AuditAction.MIGRATION_DB_CUTOVER_FINISHED,
+                result=AuditResult.SUCCEEDED if failure is None else AuditResult.FAILED,
+                details=log_data | ({"errorCode": failure.value} if failure is not None else {}),
+            )
+        if failure is None:
+            self._report("migration db cutover passed", plan, step=index)
+            if outcome is not None:
+                self._report("migration succeeded", plan)
+        else:
+            self._report("migration db cutover failed", plan, step=index, error_code=failure)
+        return outcome
+
+    async def _finish_manual(
+        self,
+        plan: MigrationPlan,
+        index: int,
+        phase: MigrationStepPhase,
+        results: list[dict[str, Any]],
+        failure: MigrationErrorCode,
+        log_data: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """트래픽도 DB 도 자동으로 되돌리지 않고 FAILED(rollbackStatus SKIPPED)로 끝낸다."""
+        results = with_step_result(
+            results,
+            index,
+            **{
+                RESULT_STATUS: MigrationStepStatus.FAILED.value,
+                RESULT_FINISHED_AT: iso(now),
+                RESULT_METRICS: _metrics_json(),
+                RESULT_FAILURE_CODE: failure.value,
+            },
+        )
+        if await self._plans.transition(
+            plan.id,
+            MigrationPlanStatus.RUNNING,
+            {
+                "status": MigrationPlanStatus.FAILED,
+                "error_code": failure,
+                "rollback_status": MigrationRollbackStatus.SKIPPED,
+                "step_phase": None,
+                "observe_until": None,
+                "step_results": skip_pending_steps(results),
+                "finished_at": now,
+                "updated_at": now,
+            },
+            _at_conditions(index, phase),
+        ):
+            await self._log.append(
+                plan,
+                MigrationLogCode.DB_CUTOVER_FAILED,
+                now,
+                step=index,
+                data=log_data,
+                error_code=failure,
+            )
+            await self._log.append(
+                plan, MigrationLogCode.DB_CUTOVER_MANUAL_REQUIRED, now, step=index, data=log_data
+            )
+            await self._log.append(plan, MigrationLogCode.FAILED, now, error_code=failure)
+            await self._record_finished(plan, MigrationPlanStatus.FAILED, failure)
+
     async def _pass_step(
         self,
         plan: MigrationPlan,
@@ -729,12 +1310,13 @@ class MigrationPlanProcessor:
         now: datetime,
         *,
         log_data: dict[str, Any] | None = None,
+        base_results: list[dict[str, Any]] | None = None,
     ) -> JobOutcome | None:
         """잠근 트랜잭션 안에서 지금 단계를 통과로 적고 다음 단계로(마지막이면 SUCCEEDED) 간다."""
         index = plan.current_step
         line_data = log_data if log_data is not None else _numbers(metrics_json)
         results = with_step_result(
-            plan.step_results,
+            base_results if base_results is not None else plan.step_results,
             index,
             **{
                 RESULT_STATUS: MigrationStepStatus.PASSED.value,
@@ -743,7 +1325,7 @@ class MigrationPlanProcessor:
             },
         )
         conditions = _at_conditions(index, MigrationStepPhase.JUDGE)
-        if index == LAST_STEP:
+        if index == last_step(plan.steps):
             if await self._plans.transition(
                 plan.id,
                 MigrationPlanStatus.RUNNING,
@@ -764,7 +1346,8 @@ class MigrationPlanProcessor:
         following = index + 1
         next_phase = (
             MigrationStepPhase.APPLY
-            if step_kind(plan.steps, following) is MigrationStepKind.SHIFT
+            if step_kind(plan.steps, following)
+            in (MigrationStepKind.SHIFT, MigrationStepKind.DB_CUTOVER)
             else MigrationStepPhase.JUDGE
         )
         results = with_step_result(
@@ -801,6 +1384,7 @@ class MigrationPlanProcessor:
         base_results: list[dict[str, Any]] | None = None,
         log_data: dict[str, Any] | None = None,
         preceding_lines: Sequence[_LogLine] = (),
+        conditions: Sequence[Any] = (),
     ) -> None:
         results = with_step_result(
             base_results if base_results is not None else plan.step_results,
@@ -820,6 +1404,7 @@ class MigrationPlanProcessor:
             index=index,
             failure_line=(code, log_data if log_data is not None else _numbers(metrics_json)),
             preceding_lines=preceding_lines,
+            conditions=conditions,
         )
 
     async def _append_lines(
@@ -840,6 +1425,7 @@ class MigrationPlanProcessor:
         index: int | None = None,
         failure_line: tuple[MigrationLogCode, dict[str, Any]] | None = None,
         preceding_lines: Sequence[_LogLine] = (),
+        conditions: Sequence[Any] = (),
     ) -> bool:
         """잠근 트랜잭션 안에서 RUNNING → ROLLING_BACK. 원인 줄(있으면)과 ROLLBACK_STARTED 를 쓴다.
 
@@ -871,7 +1457,7 @@ class MigrationPlanProcessor:
                 "step_results": skip_pending_steps(results),
                 "updated_at": now,
             },
-            [MigrationPlan.current_step == index] if index is not None else [],
+            ([MigrationPlan.current_step == index] if index is not None else []) + list(conditions),
         ):
             return False
         if index is not None:
@@ -1140,6 +1726,39 @@ def _is_at(
 
 def _at_conditions(index: int, phase: MigrationStepPhase) -> list[Any]:
     return [MigrationPlan.current_step == index, MigrationPlan.step_phase == phase]
+
+
+def _emergency_with_cutover(plan: MigrationPlan) -> bool:
+    """재난 긴급 이전이고 DB 쓰기 전환 단계(승격 허용)가 들어 있다."""
+    return plan.mode == MigrationPlanMode.EMERGENCY and any(
+        step_kind(plan.steps, index) is MigrationStepKind.DB_CUTOVER
+        for index in range(len(plan.steps))
+    )
+
+
+def _cutover_in_flight(plan: MigrationPlan) -> bool:
+    """DB 쓰기 전환 단계에서 Job 을 요청했다(만들었을 수 있다)."""
+    if step_kind(plan.steps, plan.current_step) is not MigrationStepKind.DB_CUTOVER:
+        return False
+    return plan.step_phase != MigrationStepPhase.APPLY or plan.traffic_requested_at is not None
+
+
+def _simulated_integrity_run(now: datetime, plan: MigrationPlan) -> CutoverRun:
+    """simulate DATA_INTEGRITY: 전환은 끝났지만 장부 대조에서 1건이 빠진 결과 행."""
+    kind = CutoverKind.ROLLBACK if plan.mode == MigrationPlanMode.FAILBACK else CutoverKind.CUTOVER
+    return CutoverRun(
+        kind=kind,
+        paused_at=now,
+        resumed_at=now,
+        write_pause_ms=0,
+        drain_ms=None,
+        catchup_ms=None,
+        switch_ms=None,
+        rows_total=0,
+        missing_rows=SIMULATED_MISSING_ROWS,
+        duplicate_rows=0,
+        mode="NORMAL",
+    )
 
 
 def _simulated_failure(plan: MigrationPlan, index: int) -> MigrationSimulateReason | None:

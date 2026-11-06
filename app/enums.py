@@ -423,15 +423,22 @@ IN_PROGRESS_MIGRATION_PLAN_STATUSES = frozenset(
 
 
 class MigrationStepKind(StrEnum):
-    """계획 단계 종류. 단계는 고정 5개(사전 확인 → 10% → 50% → 데이터 확인 → 100%)다."""
+    """계획 단계 종류. 단계는 고정 5개(사전 확인 → 10% → 50% → 데이터 확인 → 100%)이고,
+    만들 때 includeCutover=true 면 맨 뒤에 DB 쓰기 전환(DB_CUTOVER) 하나를 더해 6개다(API 서버 17).
+    """
 
     PREFLIGHT = "PREFLIGHT"
     SHIFT = "SHIFT"
     DATA_SYNC_CHECK = "DATA_SYNC_CHECK"
+    # 인프라 컷오버 Job(echo-infra replication/cutover-job)을 만들고 기다려 결과로 판정한다.
+    DB_CUTOVER = "DB_CUTOVER"
 
 
 class MigrationStepPhase(StrEnum):
-    """지금 단계 안의 위치. 비율 단계는 APPLY → OBSERVE → JUDGE, 데이터 확인은 JUDGE 만."""
+    """지금 단계 안의 위치. 비율 단계는 APPLY → OBSERVE → JUDGE, 데이터 확인은 JUDGE 만.
+
+    DB 쓰기 전환은 APPLY(Job 만들기) → OBSERVE(Job 이 끝날 때까지 기다림) → JUDGE(결과 표로 판정).
+    """
 
     APPLY = "APPLY"
     OBSERVE = "OBSERVE"
@@ -464,14 +471,36 @@ class MigrationErrorCode(StrEnum):
     TARGET_NOT_RECEIVING = "TARGET_NOT_RECEIVING"
     # 실행 시작 때 보안 게이트가 막았다(필수 통제 FAIL·UNKNOWN, 유효한 예외 없음). 트래픽은 그대로.
     SECURITY_GATE_BLOCKED = "SECURITY_GATE_BLOCKED"
+    # --- DB 쓰기 전환 단계(API 서버 17) ---
+    # 컷오버 Job 이 아무것도 바꾸지 않고 끝났다(종료 1) 또는 Job 을 만들지 못했다.
+    # 쓰기 담당 그대로 → 트래픽을 출발 100% 로 되돌린다.
+    DB_CUTOVER_FAILED = "DB_CUTOVER_FAILED"
+    # 제한 시간 안에 Job 이 끝나지 않았고 이 계획의 결과 행도 없다. 쓰기 담당을 알 수 없어 자동으로
+    # 되돌리지 않는다(rollbackStatus SKIPPED).
+    DB_CUTOVER_TIMEOUT = "DB_CUTOVER_TIMEOUT"
+    # Job 이 전환 도중 멈췄다(종료 2·알 수 없는 종료·Job 사라짐). 사람이 "부분 상태 복구"를 한다.
+    DB_CUTOVER_PARTIAL = "DB_CUTOVER_PARTIAL"
+    # 전환은 끝났지만 장부 대조에서 누락·중복이 있거나 결과 행을 읽지 못했다. 쓰기 담당은 도착이라
+    # 자동으로 되돌리지 않는다(12.0 결정 3).
+    DATA_INTEGRITY_FAILED = "DATA_INTEGRITY_FAILED"
+    # 컷오버 결과(쓰기 담당)를 확인하지 못했다: Job 생성 응답 유실 뒤 조회 불가,
+    # 종료 1 인데 출발이 쓰기 담당이라는 근거 없음, 상태 조회가 계속 실패.
+    # 트래픽·DB 를 그대로 두고(rollbackStatus SKIPPED)
+    # 사람이 쓰기 담당을 확인한다(트래픽과 쓰기 담당이 갈리는 것을 막는다).
+    DB_CUTOVER_UNKNOWN = "DB_CUTOVER_UNKNOWN"
 
 
 class MigrationRollbackStatus(StrEnum):
-    """출발 100% 로 되돌린 결과. NOT_NEEDED 는 트래픽을 바꾼 적이 없어 되돌릴 필요가 없었다."""
+    """출발 100% 로 되돌린 결과. NOT_NEEDED 는 트래픽을 바꾼 적이 없어 되돌릴 필요가 없었다.
+
+    SKIPPED 는 DB 쓰기 전환 단계가 쓰기 담당을 알 수 없거나 이미 도착으로 옮긴 채 실패해, 트래픽도
+    DB 도 자동으로 되돌리지 않았다는 뜻이다(사람이 확인한다. API 서버 17).
+    """
 
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     NOT_NEEDED = "NOT_NEEDED"
+    SKIPPED = "SKIPPED"
 
 
 class MigrationSimulateReason(StrEnum):
@@ -488,6 +517,11 @@ class MigrationSimulateReason(StrEnum):
     TRAFFIC = "TRAFFIC"
     TARGET_NOT_RECEIVING = "TARGET_NOT_RECEIVING"
     LOW_TRAFFIC = "LOW_TRAFFIC"
+    # DB 쓰기 전환 단계(5)만: Job 종료 1 · 종료 2 · 끝나지 않음 · 누락 1건.
+    DB_CUTOVER_FAIL = "DB_CUTOVER_FAIL"
+    DB_CUTOVER_PARTIAL = "DB_CUTOVER_PARTIAL"
+    DB_CUTOVER_TIMEOUT = "DB_CUTOVER_TIMEOUT"
+    DATA_INTEGRITY = "DATA_INTEGRITY"
 
 
 class MigrationJudgeReason(StrEnum):
@@ -532,6 +566,16 @@ class MigrationLogCode(StrEnum):
     SECURITY_GATE_BLOCKED = "SECURITY_GATE_BLOCKED"
     # 재난 트리거가 만든 계획의 첫 줄(PLAN_CREATED 앞). data 에 재난 id·규모·출발 거리.
     DISASTER_TRIGGERED = "DISASTER_TRIGGERED"
+    # DB 쓰기 전환 단계(API 서버 17). data 에 Job 이름·종류·종료 코드·결과 숫자.
+    DB_CUTOVER_JOB_CREATED = "DB_CUTOVER_JOB_CREATED"
+    DB_CUTOVER_JOB_FINISHED = "DB_CUTOVER_JOB_FINISHED"
+    DB_CUTOVER_OK = "DB_CUTOVER_OK"
+    DB_CUTOVER_FAILED = "DB_CUTOVER_FAILED"
+    # 자동으로 되돌리지 않고 끝냈다(rollbackStatus SKIPPED). 사람이 확인한다.
+    DB_CUTOVER_MANUAL_REQUIRED = "DB_CUTOVER_MANUAL_REQUIRED"
+    # 재난 긴급 이전 + DB 쓰기 전환에서 원본 DB 에 닿지 못해 데이터 확인을 건너뛰었다(경고).
+    # data.reason = EMERGENCY_SOURCE_UNREACHABLE. 승격은 승인 때 동의했다(acknowledgePromote).
+    DATA_SYNC_SKIPPED = "DATA_SYNC_SKIPPED"
 
 
 # --- 보안 판정 (보안·거버넌스 3) ---

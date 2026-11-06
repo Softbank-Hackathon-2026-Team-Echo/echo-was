@@ -362,7 +362,7 @@ EXPECTED_CONSTRAINTS = {
         "CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL)))"
     ),
     ("migration_plans", "ck_migration_plans_current_step_range"): (
-        "CHECK (((current_step >= 0) AND (current_step <= 4)))"
+        "CHECK (((current_step >= 0) AND (current_step <= 5)))"
     ),
     ("migration_plans", "ck_migration_plans_error_code_consistency"): (
         "CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, "
@@ -376,7 +376,10 @@ EXPECTED_CONSTRAINTS = {
         "'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, "
         "'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, "
         "'TARGET_NOT_RECEIVING'::character varying, "
-        "'SECURITY_GATE_BLOCKED'::character varying])::text[])))"
+        "'SECURITY_GATE_BLOCKED'::character varying, 'DB_CUTOVER_FAILED'::character varying, "
+        "'DB_CUTOVER_TIMEOUT'::character varying, 'DB_CUTOVER_PARTIAL'::character varying, "
+        "'DATA_INTEGRITY_FAILED'::character varying, "
+        "'DB_CUTOVER_UNKNOWN'::character varying])::text[])))"
     ),
     ("migration_plans", "ck_migration_plans_expected_seconds_non_negative"): (
         "CHECK ((expected_seconds >= 0))"
@@ -405,7 +408,8 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("migration_plans", "ck_migration_plans_rollback_status_valid"): (
         "CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, "
-        "'FAILED'::character varying, 'NOT_NEEDED'::character varying])::text[])))"
+        "'FAILED'::character varying, 'NOT_NEEDED'::character varying, "
+        "'SKIPPED'::character varying])::text[])))"
     ),
     ("migration_plans", "ck_migration_plans_simulate_is_object"): (
         "CHECK ((jsonb_typeof(simulate) = 'object'::text))"
@@ -466,7 +470,7 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("migration_plan_logs", "ck_migration_plan_logs_seq_positive"): ("CHECK ((seq >= 1))"),
     ("migration_plan_logs", "ck_migration_plan_logs_step_range"): (
-        "CHECK (((step >= 0) AND (step <= 4)))"
+        "CHECK (((step >= 0) AND (step <= 5)))"
     ),
     ("migration_plan_logs", "fk_migration_plan_logs_migration_plan_id_migration_plans"): (
         "FOREIGN KEY (migration_plan_id) REFERENCES migration_plans(id) ON DELETE RESTRICT"
@@ -1141,10 +1145,13 @@ BEFORE_AGENT_RUN_PROCESSING = DISASTERS_REVISION
 AGENT_RUN_PROCESSING_REVISION = "31bc0563b24b"
 # 배포 실패 진단(SPEC api-98)의 agent_runs.deploy_request_id.
 AGENT_RUN_DEPLOY_REQUEST_REVISION = "9d8e1f2a3b4c"
-# 실제 재난 피드(API 서버 18)를 더하기 전(배포 실패 진단) 시점과 지금 head.
+# 실제 재난 피드(API 서버 18)를 더하기 전(배포 실패 진단) 시점.
 BEFORE_LIVE_DISASTER_FEED = AGENT_RUN_DEPLOY_REQUEST_REVISION
 LIVE_DISASTER_FEED_REVISION = "8748e995387a"
-HEAD_REVISION = LIVE_DISASTER_FEED_REVISION
+# DB 쓰기 전환 단계(API 서버 17) CHECK 넓히기 전(실제 재난 피드) 시점과 지금 head.
+BEFORE_DB_CUTOVER_STEP = LIVE_DISASTER_FEED_REVISION
+DB_CUTOVER_STEP_REVISION = "7c2e5a9d4b18"
+HEAD_REVISION = DB_CUTOVER_STEP_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1765,6 +1772,46 @@ async def test_security_gate_revision_downgrade_with_blocked_plans_fails_clearly
     assert version == HEAD_REVISION
 
 
+async def test_db_cutover_step_revision_round_trip_and_blocks_downgrade_with_step_rows(
+    engine: AsyncEngine, migration: Migration
+) -> None:
+    # 빈 상태에서는 내렸다 다시 올릴 수 있고(옛 CHECK 0~4),
+    # 6단계 계획이 단계 5 에 닿으면 내리지 못한다.
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_DB_CUTOVER_STEP))
+        )
+        down = await connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_migration_plans_current_step_range'"
+            )
+        )
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        await transaction.commit()
+    migration.harness.use_settings(db_cutover_executor_mode="fake")
+    plan = await migration.create_plan(includeCutover=True)
+    await migration.approve(plan["id"])
+    await migration.harness.run_until_idle()
+    stored = await migration.plan_row(plan["id"])
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        with pytest.raises(RuntimeError, match="use the DB cutover step") as raised:
+            await connection.run_sync(
+                run_alembic(lambda config: command.downgrade(config, BEFORE_DB_CUTOVER_STEP))
+            )
+        await transaction.rollback()
+    async with engine.connect() as connection:
+        version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert down == "CHECK (((current_step >= 0) AND (current_step <= 4)))"
+    assert (stored.status, stored.current_step) == ("SUCCEEDED", 5)
+    assert "does not rewrite migration plan history" in str(raised.value)
+    assert version == HEAD_REVISION
+
+
 def _mode_column_and_check(connection: Connection) -> tuple[bool, bool]:
     inspector = inspect(connection)
     has_column = any(
@@ -1994,6 +2041,8 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
+    db_cutover = scripts.get_revision(DB_CUTOVER_STEP_REVISION)
+    assert db_cutover is not None and db_cutover.down_revision == BEFORE_DB_CUTOVER_STEP
     live_feed = scripts.get_revision(LIVE_DISASTER_FEED_REVISION)
     assert live_feed is not None
     assert live_feed.down_revision == AGENT_RUN_DEPLOY_REQUEST_REVISION

@@ -13,6 +13,7 @@ from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.core.clock import Clock
 from app.core.config import (
     DataSyncCheckerMode,
+    DbCutoverExecutorMode,
     EntrypointExecutorMode,
     ExecutorMode,
     HealthCheckerMode,
@@ -23,7 +24,9 @@ from app.executors.base import (
     BuildExecutor,
     CutoverRunReader,
     DataSyncChecker,
+    DbCutoverExecutor,
     DeployExecutor,
+    DisabledDbCutoverExecutor,
     EnvironmentLookup,
     HealthChecker,
     MainRouteExecutor,
@@ -42,6 +45,7 @@ from app.executors.entrypoint import (
 from app.executors.fake import (
     FakeBuildExecutor,
     FakeDataSyncChecker,
+    FakeDbCutoverExecutor,
     FakeDeployExecutor,
     FakeHealthChecker,
     FakeMainRouteExecutor,
@@ -54,6 +58,7 @@ from app.executors.google_metadata import GoogleMetadataClient
 from app.executors.http_health_checker import HttpHealthChecker
 from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeHttpClients, KubeHttpFactory, default_kube_http_factory
+from app.executors.kubernetes.cutover_job import InClusterKubeClient, KubernetesDbCutoverExecutor
 from app.executors.kubernetes.executors import (
     KubernetesDeployExecutor,
     KubernetesRuntime,
@@ -78,6 +83,8 @@ class ExecutorSet:
     data_sync: DataSyncChecker
     # 컷오버 결과 읽기(API 프로세스의 이전 계획 상세만 쓴다). 기본은 늘 행 없음이다.
     cutover_runs: CutoverRunReader = field(default_factory=NoCutoverRuns)
+    # DB 쓰기 전환 단계(API 서버 17, 일꾼만 쓴다). 기본은 꺼짐.
+    db_cutover: DbCutoverExecutor = field(default_factory=DisabledDbCutoverExecutor)
     # 프로세스가 끝날 때 닫을 HTTP 클라이언트(실제 실행기만).
     closers: tuple[Closer, ...] = field(default=(), repr=False)
 
@@ -94,6 +101,7 @@ class RealExecutorTransports:
     cloud: httpx.AsyncBaseTransport | None = None
     metadata: httpx.AsyncBaseTransport | None = None
     cloudflare: httpx.AsyncBaseTransport | None = None
+    cutover_kube: httpx.AsyncBaseTransport | None = None
     kube_http_factory: KubeHttpFactory = default_kube_http_factory
     sleep: Sleep = real_sleep
 
@@ -155,6 +163,7 @@ def build_executor_set(
         teardown = FakeTeardownExecutor(clock, step_seconds)
     data_sync: DataSyncChecker = FakeDataSyncChecker()
     cutover_runs: CutoverRunReader = NoCutoverRuns()
+    plan_runs: PostgresCutoverRunReader | None = None
     if settings.data_sync_checker_mode is DataSyncCheckerMode.POSTGRES:
         if not settings.data_sync_password_ref:
             raise ValueError("data_sync_password_ref is required")
@@ -170,7 +179,7 @@ def build_executor_set(
             timeout_seconds=settings.data_sync_timeout_seconds,
         )
         if settings.cutover_results_enabled:
-            cutover_runs = PostgresCutoverRunReader(
+            cutover_runs = plan_runs = PostgresCutoverRunReader(
                 endpoints,
                 user=settings.data_sync_user,
                 database=settings.cutover_runs_database,
@@ -179,6 +188,24 @@ def build_executor_set(
                 ssl_mode=settings.data_sync_ssl_mode,
                 timeout_seconds=settings.data_sync_timeout_seconds,
             )
+    db_cutover: DbCutoverExecutor = DisabledDbCutoverExecutor()
+    if settings.db_cutover_executor_mode is DbCutoverExecutorMode.FAKE:
+        db_cutover = FakeDbCutoverExecutor(clock, step_seconds)
+    elif settings.db_cutover_executor_mode is DbCutoverExecutorMode.KUBERNETES:
+        assert settings.db_cutover_job_image is not None  # 설정 검사가 막는다.
+        kube_db_cutover = KubernetesDbCutoverExecutor(
+            InClusterKubeClient(
+                settings.db_cutover_kube_api_url,
+                settings.db_cutover_service_account_dir,
+                settings.db_cutover_kube_timeout_seconds,
+                transport=(transports or RealExecutorTransports()).cutover_kube,
+            ),
+            namespace=settings.db_cutover_namespace,
+            image=settings.db_cutover_job_image,
+            reader=plan_runs,
+        )
+        db_cutover = kube_db_cutover
+        closers = (*closers, kube_db_cutover.aclose)
     return ExecutorSet(
         build=build,
         deploy=deploy,
@@ -189,6 +216,7 @@ def build_executor_set(
         metrics=metrics,
         data_sync=data_sync,
         cutover_runs=cutover_runs,
+        db_cutover=db_cutover,
         closers=closers,
     )
 
