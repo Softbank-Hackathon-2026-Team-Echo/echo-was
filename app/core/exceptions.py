@@ -485,7 +485,10 @@ class MigrationInProgressError(ConflictError):
 
 
 class ServiceEnvironmentNotFoundError(NotFoundError):
-    """서비스가 그 환경에 연결돼 있지 않다(연결은 그 환경의 첫 배포 요청 때 생긴다)."""
+    """서비스와 같은 조직에 그 환경이 없다(살아 있는 연결도 없다).
+
+    연결은 첫 배포 요청이나 변수 넣기 때 생긴다(API 서버 10-4).
+    """
 
     code = "SERVICE_ENVIRONMENT_NOT_FOUND"
 

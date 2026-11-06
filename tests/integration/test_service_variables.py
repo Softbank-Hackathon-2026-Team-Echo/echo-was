@@ -137,7 +137,7 @@ class Connected:
 
 
 async def _connected(harness: DeployHarness, name: str = "shop-api") -> Connected:
-    """연결은 첫 배포 요청 때 생긴다."""
+    """첫 배포를 마친 연결(배포 전 연결은 test_service_variables_before_deploy.py)."""
     service = await harness.create_service(name)
     environment = await harness.add_environment("aws-seoul")
     finished = await deploy_and_finish(harness, service["id"], environment.id)
@@ -246,26 +246,15 @@ async def test_pending_redeploy_follows_current_deployment(harness: DeployHarnes
     assert changed["pendingRedeploy"] is True
 
 
-async def test_not_connected_environment_and_missing_resources_are_404(
-    harness: DeployHarness,
-) -> None:
+async def test_missing_service_and_key_are_404(harness: DeployHarness) -> None:
+    """연결이 없는 환경(첫 배포 전)은 test_service_variables_before_deploy.py 가 본다."""
     setup = await _connected(harness)
-    other_environment = await harness.add_environment("gcp-seoul")
-    url = _path(harness, setup.service_id, other_environment.id)
 
-    listed = await harness.client.get(url)
-    put = await harness.client.put(f"{url}/{KEY}", json={"value": "x"})
-    deleted = await harness.client.delete(f"{url}/{KEY}")
     no_service = await harness.client.get(_path(harness, str(uuid.uuid4()), setup.environment.id))
     no_key = await harness.client.delete(
         _path(harness, setup.service_id, setup.environment.id, "NOPE")
     )
 
-    for response in (listed, put, deleted):
-        assert (response.status_code, response.json()["code"]) == (
-            404,
-            "SERVICE_ENVIRONMENT_NOT_FOUND",
-        )
     assert no_service.json()["code"] == "SERVICE_NOT_FOUND"
     assert (no_key.status_code, no_key.json()["code"]) == (404, "ENV_VAR_NOT_FOUND")
     assert _store(harness).names == []
@@ -1012,7 +1001,7 @@ async def test_fake_store_with_real_executor_rejects_writes_and_leaves_hand_secr
     assert (first["status"], second["status"]) == ("SUCCEEDED", "SUCCEEDED")
     assert (put.status_code, put.json()["code"]) == (409, "SECRET_STORE_NOT_CONFIGURED")
     assert (delete.status_code, delete.json()["code"]) == (409, "SECRET_STORE_NOT_CONFIGURED")
-    assert listed == {"items": [], "simulated": True}
+    assert listed == {"items": [], "simulated": True, "deployed": True}
     assert await _rows(harness) == []
     assert _store(harness).names == []
     assert _secret_calls(real_world.cluster) == []

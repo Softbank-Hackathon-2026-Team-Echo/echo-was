@@ -194,7 +194,7 @@ erDiagram
 | `teardown_error` | varchar(32) | Y | | 이 연결 내리기 실패 이유 |
 | (유일성) | | | `uq_service_environments_service_id_environment_id_live` | 같은 서비스×환경의 살아 있는 연결은 하나 |
 
-- **연결을 만드는 쪽(API 서버 3 배포 요청 접수)은 대상 환경 행을 `SELECT ... FOR SHARE` 로 잠근 뒤 연결을 만든다.** 환경 삭제는 같은 행을 `FOR UPDATE` 로 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 둘은 서로 기다려 "지운 환경에 새 연결"이 생기지 않는다. `FOR UPDATE` 가 아니라 `FOR SHARE` 인 이유: 일꾼이 서비스 행을 잡은 채 이 환경을 FK 로 가리키는 행을 쓰면 `FOR KEY SHARE` 를 잡는데, 접수가 `FOR UPDATE` 를 쥐고 서비스 행을 기다리면 교착이 생긴다(`FOR SHARE` 는 `FOR KEY SHARE` 와 부딪히지 않는다). API 서버 2 SPEC 의 "FOR UPDATE" 를 이렇게 바꿨다. 연결은 그 환경의 첫 배포 요청 때 자동으로 만든다(`traffic_weight = 0`).
+- **연결을 만드는 쪽(API 서버 3 배포 요청 접수)은 대상 환경 행을 `SELECT ... FOR SHARE` 로 잠근 뒤 연결을 만든다.** 환경 삭제는 같은 행을 `FOR UPDATE` 로 잠그고 살아 있는 연결이 있는지 본 뒤 소프트 삭제하므로(있으면 409 `ENVIRONMENT_IN_USE`), 둘은 서로 기다려 "지운 환경에 새 연결"이 생기지 않는다. `FOR UPDATE` 가 아니라 `FOR SHARE` 인 이유: 일꾼이 서비스 행을 잡은 채 이 환경을 FK 로 가리키는 행을 쓰면 `FOR KEY SHARE` 를 잡는데, 접수가 `FOR UPDATE` 를 쥐고 서비스 행을 기다리면 교착이 생긴다(`FOR SHARE` 는 `FOR KEY SHARE` 와 부딪히지 않는다). API 서버 2 SPEC 의 "FOR UPDATE" 를 이렇게 바꿨다. 연결은 그 환경의 첫 배포 요청 때 자동으로 만든다(`traffic_weight = 0`). 첫 배포 전 앱 환경 변수 넣기(API 서버 10-4)도 같은 순서(환경 `FOR SHARE` → 서비스 → 연결)로 배포 없는 연결을 만든다 — 첫 배포 요청은 그 연결을 그대로 쓴다.
 - **역할은 저장하지 않고 계산한다**: `traffic_weight > 0` 이면 서비스 중(SERVING), 0 이고 현재 배포가 있으면 예비(STANDBY), 현재 배포가 없으면 NONE. 첫 성공 연결은 가짜 대표 주소 라우터가 "적용했다"고 답한 뒤 `traffic_weight = 100` 이 된다.
 
 ### `service_environment_variables` — 고객 앱 환경 변수 (API 서버 10)

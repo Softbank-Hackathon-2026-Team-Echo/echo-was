@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import (
@@ -20,6 +21,7 @@ from app.adapters.base import (
 from app.audit.actions import AuditComponent
 from app.audit.lifecycle import record_deploy_request_finished
 from app.core.clock import Clock
+from app.core.exceptions import PublicHostConflictError
 from app.core.secrets import SecretValue
 from app.enums import (
     DeployLogCode,
@@ -31,9 +33,12 @@ from app.enums import (
 from app.executors.base import DeploymentSpec, DeployTarget
 from app.models import Deployment, DeployRequest, Environment, Job, Service, ServiceEnvironment
 from app.models.service import HOST_SUFFIX_LENGTH
+from app.models.service_environment import PUBLIC_HOST_UNIQUE_INDEX
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.job_repository import JobRepository
+from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.services.deploy_job_log import DeployJobLog
+from app.services.integrity import violated_constraint_name
 
 # config_snapshot 키(요청·배포 기록 공통). 비밀값·토큰은 넣지 않는다.
 SNAPSHOT_HEALTH_CHECK_PATH = "healthCheckPath"
@@ -199,6 +204,57 @@ def read_environment_config(environment: Environment) -> EnvironmentConfig | Non
         return environment.parsed_config()
     except (InvalidEnvironmentConfigError, UnknownEnvironmentKindError):
         return None
+
+
+async def create_service_connection(
+    session: AsyncSession,
+    service: Service,
+    environment: Environment,
+    public_base_domain: str,
+) -> ServiceEnvironment:
+    """배포 없는 서비스-환경 연결을 만든다(비율 0, 현재 배포 없음 = 역할 NONE).
+
+    첫 배포 요청(배포 접수)과 첫 배포 전 변수 저장(API 서버 10-4)이 함께 쓴다. 부르는 쪽이
+    환경(FOR SHARE) → 서비스 순서로 잠근 뒤 부른다. 같은 서비스의 연결 만들기는 서비스 행 잠금으로
+    줄을 서므로 (서비스, 환경) 고유 인덱스와 부딪히지 않는다.
+
+    주소는 이때 한 번 정해 저장한다. 환경에 하위 도메인(ingressDomain)이 있으면
+    `{서비스}-{suffix}.{하위 도메인}`, 없으면 `{서비스}-{환경}-{suffix}.{도메인}` 이다
+    (connection_public_host). 서비스의 suffix 를 쓴다. 살아 있는 연결과 겹치면 409
+    PUBLIC_HOST_CONFLICT 다(환경 이름을 바꾼 뒤 옛 이름으로 새 환경을 만든 경우, 63자 자르기로 같은
+    레이블이 된 경우, 두 환경이 같은 하위 도메인을 쓰는 경우). 서비스 이름이 53자 이상이면 자르기
+    때문에 환경별 주소가 그 서비스의 대표 주소와 같아진다. 연결이 하나뿐이라 둘 다 같은 곳으로
+    가므로 막지 않는다.
+    """
+    repository = ServiceEnvironmentRepository(session)
+    config = read_environment_config(environment)
+    public_host = connection_public_host(
+        service.name,
+        environment.name,
+        service.host_suffix,
+        public_base_domain,
+        config.environment_host_domain() if config is not None else None,
+    )
+    if await repository.is_public_host_in_use(public_host):
+        raise PublicHostConflictError(
+            "public host already in use", environment_id=str(environment.id)
+        )
+    connection = ServiceEnvironment(
+        service_id=service.id,
+        environment_id=environment.id,
+        traffic_weight=0,
+        public_host=public_host,
+    )
+    repository.add(connection)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if violated_constraint_name(exc) == PUBLIC_HOST_UNIQUE_INDEX:
+            raise PublicHostConflictError(
+                "public host already in use", environment_id=str(environment.id)
+            ) from None
+        raise
+    return connection
 
 
 def deployment_spec(

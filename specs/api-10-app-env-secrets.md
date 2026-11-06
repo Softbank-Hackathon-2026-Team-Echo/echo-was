@@ -97,7 +97,7 @@ AI 기본값(거부 가능). ★는 검토로 바뀐 것:
 
 ### 5-2. API
 
-경로 머리: `/api/v1/orgs/{org_id}/services/{service_id}/environments/{environment_id}/variables`. `environment_id`는 환경 id(서비스 상세 `environments[].environment.id`)다. 서비스가 그 환경에 연결돼 있지 않으면 404 `SERVICE_ENVIRONMENT_NOT_FOUND`.
+경로 머리: `/api/v1/orgs/{org_id}/services/{service_id}/environments/{environment_id}/variables`. `environment_id`는 환경 id(서비스 상세 `environments[].environment.id`)다. 서비스가 그 환경에 연결돼 있지 않으면 404 `SERVICE_ENVIRONMENT_NOT_FOUND`. (11/6 바뀜, API 서버 10-4: 같은 조직의 살아 있는 환경이면 `PUT` 이 배포 없는 연결을 만든다 — [api-10-4 SPEC](api-10-4-vars-before-first-deploy.md).)
 
 1. `GET …/variables` — `ViewerAccess`(에이전트 포함).
    - 응답 `items[]`(키 이름 순): `key`, `version`, `secretRef`(AD-5 모양), `updatedAt`, `updatedBy {id, githubLogin}`, `appliedVersion`(연결의 현재 배포 기록에 고정된 버전, 없으면 null), `pendingRedeploy`(appliedVersion ≠ version).

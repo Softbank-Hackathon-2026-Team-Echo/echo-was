@@ -5,6 +5,10 @@
   (docs/executors.md "앱 환경 변수"). 호출 뒤 커밋이 실패해도 안 쓰는 버전이 하나 남을 뿐이다.
 - 지우기: 행만 삭제 표시한다. 옛 배포 기록·되돌리기가 그 버전을 읽어야 해서 보관함 비밀은 남긴다.
 - 앱은 다시 배포해야 바뀐다. 응답 pendingRedeploy 로 보인다.
+- 첫 배포 전에도 넣을 수 있다(API 서버 10-4). 연결이 없고 환경이 서비스와 같은 조직에 살아
+  있으면 넣기가 배포 없는 연결(비율 0, 현재 배포 없음 = 역할 NONE)을 만들고, 첫 배포 요청은 그
+  연결을 그대로 쓴다. 목록·지우기는 연결을 만들지 않는다(목록은 빈 목록, 지우기는
+  ENV_VAR_NOT_FOUND). 응답 deployed 는 연결에 현재 배포가 있는지다.
 
 응답·로그·예외에 값·값 일부·길이를 넣지 않는다. 비밀 이름은 정상 응답의 secretRef 에만 나온다.
 
@@ -56,12 +60,14 @@ from app.models.service_environment_variable import (
     ENV_VAR_SECRET_NAME_MAX_LENGTH,
 )
 from app.repositories.deployment_repository import DeploymentRepository
+from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_environment_variable_repository import (
     ServiceEnvironmentVariableRepository,
 )
 from app.repositories.service_repository import ServiceRepository
 from app.services.app_env_values import pinned_versions
+from app.services.deploy_support import create_service_connection
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,8 @@ class ServiceVariableView:
 class ServiceVariableList:
     items: list[ServiceVariableView]
     simulated: bool
+    # 연결에 현재 배포가 있는가. 첫 배포 전(연결 없음·배포 없는 연결)이면 False.
+    deployed: bool
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,7 @@ class SavedServiceVariable:
     variable: ServiceVariableView
     created: bool
     simulated: bool
+    deployed: bool
 
 
 class ServiceVariableService:
@@ -151,6 +160,7 @@ class ServiceVariableService:
         self._clock = clock
         self._settings = settings
         self._services = ServiceRepository(session)
+        self._environments = EnvironmentRepository(session)
         self._connections = ServiceEnvironmentRepository(session)
         self._variables = ServiceEnvironmentVariableRepository(session)
         self._deployments = DeploymentRepository(session)
@@ -165,9 +175,18 @@ class ServiceVariableService:
                 service.id, environment_id
             )
             if connection is None:
-                raise ServiceEnvironmentNotFoundError
+                # 첫 배포 전: 같은 조직의 살아 있는 환경이면 빈 목록(읽기는 연결을 만들지 않는다).
+                if (
+                    await self._environments.find_live_by_id(organization_id, environment_id)
+                    is None
+                ):
+                    raise ServiceEnvironmentNotFoundError
+                return ServiceVariableList(
+                    items=[], simulated=self._store.simulated, deployed=False
+                )
             items = await self._views(connection)
-        return ServiceVariableList(items=items, simulated=self._store.simulated)
+            deployed = connection.current_deployment_id is not None
+        return ServiceVariableList(items=items, simulated=self._store.simulated, deployed=deployed)
 
     async def put_variable(
         self,
@@ -178,14 +197,17 @@ class ServiceVariableService:
         value: SecretValue,
         user_id: uuid.UUID,
     ) -> SavedServiceVariable:
-        """새 키면 created. 없는 연결·삭제 중 서비스·한도·보관함 오류는 예외다."""
+        """새 키면 created. 연결이 없으면 배포 없는 연결을 만든다(API 서버 10-4).
+
+        다른 조직·없는·지운 환경, 삭제 중 서비스, 한도, 보관함 오류는 예외다.
+        """
         check_env_var_key(key)
         check_env_var_value(value)
         self._check_store_configured()
         now = self._clock.now()
         async with self._session.begin():
-            service, connection = await self._lock_connection(
-                organization.id, service_id, environment_id
+            service, connection, connection_created = await self._lock_connection(
+                organization.id, service_id, environment_id, create=True
             )
             existing = await self._variables.find_live(connection.id, key)
             created = existing is None
@@ -237,9 +259,15 @@ class ServiceVariableService:
                 "service_environment_id": str(connection.id),
                 "env_key": key,
                 "version": version,
+                "connection_created": connection_created,
             },
         )
-        return SavedServiceVariable(variable=view, created=created, simulated=self._store.simulated)
+        return SavedServiceVariable(
+            variable=view,
+            created=created,
+            simulated=self._store.simulated,
+            deployed=connection.current_deployment_id is not None,
+        )
 
     async def delete_variable(
         self,
@@ -252,8 +280,8 @@ class ServiceVariableService:
         self._check_store_configured()
         now = self._clock.now()
         async with self._session.begin():
-            service, connection = await self._lock_connection(
-                organization_id, service_id, environment_id
+            service, connection, _ = await self._lock_connection(
+                organization_id, service_id, environment_id, create=False
             )
             variable = await self._variables.find_live(connection.id, key)
             if variable is None:
@@ -299,17 +327,48 @@ class ServiceVariableService:
             raise SecretStoreNotConfiguredError
 
     async def _lock_connection(
-        self, organization_id: uuid.UUID, service_id: uuid.UUID, environment_id: uuid.UUID
-    ) -> tuple[Service, ServiceEnvironment]:
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        environment_id: uuid.UUID,
+        *,
+        create: bool,
+    ) -> tuple[Service, ServiceEnvironment, bool]:
+        """서비스 → 연결 순서로 잠근다. 세 번째 값은 연결을 새로 만들었는가.
+
+        연결이 이미 있으면 예전과 같다(환경 행을 잠그지 않는다). 미리 읽은 연결이 없을 때만 환경을
+        FOR SHARE 로 먼저 잡는다(배포 접수와 같은 환경 → 서비스 → 연결 순서). 환경 삭제(FOR UPDATE,
+        살아 있는 연결이 있으면 거절)와 줄을 세워, 지워지는 환경에 연결을 만들지 않게 한다.
+        잠근 뒤에도 연결이 없을 때: 환경이 같은 조직에 살아 있지 않으면 404
+        SERVICE_ENVIRONMENT_NOT_FOUND, create 면 배포 없는 연결을 만들고, 아니면(지우기) 지울 키가
+        없으므로 404 ENV_VAR_NOT_FOUND. 서비스 없음(404)·삭제 중(409)이 환경 판정보다 먼저다.
+        """
+        seen = await self._connections.find_live_by_service_and_environment(
+            service_id, environment_id
+        )
+        environment = (
+            await self._environments.find_live_by_id(
+                organization_id, environment_id, for_share=True
+            )
+            if seen is None
+            else None
+        )
         service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
         if service.status == ServiceStatus.DELETING:
             raise ServiceDeletingError("service is being deleted", service_id=str(service.id))
         connection = await self._connections.lock_live_by_service_and_environment(
             service.id, environment_id
         )
-        if connection is None:
+        if connection is not None:
+            return service, connection, False
+        if environment is None:
             raise ServiceEnvironmentNotFoundError
-        return service, connection
+        if not create:
+            raise EnvVarNotFoundError
+        connection = await create_service_connection(
+            self._session, service, environment, self._settings.public_base_domain
+        )
+        return service, connection, True
 
     async def _add_version(
         self,
