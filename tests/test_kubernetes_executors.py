@@ -18,7 +18,10 @@ from app.core.config import ExecutorMode, HealthCheckerMode, Settings, SourceCli
 from app.enums import DeployRequestErrorCode, TeardownErrorCode
 from app.executors import ExecutorSet, RealExecutorTransports, build_executor_set
 from app.executors.base import (
+    CONTAINER_LOG_LINE_MAX_LENGTH,
+    CONTAINER_LOG_TAIL_LINES,
     ClusterEnvironment,
+    ContainerDiagnostics,
     DeployApplied,
     DeployApplyError,
     DeployFailed,
@@ -394,6 +397,137 @@ async def test_poll_pod_waiting_reasons(reason: str, age_seconds: float, expecte
     world.clock.advance(age_seconds)
 
     assert await world.deploy.poll(external_ref) == expected
+
+
+# --- API 서버 4-1 실패 진단 ---
+
+_CRASH_LOG = "\n".join(
+    [
+        "Starting shap-api",
+        "Traceback (most recent call last):",
+        "pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings",
+        "database_url",
+        "  Field required [type=missing, input_value={}, input_type=dict]",
+    ]
+)
+
+
+async def test_poll_crash_reads_previous_container_tail_and_exit_code() -> None:
+    world = _world()
+    external_ref = await _applied(world)
+    world.cluster.add_pod(
+        DEPLOYMENT.deployment_id,
+        name="app-crash",
+        waiting_reason="CrashLoopBackOff",
+        previous_log=_CRASH_LOG,
+        restart_count=3,
+        exit_code=1,
+        termination_reason="Error",
+    )
+
+    result = await world.deploy.poll(external_ref)
+
+    assert result == DeployFailed(DeployRequestErrorCode.CONTAINER_START_FAILED)
+    assert isinstance(result, DeployFailed) and result.diagnostics is not None
+    assert result.diagnostics == ContainerDiagnostics(
+        container="app",
+        reason="CrashLoopBackOff",
+        termination_reason="Error",
+        exit_code=1,
+        restart_count=3,
+        log_tail=tuple(_CRASH_LOG.splitlines()),
+        log_truncated=False,
+    )
+    log_requests = [r for r in world.cluster.requests if r.url.path.endswith("/log")]
+    assert [dict(r.url.params) for r in log_requests] == [
+        {"container": "app", "tailLines": "51", "limitBytes": "262144", "previous": "true"}
+    ]
+
+
+async def test_poll_crash_tail_keeps_last_50_lines_and_masks_tokens() -> None:
+    world = _world()
+    external_ref = await _applied(world)
+    token = "ghs_" + "A" * 36
+    lines = [f"line {index}" for index in range(80)] + [f"auth Bearer {token}", "x" * 1000]
+    world.cluster.add_pod(
+        DEPLOYMENT.deployment_id,
+        waiting_reason="CrashLoopBackOff",
+        previous_log="\n".join(lines),
+        restart_count=5,
+        exit_code=137,
+        termination_reason="OOMKilled",
+    )
+
+    result = await world.deploy.poll(external_ref)
+
+    assert isinstance(result, DeployFailed) and result.diagnostics is not None
+    tail = result.diagnostics.log_tail
+    assert len(tail) == CONTAINER_LOG_TAIL_LINES
+    assert result.diagnostics.log_truncated is True
+    assert tail[0] == "line 32"
+    assert tail[-2] == "auth Bearer ***"
+    assert len(tail[-1]) == CONTAINER_LOG_LINE_MAX_LENGTH
+    assert token not in "\n".join(tail)
+    assert (result.diagnostics.termination_reason, result.diagnostics.exit_code) == (
+        "OOMKilled",
+        137,
+    )
+
+
+async def test_poll_crash_without_previous_log_reads_current_container() -> None:
+    world = _world()
+    external_ref = await _applied(world)
+    world.cluster.add_pod(
+        DEPLOYMENT.deployment_id,
+        waiting_reason="CrashLoopBackOff",
+        log="boot\nfatal: missing DATABASE_URL",
+        restart_count=1,
+    )
+
+    result = await world.deploy.poll(external_ref)
+
+    assert isinstance(result, DeployFailed) and result.diagnostics is not None
+    assert result.diagnostics.log_tail == ("boot", "fatal: missing DATABASE_URL")
+    assert result.diagnostics.exit_code is None
+
+
+@pytest.mark.parametrize("status", [403, 503])
+async def test_poll_crash_still_fails_when_log_read_fails(
+    status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = _world()
+    external_ref = await _applied(world)
+    pod = world.cluster.add_pod(
+        DEPLOYMENT.deployment_id,
+        waiting_reason="CrashLoopBackOff",
+        previous_log=_CRASH_LOG,
+        restart_count=2,
+        exit_code=1,
+    )
+    world.cluster.fail_next(
+        "GET", f"/api/v1/namespaces/{NAMESPACE}/pods/{pod.name}/log", status, count=10
+    )
+
+    result = await world.deploy.poll(external_ref)
+
+    assert result == DeployFailed(DeployRequestErrorCode.CONTAINER_START_FAILED)
+    assert isinstance(result, DeployFailed) and result.diagnostics is not None
+    assert result.diagnostics.log_tail == ()
+    assert (result.diagnostics.reason, result.diagnostics.exit_code) == ("CrashLoopBackOff", 1)
+    assert "CONTAINER_LOGS_UNAVAILABLE" in [getattr(r, "error_code", None) for r in caplog.records]
+
+
+async def test_poll_image_pull_failure_reports_reason_without_reading_logs() -> None:
+    world = _world()
+    external_ref = await _applied(world)
+    world.cluster.add_pod(DEPLOYMENT.deployment_id, waiting_reason="ImagePullBackOff")
+
+    result = await world.deploy.poll(external_ref)
+
+    assert isinstance(result, DeployFailed) and result.diagnostics is not None
+    assert result.code is DeployRequestErrorCode.IMAGE_PULL_FAILED
+    assert result.diagnostics.reason == "ImagePullBackOff"
+    assert not [r for r in world.cluster.requests if r.url.path.endswith("/log")]
 
 
 async def test_poll_annotation_from_other_deployment_fails() -> None:

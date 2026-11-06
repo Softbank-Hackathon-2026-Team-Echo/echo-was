@@ -139,7 +139,8 @@ async def test_simulated_verify_failure_writes_failed_and_revert_without_health_
         "DEPLOY_REQUESTED",
         "DEPLOY_APPLIED",
         "FAILED",
-        "REVERT_SUCCEEDED",
+        # 첫 배포라 되돌릴 이전 버전이 없다(API 서버 4-1).
+        "REVERT_SUCCEEDED_NO_PREVIOUS",
     ]
     assert (rows[-2].level, rows[-2].message) == (
         "ERROR",

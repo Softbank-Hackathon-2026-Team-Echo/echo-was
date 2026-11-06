@@ -25,6 +25,7 @@ from app.enums import (
 )
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.schemas.service import EnvironmentRefResponse
+from app.services.container_diagnostics import FailureDetail
 from app.services.deploy_log_messages import ERROR_MESSAGES
 from app.services.deploy_request_service import DeployRequestView, LogPageView
 from app.services.deploy_support import SNAPSHOT_ENVIRONMENT_URL, SNAPSHOT_MAIN_URL
@@ -150,10 +151,49 @@ class DeployRequestSummaryResponse(ApiModel):
         return cls(**_summary_fields(view))
 
 
+class FailureResponse(ApiModel):
+    """실패한 요청의 원인(API 서버 4-1). 에러 수정 에이전트(echo-ai-agent #22)가 그대로 읽는다.
+
+    message 는 errorMessage 고정 문장 뒤에 원인 한 줄(`Last error: …`)을 붙인 것이다. 컨테이너 칸은
+    실행기가 컨테이너 실패를 판정해 진단을 남겼을 때만 값이 있다(없으면 null·빈 목록·false).
+    logTail 은 비밀값(그 배포의 환경 변수 값·접속 문자열 비밀번호·토큰 모양)을 가린
+    마지막 50줄 이하다.
+    """
+
+    code: DeployRequestErrorCode
+    message: str
+    container: str | None
+    container_reason: str | None
+    termination_reason: str | None
+    exit_code: int | None
+    restart_count: int | None
+    log_tail: list[str]
+    log_truncated: bool
+    # 되돌리기 뒤 이전 버전이 실행 중인가. 이전 배포가 없었으면 false, 되돌리기 전·실패면 null.
+    previous_version_running: bool | None
+
+    @classmethod
+    def from_detail(cls, detail: FailureDetail) -> Self:
+        return cls(
+            code=detail.code,
+            message=detail.message,
+            container=detail.container,
+            container_reason=detail.container_reason,
+            termination_reason=detail.termination_reason,
+            exit_code=detail.exit_code,
+            restart_count=detail.restart_count,
+            log_tail=detail.log_tail,
+            log_truncated=detail.log_truncated,
+            previous_version_running=detail.previous_version_running,
+        )
+
+
 class DeployRequestDetailResponse(DeployRequestSummaryResponse):
     repo_url: str
     superseded_by_id: uuid.UUID | None
     error_message: str | None
+    # 실패한 요청의 원인·컨테이너 진단(API 서버 4-1). 실패가 아니면 null.
+    failure: FailureResponse | None
     build: BuildRefResponse | None
     deployment_id: uuid.UUID | None
     urls: UrlsResponse
@@ -170,6 +210,9 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
             repo_url=request.repo_url,
             superseded_by_id=request.superseded_by_id,
             error_message=ERROR_MESSAGES[error_code] if error_code is not None else None,
+            failure=(
+                FailureResponse.from_detail(view.failure) if view.failure is not None else None
+            ),
             build=(
                 BuildRefResponse(
                     id=build.id,
@@ -222,6 +265,8 @@ class LogLineResponse(ApiModel):
     at: datetime
     level: LogLevel
     message: str
+    # 배포 작업 로그 줄의 코드(CONTAINER_LOG 등, API 서버 4-1). 빌드·실행 로그는 null.
+    code: str | None
 
 
 class LogPageResponse(ApiModel):
@@ -239,7 +284,7 @@ class LogPageResponse(ApiModel):
             source=view.source,
             simulated=view.simulated,
             items=[
-                LogLineResponse(at=line.at, level=line.level, message=line.message)
+                LogLineResponse(at=line.at, level=line.level, message=line.message, code=line.code)
                 for line in view.lines
             ],
             next_cursor=view.next_cursor,

@@ -2,7 +2,7 @@
 
 등록한 서비스의 Git 브랜치나 커밋을 **요청 한 번**으로 빌드해 고른 환경 1곳에 배포한다. 헬스체크를 통과해야 새 버전으로 바꾸고, 대표 주소와 환경별 주소를 돌려준다. 근거: SPEC [specs/api-3-one-touch-deploy.md](../../specs/api-3-one-touch-deploy.md), 원장 F1. 서비스 등록은 [services.md](services.md).
 
-API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 버전·되돌리기 가능 여부·필터), 이력에서 고른 이전 성공 버전으로 **되돌리기**(`trigger = ROLLBACK` 요청)와 **세 가지 로그**(배포 작업·빌드·실행) 조회를 더한다. 근거: SPEC [specs/api-4-history-rollback-logs.md](../../specs/api-4-history-rollback-logs.md).
+API 서버 4 는 같은 요청 목록을 **배포 이력**으로 쓰고(현재 버전·되돌리기 가능 여부·필터), 이력에서 고른 이전 성공 버전으로 **되돌리기**(`trigger = ROLLBACK` 요청)와 **세 가지 로그**(배포 작업·빌드·실행) 조회를 더한다. 근거: SPEC [specs/api-4-history-rollback-logs.md](../../specs/api-4-history-rollback-logs.md). 배포 실패 진단(컨테이너 로그·종료 코드·사유, `failure` 칸, "실행 중인 버전 없음")은 API 서버 4-1 — SPEC [specs/api-4-1-failed-container-logs.md](../../specs/api-4-1-failed-container-logs.md).
 
 - 공통 봉투·camelCase·null 규칙·`X-Request-ID` 는 [environments.md](environments.md#공통-규칙)와 같다. 경로는 `/api/v1/orgs/{orgId}` 아래이고 그 조직 멤버만 본다. 조회는 뷰어(에이전트 토큰 가능), 접수는 **개발자 이상의 사람**이다(에이전트 토큰은 403 `AGENT_READ_ONLY`, [auth.md](auth.md)).
 - **접수만 동기다.** API 는 요청을 `QUEUED` 로 저장하고 202 를 준다. 빌드·배포·헬스체크는 별도 일꾼(`python -m app.worker`)이 진행한다. **일꾼이 없으면 요청은 `QUEUED` 에 남는다.** 진행 상황은 단건 조회로 폴링한다(실시간 푸시 없음).
@@ -130,8 +130,8 @@ stateDiagram-v2
     "source": "DEPLOY_JOB",
     "simulated": true,
     "items": [
-      {"at": "2026-11-02T03:00:00Z", "level": "INFO", "message": "Deploy request accepted."},
-      {"at": "2026-11-02T03:00:01Z", "level": "INFO", "message": "Deploy request started."}
+      {"at": "2026-11-02T03:00:00Z", "level": "INFO", "message": "Deploy request accepted.", "code": "REQUEST_ACCEPTED"},
+      {"at": "2026-11-02T03:00:01Z", "level": "INFO", "message": "Deploy request started.", "code": "STARTED"}
     ],
     "nextCursor": "2",
     "hasMore": true
@@ -154,12 +154,15 @@ stateDiagram-v2
 | `HEALTH_PROBE_HTTP_ERROR` · `HEALTH_PROBE_UNREACHABLE` | WARN | VERIFYING | 헬스 결과 종류가 **바뀔 때만**(같은 실패가 이어지면 한 줄) |
 | `HEALTH_PROBE_OK` · `SUCCEEDED` | INFO | VERIFYING · SUCCEEDED | 성공 처리 |
 | `STANDBY_SYNC_REQUESTED` | INFO | SUCCEEDED | 원본 요청에, 예비 연결마다 한 줄 |
-| `FAILED` | ERROR | FAILED | 문장 = 그 `errorCode` 의 `errorMessage` |
-| `REVERT_SUCCEEDED` · `REVERT_FAILED` | INFO · ERROR | REVERT | 실패한 새 버전을 거둔 결과 |
+| `CONTAINER_DIAGNOSTICS` | ERROR | FAILED | 실행기가 컨테이너 실패(재시작 반복·이미지 받기 실패)를 판정했을 때 `FAILED` 바로 앞에 한 줄. 문장 = `Container app: reason=CrashLoopBackOff, terminationReason=Error, exitCode=1, restartCount=3, logLines=7, truncated=false.`(모르는 값은 `-`). API 서버 4-1 |
+| `CONTAINER_LOG` | INFO | FAILED | 위 줄 뒤, 컨테이너 로그 마지막 줄(최대 50줄, 한 줄 400자). 비밀값을 가린 문장. 재시작했으면 직전 컨테이너 로그 |
+| `FAILED` | ERROR | FAILED | 문장 = 그 `errorCode` 의 `errorMessage`. 컨테이너 진단이 있으면 뒤에 원인 한 줄 ` Last error: …`(예 `ValidationError: database_url`, 로그가 없으면 `OOMKilled (exit code 137)`) |
+| `REVERT_SUCCEEDED` · `REVERT_FAILED` | INFO · ERROR | REVERT | 실패한 새 버전을 거둔 결과. `REVERT_SUCCEEDED` 문장은 "이전 버전 유지" |
+| `REVERT_SUCCEEDED_NO_PREVIOUS` | INFO | REVERT | 되돌릴 이전 배포가 없었다(첫 배포 실패). 실패한 버전만 거뒀고 **실행 중인 버전 없음**(API 서버 4-1) |
 | `CANCELLED_SUPERSEDED` · `CANCELLED_SERVICE_DELETED` · `CANCELLED_BASE_CHANGED` | INFO | CANCELLED | 취소 3종(서비스 삭제 API·내리기 일꾼·일꾼 시작 경로 포함) |
 | `LOG_TRUNCATED` | INFO | (대신한 줄의 단계) | 500줄 상한 |
 
-정상 순서: 새 빌드 수동 = `REQUEST_ACCEPTED, STARTED, BUILD_ATTACHED, DEPLOYMENT_CREATED, DEPLOY_REQUESTED, DEPLOY_APPLIED, HEALTH_PROBE_OK, SUCCEEDED`. 재사용 수동·되돌리기·예비 따라가기는 `BUILD_ATTACHED` 대신 `BUILD_REUSED`. 빌드 자체의 시작·성공·실패는 이 로그에 쓰지 않는다(공유 빌드를 여러 요청이 기다리므로) — 빌드 진행은 `source = BUILD` 로 본다. `simulate.failAt = VERIFYING` 은 헬스 줄 없이 `FAILED`·`REVERT_*` 로 끝난다.
+정상 순서: 새 빌드 수동 = `REQUEST_ACCEPTED, STARTED, BUILD_ATTACHED, DEPLOYMENT_CREATED, DEPLOY_REQUESTED, DEPLOY_APPLIED, HEALTH_PROBE_OK, SUCCEEDED`. 재사용 수동·되돌리기·예비 따라가기는 `BUILD_ATTACHED` 대신 `BUILD_REUSED`. 빌드 자체의 시작·성공·실패는 이 로그에 쓰지 않는다(공유 빌드를 여러 요청이 기다리므로) — 빌드 진행은 `source = BUILD` 로 본다. `simulate.failAt = VERIFYING` 은 헬스 줄 없이 `FAILED`·`REVERT_*` 로 끝난다. `simulate.failAt = DEPLOYING`·가짜 실행기 배포 실패는 실제와 같은 모양의 가짜 진단(`CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG` 7줄, `ValidationError: database_url`)을 `FAILED` 앞에 쓴다(시연·시험용, `simulated = true`).
 
 ## 응답 스키마
 
@@ -192,9 +195,52 @@ stateDiagram-v2
 | `repoUrl` | string | 접수 때 고정한 저장소 |
 | `supersededById` | uuid \| null | 이 요청을 밀어낸 요청 |
 | `errorMessage` | string \| null | 오류 코드별 **고정 문장**(외부 응답 원문은 싣지 않는다) |
+| `failure` | `Failure` \| null | `FAILED` 일 때만. 원인과 컨테이너 진단(API 서버 4-1, 아래). 다른 상태는 null |
 | `build` | `{id, status, imageRepository, imageDigest, reused}` \| null | 쓰는 빌드. `reused = true` 면 이 요청이 새로 만든 빌드가 아니다(되돌리기·예비 따라가기는 늘 true) |
 | `deploymentId` | uuid \| null | 빌드 성공 뒤 만든 배포 기록 |
 | `urls` | `{main, environment}` | 대표 주소, 환경별 주소(접수 때 사본) |
+
+`Failure` — 실패 원인. **에러 수정 에이전트(echo-ai-agent #22)가 이 칸을 그대로 입력으로 읽는다.** 배포 작업 로그의 `CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG`·`FAILED`·`REVERT_*` 줄로 만든다(저장 칸 추가 없음).
+
+| 칸 | 타입 | 설명 |
+|---|---|---|
+| `code` | 코드 | `errorCode` 와 같다 |
+| `message` | string | `errorMessage` + 원인 한 줄(` Last error: ValidationError: database_url`). 진단이 없으면 `errorMessage` 와 같다 |
+| `container` | string \| null | 실패한 컨테이너 이름(`app`) |
+| `containerReason` | string \| null | 쿠버네티스 대기 이유: `CrashLoopBackOff`·`ImagePullBackOff`·`ErrImagePull`·`InvalidImageName`·`ErrImageNeverPull` |
+| `terminationReason` | string \| null | 마지막 종료 이유: `OOMKilled`·`Error`·`Completed` 등 |
+| `exitCode` | integer \| null | 마지막 종료 코드(137 = OOM·SIGKILL) |
+| `restartCount` | integer \| null | 재시작 횟수 |
+| `logTail` | string[] | 컨테이너 로그 마지막 50줄 이하(재시작했으면 직전 컨테이너). **비밀값을 가린 값**: 그 배포의 앱 환경 변수 값(6자 이상), 접속 문자열 비밀번호(`scheme://user:***@host`), `password=`·`token:` 꼴 값, 토큰 모양(GitHub·AWS·`Bearer`·`sk-`·개인 키). 이미지 받기 실패·로그를 못 읽었을 때는 빈 목록 |
+| `logTruncated` | boolean | 50줄보다 앞 줄이 더 있었다 |
+| `previousVersionRunning` | boolean \| null | 되돌린 뒤 이전 버전이 실행 중인가. 이전 배포가 없었으면 `false`(실행 중인 버전 없음), 되돌리기 전·되돌리기 실패·빌드 단계 실패면 `null` |
+
+컨테이너 진단은 실제 실행기가 **되돌리기(실패한 Deployment·파드 정리) 전에** 읽는다. 로그 읽기가 막혀도(권한 `pods/log` 없음·닿지 못함) 배포는 같은 코드로 실패하고 `logTail` 만 빈다(서버 경고 `CONTAINER_LOGS_UNAVAILABLE`). 앱 환경 변수 값을 보관함에서 다시 못 꺼내면 가릴 수 없으므로 `logTail` 을 버리고 사유·종료 코드만 남긴다.
+
+예 (첫 배포가 필수 변수 누락으로 실패):
+
+```json
+"failure": {
+  "code": "CONTAINER_START_FAILED",
+  "message": "The container kept crashing after it started. Last error: ValidationError: database_url",
+  "container": "app",
+  "containerReason": "CrashLoopBackOff",
+  "terminationReason": "Error",
+  "exitCode": 1,
+  "restartCount": 3,
+  "logTail": [
+    "Starting application",
+    "Traceback (most recent call last):",
+    "  File \"/app/main.py\", line 7, in <module>",
+    "    settings = Settings()",
+    "pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings",
+    "database_url",
+    "  Field required [type=missing, input_value={}, input_type=dict]"
+  ],
+  "logTruncated": false,
+  "previousVersionRunning": false
+}
+```
 
 예 (성공):
 
@@ -216,6 +262,7 @@ stateDiagram-v2
     "supersededById": null,
     "errorCode": null,
     "errorMessage": null,
+    "failure": null,
     "revertStatus": null,
     "build": {"id": "b1…", "status": "SUCCEEDED", "imageRepository": "registry.echo.test/shop-api", "imageDigest": "sha256:…", "reused": false},
     "deploymentId": "d1…",
@@ -229,7 +276,7 @@ stateDiagram-v2
 }
 ```
 
-`LogPage`(로그 한 페이지) — `source`(`DEPLOY_JOB`·`BUILD`·`RUNTIME`), `simulated`(행에 저장한 값: `DEPLOY_JOB`·`RUNTIME` 은 요청, `BUILD` 는 빌드), `items[{at, level(INFO·WARN·ERROR), message}]`(시간 순), `nextCursor`(string \| null, 줄이 없으면 받은 cursor), `hasMore`.
+`LogPage`(로그 한 페이지) — `source`(`DEPLOY_JOB`·`BUILD`·`RUNTIME`), `simulated`(행에 저장한 값: `DEPLOY_JOB`·`RUNTIME` 은 요청, `BUILD` 는 빌드), `items[{at, level(INFO·WARN·ERROR), message, code}]`(시간 순, `code` 는 `DEPLOY_JOB` 줄의 코드 — `BUILD`·`RUNTIME` 은 null, API 서버 4-1), `nextCursor`(string \| null, 줄이 없으면 받은 cursor), `hasMore`.
 
 ## 실패 이유 코드 (`errorCode`)
 

@@ -403,6 +403,12 @@ class FakePod:
     created_at: str
     waiting_reason: str | None = None
     log: str = ""
+    # 실패 진단(API 서버 4-1): 직전 컨테이너 로그(None 이면 previous=true 에 400),
+    # 재시작 수, 직전 종료.
+    previous_log: str | None = None
+    restart_count: int = 0
+    exit_code: int | None = None
+    termination_reason: str | None = None
 
 
 @dataclass
@@ -493,6 +499,15 @@ class FakeCluster:
             pod = next((pod for pod in self.pods if pod.name == parts[-2]), None)
             if pod is None:
                 return httpx.Response(404)
+            tail_lines = request.url.params.get("tailLines")
+            if tail_lines is not None:
+                # 실패 진단 꼬리 읽기(API 서버 4-1): 시각 없이 마지막 N줄.
+                text = pod.previous_log if request.url.params.get("previous") == "true" else pod.log
+                if not text:
+                    return httpx.Response(400, json={"kind": "Status", "code": 400})
+                return httpx.Response(
+                    200, text="\n".join(text.splitlines()[-int(tail_lines) :]) + "\n"
+                )
             assert request.url.params["timestamps"] == "true"
             return httpx.Response(200, text=pod.log)
         if path.endswith("/secrets") and request.method == "POST":
@@ -572,7 +587,25 @@ class FakeCluster:
                 "creationTimestamp": pod.created_at,
                 "labels": {"echo.deployment-id": pod.deployment_id},
             },
-            "status": {"containerStatuses": [{"name": "app", "state": state}]},
+            "status": {
+                "containerStatuses": [
+                    {
+                        "name": "app",
+                        "state": state,
+                        "restartCount": pod.restart_count,
+                        "lastState": (
+                            {
+                                "terminated": {
+                                    "exitCode": pod.exit_code,
+                                    "reason": pod.termination_reason,
+                                }
+                            }
+                            if pod.exit_code is not None
+                            else {}
+                        ),
+                    }
+                ]
+            },
         }
 
     def deployment(self, namespace: str) -> dict[str, Any]:

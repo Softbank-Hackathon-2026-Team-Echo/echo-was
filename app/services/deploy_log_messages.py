@@ -2,6 +2,9 @@
 
 외부 응답 원문(비밀값이 섞일 수 있음)은 넣지 않는다. 줄마다 코드·수준·단계·문장이 정해져 있고,
 FAILED 줄만 문장이 그 실패 코드의 문장이다.
+
+예외(API 서버 4-1): 컨테이너 실패 진단 줄(CONTAINER_DIAGNOSTICS·CONTAINER_LOG)과 FAILED 줄 뒤의
+원인 한 줄은 컨테이너 로그에서 온다. 처리기가 비밀값을 가린 뒤에만 쓴다(container_diagnostics.py).
 """
 
 from collections.abc import Sequence
@@ -90,10 +93,21 @@ DEPLOY_LOG_ENTRIES: dict[DeployLogCode, DeployLogEntry] = {
     DeployLogCode.STANDBY_SYNC_REQUESTED: DeployLogEntry(
         _INFO, _S.SUCCEEDED, "A standby environment was asked to follow this version."
     ),
+    # 문장은 처리기가 진단 값으로 만든다(container_diagnostics.diagnostics_message·로그 한 줄).
+    DeployLogCode.CONTAINER_DIAGNOSTICS: DeployLogEntry(
+        _ERROR, _S.FAILED, "Container status was read before withdrawing the failed version."
+    ),
+    DeployLogCode.CONTAINER_LOG: DeployLogEntry(_INFO, _S.FAILED, "Container log line."),
     # FAILED 의 문장은 실패 코드의 문장(ERROR_MESSAGES)으로 바꿔 쓴다.
     DeployLogCode.FAILED: DeployLogEntry(_ERROR, _S.FAILED, "Deploy request failed."),
     DeployLogCode.REVERT_SUCCEEDED: DeployLogEntry(
         _INFO, _S.REVERT, "The failed version was withdrawn and the previous version was kept."
+    ),
+    DeployLogCode.REVERT_SUCCEEDED_NO_PREVIOUS: DeployLogEntry(
+        _INFO,
+        _S.REVERT,
+        "The failed version was withdrawn. No version is running in this environment "
+        "because there was no previous deployment.",
     ),
     DeployLogCode.REVERT_FAILED: DeployLogEntry(
         _ERROR, _S.REVERT, "Withdrawing the failed version did not succeed."

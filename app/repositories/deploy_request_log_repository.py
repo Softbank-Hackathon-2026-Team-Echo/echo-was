@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,5 +35,19 @@ class DeployRequestLogRepository:
             )
             .order_by(DeployRequestLog.seq)
             .limit(limit)
+        )
+        return list((await self._session.scalars(statement)).all())
+
+    async def search_by_codes(
+        self, deploy_request_id: uuid.UUID, codes: Iterable[str]
+    ) -> list[DeployRequestLog]:
+        """그 코드의 줄을 seq 오름차순으로(배포 상세 failure 칸, API 서버 4-1)."""
+        statement = (
+            select(DeployRequestLog)
+            .where(
+                DeployRequestLog.deploy_request_id == deploy_request_id,
+                DeployRequestLog.code.in_([str(code) for code in codes]),
+            )
+            .order_by(DeployRequestLog.seq)
         )
         return list((await self._session.scalars(statement)).all())

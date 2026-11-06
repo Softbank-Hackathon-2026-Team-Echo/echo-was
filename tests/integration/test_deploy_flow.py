@@ -48,6 +48,8 @@ DETAIL_KEYS = {
     "isCurrent",
     "rollbackable",
     "rollbackOfRequestId",
+    # API 서버 4-1: 실패 원인·컨테이너 진단
+    "failure",
 }
 
 

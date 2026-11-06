@@ -25,13 +25,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.clock import Clock
+from app.core.log_masking import mask_secrets
 from app.enums import LogLevel
 from app.executors.base import (
+    CONTAINER_LOG_TAIL_LINES,
     BuildFailed,
     BuildPollResult,
     BuildRunning,
     BuildSpec,
     BuildSucceeded,
+    ContainerDiagnostics,
     CountsResult,
     CountsUnavailable,
     DataSyncLag,
@@ -104,6 +107,32 @@ def _inject(
 ) -> list[tuple[LogLevel, str]]:
     """시험이 넣은 줄을 첫 줄 뒤에 끼운다."""
     return [*messages[:1], *((LogLevel.INFO, line) for line in injections), *messages[1:]]
+
+
+# 가짜 배포 실패의 컨테이너 로그 꼬리(API 서버 4-1). 필수 환경 변수가 빠진 앱이 시작하다 죽는 모양.
+FAKE_CRASH_LOG_TAIL = (
+    "Starting application",
+    "Traceback (most recent call last):",
+    '  File "/app/main.py", line 7, in <module>',
+    "    settings = Settings()",
+    "pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings",
+    "database_url",
+    "  Field required [type=missing, input_value={}, input_type=dict]",
+)
+
+
+def fake_crash_diagnostics(log_tail: Iterable[str]) -> ContainerDiagnostics:
+    """실제 실행기와 같은 규칙(마지막 50줄, 앞 줄이 더 있으면 log_truncated, 비밀값 모양 가림)."""
+    lines = mask_secrets("\n".join(log_tail)).splitlines()
+    return ContainerDiagnostics(
+        container="app",
+        reason="CrashLoopBackOff",
+        termination_reason="Error",
+        exit_code=1,
+        restart_count=3,
+        log_tail=tuple(lines[-CONTAINER_LOG_TAIL_LINES:]),
+        log_truncated=len(lines) > CONTAINER_LOG_TAIL_LINES,
+    )
 
 
 @dataclass(frozen=True)
@@ -240,8 +269,10 @@ class FakeDeployExecutor:
         stall_service_environment_ids: Iterable[uuid.UUID] = (),
         fail_revert: bool = False,
         log_injections: Iterable[str] = (),
+        crash_log_tail: Iterable[str] = FAKE_CRASH_LOG_TAIL,
     ) -> None:
         self._operations = _FakeOperations("fake-deploy", clock, step_seconds)
+        self._crash_log_tail = tuple(crash_log_tail)
         self._fail = {str(value) for value in fail_service_environment_ids}
         self._stall = {str(value) for value in stall_service_environment_ids}
         self._fail_revert = fail_revert
@@ -277,7 +308,8 @@ class FakeDeployExecutor:
         if service_environment_id in self._stall or not is_done:
             return DeployPending()
         if service_environment_id in self._fail:
-            return DeployFailed()
+            # 실제 실행기처럼 실패와 함께 컨테이너 진단을 돌려준다(API 서버 4-1).
+            return DeployFailed(diagnostics=fake_crash_diagnostics(self._crash_log_tail))
         return DeployApplied()
 
     async def revert(
