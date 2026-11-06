@@ -108,9 +108,9 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 | `redeployRequestId` | 반영이 `SUCCEEDED` 가 된 뒤 WAS 가 같은 환경에 만든 재배포 요청 id. 화면은 이 값이 생기면 배포 진행 화면(`GET /deploy-requests/{id}`)으로 잇는다. 반영 전·실패·사전 점검 패치·접수 거절이면 null |
 | `redeployRejectedCode` (가칭, 이슈에 없던 칸) | 재배포 접수가 거절된 오류 코드(예: `MIGRATION_IN_PROGRESS`·`SERVICE_DELETING`). 거절이 없으면 null. 이 값이 있으면 화면은 "재배포를 시작하지 못함"을 보이고 사람이 다시 배포한다 |
 
-재배포 요청은 기존 배포 접수 규칙(`POST /services/{id}/deploy-requests`)을 그대로 거친다: `trigger: MANUAL`, `ref: {type: COMMIT, value: <실패한 요청의 commitSha>}`, 같은 환경, 요청자 = 승인한 사람, 감사 `DEPLOY_REQUESTED` 의 `details.diagnosisApplyRunId` = 반영 실행 id. 스위치 `AI_APPLY_COMMIT_ENABLED` 가 꺼져 있으면(기본) 원래 실패 커밋을 다시 배포한다. 켜져 있으면 WAS 가 저장소에 만든 **고친 커밋**(`appliedCommitSha`)을 배포한다(아래 「저장소 반영」, SPEC api-19). 반영 성공을 다시 받아도(같은 결정 재전송, 결과 재전송) 재배포는 한 번만 만든다.
+재배포 요청은 기존 배포 접수 규칙(`POST /services/{id}/deploy-requests`)을 그대로 거친다: `trigger: MANUAL`, `ref: {type: COMMIT, value: <실패한 요청의 commitSha>}`, 같은 환경, 요청자 = 승인한 사람, 감사 `DEPLOY_REQUESTED` 의 `details.diagnosisApplyRunId` = 반영 실행 id. 스위치 `AI_APPLY_COMMIT_ENABLED` 가 꺼져 있으면(기본) 원래 실패 커밋을 다시 배포한다. 켜져 있으면 WAS 가 저장소에 만든 **고친 커밋**(`appliedCommitSha`)을 배포한다(아래 「저장소 반영」, SPEC api-19). 반영 성공을 다시 받아도(같은 결정 재전송, 결과 재전송, **같은 패치 동시 승인**) 재배포는 한 번만 만든다 — 반영 실행 행을 잠그고 확인·접수·연결을 한 트랜잭션으로 하므로 동시에 온 두 요청의 응답도 같은 살아 있는 재배포 id 를 싣는다.
 
-언제 이어지나: 가짜 진단은 승인 응답 안에서, 러너 반영은 러너가 `ApplyPatchResult(SUCCEEDED)` 를 낸 결과 요청 안에서 만든다. 접수 거절은 결과 응답을 실패로 만들지 않는다.
+언제 이어지나: 가짜 진단은 승인 응답 안에서, 러너 반영은 러너가 `ApplyPatchResult(SUCCEEDED)` 를 낸 결과 요청 안에서 만든다. 접수 거절은 결과 응답을 실패로 만들지 않는다 — 승인 응답은 200 그대로이고 `apply.status: SUCCEEDED`·`redeployRequestId: null`·`redeployRejectedCode: <코드>` 가 저장된다(재배포 행은 생기지 않는다).
 
 ## 러너 계약 (CHANGE_PROPOSAL) — echo-ai-agent #22 가 맞출 기준
 
@@ -147,7 +147,7 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 
 ### 결과 `POST /{id}/result` — `RunResult` + `diagnosis`
 
-`RunResult`(사전 점검과 같은 칸·검사, [agent-runner.md](../agent-runner.md#결과-post-idresult--runresult))에 선택 칸 `diagnosis` 하나를 더한다.
+`RunResult`(사전 점검과 같은 칸·검사, [agent-runner.md](../agent-runner.md#결과-post-idresult--runresult))의 선택 칸 `diagnosis` 를 쓴다. OpenAPI 결과 본문은 따로 된 진단 모양 없이 `oneOf [RunResult, ApplyPatchResult]` 이고 `diagnosis` 는 RunResult 의 선택 칸이다. 이 칸은 진단(`CHANGE_PROPOSAL`) 실행만 보낸다 — 사전 점검 실행이 보내면(null 이어도) 422 `RESULT_INVALID`(`details: [{field: "diagnosis", reason: "DIAGNOSIS_NOT_ALLOWED"}]`).
 
 ```json
 {
@@ -201,7 +201,7 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 
 ## C-AI-1 · 레지던시
 
-진단 실행은 **C-AI-1 증거가 아니다**(게이트는 `kind = PRECHECK` 만 읽는다). AI 레지던시 요약([ai-residency.md](ai-residency.md))도 진단 실행을 세지 않는다(숫자·판정·위반·최근 실행 모두).
+진단 실행은 **C-AI-1 증거가 아니다**(게이트는 `kind = PRECHECK` 만 읽는다). AI 레지던시 요약([ai-residency.md](ai-residency.md))도 진단 실행을 세지 않는다(숫자·판정·위반·최근 실행 모두). 진단은 조회 단계에서 먼저 빠지므로 읽기 상한(최신 5,000건)과 `truncated` 판단에도 들어가지 않는다.
 
 ## 감사
 

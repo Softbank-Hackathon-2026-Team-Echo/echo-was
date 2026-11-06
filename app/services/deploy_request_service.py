@@ -203,76 +203,114 @@ class DeployRequestService:
 
         commit_sha = await self._source_client.resolve_ref(repo, command.ref_value)
 
-        now = self._clock.now()
         async with self._session.begin():
-            # FOR SHARE: 환경 삭제(FOR UPDATE)와는 줄을 세우되, 일꾼이 서비스 행을 잡은 채
-            # 이 환경을 FK 로 가리키는 행을 쓸 때 잡는 FOR KEY SHARE 와는 부딪히지 않게 한다
-            # (FOR UPDATE 면 접수 ↔ 성공 처리 사이에 교착이 생긴다).
-            environment = await self._environments.get_live_by_id(
-                organization_id, command.environment_id, for_share=True
-            )
-            _check_environment_accepts(environment)
-            service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
-            _check_service_accepts(service)
-            connections = await self._service_environments.lock_live_by_service(service.id)
-            await check_no_migration_in_progress(self._session, service.id)
-            connection = next(
-                (item for item in connections if item.environment_id == environment.id), None
-            )
-            if connection is None:
-                # 첫 배포 전에 변수를 저장했으면(API 서버 10-4) 그때 만든 연결을 그대로 쓴다.
-                connection = await create_service_connection(
-                    self._session, service, environment, self._public_base_domain
-                )
-            request = DeployRequest(
-                id=uuid.uuid4(),
-                service_id=service.id,
-                environment_id=environment.id,
-                service_environment_id=connection.id,
-                trigger=DeployRequestTrigger.MANUAL,
-                ref_type=command.ref_type,
-                ref_value=command.ref_value,
-                repo_url=service.repo_url,
-                commit_sha=commit_sha,
-                status=DeployRequestStatus.QUEUED,
-                config_snapshot=_with_standby_ids(
-                    build_config_snapshot(service, connection), command.standby_environment_ids
-                ),
-                simulate=_simulate(command.simulate_fail_at),
-                simulated=self._executor_mode is ExecutorMode.FAKE,
-                created_at=now,
-                updated_at=now,
-            )
-            superseded_id = await enqueue_deploy_request(
-                self._session,
-                self._deploy_requests,
-                self._jobs,
-                self._job_log,
-                request,
-                now,
-                self._clock,
-                AuditComponent.API,
-            )
-            details: dict[str, object] = {
-                "environmentId": str(environment.id),
-                "ref": command.ref_value,
-                "commitSha": commit_sha,
-            }
-            if command.standby_environment_ids:
-                details["standbyEnvironmentIds"] = [
-                    str(item) for item in command.standby_environment_ids
-                ]
-            if command.diagnosis_apply_run_id is not None:
-                details["diagnosisApplyRunId"] = str(command.diagnosis_apply_run_id)
-            self._audit.record(
-                organization_id=organization_id,
-                actor=AuditActor.user(actor_user_id),
-                action=AuditAction.DEPLOY_REQUESTED,
-                target=await deploy_request_target(self._session, request),
-                details=details,
+            request, environment, superseded_id = await self._enqueue_manual(
+                organization_id, service_id, actor_user_id, command, commit_sha
             )
         _log_accepted("deploy request accepted", "create_deploy_request", request, superseded_id)
         return DeployRequestView(deploy_request=request, environment=environment, build=None)
+
+    async def create_redeploy_in_transaction(
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        command: CreateDeployCommand,
+        commit_sha: str,
+    ) -> DeployRequestView:
+        """이미 고정된 커밋(commit_sha)을 다시 배포하는 접수. 부르는 쪽 트랜잭션 안에서 돈다.
+
+        배포 실패 진단의 반영 뒤 재배포(SPEC api-98)가 쓴다. 부르는 쪽이 반영 실행 행을
+        FOR UPDATE 로 잡은 채 접수와 연결을 한 트랜잭션으로 묶는다(같은 반영의 재배포는 한 번).
+        ref 해석(GitHub 호출)은 없고, 접수 규칙(서비스 삭제 중·환경 접속·이전 진행 중)은
+        create_deploy_request 의 두 번째 단계와 같다. 거절(AppError)이면 아무 것도 쓰지 않고
+        그대로 던진다 — 부르는 쪽이 savepoint 로 감싸 되돌린다.
+        """
+        self._check_simulate_allowed(command.simulate_fail_at)
+        _check_standby_command(command)
+        request, environment, superseded_id = await self._enqueue_manual(
+            organization_id, service_id, actor_user_id, command, commit_sha
+        )
+        _log_accepted("deploy request accepted", "create_redeploy", request, superseded_id)
+        return DeployRequestView(deploy_request=request, environment=environment, build=None)
+
+    async def _enqueue_manual(
+        self,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        command: CreateDeployCommand,
+        commit_sha: str,
+    ) -> tuple[DeployRequest, Environment, uuid.UUID | None]:
+        """접수 두 번째 단계(잠그고 다시 확인 → 요청·할 일 넣기 → 감사). 열린 트랜잭션 안에서."""
+        now = self._clock.now()
+        # FOR SHARE: 환경 삭제(FOR UPDATE)와는 줄을 세우되, 일꾼이 서비스 행을 잡은 채
+        # 이 환경을 FK 로 가리키는 행을 쓸 때 잡는 FOR KEY SHARE 와는 부딪히지 않게 한다
+        # (FOR UPDATE 면 접수 ↔ 성공 처리 사이에 교착이 생긴다).
+        environment = await self._environments.get_live_by_id(
+            organization_id, command.environment_id, for_share=True
+        )
+        _check_environment_accepts(environment)
+        service = await self._services.get_live_by_id(organization_id, service_id, lock=True)
+        _check_service_accepts(service)
+        connections = await self._service_environments.lock_live_by_service(service.id)
+        await check_no_migration_in_progress(self._session, service.id)
+        connection = next(
+            (item for item in connections if item.environment_id == environment.id), None
+        )
+        if connection is None:
+            # 첫 배포 전에 변수를 저장했으면(API 서버 10-4) 그때 만든 연결을 그대로 쓴다.
+            connection = await create_service_connection(
+                self._session, service, environment, self._public_base_domain
+            )
+        request = DeployRequest(
+            id=uuid.uuid4(),
+            service_id=service.id,
+            environment_id=environment.id,
+            service_environment_id=connection.id,
+            trigger=DeployRequestTrigger.MANUAL,
+            ref_type=command.ref_type,
+            ref_value=command.ref_value,
+            repo_url=service.repo_url,
+            commit_sha=commit_sha,
+            status=DeployRequestStatus.QUEUED,
+            config_snapshot=_with_standby_ids(
+                build_config_snapshot(service, connection), command.standby_environment_ids
+            ),
+            simulate=_simulate(command.simulate_fail_at),
+            simulated=self._executor_mode is ExecutorMode.FAKE,
+            created_at=now,
+            updated_at=now,
+        )
+        superseded_id = await enqueue_deploy_request(
+            self._session,
+            self._deploy_requests,
+            self._jobs,
+            self._job_log,
+            request,
+            now,
+            self._clock,
+            AuditComponent.API,
+        )
+        details: dict[str, object] = {
+            "environmentId": str(environment.id),
+            "ref": command.ref_value,
+            "commitSha": commit_sha,
+        }
+        if command.standby_environment_ids:
+            details["standbyEnvironmentIds"] = [
+                str(item) for item in command.standby_environment_ids
+            ]
+        if command.diagnosis_apply_run_id is not None:
+            details["diagnosisApplyRunId"] = str(command.diagnosis_apply_run_id)
+        self._audit.record(
+            organization_id=organization_id,
+            actor=AuditActor.user(actor_user_id),
+            action=AuditAction.DEPLOY_REQUESTED,
+            target=await deploy_request_target(self._session, request),
+            details=details,
+        )
+        return request, environment, superseded_id
 
     async def create_rollback(
         self,

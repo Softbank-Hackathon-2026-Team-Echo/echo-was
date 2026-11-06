@@ -1,8 +1,9 @@
 """승인된 진단 패치를 서비스 저장소에 커밋하고 PR 을 연다(SPEC api-19).
 
 러너가 진단 패치 반영(APPLY_PATCH)을 샌드박스에서 SUCCEEDED 로 검증한 뒤, 재배포를 만들기 직전에
-`DiagnosisService.redeploy_after_apply` 가 한 번 부른다. 스위치 `AI_APPLY_COMMIT_ENABLED`(기본
-꺼짐)가 꺼져 있으면 아무 것도 하지 않고 원래 실패 커밋을 돌려준다(#101 동작 그대로).
+`DiagnosisService.redeploy_after_apply` 가 행 잠금 트랜잭션 전에 한 번 부른다.
+스위치 `AI_APPLY_COMMIT_ENABLED`(기본 꺼짐)가 꺼져 있으면 아무 것도 하지 않고 원래 실패 커밋을
+쓰게 한다(#101 동작 그대로).
 
 켜져 있으면:
 - 가짜 반영(simulated)은 GitHub 를 부르지 않는다(가짜 sha·`pullRequestUrl` null 그대로, 재배포는
@@ -31,9 +32,10 @@ from app.clients.repo_commit_writer import (
 from app.core.clock import Clock
 from app.core.log_masking import mask_secrets
 from app.core.repo_url import InvalidRepoUrlError, parse_repo_url
-from app.enums import RefType
+from app.enums import AgentRunKind, AgentRunStatus, RefType
 from app.models import AgentRun, DeployRequest
 from app.repositories.agent_run_repository import AgentRunRepository
+from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.user_repository import UserRepository
 from app.services.patch_text import PatchApplyError, apply_patch, diff_paths
 from app.services.run_result import compute_patch_hash
@@ -41,6 +43,8 @@ from app.services.run_result import compute_patch_hash
 logger = logging.getLogger(__name__)
 
 BRANCH_PREFIX = "echoport/fix-"
+# diagnosis_service.REDEPLOY_REQUEST_ID_KEY 와 같은 값(순환 import 를 피해 둔다).
+REDEPLOY_REQUEST_ID_KEY = "redeployRequestId"
 # 반영 실행 result 에 WAS 가 덧붙이는 칸(재배포 칸과 겹치지 않는다).
 PULL_REQUEST_URL_KEY = "pullRequestUrl"
 REPO_COMMIT_KEY = "repoCommitted"
@@ -121,10 +125,16 @@ def pull_request_body(context: CommitContext) -> str:
 
 @dataclass(frozen=True)
 class CommitOutcome:
-    """재배포에 쓸 커밋(ref). None 이면 재배포를 만들지 않는다(run = 바뀐 반영 실행)."""
+    """저장소 반영 결과.
 
-    ref: str | None
+    - `stopped=False, ref=None`: 반영 안 함(스위치 꺼짐·가짜 반영·진단 반영 아님) → 원래 커밋 재배포
+    - `stopped=False, ref=<sha>`: 저장소 커밋 → 그 커밋 재배포
+    - `stopped=True`: 저장소 반영 실패 → 재배포 없음(run = FAILED 로 바뀐 반영 실행)
+    """
+
+    ref: str | None = None
     run: AgentRun | None = None
+    stopped: bool = False
 
 
 class ApplyCommitService:
@@ -141,14 +151,40 @@ class ApplyCommitService:
         self._writer = writer
         self._enabled = enabled
         self._runs = AgentRunRepository(session)
+        self._deploy_requests = DeployRequestRepository(session)
         self._users = UserRepository(session)
 
-    async def commit_for_redeploy(
+    async def prepare_redeploy_commit(self, apply_run_id: uuid.UUID) -> CommitOutcome:
+        """재배포 전에 부른다(행 잠금 트랜잭션 밖 — GitHub 호출이 있다).
+
+        진단 반영이 아니거나·성공이 아니거나·이미 재배포가 연결됐거나·스위치 꺼짐·가짜 반영이면
+        아무 것도 하지 않는다(ref None). 같은 반영을 두 요청이 함께 이어도 브랜치 이름이 반영 실행
+        id 로 정해져 있어 GitHub 에는 브랜치·PR 하나만 생긴다(뒤 요청은 있는 것을 쓴다).
+        """
+        if not self._enabled:
+            return CommitOutcome()
+        async with self._session.begin():
+            apply_run = await self._runs.find_by_id(apply_run_id)
+            if (
+                apply_run is None
+                or apply_run.kind != AgentRunKind.APPLY_PATCH
+                or apply_run.status != AgentRunStatus.SUCCEEDED
+                or apply_run.parent_run_id is None
+                or apply_run.simulated
+                or REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {})
+            ):
+                return CommitOutcome()
+            parent = await self._runs.find_by_id(apply_run.parent_run_id)
+            if parent is None or parent.deploy_request_id is None:
+                return CommitOutcome()
+            failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
+            if failed is None:
+                return CommitOutcome()
+        return await self._commit(apply_run, parent, failed)
+
+    async def _commit(
         self, apply_run: AgentRun, parent: AgentRun, failed: DeployRequest
     ) -> CommitOutcome:
-        """재배포 ref 를 정한다. 스위치 꺼짐·가짜 반영이면 원래 실패 커밋 그대로."""
-        if not self._enabled or apply_run.simulated:
-            return CommitOutcome(failed.commit_sha)
         result: dict[str, Any] = dict(apply_run.result or {})
         if result.get(REPO_COMMIT_KEY) and isinstance(result.get("appliedCommitSha"), str):
             return CommitOutcome(result["appliedCommitSha"])
@@ -185,7 +221,7 @@ class ApplyCommitService:
                     "detail": exc.detail,
                 },
             )
-            return CommitOutcome(None, await self._fail(apply_run.id, exc.code))
+            return CommitOutcome(run=await self._fail(apply_run.id, exc.code), stopped=True)
         now = self._clock.now()
         async with self._session.begin():
             fresh = await self._runs.find_by_id(apply_run.id)

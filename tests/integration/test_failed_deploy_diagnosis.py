@@ -4,9 +4,10 @@ migration 픽스처: shop-api(aws-seoul 서비스 중 + gcp-seoul 예비), 개�
 만들고 개발자 B(approver_client)가 승인한다. 실패 배포는 가짜 실행기 simulate.failAt 로 만든다.
 """
 
+import asyncio
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -15,11 +16,17 @@ from sqlalchemy import select
 
 from app.audit.actions import AuditAction
 from app.core.exceptions import ServiceDeletingError
-from app.enums import AgentRunKind, AgentRunStatus
-from app.models import AgentRun, AuditLog
+from app.enums import AgentRunKind, AgentRunStatus, ServiceStatus
+from app.models import AgentRun, AuditLog, DeployRequest, Service
 from app.repositories.agent_run_repository import AgentRunRepository
+from app.services import ai_residency_service
 from app.services.deploy_request_service import DeployRequestService
-from app.services.diagnosis_service import SIMULATED_CAUSE, SIMULATED_FILE, SIMULATED_LINE
+from app.services.diagnosis_service import (
+    SIMULATED_CAUSE,
+    SIMULATED_FILE,
+    SIMULATED_LINE,
+    DiagnosisService,
+)
 from tests.integration.auth_support import org_path
 from tests.integration.migration_support import Migration
 from tests.integration.rollback_support import deploy_and_finish
@@ -28,9 +35,11 @@ from tests.integration.runner_support import (
     RunnerFixture,
     add_runner,
     claim,
+    create_precheck,
     event,
     prechecks_path,
     run_patch,
+    run_result,
     run_row,
 )
 
@@ -217,7 +226,7 @@ async def test_redeploy_rejection_is_recorded_without_failing_approval(
     async def reject(*_: Any, **__: Any) -> Any:
         raise error
 
-    monkeypatch.setattr(DeployRequestService, "create_deploy_request", reject)
+    monkeypatch.setattr(DeployRequestService, "create_redeploy_in_transaction", reject)
     approved = await _approve(migration, run["id"], run["patches"][0])
 
     assert approved.status_code == 200, approved.text
@@ -228,6 +237,135 @@ async def test_redeploy_rejection_is_recorded_without_failing_approval(
         code,
     )
     assert (await _detail(migration, run["id"]))["patches"][0]["apply"] == apply
+
+
+async def _deploy_request_ids(migration: Migration) -> set[uuid.UUID]:
+    async with migration.harness.session_factory() as session:
+        return set(await session.scalars(select(DeployRequest.id)))
+
+
+@pytest.mark.parametrize(
+    ("blocked", "code"),
+    [("migration", "MIGRATION_IN_PROGRESS"), ("deleting", "SERVICE_DELETING")],
+)
+async def test_real_redeploy_rejection_keeps_approval_and_records_code(
+    migration: Migration, blocked: str, code: str
+) -> None:
+    """실제 접수 함수가 거절해도(이전 계획 APPROVED·서비스 DELETING) 승인은 200, 거절 코드가 남는다.
+
+    거절은 savepoint 로만 되돌리므로 반영 성공·거절 코드가 함께 커밋되고 재배포 행은 없다.
+    """
+    failed = await _failed_deploy(migration)
+    run = _data(await _request_diagnosis(migration, failed["id"]))
+    if blocked == "migration":
+        plan = await migration.create_plan()
+        await migration.approve(plan["id"])
+    else:
+        async with migration.harness.session_factory() as session, session.begin():
+            service = await session.get(Service, uuid.UUID(migration.service_id))
+            assert service is not None
+            service.status = ServiceStatus.DELETING
+    before = await _deploy_request_ids(migration)
+
+    approved = await _approve(migration, run["id"], run["patches"][0])
+
+    assert approved.status_code == 200, approved.text
+    apply = _data(approved)["apply"]
+    assert (apply["status"], apply["redeployRequestId"], apply["redeployRejectedCode"]) == (
+        "SUCCEEDED",
+        None,
+        code,
+    )
+    assert (await _detail(migration, run["id"]))["patches"][0]["apply"] == apply
+    assert await _deploy_request_ids(migration) == before
+
+
+async def test_parallel_approvals_link_exactly_one_live_redeploy(
+    migration: Migration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """같은 패치 승인 두 번이 재배포 잇기에 함께 들어가도 재배포는 하나, 두 응답 모두 그 id."""
+    failed = await _failed_deploy(migration)
+    run = _data(await _request_diagnosis(migration, failed["id"]))
+    before = await _deploy_request_ids(migration)
+    original = DiagnosisService.redeploy_after_apply
+    arrived = 0
+    both_arrived = asyncio.Event()
+
+    async def synchronized(self: DiagnosisService, apply_run_id: uuid.UUID) -> AgentRun | None:
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both_arrived.set()
+        await asyncio.wait_for(both_arrived.wait(), 15)
+        return await original(self, apply_run_id)
+
+    monkeypatch.setattr(DiagnosisService, "redeploy_after_apply", synchronized)
+    responses = await asyncio.gather(
+        *[_approve(migration, run["id"], run["patches"][0]) for _ in range(2)]
+    )
+
+    assert arrived == 2
+    assert all(response.status_code == 200 for response in responses), [
+        response.text for response in responses
+    ]
+    async with migration.harness.session_factory() as session:
+        created = (
+            await session.scalars(select(DeployRequest).where(DeployRequest.id.not_in(before)))
+        ).all()
+        applies = (
+            await session.scalars(
+                select(AgentRun).where(AgentRun.parent_run_id == uuid.UUID(run["id"]))
+            )
+        ).all()
+    assert len(applies) == 1
+    assert len(created) == 1
+    assert created[0].status == "QUEUED"
+    linked = {_data(response)["apply"]["redeployRequestId"] for response in responses}
+    assert linked == {str(created[0].id)}
+
+
+async def test_residency_excludes_diagnosis_before_read_limit(
+    migration: Migration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """빼는 종류(진단)는 조회 조건에서 먼저 빠진다.
+
+    상한 1 에서 최신 진단이 옛 사전 점검을 가리지 않는다(total 1, truncated false).
+    """
+    harness = migration.harness
+    now = harness.clock.now()
+    precheck_id = uuid.uuid4()
+    precheck = AgentRun(
+        id=precheck_id,
+        organization_id=harness.organization.id,
+        service_id=uuid.UUID(migration.service_id),
+        kind=AgentRunKind.PRECHECK,
+        target_environment_id=migration.aws.id,
+        status=AgentRunStatus.SUCCEEDED,
+        finished_at=now,
+        input_snapshot={},
+        input_hash="sha256:" + "b" * 64,
+        result={},
+        requested_by_user_id=harness.admin.user.id,
+        deadline_at=now + timedelta(minutes=15),
+        created_at=now,
+        updated_at=now,
+    )
+    async with harness.session_factory() as session, session.begin():
+        session.add(precheck)
+    harness.clock.advance(1)
+    failed = await _failed_deploy(migration)
+    assert (await _request_diagnosis(migration, failed["id"])).status_code == 201
+    harness.clock.advance(1)
+    monkeypatch.setattr(ai_residency_service, "RESIDENCY_RUN_LIMIT", 1)
+
+    response = await migration.author_client.get(
+        org_path(harness.organization.id, "/ai/residency"), params={"days": 30}
+    )
+
+    assert response.status_code == 200, response.text
+    data = _data(response)
+    assert (data["runs"]["total"], data["runs"]["truncated"]) == (1, False)
+    assert [item["runId"] for item in data["recentRuns"]] == [str(precheck_id)]
 
 
 async def test_simulated_insufficient_evidence_has_reason_and_no_patch(
@@ -453,3 +591,21 @@ async def test_runner_result_without_diagnosis_is_insufficient_evidence(
     assert detail["patches"] == []
     row: AgentRun = await run_row(migration, run_id)
     assert (row.kind, row.status) == (AgentRunKind.CHANGE_PROPOSAL, AgentRunStatus.SUCCEEDED)
+
+
+@pytest.mark.parametrize(
+    "diagnosis",
+    [None, {"result": "INSUFFICIENT_EVIDENCE", "fixable": False, "unfixableReason": "x"}],
+)
+async def test_precheck_result_rejects_diagnosis_field(
+    migration: Migration, runner: RunnerFixture, diagnosis: dict[str, Any] | None
+) -> None:
+    """RunResult.diagnosis 는 CHANGE_PROPOSAL 만 받는다. 사전 점검이 보내면(null 이어도) 422."""
+    await create_precheck(migration)
+    claimed = await _claim(runner, ["PRECHECK"])
+
+    response = await claimed.post("result", run_result(migration) | {"diagnosis": diagnosis})
+
+    assert (response.status_code, response.json()["code"]) == (422, "RESULT_INVALID")
+    assert response.json()["details"] == [{"field": "diagnosis", "reason": "DIAGNOSIS_NOT_ALLOWED"}]
+    assert (await run_row(migration, claimed.run_id)).status == AgentRunStatus.CLAIMED

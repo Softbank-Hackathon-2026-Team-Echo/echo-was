@@ -11,6 +11,7 @@
 - 반영 실행이 성공하면(러너 결과 또는 가짜 반영) 같은 환경에 재배포 요청을 기존 배포 접수
   규칙으로 만든다. 러너가 고친 커밋을 push 하지 않으므로 지금은 원래 실패 커밋을 다시
   배포한다(pullRequestUrl 은 늘 null). 접수가 거절되면(이전 중 409 등) 그 오류 코드를 남긴다.
+  반영 실행 행을 FOR UPDATE 로 잡고 확인·접수·연결을 한 트랜잭션으로 해 재배포는 한 번뿐이다.
 - 진단 실행은 C-AI-1 증거가 아니다(증거는 kind = PRECHECK 만 고른다). AI 레지던시 요약도
   진단 실행을 세지 않는다(ai_residency.RESIDENCY_EXCLUDED_KINDS).
 """
@@ -219,82 +220,87 @@ class DiagnosisService:
         """성공한 진단 패치 반영 뒤 같은 환경에 재배포 요청을 만들고 반영 실행에 연결한다.
 
         진단에서 온 반영이 아니거나, 성공이 아니거나, 이미 연결(또는 거절 기록)이 있으면 하지
-        않는다(멱등). 접수 거절(AppError)은 삼키고 그 코드를 남긴다 — 러너 결과·승인 응답을
-        실패로 만들지 않는다. 바뀐 반영 실행을 돌려준다(안 했으면 None).
+        않는다(멱등). 바뀐(또는 이미 연결된) 반영 실행을 돌려준다(진단 반영이 아니면 None).
+
+        한 트랜잭션: 반영 실행 행 FOR UPDATE → 연결 확인 → 접수 → 연결 기록. 같은 반영을 두
+        요청이 함께 이어도(동시 승인·러너 결과와 승인 경합) 뒤 요청은 앞 요청이 커밋할 때까지
+        기다렸다가 이미 연결된 값을 읽으므로 재배포는 정확히 하나다.
+
+        접수 거절(AppError, 예: 이전 중 409·서비스 삭제 중)은 savepoint 로 접수 쓰기만 되돌리고
+        그 코드를 redeployRejectedCode 로 남긴다 — 반영 결과·승인 응답은 성공 그대로다.
         """
+        # 재배포 커밋(SPEC api-19): AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 행 잠금 트랜잭션 밖에서
+        # (GitHub 호출) 서비스 저장소에 커밋·PR 을 만들고 그 커밋을 쓴다. 실패면 재배포 없음.
+        repo_commit_sha: str | None = None
+        if self._apply_commit is not None:
+            committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
+            if committed.stopped:
+                return committed.run
+            repo_commit_sha = committed.ref
+        rejected_code: str | None = None
+        redeploy_id: uuid.UUID | None = None
         async with self._session.begin():
-            apply_run = await self._runs.find_by_id(apply_run_id)
+            apply_run = await self._runs.find_by_id(apply_run_id, lock=True)
             if (
                 apply_run is None
                 or apply_run.kind != AgentRunKind.APPLY_PATCH
-                or apply_run.status != AgentRunStatus.SUCCEEDED
                 or apply_run.parent_run_id is None
-                or REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {})
             ):
                 return None
+            if apply_run.status != AgentRunStatus.SUCCEEDED:
+                return None
+            if REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {}):
+                return apply_run
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
             if parent is None or parent.deploy_request_id is None:
                 return None
             failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
             if failed is None:
                 return None
-        # 재배포 커밋: AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 저장소에 반영한 커밋(SPEC api-19).
-        ref_value = failed.commit_sha
-        if self._apply_commit is not None:
-            committed = await self._apply_commit.commit_for_redeploy(apply_run, parent, failed)
-            if committed.ref is None:
-                return committed.run
-            ref_value = committed.ref
-        redeploy_id: uuid.UUID | None = None
-        rejected_code: str | None = None
-        try:
-            view = await self._deploy_request_service.create_deploy_request(
-                apply_run.organization_id,
-                failed.service_id,
-                apply_run.requested_by_user_id,
-                CreateDeployCommand(
-                    environment_id=failed.environment_id,
-                    ref_type=RefType.COMMIT,
-                    ref_value=ref_value,
-                    simulate_fail_at=None,
-                    diagnosis_apply_run_id=apply_run.id,
-                ),
+            # savepoint 를 되돌리면 그 안에서 바꾼 객체가 만료될 수 있으므로 필요한 값을 먼저 뺀다.
+            organization_id = apply_run.organization_id
+            actor_user_id = apply_run.requested_by_user_id
+            base_result = dict(apply_run.result or {})
+            service_id = failed.service_id
+            commit_sha = repo_commit_sha or failed.commit_sha
+            command = CreateDeployCommand(
+                environment_id=failed.environment_id,
+                ref_type=RefType.COMMIT,
+                ref_value=commit_sha,
+                simulate_fail_at=None,
+                diagnosis_apply_run_id=apply_run_id,
             )
-            redeploy_id = view.deploy_request.id
-        except AppError as exc:
-            if self._session.in_transaction():
-                await self._session.rollback()
-            rejected_code = exc.code
-        except Exception:
-            # GitHub·DB 일시 오류 등. 반영 결과는 이미 커밋됐으므로 응답을 500 으로 만들지 않고
-            # 거절 코드로 남긴다(사람이 다시 배포한다).
-            logger.exception(
-                "diagnosis redeploy failed",
-                extra={"action": "redeploy_after_apply", "apply_run_id": str(apply_run.id)},
-            )
-            if self._session.in_transaction():
-                await self._session.rollback()
-            rejected_code = REDEPLOY_INTERNAL_ERROR_CODE
-        now = self._clock.now()
-        async with self._session.begin():
-            fresh = await self._runs.find_by_id(apply_run.id)
-            if fresh is None or REDEPLOY_REQUEST_ID_KEY in (fresh.result or {}):
-                return fresh
+            try:
+                async with self._session.begin_nested():
+                    view = await self._deploy_request_service.create_redeploy_in_transaction(
+                        organization_id, service_id, actor_user_id, command, commit_sha
+                    )
+                    redeploy_id = view.deploy_request.id
+            except AppError as exc:
+                rejected_code = exc.code
+            except Exception:
+                # DB 일시 오류 등. 반영 결과는 이미 커밋됐으므로 응답을 500 으로 만들지 않고
+                # 거절 코드로 남긴다(사람이 다시 배포한다).
+                logger.exception(
+                    "diagnosis redeploy failed",
+                    extra={"action": "redeploy_after_apply", "apply_run_id": str(apply_run_id)},
+                )
+                rejected_code = REDEPLOY_INTERNAL_ERROR_CODE
             await self._runs.merge_result(
-                apply_run.id,
-                now,
+                apply_run_id,
+                self._clock.now(),
                 {
-                    **(fresh.result or {}),
+                    **base_result,
                     REDEPLOY_REQUEST_ID_KEY: str(redeploy_id) if redeploy_id else None,
                     REDEPLOY_REJECTED_CODE_KEY: rejected_code,
                 },
             )
-            updated = await self._runs.find_by_id(apply_run.id)
+            updated = await self._runs.find_by_id(apply_run_id)
         logger.info(
             "diagnosis redeploy linked",
             extra={
                 "action": "redeploy_after_apply",
-                "apply_run_id": str(apply_run.id),
+                "apply_run_id": str(apply_run_id),
                 "redeploy_request_id": str(redeploy_id) if redeploy_id else None,
                 "rejected_code": rejected_code,
             },

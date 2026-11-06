@@ -59,10 +59,14 @@ class AgentRunRepository:
         )
         return (await self._session.scalars(stmt)).first()
 
-    async def find_by_id(self, run_id: uuid.UUID) -> AgentRun | None:
-        return await self._session.scalar(
+    async def find_by_id(self, run_id: uuid.UUID, *, lock: bool = False) -> AgentRun | None:
+        """lock=True 는 `FOR UPDATE` 다(진단 반영 뒤 재배포를 한 번만 잇는다, SPEC api-98)."""
+        statement = (
             select(AgentRun).where(AgentRun.id == run_id).execution_options(populate_existing=True)
         )
+        if lock:
+            statement = statement.with_for_update()
+        return await self._session.scalar(statement)
 
     async def find_precheck(
         self, organization_id: uuid.UUID, run_id: uuid.UUID, *, lock: bool = False
@@ -168,9 +172,18 @@ class AgentRunRepository:
         return list((await self._session.scalars(statement)).all())
 
     async def search_finished_for_residency(
-        self, organization_id: uuid.UUID, from_at: datetime, to_at: datetime, limit: int
+        self,
+        organization_id: uuid.UUID,
+        from_at: datetime,
+        to_at: datetime,
+        limit: int,
+        *,
+        excluded_kinds: Collection[AgentRunKind] = (),
     ) -> list[AgentRun]:
-        """그 조직에서 [from_at, to_at) 안에 끝난 실행(최신순). 요약에 쓰는 칸만 읽는다."""
+        """그 조직에서 [from_at, to_at) 안에 끝난 실행(최신순). 요약에 쓰는 칸만 읽는다.
+
+        excluded_kinds 는 LIMIT 전에 조회 조건으로 뺀다(빼는 종류가 상한을 먹지 않게, SPEC api-98).
+        """
         statement = (
             select(AgentRun)
             .options(
@@ -193,6 +206,8 @@ class AgentRunRepository:
             .order_by(AgentRun.finished_at.desc(), AgentRun.id.desc())
             .limit(limit)
         )
+        if excluded_kinds:
+            statement = statement.where(AgentRun.kind.not_in(list(excluded_kinds)))
         return list((await self._session.scalars(statement)).all())
 
     async def find_id_by_token_hash(self, token_hash: str) -> uuid.UUID | None:

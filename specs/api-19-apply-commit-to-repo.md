@@ -15,7 +15,7 @@
 | ID | 결정 |
 |---|---|
 | D-1 | 스위치 `AI_APPLY_COMMIT_ENABLED`(기본 false). 꺼지면 #101 동작 그대로. 병합 = 동작 불변 |
-| D-2 | 시점: 러너 반영 결과(`ApplyPatchResult` SUCCEEDED)를 받은 요청 안, `redeploy_after_apply` 의 재배포 생성 직전. 재배포 생성 지점 변경은 **커밋 참조(ref_value) 교체 한 곳**뿐(#101 수정과 충돌 최소화) |
+| D-2 | 시점: 러너 반영 결과(`ApplyPatchResult` SUCCEEDED)를 받은 요청 안, `redeploy_after_apply` 의 **행 잠금 트랜잭션 전**(GitHub 호출을 잠금 안에서 하지 않는다). 재배포 생성 지점 변경은 커밋 참조(`commit_sha`·`ref_value`) 교체뿐(#101 의 잠금·멱등 구조는 그대로) |
 | D-3 | 로직은 새 모듈 `app/services/apply_commit_service.py`(+ `app/clients/repo_commit_writer.py`, `app/services/patch_text.py`) |
 | D-4 | 자격: GitHub App `echoport-deploy` 설치 토큰, `repositories=[그 저장소]`, `permissions={contents: write, pull_requests: write}`. 개인키는 기존 `GITHUB_APP_PRIVATE_KEY_REF` |
 | D-5 | 파일 내용은 실패 커밋에서 읽어 승인된 diff 를 러너와 같은 엄격 규칙으로 적용(문맥 불일치면 `REPO_PATCH_CONFLICT`). patchHash 를 다시 계산해 입력 사본과 대조 |
@@ -24,7 +24,7 @@
 | D-8 | 성공: 반영 실행 result 의 `appliedCommitSha`·`branch` 를 저장소 값으로, `pullRequestUrl` 추가, 러너 값은 `sandboxCommitSha`·`sandboxBranch`, `repoCommitted: true`. 재배포 ref = 그 커밋 |
 | D-9 | 실패: 반영 실행을 `SUCCEEDED → FAILED`, `failure_code = REPO_…`, `appliedCommitSha: null`. 재배포를 만들지 않는다(패치 상태 `APPLY_FAILED`). 응답은 성공(러너 결과 요청 200) |
 | D-10 | 가짜 반영(simulate)은 스위치가 켜져 있어도 GitHub 를 부르지 않는다(가짜 sha·`pullRequestUrl: null`, 재배포 = 원래 커밋 — 지어낸 sha 는 빌드할 수 없다) |
-| D-11 | 멱등: `repoCommitted` 가 있으면 GitHub 를 다시 부르지 않는다. 브랜치·PR 이 이미 있으면(422) 그것을 쓴다 |
+| D-11 | 멱등: 재배포가 이미 연결됐거나 `repoCommitted` 가 있으면 GitHub 를 다시 부르지 않는다. 동시 두 요청이 함께 들어와도 브랜치 이름이 반영 실행 id 로 정해져 있어 브랜치·PR 은 하나(뒤 요청은 422 → 있는 것을 씀), 재배포는 #101 의 행 잠금으로 하나 |
 | D-12 | 스위치가 켜졌는데 App 이 설정되지 않았으면(source_client_mode ≠ github 등) `REPO_WRITE_UNAVAILABLE` 로 실패시킨다(조용히 원래 커밋을 다시 배포하지 않는다) |
 
 ## 3. 실패 코드
