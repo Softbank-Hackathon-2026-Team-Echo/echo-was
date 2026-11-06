@@ -62,6 +62,7 @@ from app.repositories.service_environment_variable_repository import (
 )
 from app.repositories.service_repository import ServiceRepository
 from app.services.agent_run_service import RUN_DEADLINE, expire_overdue_runs, run_target
+from app.services.apply_commit_service import ApplyCommitService
 from app.services.container_diagnostics import (
     FAILURE_LOG_CODES,
     FailureDetail,
@@ -107,12 +108,14 @@ class DiagnosisService:
         *,
         simulate_enabled: bool,
         runner_enabled: bool = False,
+        apply_commit: ApplyCommitService | None = None,
     ) -> None:
         self._session = session
         self._clock = clock
         self._deploy_request_service = deploy_requests
         self._simulate_enabled = simulate_enabled
         self._runner_enabled = runner_enabled
+        self._apply_commit = apply_commit
         self._runs = AgentRunRepository(session)
         self._events = AgentRunEventRepository(session)
         self._deploy_requests = DeployRequestRepository(session)
@@ -235,6 +238,13 @@ class DiagnosisService:
             failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
             if failed is None:
                 return None
+        # 재배포 커밋: AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 저장소에 반영한 커밋(SPEC api-19).
+        ref_value = failed.commit_sha
+        if self._apply_commit is not None:
+            committed = await self._apply_commit.commit_for_redeploy(apply_run, parent, failed)
+            if committed.ref is None:
+                return committed.run
+            ref_value = committed.ref
         redeploy_id: uuid.UUID | None = None
         rejected_code: str | None = None
         try:
@@ -245,7 +255,7 @@ class DiagnosisService:
                 CreateDeployCommand(
                     environment_id=failed.environment_id,
                     ref_type=RefType.COMMIT,
-                    ref_value=failed.commit_sha,
+                    ref_value=ref_value,
                     simulate_fail_at=None,
                     diagnosis_apply_run_id=apply_run.id,
                 ),

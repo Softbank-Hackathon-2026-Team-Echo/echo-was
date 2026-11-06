@@ -122,6 +122,26 @@ class AgentRunRepository:
             {"result": result, "updated_at": now},
         )
 
+    async def fail_after_success(
+        self, run_id: uuid.UUID, now: datetime, failure_code: str, result: dict[str, Any]
+    ) -> bool:
+        """성공으로 끝난 반영 실행을 WAS 단계 실패로 바꾼다(SPEC api-19: 저장소 반영 실패).
+
+        러너 검증은 성공했지만 WAS 가 서비스 저장소에 커밋하지 못했을 때만 쓴다. 성공일 때만.
+        """
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [AgentRun.status == AgentRunStatus.SUCCEEDED],
+            {
+                "status": AgentRunStatus.FAILED,
+                "failure_code": failure_code,
+                "result": result,
+                "updated_at": now,
+            },
+        )
+
     async def find_in_organization(
         self, organization_id: uuid.UUID, run_id: uuid.UUID, kinds: Collection[AgentRunKind]
     ) -> AgentRun | None:
