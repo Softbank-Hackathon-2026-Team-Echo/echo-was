@@ -56,6 +56,7 @@ from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
+from app.services.live_disaster_feed import LiveDisasterFeedService
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
@@ -488,6 +489,14 @@ def get_disaster_service(
             item.partition("=")[0].strip() for item in settings.entrypoint_environment_map
         ),
     )
+
+
+def get_live_disaster_feed_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> LiveDisasterFeedService:
+    return LiveDisasterFeedService(session=session, clock=clock, settings=settings)
 
 
 def get_security_matrix_service(

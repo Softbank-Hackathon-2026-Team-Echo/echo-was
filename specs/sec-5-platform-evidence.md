@@ -9,14 +9,14 @@
 ## 1. 왜 하나
 
 - 두 통제는 필수(`예`)인데 증거를 만드는 경로가 없어 늘 UNKNOWN 이었다. 운영은 WAS 버전 범위 기한부 예외(11/12 만료)로 덮어 두었다. 심사에서 "증거 없음 → 예외"는 약한 답이다.
-- 실제로는 지켜지고 있다: 에이전트 토큰의 쓰기는 검사기에서 403 `AGENT_READ_ONLY`(`app/auth/guards.py`), 조직 안 쓰기 35경로는 감사 이름표(`WRITE_ROUTE_ACTIONS`)와 시험(`test_every_write_route_has_an_action_name`)으로 묶여 있다. 이것을 **운영에서 주기적으로 직접 확인해 증거로 남기면** 예외 없이 PASS 가 된다.
+- 실제로는 지켜지고 있다: 에이전트 토큰의 쓰기는 검사기에서 403 `AGENT_READ_ONLY`(`app/auth/guards.py`), 조직 안 쓰기 37경로(API 서버 18 실제 재난 피드 2개 포함)는 감사 이름표(`WRITE_ROUTE_ACTIONS`)와 시험(`test_every_write_route_has_an_action_name`)으로 묶여 있다. 이것을 **운영에서 주기적으로 직접 확인해 증거로 남기면** 예외 없이 PASS 가 된다.
 
 ## 2. 결정
 
 | ID | 결정 | 출처 |
 |---|---|---|
 | D-1 | 수집은 기존 C-TLS-1 주기 시험과 같은 방식: 보안 게이트가 켜진 일꾼 프로세스의 루프. 시작 때 한 번, 이후 `SECURITY_PLATFORM_SELF_TEST_INTERVAL_SECONDS`(기본 21600 = 6시간, 300~28800)마다 | 지시(11/7), `periodic_tls_probe.py` 관례 |
-| D-2 | **C-IAM-2 = 자기 시험(`WAS_TEST`)**: 조직마다 진짜 에이전트 토큰을 일회용으로 발급(이름 `security-self-test`, 유효 1일, 원문은 메모리에만, 발급자 = 조직을 만든 사람)하고, 앱의 쓰기 경로 전부(`POST·PUT·PATCH·DELETE` − 로그아웃 − 러너 경로 = 35개, 승인 경로 3개·배포 실패 진단 1개 포함)를 그 토큰으로 호출한다. **모두 403 `AGENT_READ_ONLY` 면 PASS, 하나라도 다른 응답(2xx·404·다른 403·500)이면 FAIL**. 부른 경로가 없으면 UNKNOWN. 토큰은 끝나면 바로 폐기한다 | 지시(11/7) |
+| D-2 | **C-IAM-2 = 자기 시험(`WAS_TEST`)**: 조직마다 진짜 에이전트 토큰을 일회용으로 발급(이름 `security-self-test`, 유효 1일, 원문은 메모리에만, 발급자 = 조직을 만든 사람)하고, 앱의 쓰기 경로 전부(`POST·PUT·PATCH·DELETE` − 로그아웃 − 러너 경로 = 37개, 승인 경로 3개·배포 실패 진단 1개·실제 재난 피드 2개 포함)를 그 토큰으로 호출한다. **모두 403 `AGENT_READ_ONLY` 면 PASS, 하나라도 다른 응답(2xx·404·다른 403·500)이면 FAIL**. 부른 경로가 없으면 UNKNOWN. 토큰은 끝나면 바로 폐기한다 | 지시(11/7) |
 | D-3 | 호출은 일꾼 프로세스 안의 같은 API 앱(ASGI, `httpx.ASGITransport`)으로 한다. 일꾼과 API 는 같은 이미지·같은 ConfigMap(`WAS_VERSION`)이므로 "그 WAS 버전의 검사기"를 시험한다. 네트워크 경로(인그레스)는 보지 않는다 | AI-default(검토 필요) |
 | D-4 | 경로 변수는 조직 = 그 조직, 앱 환경 변수 키 = `SELF_TEST_KEY`, 나머지 = 임의 uuid, 본문 = `{}`. 검사기가 뚫려도 리소스를 찾지 못하거나(404) 본문 검증(422)에서 멈추므로 운영 데이터를 바꾸지 않는다(그 응답은 FAIL 로 기록된다) | AI-default |
 | D-5 | **C-AUD-1 = 감사 기록 대조(`AUDIT_LOG`)**: (a) 앱의 쓰기 경로가 모두 감사 행동 이름표에 있는가(기존 시험과 같은 계산을 `app/audit/route_coverage.py` 로 옮겨 씀), (b) 최근 24시간에 일어난 일마다 그 대상(실행) id 로 감사 줄이 있는가 — 3절 표, (c) D-2 의 거부 요청이 모두 그 토큰 id 의 `DENIED`·`AGENT_READ_ONLY` 줄로 남았는가. 빠진 것이 하나라도 있으면 FAIL, 없으면 PASS. 그 시간에 일이 없던 종류는 `0/0` 으로 보이고 결과를 바꾸지 않는다 | 지시(11/7) |
@@ -63,7 +63,7 @@
 
 1. 병합 = 운영 자동 배포 → 일꾼 재시작 → **시작하자마자** 살아 있는 환경이 있는 조직마다 C-IAM-2·C-AUD-1 증거 2건(`sourceRef = self-test:platform`, `wasVersion = 2026.11.05`, 유효 24시간).
 2. 그 즉시 매트릭스의 aws·gcp·onprem 세 행 모두 `iam`·`auditLog` 칸의 두 통제가 `result = PASS`·`gateStatus = PASS`·예외 표시 없음이 된다(C-AUD-1 이 PASS 일 때). 기존 예외는 남아 있지만 적용되지 않고 11/12 에 만료된다.
-3. 확인 방법(읽기만): `GET /api/v1/orgs/{org}/security/findings?controlId=C-IAM-2`·`C-AUD-1` 의 최신 행 `result`·`items`, `GET …/security/matrix` 의 두 통제 `exception = null`. 감사 로그에 `security-self-test` SYSTEM 줄 2개 + 에이전트 거부 35줄이 6시간마다 생긴다.
+3. 확인 방법(읽기만): `GET /api/v1/orgs/{org}/security/findings?controlId=C-IAM-2`·`C-AUD-1` 의 최신 행 `result`·`items`, `GET …/security/matrix` 의 두 통제 `exception = null`. 감사 로그에 `security-self-test` SYSTEM 줄 2개 + 에이전트 거부 37줄이 6시간마다 생긴다.
 4. C-AUD-1 이 FAIL 이면 근거 줄의 `target`(대상 id)이 감사 줄 없이 생긴 행이다. 감사 줄이 정말 없으면 그 행이 창(24시간)을 벗어날 때까지 매 주기 FAIL 이 이어진다. 그 뒤 다음 시험이 PASS 를 남기면 마지막 FAIL 은 수집 + (간격 + 10분)에 만료되어 게이트가 열린다(D-8). 예외가 유효한 동안은 WARN + 예외로 보인다.
 
 ## 6. 인수 조건
@@ -72,7 +72,7 @@
 |---|---|---|
 | AC-1 | 모든 쓰기 경로가 403 `AGENT_READ_ONLY` 면 C-IAM-2 PASS(`WAS_TEST`, 조직 + WAS 버전 범위, 정책 버전, 만료 24시간), 승인 경로 3개가 포함된다 | `test_self_test_records_passing_evidence_with_was_version_scope`, `test_agent_probe_routes_cover_every_human_write_route_including_approvals`, `test_all_denied_writes_pass_iam` |
 | AC-2 | 쓰기 하나라도 통과(2xx·404·다른 403·500)하면 FAIL, 통과한 경로가 근거 첫 줄 | `test_agent_write_that_passes_fails_iam_evidence`, `test_any_write_that_is_not_agent_read_only_fails_iam`, `test_no_probe_is_unknown_not_pass` |
-| AC-3 | 일회용 토큰은 폐기되고 발급·폐기·거부 35건이 감사 줄로 남는다 | `test_self_test_token_is_revoked_and_every_step_is_audited` |
+| AC-3 | 일회용 토큰은 폐기되고 발급·폐기·거부 37건이 감사 줄로 남는다 | `test_self_test_token_is_revoked_and_every_step_is_audited` |
 | AC-4 | 최근 활동(승인·AI 실행·예외)이 감사 줄과 맞으면 C-AUD-1 PASS, 감사 줄 없이 생긴 예외·게이트 로그 없는 승인·이름표에 없는 쓰기 경로는 FAIL | `test_recent_activity_with_audit_rows_passes`, `test_exception_without_audit_row_fails_audit_evidence`, `test_approval_without_gate_log_fails_when_gate_is_on`, `test_unnamed_write_route_fails_audit_evidence`, 단위 `test_missing_audit_row_*`·`test_unnamed_write_route_*` |
 | AC-5 | 매트릭스 환경 3개 모두 두 통제가 PASS, 유효한 예외가 있어도 적용되지 않고 예외 행은 그대로 | `test_matrix_uses_pass_evidence_in_every_environment_before_exception` |
 | AC-6 | 새 FAIL 은 앞선 PASS 가 있어도 막는다 | `test_failed_evidence_blocks_matrix_even_after_older_pass` |

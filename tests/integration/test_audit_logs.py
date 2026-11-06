@@ -144,12 +144,12 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 38
+    assert len(WRITE_ROUTE_ACTIONS) == 40
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 35개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
-# + 변수 복사 1개 + 배포 실패 진단 1개) ---
+# --- AC-2: 쓰기 40개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개) ---
 
 
 @dataclass
@@ -788,6 +788,37 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
             "affectedEnvironmentIds": [],
         },
     )
+    # 실제 재난 피드(API 서버 18): 대피 시작(기준 미달이라 계획 없음)과 시연 주입(기준 미달)
+    await ledger.expect_one(
+        await migration.author_client.post(f"{disasters_path}/{disaster_id}/evacuate"),
+        AuditAction.DISASTER_EVACUATION_REQUESTED,
+        migration.author.user,
+        team_id,
+        "disaster",
+        disaster_id,
+        "EARTHQUAKE M6.0",
+        {"source": "SIMULATED", "plans": []},
+    )
+    injected = await migration.author_client.post(
+        f"{disasters_path}/feed:inject",
+        json={"magnitude": 5.0, "epicenter": {"lat": 0, "lng": 0}},
+    )
+    await ledger.expect_one(
+        injected,
+        AuditAction.DISASTER_FEED_INJECTED,
+        migration.author.user,
+        team_id,
+        "organization",
+        team_id,
+        harness.organization.name,
+        {
+            "feedEventId": _data(injected)["feedEventId"],
+            "magnitude": 5.0,
+            "epicenter": {"lat": 0.0, "lng": 0.0},
+            "matched": False,
+            "reason": "BELOW_THRESHOLD",
+        },
+    )
     await ledger.expect_one(
         await migration.author_client.post(f"{disasters_path}/{disaster_id}/end"),
         AuditAction.DISASTER_ENDED,
@@ -798,7 +829,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 37개를 모두 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 40개 가운데 39개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
     # 환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)

@@ -792,7 +792,35 @@ EXPECTED_CONSTRAINTS = {
     ("disasters", "ck_disasters_safe_environment_ids_is_array"): (
         "CHECK ((jsonb_typeof(safe_environment_ids) = 'array'::text))"
     ),
-    ("disasters", "ck_disasters_source_valid"): "CHECK (((source)::text = 'SIMULATED'::text))",
+    ("disasters", "ck_disasters_source_valid"): (
+        "CHECK (((source)::text = ANY ((ARRAY['SIMULATED'::character varying, "
+        "'LIVE_FEED'::character varying, 'FEED_INJECTED'::character varying])::text[])))"
+    ),
+    # API 서버 18: 실제 재난 피드
+    ("disasters", "ck_disasters_creator_matches_source"): (
+        "CHECK ((((source)::text = 'SIMULATED'::text) = (created_by_user_id IS NOT NULL)))"
+    ),
+    ("disasters", "ck_disasters_feed_event_matches_source"): (
+        "CHECK ((((source)::text = 'SIMULATED'::text) = (feed_event_id IS NULL)))"
+    ),
+    ("disasters", "ck_disasters_feed_event_is_object"): (
+        "CHECK (((feed_event IS NULL) OR (jsonb_typeof(feed_event) = 'object'::text)))"
+    ),
+    ("disaster_feed_states", "pk_disaster_feed_states"): "PRIMARY KEY (provider)",
+    ("disaster_feed_states", "ck_disaster_feed_states_seen_event_ids_is_array"): (
+        "CHECK ((jsonb_typeof(seen_event_ids) = 'array'::text))"
+    ),
+    ("disaster_feed_states", "ck_disaster_feed_states_counts_non_negative"): (
+        "CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0) "
+        "AND (last_skipped_count >= 0)))"
+    ),
+    ("organizations", "ck_organizations_live_feed_min_magnitude_range"): (
+        "CHECK (((live_feed_min_magnitude >= (0)::numeric) "
+        "AND (live_feed_min_magnitude <= (10)::numeric)))"
+    ),
+    ("organizations", "ck_organizations_live_feed_radius_km_range"): (
+        "CHECK (((live_feed_radius_km >= 1) AND (live_feed_radius_km <= 2000)))"
+    ),
     ("disasters", "ck_disasters_status_valid"): (
         "CHECK (((status)::text = ANY "
         "((ARRAY['ACTIVE'::character varying, 'ENDED'::character varying])::text[])))"
@@ -1074,6 +1102,14 @@ EXPECTED_INDEXES = {
     "ix_migration_plans_disaster_id": (
         "CREATE INDEX ix_migration_plans_disaster_id ON migration_plans USING btree (disaster_id)"
     ),
+    # API 서버 18: 실제 재난 피드
+    "pk_disaster_feed_states": (
+        "CREATE UNIQUE INDEX pk_disaster_feed_states ON disaster_feed_states USING btree (provider)"
+    ),
+    "uq_disasters_organization_id_feed_event_id": (
+        "CREATE UNIQUE INDEX uq_disasters_organization_id_feed_event_id ON disasters "
+        "USING btree (organization_id, feed_event_id) WHERE (feed_event_id IS NOT NULL)"
+    ),
 }
 
 EXPECTED_TRIGGERS = {
@@ -1144,7 +1180,10 @@ BEFORE_AGENT_RUN_PROCESSING = DISASTERS_REVISION
 AGENT_RUN_PROCESSING_REVISION = "31bc0563b24b"
 # 배포 실패 진단(SPEC api-98)의 agent_runs.deploy_request_id.
 AGENT_RUN_DEPLOY_REQUEST_REVISION = "9d8e1f2a3b4c"
-# CVE 감시(보안 6)의 의존성 목록 표·findings 칸. 지금 head.
+# 실제 재난 피드(API 서버 18)를 더하기 전(배포 실패 진단) 시점과 그 리비전.
+BEFORE_LIVE_DISASTER_FEED = AGENT_RUN_DEPLOY_REQUEST_REVISION
+LIVE_DISASTER_FEED_REVISION = "8748e995387a"
+# CVE 감시(보안 6)의 의존성 목록 표·findings 칸. 실제 재난 피드 위에 잇는다. 지금 head.
 CVE_WATCH_REVISION = "9d7fe177bcaf"
 HEAD_REVISION = CVE_WATCH_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
@@ -1305,6 +1344,7 @@ async def test_migration_round_trip_upgrade_downgrade_upgrade(engine: AsyncEngin
         "deploy_request_logs",
         "deploy_requests",
         "deployments",
+        "disaster_feed_states",
         "disasters",
         "environments",
         "findings",
@@ -1996,12 +2036,15 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
+    live_feed = scripts.get_revision(LIVE_DISASTER_FEED_REVISION)
+    assert live_feed is not None
+    assert live_feed.down_revision == AGENT_RUN_DEPLOY_REQUEST_REVISION
     deploy_request = scripts.get_revision(AGENT_RUN_DEPLOY_REQUEST_REVISION)
     assert deploy_request is not None
     assert deploy_request.down_revision == AGENT_RUN_PROCESSING_REVISION
     cve_watch = scripts.get_revision(CVE_WATCH_REVISION)
     assert cve_watch is not None
-    assert cve_watch.down_revision == AGENT_RUN_DEPLOY_REQUEST_REVISION
+    assert cve_watch.down_revision == LIVE_DISASTER_FEED_REVISION
     processing = scripts.get_revision(AGENT_RUN_PROCESSING_REVISION)
     assert processing is not None and processing.down_revision == BEFORE_AGENT_RUN_PROCESSING
     disasters = scripts.get_revision(DISASTERS_REVISION)
@@ -2034,8 +2077,14 @@ async def test_service_variables_revision_only_adds_a_table_and_has_no_value_col
         await connection.run_sync(run_alembic(command.check))
         await transaction.rollback()
 
-    # 그 뒤 리비전이 더한 재난 표·CVE 감시 의존성 목록 표도 함께 내려간다.
-    assert up - down == {SERVICE_VARIABLES_TABLE, "disasters", "service_dependency_snapshots"}
+    # 그 뒤 리비전이 더한 재난 표·실제 재난 피드 상태 표·CVE 감시 의존성 목록 표도
+    # 함께 내려간다.
+    assert up - down == {
+        SERVICE_VARIABLES_TABLE,
+        "disasters",
+        "disaster_feed_states",
+        "service_dependency_snapshots",
+    }
     assert down - up == set()
     assert columns == {
         "id",
@@ -2087,8 +2136,8 @@ async def test_disasters_revision_downgrade_removes_only_additions_and_upgrade_r
 
     assert down_state == (False, False, 0)
     assert up_state == (True, True, 1)
-    # 그 뒤 리비전(CVE 감시)이 더한 의존성 목록 표도 함께 내려간다.
-    assert up - down == {"disasters", "service_dependency_snapshots"}
+    # 그 뒤 리비전(실제 재난 피드·CVE 감시)이 더한 표도 함께 내려간다.
+    assert up - down == {"disasters", "disaster_feed_states", "service_dependency_snapshots"}
     assert function_count == 1
 
 
@@ -2112,7 +2161,9 @@ async def test_disasters_cannot_be_deleted(harness: DeployHarness, engine: Async
         ("epicenter_lat", "91", "ck_disasters_epicenter_lat_range"),
         ("epicenter_lng", "181", "ck_disasters_epicenter_lng_range"),
         ("type", "'FLOOD'", "ck_disasters_type_valid"),
-        ("source", "'LIVE_FEED'", "ck_disasters_source_valid"),
+        ("source", "'RUMOR'", "ck_disasters_"),
+        ("source", "'LIVE_FEED'", "ck_disasters_creator_matches_source"),
+        ("feed_event_id", "'usgs:x'", "ck_disasters_feed_event_matches_source"),
         ("status", "'ENDED'", "ck_disasters_ended_at_consistency"),
         ("ended_at", "now()", "ck_disasters_ended_at_consistency"),
         ("safe_environment_ids", "'{}'::jsonb", "ck_disasters_safe_environment_ids_is_array"),
@@ -2319,10 +2370,11 @@ async def test_cve_watch_revision_downgrade_removes_additions_and_upgrade_restor
     async with engine.connect() as connection:
         transaction = await connection.begin()
         await connection.run_sync(
-            run_alembic(lambda config: command.downgrade(config, AGENT_RUN_DEPLOY_REQUEST_REVISION))
+            run_alembic(lambda config: command.downgrade(config, LIVE_DISASTER_FEED_REVISION))
         )
         down_state = await connection.run_sync(_cve_watch_state)
         deploy_request_kept = await connection.run_sync(_agent_run_deploy_request_state)
+        live_feed_kept = await connection.run_sync(_live_feed_schema_state)
         down_version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
         await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
         up_state = await connection.run_sync(_cve_watch_state)
@@ -2331,5 +2383,65 @@ async def test_cve_watch_revision_downgrade_removes_additions_and_upgrade_restor
 
     assert down_state == (False, False, False, False)
     assert deploy_request_kept == (True, True, True)
-    assert down_version == AGENT_RUN_DEPLOY_REQUEST_REVISION
+    assert live_feed_kept == (True, True, True, True)
+    assert down_version == LIVE_DISASTER_FEED_REVISION
     assert up_state == (True, True, True, True)
+
+
+def _live_feed_schema_state(connection: Connection) -> tuple[bool, bool, bool, bool]:
+    inspector = inspect(connection)
+    disaster_columns = {column["name"]: column for column in inspector.get_columns("disasters")}
+    organization_columns = {column["name"] for column in inspector.get_columns("organizations")}
+    return (
+        "disaster_feed_states" in inspector.get_table_names(),
+        "feed_event_id" in disaster_columns,
+        bool(disaster_columns["created_by_user_id"]["nullable"]),
+        "live_feed_radius_km" in organization_columns,
+    )
+
+
+async def test_live_disaster_feed_revision_downgrade_removes_additions_and_upgrade_restores(
+    engine: AsyncEngine,
+) -> None:
+    scripts = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
+    revision = scripts.get_revision(LIVE_DISASTER_FEED_REVISION)
+    assert revision is not None and revision.down_revision == BEFORE_LIVE_DISASTER_FEED
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_LIVE_DISASTER_FEED))
+        )
+        down_state = await connection.run_sync(_live_feed_schema_state)
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        up_state = await connection.run_sync(_live_feed_schema_state)
+        await connection.run_sync(run_alembic(command.check))
+        await transaction.rollback()
+
+    assert down_state == (False, False, False, False)
+    assert up_state == (True, True, True, True)
+
+
+async def test_live_disaster_feed_revision_keeps_existing_rows_valid(
+    harness: DeployHarness, engine: AsyncEngine
+) -> None:
+    """기존 버튼 재난·조직이 있어도 올리고 내릴 수 있다(새 CHECK 를 만족, 조직은 기본값)."""
+    response = await harness.client.post(
+        f"/api/v1/orgs/{harness.organization.id}/disasters",
+        json={"type": "EARTHQUAKE", "epicenter": {"lat": 0, "lng": 0}, "magnitude": 6.0},
+    )
+    assert response.status_code == 201, response.text
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(
+            run_alembic(lambda config: command.downgrade(config, BEFORE_LIVE_DISASTER_FEED))
+        )
+        await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
+        defaults = (
+            await connection.execute(
+                text("SELECT live_feed_min_magnitude, live_feed_radius_km FROM organizations")
+            )
+        ).first()
+        await transaction.rollback()
+
+    assert defaults is not None
+    assert (float(defaults[0]), defaults[1]) == (6.0, 300)

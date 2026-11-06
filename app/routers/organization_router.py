@@ -13,7 +13,11 @@ from app.schemas.organization import (
     UpdateOrganizationSettingsRequest,
 )
 from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
-from app.services.organization_service import OrganizationService, OrganizationView
+from app.services.organization_service import (
+    LiveFeedThresholdChange,
+    OrganizationService,
+    OrganizationView,
+)
 
 router = APIRouter(prefix="/api/v1/orgs", tags=["organization"])
 
@@ -63,7 +67,11 @@ async def update_organization_settings(
     organizations: Organizations,
 ) -> ApiResponse[OrganizationResponse]:
     view = await organizations.update_settings(
-        access.organization_id, access.user.id, access.role, request.allow_self_approval
+        access.organization_id,
+        access.user.id,
+        access.role,
+        request.allow_self_approval,
+        LiveFeedThresholdChange(request.live_feed_min_magnitude, request.live_feed_radius_km),
     )
     return ApiResponse(data=OrganizationResponse.from_view(view))
 

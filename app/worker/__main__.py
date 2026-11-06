@@ -4,6 +4,8 @@
 보안 게이트가 켜져 있으면(`SECURITY_GATE_ENABLED=true`) 공개 경로 TLS 주기 시험 루프와 플랫폼 자기
 시험 루프(C-IAM-2·C-AUD-1 증거, 보안 5-3. 같은 프로세스 안의 API 앱을 부른다)도 돌린다.
 CVE 감시가 켜져 있으면(`CVE_WATCH_ENABLED=true`) OSV 주기 조회 루프(기본 6시간)도 돌린다.
+실제 재난 피드가 켜져 있으면(`LIVE_DISASTER_FEED_ENABLED=true`, 기본 꺼짐) USGS 지진 피드 조회
+루프도 돌린다.
 실행기 묶음과 앱 환경 변수 보관함은 프로세스당 하나이고 멈출 때 HTTP 클라이언트를 닫는다.
 """
 
@@ -24,6 +26,7 @@ from app.executors.kubernetes.executors import KubernetesDeployExecutor
 from app.main import app as api_app
 from app.services.cve_watch_loop import CveWatchLoop
 from app.services.executor_environment_lookup import DbEnvironmentLookup
+from app.services.live_disaster_feed import LiveDisasterFeedPoller
 from app.services.onprem_pull_refresher import OnpremPullSecretRefresher
 from app.services.periodic_tls_probe import PeriodicTlsProbe
 from app.services.platform_self_test import PlatformSelfTest
@@ -43,6 +46,11 @@ async def main() -> None:
     )
     app_secret_store = build_app_secret_store(settings, clock)
     tls_checker = build_public_tls_checker(settings)
+    feed_poller = (
+        LiveDisasterFeedPoller(session_factory, clock, settings)
+        if settings.live_disaster_feed_enabled
+        else None
+    )
     worker = Worker(
         session_factory=session_factory,
         settings=settings,
@@ -67,6 +75,7 @@ async def main() -> None:
             "source_client_mode": settings.source_client_mode,
             "app_secret_store_mode": settings.app_secret_store_mode,
             "concurrency": settings.worker_concurrency,
+            "live_disaster_feed_enabled": settings.live_disaster_feed_enabled,
         },
     )
     try:
@@ -89,7 +98,11 @@ async def main() -> None:
                     session_factory, get_advisory_feed(settings), clock, settings
                 )
                 group.create_task(cve_watch.run(stop))
+            if feed_poller is not None:
+                group.create_task(feed_poller.run(stop))
     finally:
+        if feed_poller is not None:
+            await feed_poller.aclose()
         await executors.aclose()
         await app_secret_store.aclose()
         await get_engine().dispose()

@@ -67,6 +67,7 @@ app/
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   DisasterService(재난 미리보기·만들기·종료, 피해 서비스 긴급 계획 트리거) · disaster_rules(반경·거리·분류·도착 고르기, 순수 계산)
+│                     #   live_disaster_feed(실제 지진 피드 USGS 주기 조회·시연 주입·상태, 기본 꺼짐, API 서버 18) · live_disaster_feed_rules(피드 읽기·중복 제거·조직 기준 판정, 순수 계산)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1·C-SEC-1(출발·도착 앱 환경 변수 키) 확인, 기본 꺼짐, 보안 5)

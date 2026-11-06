@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 35개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 40개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개·실제 재난 피드 2개·CVE 감시 3개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -128,6 +128,9 @@
 | `DIAGNOSIS_REQUESTED` | `POST /deploy-requests/{id}/diagnosis`(이미 있어 200 이면 기록 안 함, 이슈 #98) | `agent_run`(진단 실행) | `{serviceId, deployRequestId, environmentId, simulated}` |
 | `DISASTER_DECLARED` | `POST /disasters` | `disaster`(이름표 `EARTHQUAKE M7.2`) | `{type, magnitude, radiusKm, meetsThreshold, affectedEnvironmentIds}`. 건너뛴 서비스가 있으면 같은 대상에 둘째 줄 `{skippedPlans: [{serviceId, planId, reason}]}`([disasters.md](disasters.md#감사)) |
 | `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
+| `DISASTER_EVACUATION_REQUESTED` | `POST /disasters/{id}/evacuate`(API 서버 18) | `disaster` | `{source, plans: [{serviceId, planId, outcome, reason}]}` |
+| `DISASTER_FEED_INJECTED` | `POST /disasters/feed:inject`(API 서버 18) | 만든 `disaster` 또는 `organization`(못 만들었을 때) | `{feedEventId, magnitude, epicenter, matched, reason}` |
+| `DISASTER_DECLARED`(SYSTEM `live-disaster-feed`) | 실제 지진 피드·시연 주입이 재난을 만듦 | `disaster` | `{source, feedEventId, magnitude, place, radiusKm, minMagnitude, nearestDistanceKm, affectedEnvironmentIds, evacuation}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName, kind}` |
 | `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{kind, status, failureCode?, simulated, aiReviewed, processing?}`(`processing` 은 레지던시 기록이 있을 때만). 반영 실행(`APPLY_PATCH`)이면 `aiReviewed: false` + `appliedCommitSha`(실패면 null) |
 | `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
@@ -151,6 +154,7 @@
 | `teardown-worker` | 서비스 삭제 완료, 삭제 일꾼의 배포 요청 취소 |
 | `api` | 사람 요청을 처리하다 서버 규칙으로 **자동으로** 끝낸 것: 대기 요청 밀어내기(`SUPERSEDED`), 서비스 삭제의 배포 요청 취소, 승인·거절·취소 시도 때 만료(`EXPIRED`), 승인 때 낡음(`STALE`), 새 계획을 만들 때 옛 대기 계획 만료, 중단의 할 일 복구(`CANCELLED`). 누른 사람의 행동이 아니므로 USER 로 쓰지 않는다. 그래서 승인 시도가 `EXPIRED` 로 끝나면 USER 승인 줄은 없고 SYSTEM `api` 줄만 있다 |
 | `ai-runner` | AI 실행 가져가기·결과 제출·시간 초과. 러너 신원은 이 행동만 한다(하트비트·이벤트는 줄이 없다). 사전 점검 요청 안에서 만료한 것도 이 값이다 |
+| `live-disaster-feed` | 실제 지진 피드(일꾼)나 시연 주입(API)이 조직 기준에 맞는 지진으로 재난을 만든 것(`DISASTER_DECLARED`, API 서버 18) |
 | `security-self-test` | 플랫폼 자기 시험(보안 5-3)의 일회용 에이전트 토큰 발급·폐기(`AGENT_TOKEN_ISSUED`·`AGENT_TOKEN_REVOKED`, 토큰 이름 `security-self-test`). 그 토큰의 쓰기 시도는 보통의 에이전트 거부 줄(`DENIED`·`AGENT_READ_ONLY`)로 남는다 |
 
 ## 기록하지 않는 것

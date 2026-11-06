@@ -279,6 +279,21 @@ CREATE TABLE public.deployments (
     CONSTRAINT ck_deployments_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'IN_PROGRESS'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
 );
 
+CREATE TABLE public.disaster_feed_states (
+    provider character varying(32) NOT NULL,
+    last_polled_at timestamp with time zone,
+    last_success_at timestamp with time zone,
+    last_error_code character varying(64),
+    last_feed_count integer NOT NULL,
+    last_new_event_count integer NOT NULL,
+    last_skipped_count integer NOT NULL,
+    seen_event_ids jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_disaster_feed_states_counts_non_negative CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0) AND (last_skipped_count >= 0))),
+    CONSTRAINT ck_disaster_feed_states_seen_event_ids_is_array CHECK ((jsonb_typeof(seen_event_ids) = 'array'::text))
+);
+
 CREATE TABLE public.disasters (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     organization_id uuid NOT NULL,
@@ -293,20 +308,25 @@ CREATE TABLE public.disasters (
     affected_environment_ids jsonb NOT NULL,
     safe_environment_ids jsonb NOT NULL,
     unknown_environment_ids jsonb NOT NULL,
-    created_by_user_id uuid NOT NULL,
+    created_by_user_id uuid,
     ended_by_user_id uuid,
     started_at timestamp with time zone NOT NULL,
     ended_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    feed_event_id character varying(128),
+    feed_event jsonb,
     CONSTRAINT ck_disasters_affected_environment_ids_is_array CHECK ((jsonb_typeof(affected_environment_ids) = 'array'::text)),
+    CONSTRAINT ck_disasters_creator_matches_source CHECK ((((source)::text = 'SIMULATED'::text) = (created_by_user_id IS NOT NULL))),
     CONSTRAINT ck_disasters_ended_at_consistency CHECK ((((status)::text = 'ENDED'::text) = (ended_at IS NOT NULL))),
     CONSTRAINT ck_disasters_epicenter_lat_range CHECK (((epicenter_lat >= ('-90'::integer)::double precision) AND (epicenter_lat <= (90)::double precision))),
     CONSTRAINT ck_disasters_epicenter_lng_range CHECK (((epicenter_lng >= ('-180'::integer)::double precision) AND (epicenter_lng <= (180)::double precision))),
+    CONSTRAINT ck_disasters_feed_event_is_object CHECK (((feed_event IS NULL) OR (jsonb_typeof(feed_event) = 'object'::text))),
+    CONSTRAINT ck_disasters_feed_event_matches_source CHECK ((((source)::text = 'SIMULATED'::text) = (feed_event_id IS NULL))),
     CONSTRAINT ck_disasters_magnitude_range CHECK (((magnitude >= (0)::numeric) AND (magnitude <= (10)::numeric))),
     CONSTRAINT ck_disasters_radius_km_non_negative CHECK ((radius_km >= 0)),
     CONSTRAINT ck_disasters_safe_environment_ids_is_array CHECK ((jsonb_typeof(safe_environment_ids) = 'array'::text)),
-    CONSTRAINT ck_disasters_source_valid CHECK (((source)::text = 'SIMULATED'::text)),
+    CONSTRAINT ck_disasters_source_valid CHECK (((source)::text = ANY ((ARRAY['SIMULATED'::character varying, 'LIVE_FEED'::character varying, 'FEED_INJECTED'::character varying])::text[]))),
     CONSTRAINT ck_disasters_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'ENDED'::character varying])::text[]))),
     CONSTRAINT ck_disasters_type_valid CHECK (((type)::text = ANY ((ARRAY['EARTHQUAKE'::character varying, 'TYPHOON'::character varying])::text[]))),
     CONSTRAINT ck_disasters_unknown_environment_ids_is_array CHECK ((jsonb_typeof(unknown_environment_ids) = 'array'::text))
@@ -507,6 +527,10 @@ CREATE TABLE public.organizations (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     allow_self_approval boolean DEFAULT false NOT NULL,
+    live_feed_min_magnitude numeric(3,1) DEFAULT 6.0 NOT NULL,
+    live_feed_radius_km integer DEFAULT 300 NOT NULL,
+    CONSTRAINT ck_organizations_live_feed_min_magnitude_range CHECK (((live_feed_min_magnitude >= (0)::numeric) AND (live_feed_min_magnitude <= (10)::numeric))),
+    CONSTRAINT ck_organizations_live_feed_radius_km_range CHECK (((live_feed_radius_km >= 1) AND (live_feed_radius_km <= 2000))),
     CONSTRAINT ck_organizations_name_not_empty CHECK ((char_length((name)::text) >= 1)),
     CONSTRAINT ck_organizations_slug_format CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))
 );
@@ -670,6 +694,9 @@ ALTER TABLE ONLY public.deploy_requests
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT pk_deployments PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.disaster_feed_states
+    ADD CONSTRAINT pk_disaster_feed_states PRIMARY KEY (provider);
+
 ALTER TABLE ONLY public.disasters
     ADD CONSTRAINT pk_disasters PRIMARY KEY (id);
 
@@ -809,6 +836,8 @@ CREATE UNIQUE INDEX uq_builds_service_id_repo_url_commit_sha_not_failed ON publi
 CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_active ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = ANY ((ARRAY['BUILDING'::character varying, 'DEPLOYING'::character varying, 'VERIFYING'::character varying])::text[]));
 
 CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_queued ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = 'QUEUED'::text);
+
+CREATE UNIQUE INDEX uq_disasters_organization_id_feed_event_id ON public.disasters USING btree (organization_id, feed_event_id) WHERE (feed_event_id IS NOT NULL);
 
 CREATE UNIQUE INDEX uq_environments_org_name_live ON public.environments USING btree (organization_id, name) WHERE (is_deleted = false);
 

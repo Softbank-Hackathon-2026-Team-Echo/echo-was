@@ -485,6 +485,68 @@ class DisasterService:
                 AuditAction.DISASTER_DECLARED, disaster, actor_user_id, {"skippedPlans": skipped}
             )
 
+    # --- 피드 재난의 대피 계획 만들기(API 서버 18) ---
+
+    async def evacuate_disaster(
+        self, organization_id: uuid.UUID, disaster_id: uuid.UUID, actor_user_id: uuid.UUID
+    ) -> DisasterView:
+        """제안된 긴급 이전을 사람이 시작한다: 버튼 재난과 같은 트리거(_trigger_plans)를 이 사람으로
+        돈다.
+
+        피드 재난(LIVE_FEED·FEED_INJECTED)은 만든 사람이 없어 계획을 스스로 만들지 않는다(제안만).
+        피해·안전 환경은 재난을 만든 순간의 스냅숏을 쓰고, 지금 없는 환경은 뺀다. 열린 계획이 있는
+        서비스는 건너뛰므로(MIGRATION_PLAN_OPEN) 여러 번 불러도 계획이 겹치지 않는다. 버튼 재난에도
+        쓸 수
+        있다(예: 그때 건너뛴 서비스를 다시 시도).
+        """
+        async with self._session.begin():
+            disaster = await self._get_in_organization(organization_id, disaster_id)
+            if disaster.status != DisasterStatus.ACTIVE:
+                raise DisasterNotActiveError(str(disaster_id))
+            environments = await self._environments.search_all_live(organization_id)
+            facts = {environment.id: _facts(environment) for environment in environments}
+            classification = EnvironmentClassification(
+                affected=_known_ids(disaster.affected_environment_ids, facts),
+                safe=_known_ids(disaster.safe_environment_ids, facts),
+                unknown=_known_ids(disaster.unknown_environment_ids, facts),
+            )
+            command = DisasterInput(
+                type=DisasterType(disaster.type),
+                magnitude=disaster.magnitude,
+                epicenter=Coordinates(disaster.epicenter_lat, disaster.epicenter_lng),
+            )
+            is_over_threshold = disaster.meets_threshold
+        results: list[DisasterPlanResult] = []
+        if is_over_threshold:
+            results = await self._trigger_plans(
+                organization_id, actor_user_id, disaster_id, command, facts, classification
+            )
+        async with self._session.begin():
+            disaster = await self._get_in_organization(organization_id, disaster_id)
+            self._record_audit(
+                AuditAction.DISASTER_EVACUATION_REQUESTED,
+                disaster,
+                actor_user_id,
+                {
+                    "source": str(disaster.source),
+                    "plans": [
+                        {
+                            "serviceId": str(result.service_id),
+                            "planId": str(result.plan_id) if result.plan_id else None,
+                            "outcome": str(result.outcome),
+                            "reason": result.reason,
+                        }
+                        for result in results
+                    ],
+                },
+            )
+            users_by_id = await self._users_by_id([disaster])
+            view = DisasterView(disaster, users_by_id, results)
+        _log_disaster(
+            "disaster evacuation requested", "evacuate_disaster", disaster_id, organization_id
+        )
+        return view
+
     # --- 조회 ---
 
     async def search_disasters(
@@ -604,6 +666,17 @@ def _locations(environments: Iterable[Environment]) -> list[EnvironmentLocation]
         EnvironmentLocation(environment.id, _coordinates(environment))
         for environment in environments
     ]
+
+
+def environment_locations(environments: Iterable[Environment]) -> list[EnvironmentLocation]:
+    """환경 → 위치(좌표를 모르면 None). 실제 재난 피드 판정도 버튼 재난과 같은 좌표를 쓴다."""
+    return _locations(environments)
+
+
+def _known_ids(
+    ids: Iterable[str], facts: dict[uuid.UUID, _EnvironmentFacts]
+) -> tuple[uuid.UUID, ...]:
+    return tuple(item for item in (uuid.UUID(value) for value in ids) if item in facts)
 
 
 def _id_strings(ids: Iterable[uuid.UUID]) -> list[str]:

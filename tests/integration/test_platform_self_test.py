@@ -6,6 +6,7 @@
 """
 
 import json
+import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -19,6 +20,8 @@ from app.audit.actions import WRITE_ROUTE_ACTIONS, AuditAction, AuditComponent
 from app.audit.route_coverage import agent_probe_routes
 from app.enums import (
     ActorType,
+    AgentRunKind,
+    AgentRunStatus,
     AuditResult,
     SecurityControlId,
     SecurityFindingMode,
@@ -29,7 +32,7 @@ from app.enums import (
     SecurityResult,
 )
 from app.main import app
-from app.models import AgentToken, AuditLog, Finding, SecurityException
+from app.models import AgentRun, AgentToken, AuditLog, Finding, SecurityException
 from app.services.platform_self_test import (
     EVIDENCE_TTL,
     FAIL_RENEW_MARGIN,
@@ -42,6 +45,7 @@ from app.services.security_rules import POLICY_VERSION
 from tests.integration.auth_support import create_user, org_path
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.migration_support import Migration
+from tests.integration.rollback_support import deploy_and_finish
 from tests.integration.runner_support import add_runner, finish_precheck
 
 WAS_VERSION = "2026.11.07"
@@ -51,8 +55,7 @@ APPROVE_ROUTES = {
     "POST /api/v1/orgs/{org_id}/prechecks/{precheck_id}/patches/{patch_id}/approve",
 }
 LEAKY_ROUTE = "POST /api/v1/orgs/{org_id}/migration-plans/{plan_id}/approve"
-# 에이전트 토큰으로 두드리는 쓰기 경로 수 — 숫자를 박지 않고 지금 라우터에서 센다
-# (조직 안 쓰기 경로 = 감사 WRITE_ROUTE_ACTIONS 와 같은 집합).
+# 에이전트 토큰으로 부르는 쓰기 경로 수(라우터에서 계산 — 경로가 늘어도 숫자를 고치지 않는다).
 PROBE_COUNT = len(agent_probe_routes(app.routes))
 # 시험 시작 직전 유예를 지나 도메인 줄이 대조 범위에 들어오게 하는 시간(초).
 PAST_GRACE = IN_FLIGHT_GRACE.total_seconds() + 1
@@ -254,6 +257,77 @@ async def test_recent_activity_with_audit_rows_passes(migration: Migration) -> N
     assert summary[f"agent:{AuditAction.AGENT_RUN_FINISHED}"] == "1/1"
     assert "gate:SECURITY_GATE_PASSED" not in summary
     assert precheck["id"] and exception["id"]
+
+
+async def test_simulated_diagnosis_and_apply_runs_pass_audit_evidence(
+    migration: Migration,
+) -> None:
+    """운영 C-AUD-1 FAIL 재현(가짜 진단 410a410b…): 가짜 진단·가짜 반영도 종료 줄이 있어야 PASS."""
+    harness = migration.harness
+    failed = await deploy_and_finish(
+        harness, migration.service_id, migration.aws.id, simulate={"failAt": "DEPLOYING"}
+    )
+    path = org_path(harness.organization.id, f"/deploy-requests/{failed['id']}/diagnosis")
+    created = await migration.author_client.post(path)
+    assert created.status_code == 201, created.text
+    run = created.json()["data"]
+    assert (run["status"], run["simulated"]) == ("SUCCEEDED", True)
+    patch = run["patches"][0]
+    approved = await migration.approver_client.post(
+        org_path(harness.organization.id, f"/prechecks/{run['id']}/patches/{patch['id']}/approve"),
+        json={"patchHash": patch["patchHash"]},
+    )
+    assert approved.status_code == 200, approved.text
+    apply = approved.json()["data"]["apply"]
+    assert (apply["status"], apply["simulated"]) == ("SUCCEEDED", True)
+
+    harness.clock.advance(PAST_GRACE)
+    await _self_test(harness, gate_enabled=False).run_once()
+
+    audit = (await _findings(harness))[SecurityControlId.AUD_1]
+    assert audit.result == SecurityResult.PASS, audit.items
+    summary = {item["item_id"]: item["target"] for item in audit.items}
+    assert summary[f"agent:{AuditAction.AGENT_RUN_FINISHED}"] == "2/2"
+    assert summary[f"approval:{AuditAction.AGENT_PATCH_APPROVED}"] == "1/1"
+
+
+async def test_finished_run_without_audit_row_still_fails(migration: Migration) -> None:
+    """대조 규칙은 그대로다: 종료 줄 없이 끝난 실행(옛 가짜 진단 모양)은 여전히 FAIL 이다."""
+    harness = migration.harness
+    failed = await deploy_and_finish(
+        harness, migration.service_id, migration.aws.id, simulate={"failAt": "DEPLOYING"}
+    )
+    harness.clock.advance(PAST_GRACE)
+    now = harness.clock.now()
+    run = AgentRun(
+        organization_id=harness.organization.id,
+        service_id=uuid.UUID(migration.service_id),
+        kind=AgentRunKind.CHANGE_PROPOSAL,
+        target_environment_id=migration.aws.id,
+        deploy_request_id=uuid.UUID(failed["id"]),
+        status=AgentRunStatus.SUCCEEDED,
+        simulated=True,
+        input_snapshot={"service": {"name": "legacy-simulated"}},
+        input_hash="sha256:" + "0" * 64,
+        requested_by_user_id=harness.admin.user.id,
+        deadline_at=now + timedelta(minutes=15),
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    async with harness.session_factory() as session, session.begin():
+        session.add(run)
+    harness.clock.advance(PAST_GRACE)
+
+    await _self_test(harness).run_once()
+
+    audit = (await _findings(harness))[SecurityControlId.AUD_1]
+    assert audit.result == SecurityResult.FAIL
+    assert audit.reason == SecurityFindingReason.AUDIT_RECORD_MISSING
+    assert (audit.items[0]["item_id"], audit.items[0]["target"]) == (
+        f"agent:{AuditAction.AGENT_RUN_FINISHED}",
+        str(run.id),
+    )
 
 
 async def test_approval_without_gate_log_fails_when_gate_is_on(migration: Migration) -> None:

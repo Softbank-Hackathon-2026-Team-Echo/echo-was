@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated
 
 from pydantic import Field, StringConstraints
@@ -11,6 +12,8 @@ from app.enums import InvitationStatus, OrganizationRole
 from app.models import AgentToken, Invitation, User
 from app.models.agent_token import AGENT_TOKEN_NAME_MAX_LENGTH
 from app.models.organization import (
+    LIVE_FEED_MIN_MAGNITUDE_RANGE,
+    LIVE_FEED_RADIUS_KM_RANGE,
     ORGANIZATION_NAME_MAX_LENGTH,
     ORGANIZATION_SLUG_MAX_LENGTH,
     ORGANIZATION_SLUG_PATTERN,
@@ -101,9 +104,27 @@ class CreateOrganizationRequest(ApiRequestModel):
 
 
 class UpdateOrganizationSettingsRequest(ApiRequestModel):
-    """조직 설정 변경(어드민). allowSelfApproval 은 필수다."""
+    """조직 설정 변경(어드민). allowSelfApproval 은 필수다.
+
+    liveFeedMinMagnitude·liveFeedRadiusKm 은 실제 재난 피드 기준이다(API 서버 18, 생략하면 그대로).
+    지금 값은 GET /disasters/feed 의 threshold 로 본다.
+    """
 
     allow_self_approval: bool
+    live_feed_min_magnitude: Annotated[
+        Decimal | None,
+        Field(
+            default=None,
+            ge=LIVE_FEED_MIN_MAGNITUDE_RANGE[0],
+            le=LIVE_FEED_MIN_MAGNITUDE_RANGE[1],
+            max_digits=3,
+            decimal_places=1,
+        ),
+    ] = None
+    live_feed_radius_km: Annotated[
+        int | None,
+        Field(default=None, ge=LIVE_FEED_RADIUS_KM_RANGE[0], le=LIVE_FEED_RADIUS_KM_RANGE[1]),
+    ] = None
 
 
 class MemberResponse(ApiModel):

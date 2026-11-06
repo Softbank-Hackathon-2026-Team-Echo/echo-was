@@ -96,6 +96,16 @@ class EnvironmentRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_organization_ids_with_live(self) -> list[uuid.UUID]:
+        """살아 있는 환경이 하나라도 있는 조직 id(실제 재난 피드 판정용, API 서버 18)."""
+        statement = (
+            select(Environment.organization_id)
+            .where(_is_live())
+            .distinct()
+            .order_by(Environment.organization_id)
+        )
+        return list((await self._session.scalars(statement)).all())
+
     async def count_live(self, organization_id: uuid.UUID, kind: str | None) -> int:
         statement = _filter_by_kind(
             _in_organization(select(func.count()).select_from(Environment), organization_id), kind
