@@ -151,6 +151,7 @@
 | `teardown-worker` | 서비스 삭제 완료, 삭제 일꾼의 배포 요청 취소 |
 | `api` | 사람 요청을 처리하다 서버 규칙으로 **자동으로** 끝낸 것: 대기 요청 밀어내기(`SUPERSEDED`), 서비스 삭제의 배포 요청 취소, 승인·거절·취소 시도 때 만료(`EXPIRED`), 승인 때 낡음(`STALE`), 새 계획을 만들 때 옛 대기 계획 만료, 중단의 할 일 복구(`CANCELLED`). 누른 사람의 행동이 아니므로 USER 로 쓰지 않는다. 그래서 승인 시도가 `EXPIRED` 로 끝나면 USER 승인 줄은 없고 SYSTEM `api` 줄만 있다 |
 | `ai-runner` | AI 실행 가져가기·결과 제출·시간 초과. 러너 신원은 이 행동만 한다(하트비트·이벤트는 줄이 없다). 사전 점검 요청 안에서 만료한 것도 이 값이다 |
+| `security-self-test` | 플랫폼 자기 시험(보안 5-3)의 일회용 에이전트 토큰 발급·폐기(`AGENT_TOKEN_ISSUED`·`AGENT_TOKEN_REVOKED`, 토큰 이름 `security-self-test`). 그 토큰의 쓰기 시도는 보통의 에이전트 거부 줄(`DENIED`·`AGENT_READ_ONLY`)로 남는다 |
 
 ## 기록하지 않는 것
 

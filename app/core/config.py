@@ -254,6 +254,9 @@ class Settings(BaseSettings):
     # 게이트가 켜진 일꾼이 공개 경로 TLS 를 주기로 시험해 C-TLS-1 준비 증거(유효 1시간)를
     # 남기는 간격. 증거가 비지 않게 유효기간보다 짧아야 한다(최대 50분).
     security_tls_probe_interval_seconds: int = Field(default=1800, ge=60, le=3000)
+    # 게이트가 켜진 일꾼이 C-IAM-2·C-AUD-1 자기 시험(보안 5-3)을 도는 간격. 증거 유효기간(24시간)
+    # 안에 세 번 이상 돌도록 최대 8시간.
+    security_platform_self_test_interval_seconds: int = Field(default=21600, ge=300, le=28800)
     # 켜면 패치 승인이 반영 실행(APPLY_PATCH)을 만든다. 러너가 그 실행을 가져가는 길이 생기기 전에는
     # 켜지 않는다(실행이 QUEUED 로 마감까지 머물고 그동안 그 서비스의 새 사전 점검이 409 다).
     patch_apply_enabled: bool = False

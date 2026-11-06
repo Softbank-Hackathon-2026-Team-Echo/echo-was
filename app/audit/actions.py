@@ -89,6 +89,8 @@ class AuditComponent(StrEnum):
     TEARDOWN_WORKER = "teardown-worker"
     AI_RUNNER = "ai-runner"
     CVE_WATCH = "cve-watch"
+    # 플랫폼 자기 시험(보안 5-3): 일회용 에이전트 토큰 발급·폐기.
+    SECURITY_SELF_TEST = "security-self-test"
 
 
 _ORG = "/api/v1/orgs/{org_id}"

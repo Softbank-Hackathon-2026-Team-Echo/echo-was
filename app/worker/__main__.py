@@ -1,7 +1,8 @@
 """`python -m app.worker` 진입점. SIGTERM·SIGINT 를 받으면 지금 실행만 끝내고 멈춘다.
 
 실제 실행기 모드(`EXECUTOR_MODE=real`)면 온프레 이미지 받기 자격 갱신 루프도 함께 돌린다.
-보안 게이트가 켜져 있으면(`SECURITY_GATE_ENABLED=true`) 공개 경로 TLS 주기 시험 루프도 돌린다.
+보안 게이트가 켜져 있으면(`SECURITY_GATE_ENABLED=true`) 공개 경로 TLS 주기 시험 루프와 플랫폼 자기
+시험 루프(C-IAM-2·C-AUD-1 증거, 보안 5-3. 같은 프로세스 안의 API 앱을 부른다)도 돌린다.
 CVE 감시가 켜져 있으면(`CVE_WATCH_ENABLED=true`) OSV 주기 조회 루프(기본 6시간)도 돌린다.
 실행기 묶음과 앱 환경 변수 보관함은 프로세스당 하나이고 멈출 때 HTTP 클라이언트를 닫는다.
 """
@@ -20,10 +21,12 @@ from app.core.logging import configure_logging
 from app.dependencies import build_source_repository_client, get_advisory_feed
 from app.executors import build_executor_set
 from app.executors.kubernetes.executors import KubernetesDeployExecutor
+from app.main import app as api_app
 from app.services.cve_watch_loop import CveWatchLoop
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.onprem_pull_refresher import OnpremPullSecretRefresher
 from app.services.periodic_tls_probe import PeriodicTlsProbe
+from app.services.platform_self_test import PlatformSelfTest
 from app.services.security_gate import build_public_tls_checker
 from app.worker.runner import Worker
 
@@ -77,6 +80,10 @@ async def main() -> None:
             if tls_checker is not None:
                 tls_probe = PeriodicTlsProbe(session_factory, tls_checker, clock, settings)
                 group.create_task(tls_probe.run(stop))
+                self_test = PlatformSelfTest(
+                    session_factory, clock, settings, api_app, api_app.routes
+                )
+                group.create_task(self_test.run(stop))
             if settings.cve_watch_enabled:
                 cve_watch = CveWatchLoop(
                     session_factory, get_advisory_feed(settings), clock, settings
