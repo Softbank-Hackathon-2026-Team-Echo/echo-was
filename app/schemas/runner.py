@@ -412,7 +412,8 @@ class RunResultRequest(ApiRequestModel):
 class ApplyPatchResultRequest(ApiRequestModel):
     """반영 실행(APPLY_PATCH) 결과. 계약 2.1 `{appliedCommitSha, branch}` + 공통 칸만.
 
-    성공이면 branch 가 필수다. appliedCommitSha 는 러너가 커밋하지 못했으면(git 없는 사본) null.
+    성공이면 branch 가 필수다. appliedCommitSha 는 러너가 커밋하지 못했으면(git 없는 사본) null,
+    실패면 항상 null 이다(SPEC 3절).
     지문(승인 행 patchHash ↔ 입력 사본 diff 재계산)은 서비스가 본다.
     """
 
@@ -429,8 +430,11 @@ class ApplyPatchResultRequest(ApiRequestModel):
                 raise ValueError("failureCode must be null when status is SUCCEEDED")
             if self.branch is None:
                 raise ValueError("branch is required when status is SUCCEEDED")
-        if self.status == AgentRunStatus.FAILED and self.failure_code is None:
-            raise ValueError("failureCode is required when status is FAILED")
+        if self.status == AgentRunStatus.FAILED:
+            if self.failure_code is None:
+                raise ValueError("failureCode is required when status is FAILED")
+            if self.applied_commit_sha is not None:
+                raise ValueError("appliedCommitSha must be null when status is FAILED")
         return self
 
     def to_normalized(self) -> NormalizedApplyResult:

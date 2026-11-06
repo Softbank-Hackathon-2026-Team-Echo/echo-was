@@ -369,6 +369,45 @@ async def test_apply_patch_branch_mismatch_is_rejected(
     assert failure.status_code == 200, failure.text
 
 
+async def test_apply_patch_lease_expiry_is_checked_before_fingerprint(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    """임대가 지난 뒤 브랜치가 틀린 결과: 422 가 아니라 409 이고 만료가 저장된다."""
+    parent_id, apply_run_id = await _approved_patch(migration, runner)
+    claimed, _ = await _claim_apply(runner)
+    migration.harness.clock.advance(61)
+
+    late = await claimed.post("result", _apply_result(apply_run_id, branch="main"))
+
+    assert _error(late) == (409, "RUN_NOT_ACTIVE")
+    row = await run_row(migration, apply_run_id)
+    assert (row.status, row.failure_code) == (AgentRunStatus.TIMED_OUT, "LEASE_EXPIRED")
+    assert row.result is None
+    timed_out = (await run_audit_rows(migration, apply_run_id))[-1]
+    assert timed_out.action == AuditAction.AGENT_RUN_TIMED_OUT
+    patch = await _patch_in_detail(migration, parent_id)
+    assert (patch["status"], patch["apply"]["status"]) == ("APPLY_FAILED", "TIMED_OUT")
+
+
+async def test_apply_patch_failed_result_with_commit_sha_is_rejected(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    """SPEC 3절: FAILED 결과의 appliedCommitSha 는 null 이어야 한다. 아니면 422, 저장 없음."""
+    parent_id, apply_run_id = await _approved_patch(migration, runner)
+    claimed, _ = await _claim_apply(runner)
+
+    response = await claimed.post(
+        "result",
+        _apply_result(apply_run_id, status="FAILED", failureCode="BUILD_FAILED"),
+    )
+
+    assert _error(response) == (422, "RESULT_INVALID")
+    row = await run_row(migration, apply_run_id)
+    assert row.status == AgentRunStatus.CLAIMED
+    assert row.result is None
+    assert (await _patch_in_detail(migration, parent_id))["status"] == "APPROVED"
+
+
 async def test_precheck_result_patch_hash_must_be_hash_of_diff(
     migration: Migration, runner: RunnerFixture
 ) -> None:

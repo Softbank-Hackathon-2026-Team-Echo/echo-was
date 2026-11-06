@@ -251,24 +251,29 @@ class AgentRunService:
         성공 결과만 본다(실패는 그대로 받는다):
         - 입력 사본 patch.patchHash 또는 그 diff 로 다시 계산한 해시 ≠ 승인 행 → 422(PD-14).
         - branch 가 입력 사본 값(applied/<runId>)과 다름 → 422 BRANCH_MISMATCH.
+        임대·마감이 지났으면 지문보다 먼저 만료 전환하고 409 다(422 로 롤백하면 만료가 안 남는다).
         """
         now = self._clock.now()
         async with self._session.begin():
             run = await self._runs.find_by_id(run_id)
             if run is None or run.status not in OPEN_STATUSES:
                 raise ResultAlreadySubmittedError(str(run_id))
-            approval = await self._approvals.find_by_apply_run(run.id)
-            _check_apply_fingerprint(run, approval, normalized)
-            is_finished = await self._finish_or_expire(
-                run,
-                now,
-                {
-                    "status": normalized.status,
-                    "failure_code": normalized.failure_code,
-                    "result": normalized.result,
-                    "simulated": normalized.simulated,
-                },
-            )
+            if _is_lease_alive(run, now):
+                approval = await self._approvals.find_by_apply_run(run.id)
+                _check_apply_fingerprint(run, approval, normalized)
+                is_finished = await self._finish_or_expire(
+                    run,
+                    now,
+                    {
+                        "status": normalized.status,
+                        "failure_code": normalized.failure_code,
+                        "result": normalized.result,
+                        "simulated": normalized.simulated,
+                    },
+                )
+            else:
+                await expire_overdue_runs(self._runs, self._audit, now, run_id=run.id)
+                is_finished = False
             if is_finished:
                 self._record_apply_finished(run, normalized)
         if not is_finished:
@@ -351,6 +356,11 @@ class AgentRunService:
             target=run_target(run),
             details=details,
         )
+
+
+def _is_lease_alive(run: AgentRun, now: datetime) -> bool:
+    """임대와 마감이 모두 남아 있다. 저장소의 _is_lease_alive 와 같은 경계다."""
+    return run.lease_until is not None and run.lease_until >= now and run.deadline_at > now
 
 
 def _check_apply_fingerprint(

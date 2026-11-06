@@ -712,6 +712,13 @@ def test_apply_result_shape_violations_are_rejected(changes: dict[str, Any]) -> 
     assert _apply_rejected(_apply_body(**changes))
 
 
+def test_apply_result_failed_with_commit_sha_is_rejected() -> None:
+    """SPEC 3절: FAILED 면 appliedCommitSha 는 null 이다(실패한 반영의 커밋을 보이지 않는다)."""
+    body = _apply_body(status="FAILED", failureCode="BUILD_FAILED", appliedCommitSha=COMMIT_SHA)
+
+    assert _apply_rejected(body)
+
+
 def test_apply_result_success_without_commit_is_accepted() -> None:
     normalized = _parse_apply(_apply_body(appliedCommitSha=None)).to_normalized()
 
