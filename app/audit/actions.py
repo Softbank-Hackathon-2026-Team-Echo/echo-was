@@ -27,6 +27,7 @@ class AuditAction(StrEnum):
     SERVICE_DELETE_REQUESTED = "SERVICE_DELETE_REQUESTED"
     SERVICE_VARIABLE_SET = "SERVICE_VARIABLE_SET"
     SERVICE_VARIABLE_DELETED = "SERVICE_VARIABLE_DELETED"
+    SERVICE_VARIABLE_COPIED = "SERVICE_VARIABLE_COPIED"
     DEPLOY_REQUESTED = "DEPLOY_REQUESTED"
     ROLLBACK_REQUESTED = "ROLLBACK_REQUESTED"
     MIGRATION_PLAN_CREATED = "MIGRATION_PLAN_CREATED"
@@ -109,6 +110,9 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("DELETE", f"{_ORG}/services/{{service_id}}"): AuditAction.SERVICE_DELETE_REQUESTED,
     ("PUT", _SERVICE_VARIABLE): AuditAction.SERVICE_VARIABLE_SET,
     ("DELETE", _SERVICE_VARIABLE): AuditAction.SERVICE_VARIABLE_DELETED,
+    ("POST", f"{_ORG}/services/{{service_id}}/variables:copy"): (
+        AuditAction.SERVICE_VARIABLE_COPIED
+    ),
     ("POST", f"{_ORG}/services/{{service_id}}/deploy-requests"): AuditAction.DEPLOY_REQUESTED,
     ("POST", f"{_ORG}/deploy-requests/{{deploy_request_id}}/rollback"): (
         AuditAction.ROLLBACK_REQUESTED

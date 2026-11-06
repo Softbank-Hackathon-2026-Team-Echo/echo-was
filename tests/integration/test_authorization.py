@@ -155,6 +155,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
         A,
         human_only=True,
     ),
+    # 이슈 #99: 변수 복사는 넣기와 같은 검사기(개발자 사람).
+    _org("POST", "/services/{service_id}/variables:copy", D, human_only=True),
     # --- 보안 3: 기한부 예외(조회는 뷰어·에이전트, 요청·승인·철회는 개발자 이상 사람) ---
     _org("GET", "/security/exceptions", V),
     _org("GET", "/security/exceptions/{exception_id}", V),

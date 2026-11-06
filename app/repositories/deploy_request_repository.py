@@ -226,6 +226,20 @@ class DeployRequestRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def search_standby_sync_ids_by_source(
+        self, source_request_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """이 요청이 성공해 만든 예비 따라가기 요청 id(만든 순서)."""
+        statement = (
+            select(DeployRequest.id)
+            .where(
+                DeployRequest.source_request_id == source_request_id,
+                DeployRequest.trigger == DeployRequestTrigger.STANDBY_SYNC,
+            )
+            .order_by(DeployRequest.created_at, DeployRequest.id)
+        )
+        return list((await self._session.scalars(statement)).all())
+
     async def search_by_ids(self, deploy_request_ids: Sequence[uuid.UUID]) -> list[DeployRequest]:
         if not deploy_request_ids:
             return []

@@ -162,6 +162,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **외부 호출은 트랜잭션 밖 + 멱등 키**(빌드 `builds.id`, 배포·되돌리기 `deployments.id`, 내리기 `연결 id:teardown_attempt`) + "요청함 시각 저장·커밋 → 호출 → external_ref 저장" 순서([docs/executors.md](docs/executors.md)).
 - 일꾼·배포 코드의 시각은 주입한 `Clock` 으로 정한다(DB `now()` 에 기대지 않는다).
 - 같은 연결은 실행 1 + 대기 1(부분 unique 2개). 새 대기 요청은 `enqueue_deploy_request` 로만 넣는다(밀어내기 포함).
+- **예비 함께 띄우기(`standbyEnvironmentIds`, 이슈 #99)는 수동 요청 `config_snapshot` 에만 둔다.** 배포 기록·따라가기 사본에는 옮기지 않고(되돌리기가 다시 띄우지 않게), 일꾼 `_succeed` 가 기존 예비 따라가기 뒤에 연결 만들기 + `STANDBY_SYNC` 를 한다. 못 띄우면 `STANDBY_SKIPPED` 줄.
 - 가짜 결과는 `simulated = true` 를 **행에 저장**하고, 응답 때 설정으로 다시 계산하지 않는다. 설치 토큰·App 개인키는 `SecretValue`/메모리로만 다루고 저장·로그·응답에 넣지 않는다.
 
 ### 실제 실행기 (API 서버 3-2, 자주 어기는 것)
@@ -177,6 +178,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **배포 기록에 버전을 고정한다**(`config_snapshot.envVars`, `_deployment_snapshot`). 새 배포·예비 따라가기는 그 연결의 지금 최신, 되돌리기는 대상 기록 그대로, 재실행은 기록 그대로. 값은 실행기 호출 직전에 트랜잭션 밖에서 꺼낸다(`AppEnvResolver`).
 - **`env_values = None` 이면 실행기는 `{ns}-env` 를 읽지도 쓰지도 않는다**(옛 기록, 가짜 보관함 + 실제 실행기, gcp 모드의 `fake-sm:` 참조). `{}` 면 echo-was 소유 Secret 만 비운다. 손으로 만든 Secret 은 변수가 없는 연결에서 절대 건드리지 않는다. 쓸 때는 서버 측 apply 가 아니라 GET → PUT·POST 로 통째로 쓴다.
 - **값 넣기 API 만 잠근 채 외부를 부른다**(서비스 → 연결 잠금 안에서 `add_version`, 호출 전체 10초). 다른 곳에 따라 하지 않는다.
+- **복사(`variables:copy`, 이슈 #99)는 넣기 저장 경로(`ServiceVariableService._save`)를 대상·키마다 따로 탄다.** 원본 값은 잠금 밖에서 `access` 로 읽어 메모리로만 넘기고, 원본 행은 값(dataclass)으로만 든다(항목 실패의 롤백이 ORM 객체를 만료시킨다). 감사 줄은 키·환경 id 만.
 
 ### 되돌리기·배포 작업 로그 (자주 어기는 것)
 - **되돌리기는 `trigger = ROLLBACK` 배포 요청**이다(`DeployRequestService.create_rollback`). 대상의 `build_id`(`build_reused = true`)·커밋·배포 기록 `config_snapshot` 사본을 쓰고, 접수 순간 현재 배포를 `rollback_base_deployment_id` 에 적는다. 일꾼 `_start` 가 현재 배포가 다르면 `CANCELLED(BASE_CHANGED)`. 새 배포 기록은 `rollback_of_id` = 대상의 배포 기록. 예비 따라가기는 `MANUAL`·`ROLLBACK` 성공(서비스 중 연결)일 때만.

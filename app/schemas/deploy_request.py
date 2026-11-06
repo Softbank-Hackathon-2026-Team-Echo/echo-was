@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal, Self
 
-from pydantic import StringConstraints, field_validator, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from app.enums import (
@@ -28,9 +28,15 @@ from app.schemas.service import EnvironmentRefResponse
 from app.services.container_diagnostics import FailureDetail
 from app.services.deploy_log_messages import ERROR_MESSAGES
 from app.services.deploy_request_service import DeployRequestView, LogPageView
-from app.services.deploy_support import SNAPSHOT_ENVIRONMENT_URL, SNAPSHOT_MAIN_URL
+from app.services.deploy_support import (
+    SNAPSHOT_ENVIRONMENT_URL,
+    SNAPSHOT_MAIN_URL,
+    SNAPSHOT_STANDBY_ENVIRONMENT_IDS,
+)
 
 BRANCH_MAX_LENGTH = 255
+# 한 번에 함께 띄울 예비 환경 수 상한(이슈 #99).
+STANDBY_ENVIRONMENTS_MAX = 5
 INVALID_BRANCH_REASON = "INVALID_BRANCH"
 REF_REQUIRED_REASON = "EXACTLY_ONE_OF_BRANCH_OR_COMMIT_SHA"
 # git ref 이름 기본 금지: 공백·제어 문자, ~ ^ : ? * [ \, "..", "@{".
@@ -62,6 +68,10 @@ class CreateDeployRequest(ApiRequestModel):
     branch: str | None = None
     commit_sha: CommitSha | None = None
     simulate: SimulateRequest | None = None
+    # 선택(이슈 #99 2번). 주 환경 성공 뒤 각 환경에 연결을 만들고(없으면) STANDBY_SYNC 를 시작한다.
+    standby_environment_ids: list[uuid.UUID] = Field(
+        default_factory=list, max_length=STANDBY_ENVIRONMENTS_MAX
+    )
 
     @field_validator("branch")
     @classmethod
@@ -198,6 +208,12 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
     build: BuildRefResponse | None
     deployment_id: uuid.UUID | None
     urls: UrlsResponse
+    # 이슈 #99 2번(칸 이름은 가칭). 접수 때 받은 예비 환경 id(없으면 빈 목록)와,
+    # 이 요청이 성공해 만든 예비 따라가기(STANDBY_SYNC) 요청 id. 접수 응답(202)에서는
+    # 아직 없어 빈 목록이고, 주 환경이 성공한 뒤 상세 조회에 나온다.
+    # 나중에 더한 칸이라 OpenAPI 에서는 선택 칸이다.
+    standby_environment_ids: list[uuid.UUID] = Field(default_factory=list)
+    standby_deploy_request_ids: list[uuid.UUID] = Field(default_factory=list)
 
     @classmethod
     def from_view(cls, view: DeployRequestView) -> Self:
@@ -230,6 +246,11 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
                 main=str(request.config_snapshot[SNAPSHOT_MAIN_URL]),
                 environment=str(request.config_snapshot[SNAPSHOT_ENVIRONMENT_URL]),
             ),
+            standby_environment_ids=[
+                uuid.UUID(str(item))
+                for item in request.config_snapshot.get(SNAPSHOT_STANDBY_ENVIRONMENT_IDS) or []
+            ],
+            standby_deploy_request_ids=list(view.standby_request_ids),
         )
 
 
