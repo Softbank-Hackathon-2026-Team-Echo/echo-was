@@ -7,14 +7,15 @@ API 서버 17(이전 계획에 DB 쓰기 전환 단계 넣기). CHECK 를 넓히
 - migration_plans.rollback_status: SKIPPED(자동으로 되돌리지 않음)를 더한다
 칸·인덱스는 바꾸지 않는다. 옛 파드는 새 값을 쓰지 않으므로 롤아웃 동안 안전하다.
 
-down_revision 은 main(#101 병합 뒤)의 head `9d8e1f2a3b4c`(agent_runs.deploy_request_id)다. 그
-리비전은 agent_runs 만 바꾸므로 이 CHECK 들과 겹치지 않는다. 이 PR 앞에 다른 마이그레이션이 먼저
-병합되면 병합할 때 down_revision 을 그 head 로 다시 맞춘다.
+down_revision 은 main(#103 병합 뒤)의 head `8748e995387a`(실제 재난 피드: disasters·organizations·
+disaster_feed_states)다. 그 리비전은 migration_plans 를 바꾸지 않으므로 이 CHECK
+들과 겹치지 않는다. 이 PR 앞에 다른 마이그레이션이 먼저 병합되면 병합할 때 down_revision 을 그
+head 로 다시 맞춘다.
 
 autogenerate 는 CHECK 정의 변경을 감지하지 못해 직접 적었다.
 
 Revision ID: 7c2e5a9d4b18
-Revises: 9d8e1f2a3b4c
+Revises: 8748e995387a
 Create Date: 2026-11-07 04:30:00.000000
 
 """
@@ -26,7 +27,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "7c2e5a9d4b18"
-down_revision: str | Sequence[str] | None = "9d8e1f2a3b4c"
+down_revision: str | Sequence[str] | None = "8748e995387a"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

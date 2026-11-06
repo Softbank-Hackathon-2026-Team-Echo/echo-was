@@ -347,9 +347,26 @@ class DisasterType(StrEnum):
 
 
 class DisasterSource(StrEnum):
-    """재난 정보 출처. 지금은 사람이 버튼으로 낸 시뮬레이션뿐이다."""
+    """재난 정보 출처(API 서버 9·18).
+
+    - SIMULATED: 사람이 재난 버튼으로 낸 시뮬레이션(simulated=true, 만든 사람 있음).
+    - LIVE_FEED: 실제 지진 피드(USGS)에서 서버가 만든 재난(simulated=false, 만든 사람 없음).
+    - FEED_INJECTED: 시연용으로 피드에 넣은 가짜 지진이 피드와 같은 경로로 만든
+      재난(simulated=true).
+    """
 
     SIMULATED = "SIMULATED"
+    LIVE_FEED = "LIVE_FEED"
+    FEED_INJECTED = "FEED_INJECTED"
+
+
+class LiveFeedConnectionStatus(StrEnum):
+    """실제 재난 피드 연결 상태(GET /disasters/feed). 스위치가 꺼져 있으면 DISABLED 다."""
+
+    DISABLED = "DISABLED"
+    WAITING = "WAITING"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
 
 
 class DisasterStatus(StrEnum):
@@ -749,6 +766,15 @@ class SecurityFindingReason(StrEnum):
     SECRETS_MISSING = "SECRETS_MISSING"
     # 사람 점검 기록. 결과는 점검자가 정한 값(result)이다.
     MANUAL_REVIEW_RECORDED = "MANUAL_REVIEW_RECORDED"
+    # 플랫폼 자기 시험(보안 5-3). C-IAM-2: 일회용 에이전트 토큰의 쓰기 요청이 모두 403
+    # AGENT_READ_ONLY(PASS) · 하나라도 다른 응답(FAIL, 근거 줄 = 경로·응답 코드).
+    AGENT_WRITES_DENIED = "AGENT_WRITES_DENIED"
+    AGENT_WRITE_NOT_DENIED = "AGENT_WRITE_NOT_DENIED"
+    # C-AUD-1: 최근 24시간 승인·게이트 판정·AI 실행·예외·거부가 실행 ID 로 감사 기록에 있고
+    # 쓰기 경로가 모두 이름표에 있다(PASS) · 빠진 기록(FAIL) · 이름표에 없는 쓰기 경로(FAIL).
+    AUDIT_TRAIL_COMPLETE = "AUDIT_TRAIL_COMPLETE"
+    AUDIT_RECORD_MISSING = "AUDIT_RECORD_MISSING"
+    AUDIT_ROUTE_UNNAMED = "AUDIT_ROUTE_UNNAMED"
 
 
 # --- AI 에이전트 실행 (WAS ↔ 러너 계약 v1) ---
