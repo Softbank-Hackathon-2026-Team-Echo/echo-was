@@ -41,10 +41,12 @@ from app.services.migration_plan_support import (
     CONDITION_MAX_P95_MS,
     CONDITION_MAX_REPLICATION_LAG,
     DATA_SYNC_STEP,
+    DB_CUTOVER_STEP,
     DEFAULT_MAX_ERROR_RATE_PERCENT,
     DEFAULT_MAX_P95_MS,
     DEFAULT_MAX_REPLICATION_LAG_SECONDS,
     RESULT_COUNTING,
+    RESULT_CUTOVER,
     RESULT_FAILURE_CODE,
     RESULT_FINISHED_AT,
     RESULT_METRICS,
@@ -54,6 +56,7 @@ from app.services.migration_plan_support import (
     STEP_EXPECTED_SECONDS,
     STEP_INDEX,
     STEP_KIND,
+    STEP_MAX_WAIT_SECONDS,
     STEP_REQUIRED_REQUESTS,
     STEP_SOURCE_WEIGHT,
     STEP_TARGET_WEIGHT,
@@ -74,6 +77,10 @@ _SIMULATE_STEPS: dict[MigrationSimulateReason, frozenset[int]] = {
     MigrationSimulateReason.LOW_TRAFFIC: frozenset(SHIFT_STEPS),
     MigrationSimulateReason.TARGET_NOT_RECEIVING: frozenset(SHIFT_STEPS[:2]),
     MigrationSimulateReason.DATA_LAG: frozenset({DATA_SYNC_STEP}),
+    MigrationSimulateReason.DB_CUTOVER_FAIL: frozenset({DB_CUTOVER_STEP}),
+    MigrationSimulateReason.DB_CUTOVER_PARTIAL: frozenset({DB_CUTOVER_STEP}),
+    MigrationSimulateReason.DB_CUTOVER_TIMEOUT: frozenset({DB_CUTOVER_STEP}),
+    MigrationSimulateReason.DATA_INTEGRITY: frozenset({DB_CUTOVER_STEP}),
 }
 # 저장된 옛 계획을 읽으려고 enum 값만 남긴 이유(요청으로는 받지 않는다).
 _REMOVED_SIMULATE_REASONS = frozenset({MigrationSimulateReason.LATENCY})
@@ -96,8 +103,9 @@ class RollbackConditionsRequest(ApiRequestModel):
 class MigrationSimulateRequest(ApiRequestModel):
     """가짜 실행기 모드에서만 받는다. failAtStep 단계를 reason 대로 실패(또는 트래픽 적음)시킨다.
 
-    DATA_LAG 는 데이터 확인 단계(3)만, TARGET_NOT_RECEIVING 은 비율 단계 1·2만, 그 밖의 reason 은
-    비율 단계(1·2·4)만 고를 수 있다. LATENCY 는 받지 않는다(p95 는 판정에 쓰지 않는다).
+    DATA_LAG 는 데이터 확인 단계(3)만, TARGET_NOT_RECEIVING 은 비율 단계 1·2만, DB_CUTOVER_* ·
+    DATA_INTEGRITY 는 DB 쓰기 전환 단계(5, includeCutover=true 계획만)만, 그 밖의 reason 은 비율
+    단계(1·2·4)만 고를 수 있다. LATENCY 는 받지 않는다(p95 는 판정에 쓰지 않는다).
     """
 
     fail_at_step: int = Field(ge=1, le=LAST_STEP_INDEX)
@@ -135,6 +143,18 @@ class CreateMigrationPlanRequest(ApiRequestModel):
         default_factory=RollbackConditionsRequest
     )
     simulate: MigrationSimulateRequest | None = None
+    # 비율 100% 뒤에 DB 쓰기 전환(인프라 컷오버 Job) 단계를 더한다(API 서버 17). 기본 false.
+    include_cutover: bool = False
+
+    @model_validator(mode="after")
+    def _check_cutover_simulate(self) -> Self:
+        if (
+            self.simulate is not None
+            and self.simulate.fail_at_step == DB_CUTOVER_STEP
+            and not self.include_cutover
+        ):
+            raise PydanticCustomError("simulate_step_mismatch", SIMULATE_STEP_MISMATCH_REASON)
+        return self
 
 
 class UserRefResponse(ApiModel):
@@ -166,6 +186,44 @@ class StepMetricsResponse(ApiModel):
     replication_lag_seconds: float | None = None
 
 
+class StepCutoverRunResponse(ApiModel):
+    """컷오버 Job 이 고객 DB 결과 표(echo_ops.cutover_runs)에 남긴 이 계획의 행."""
+
+    kind: CutoverKind
+    paused_at: datetime
+    resumed_at: datetime
+    write_pause_ms: int
+    drain_ms: int | None
+    catchup_ms: int | None
+    switch_ms: int | None
+    rows_total: int | None
+    missing_rows: int | None
+    duplicate_rows: int | None
+    mode: str | None
+    rpo_estimate_ms: int | None
+
+
+class StepCutoverResponse(ApiModel):
+    """DB 쓰기 전환 단계(API 서버 17)의 Job 과 결과. 그 밖의 단계는 null.
+
+    jobKind = cutover·rollback(복귀)·promote, allowPromote = 재난 긴급 이전,
+    exitCode = 스크립트 종료 코드(0 끝남·1 바뀐 것 없음·2 부분 상태, 모르면 null),
+    reason = 건너뜀·판정 이유
+    (ALREADY_WRITER·ALREADY_DONE·PROMOTED·ROWS_MISMATCH·RESULT_MISSING·RESULT_UNAVAILABLE·JOB_LOST·
+    TIMED_OUT), startFailure = Job 을 만들지 못한 이유 코드, run = 결과 행.
+    """
+
+    job_name: str | None = None
+    job_kind: str | None = None
+    allow_promote: bool | None = None
+    exit_code: int | None = None
+    reason: str | None = None
+    job_finished: bool | None = None
+    job_lost: bool | None = None
+    start_failure: str | None = None
+    run: StepCutoverRunResponse | None = None
+
+
 class StepResultResponse(ApiModel):
     status: MigrationStepStatus
     started_at: datetime | None
@@ -189,6 +247,8 @@ class MigrationStepResponse(ApiModel):
     max_wait_seconds: int | None
     expected_seconds: int
     result: StepResultResponse
+    # DB 쓰기 전환 단계(API 서버 17)의 Job·결과 행. 그 밖의 단계와 아직 시작 전이면 null.
+    cutover: StepCutoverResponse | None = None
 
 
 class RollbackConditionsResponse(ApiModel):
@@ -439,6 +499,7 @@ def _step_response(
     step: dict[str, Any], result: dict[str, Any], max_wait_seconds: int
 ) -> MigrationStepResponse:
     metrics = result.get(RESULT_METRICS)
+    cutover = result.get(RESULT_CUTOVER)
     kind = MigrationStepKind(step[STEP_KIND])
     is_shift = kind is MigrationStepKind.SHIFT
     return MigrationStepResponse(
@@ -447,7 +508,13 @@ def _step_response(
         source_weight=step[STEP_SOURCE_WEIGHT],
         target_weight=step[STEP_TARGET_WEIGHT],
         required_requests=step.get(STEP_REQUIRED_REQUESTS),
-        max_wait_seconds=max_wait_seconds if is_shift else None,
+        max_wait_seconds=(
+            max_wait_seconds
+            if is_shift
+            else step.get(STEP_MAX_WAIT_SECONDS)
+            if kind is MigrationStepKind.DB_CUTOVER
+            else None
+        ),
         expected_seconds=int(step[STEP_EXPECTED_SECONDS]),
         result=StepResultResponse(
             status=MigrationStepStatus(result[RESULT_STATUS]),
@@ -456,6 +523,7 @@ def _step_response(
             metrics=StepMetricsResponse.model_validate(metrics) if metrics else None,
             failure_code=result.get(RESULT_FAILURE_CODE),
         ),
+        cutover=StepCutoverResponse.model_validate(cutover) if cutover else None,
     )
 
 

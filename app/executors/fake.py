@@ -15,6 +15,8 @@
   0.1%·p95 120ms·요청 수 max(1, round(rps × 비율/100 × 창 초)), 복제 지연 0.3초. 누적 카운터
   (read_counts)는 주입 시계로 "rps × 그 연결 비율/100 × 지난 초"를 쌓고 5xx 는 0 이다. rps 는 설정
   MIGRATION_EXPECTED_RPS 한 값을 넣는다.
+- DB 쓰기 전환(API 서버 17) 가짜는 Job 을 만들지 않고 step_seconds 뒤 종료 0 으로 끝나며, 결과 행은
+  쓰기 정지 1500ms·장부 100건·누락 0·중복 0 이다. job 이름에 계획 id·시작 시각을 담는다.
 """
 
 import hashlib
@@ -37,9 +39,20 @@ from app.executors.base import (
     ContainerDiagnostics,
     CountsResult,
     CountsUnavailable,
+    CutoverRun,
+    CutoverRunNotFound,
+    CutoverRunResult,
     DataSyncLag,
     DataSyncResult,
     DataSyncUnavailable,
+    DbCutoverFinished,
+    DbCutoverLost,
+    DbCutoverPollResult,
+    DbCutoverRequest,
+    DbCutoverRunning,
+    DbCutoverStarted,
+    DbCutoverStartFailed,
+    DbCutoverStartResult,
     DeployApplied,
     DeployFailed,
     DeploymentSpec,
@@ -595,3 +608,91 @@ class FakeDataSyncChecker:
         if self.unavailable:
             return DataSyncUnavailable()
         return DataSyncLag(seconds=FAKE_REPLICATION_LAG_SECONDS)
+
+
+FAKE_CUTOVER_WRITE_PAUSE_MS = 1500
+FAKE_CUTOVER_ROWS_TOTAL = 100
+_FAKE_CUTOVER_PREFIX = "fake-cutover"
+
+
+class FakeDbCutoverExecutor:
+    """가짜 DB 쓰기 전환. 시험은 exit_code·reason·never_finish·start_failure·run 으로 결과를 바꾼다.
+
+    run 을 주지 않으면 종료 0 으로 끝났을 때 누락·중복 0 인 결과 행을 만든다(종료 1·2·끝나지 않음·
+    사라짐은 행 없음).
+    """
+
+    def __init__(
+        self,
+        clock: Clock,
+        step_seconds: float,
+        *,
+        exit_code: int | None = 0,
+        reason: str | None = None,
+        never_finish: bool = False,
+        lost: bool = False,
+        start_failure: DbCutoverStartFailed | None = None,
+        run: CutoverRun | None = None,
+        no_run: bool = False,
+    ) -> None:
+        self._clock = clock
+        self._step = timedelta(seconds=step_seconds)
+        self.exit_code = exit_code
+        self.reason = reason
+        self.never_finish = never_finish
+        self.lost = lost
+        self.start_failure = start_failure
+        self.run = run
+        self.no_run = no_run
+        self.started: list[DbCutoverRequest] = []
+        self.polls = 0
+        self._started_at: dict[uuid.UUID, datetime] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def start(self, request: DbCutoverRequest) -> DbCutoverStartResult:
+        self.started.append(request)
+        if self.start_failure is not None:
+            return self.start_failure
+        started_at = self._started_at.setdefault(request.plan_id, self._clock.now())
+        return DbCutoverStarted(
+            _SEPARATOR.join((_FAKE_CUTOVER_PREFIX, str(request.plan_id), started_at.isoformat()))
+        )
+
+    async def poll(self, job_name: str) -> DbCutoverPollResult:
+        self.polls += 1
+        if self.lost:
+            return DbCutoverLost("JOB_NOT_FOUND")
+        _, _, started = job_name.split(_SEPARATOR)
+        if self.never_finish or self._clock.now() < datetime.fromisoformat(started) + self._step:
+            return DbCutoverRunning()
+        return DbCutoverFinished(self.exit_code, self.reason)
+
+    async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:
+        if self.run is not None:
+            return self.run
+        if (
+            self.no_run
+            or self.never_finish
+            or self.lost
+            or self.exit_code != 0
+            or self.reason is not None
+        ):
+            return CutoverRunNotFound()
+        started_at = self._started_at.get(request.plan_id, self._clock.now())
+        resumed_at = started_at + timedelta(milliseconds=FAKE_CUTOVER_WRITE_PAUSE_MS)
+        return CutoverRun(
+            kind=request.result_kind,
+            paused_at=started_at,
+            resumed_at=resumed_at,
+            write_pause_ms=FAKE_CUTOVER_WRITE_PAUSE_MS,
+            drain_ms=100,
+            catchup_ms=400,
+            switch_ms=1000,
+            rows_total=FAKE_CUTOVER_ROWS_TOTAL,
+            missing_rows=0,
+            duplicate_rows=0,
+            mode="NORMAL",
+        )

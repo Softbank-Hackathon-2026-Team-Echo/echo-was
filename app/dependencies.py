@@ -466,6 +466,9 @@ def get_migration_plan_service(
             if tls_checker is not None
             else None
         ),
+        db_cutover_mode=settings.db_cutover_executor_mode,
+        db_cutover_timeout_seconds=settings.migration_db_cutover_timeout_seconds,
+        db_cutover_on_disaster=settings.migration_db_cutover_on_disaster,
     )
 
 

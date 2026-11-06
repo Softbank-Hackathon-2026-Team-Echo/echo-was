@@ -28,6 +28,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from app.adapters.base import EnvironmentConfig
@@ -377,6 +378,9 @@ class CutoverRun:
     rows_total: int | None
     missing_rows: int | None
     duplicate_rows: int | None
+    # 계획 id 로 찾을 때만 읽는다(인프라 12.1 칸). NORMAL·PROMOTE, 승격 때 잃었을 수 있는 범위(ms).
+    mode: str | None = None
+    rpo_estimate_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +396,69 @@ class CutoverRunUnavailable:
 
 
 type CutoverRunResult = CutoverRun | CutoverRunNotFound | CutoverRunUnavailable
+
+
+class DbCutoverJobKind(StrEnum):
+    """컷오버 Job 의 KIND 환경 변수(echo-infra cutover-entry.sh, VAP 가 이 셋만 받는다)."""
+
+    CUTOVER = "cutover"
+    ROLLBACK = "rollback"
+    PROMOTE = "promote"
+
+
+@dataclass(frozen=True)
+class DbCutoverRequest:
+    """DB 쓰기 전환 한 번. plan_id 가 Job 이름·PLAN_ID·결과 행 찾기의 열쇠다.
+
+    target 은 결과 행을 읽을 쪽(이전 계획의 도착 환경 = 새 쓰기 담당)이다. result_kind 는 결과 표의
+    kind(CUTOVER·ROLLBACK)다.
+    """
+
+    plan_id: uuid.UUID
+    job_kind: DbCutoverJobKind
+    allow_promote: bool
+    target: CutoverRunTarget
+    result_kind: CutoverKind
+
+
+@dataclass(frozen=True)
+class DbCutoverStarted:
+    job_name: str
+
+
+@dataclass(frozen=True)
+class DbCutoverStartFailed:
+    """Job 을 만들지 못했다. retryable 이면 다음 확인 때 같은 이름으로 다시 만든다."""
+
+    code: str
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
+class DbCutoverRunning:
+    pass
+
+
+@dataclass(frozen=True)
+class DbCutoverFinished:
+    """Job 이 끝났다. exit_code 는 스크립트 종료 코드(0 끝남·1 바뀐 것 없음·2 부분 상태) 또는 None.
+
+    reason 은 종료 0 일 때 로그에서 읽은 건너뜀 이유(ALREADY_WRITER·ALREADY_DONE·PROMOTED)다.
+    """
+
+    exit_code: int | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DbCutoverLost:
+    """Job 이 사라졌다(누가 지웠거나 TTL). 쓰기 담당을 알 수 없다."""
+
+    code: str
+
+
+type DbCutoverStartResult = DbCutoverStarted | DbCutoverStartFailed
+type DbCutoverPollResult = DbCutoverRunning | DbCutoverFinished | DbCutoverLost
 
 
 def check_weights_total(weights: tuple[WeightedTarget, ...]) -> None:
@@ -623,6 +690,44 @@ class CutoverRunReader(Protocol):
         없으면 CutoverRunNotFound, 읽지 못하면 CutoverRunUnavailable 이고 예외를 올리지 않는다.
         """
         ...
+
+
+class DbCutoverExecutor(Protocol):
+    """DB 쓰기 전환(API 서버 17). 실제 구현은 서울 GKE echo-ops 의 컷오버 Job, 가짜는 fake."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    async def start(self, request: DbCutoverRequest) -> DbCutoverStartResult:
+        """Job 을 만든다. 같은 계획으로 이미 있으면 그 Job 이다(멱등). 예외를 올리지 않는다."""
+        ...
+
+    async def poll(self, job_name: str) -> DbCutoverPollResult:
+        """Job 상태. 창구에 닿지 못하면 DbCutoverRunning(부르는 쪽 제한 시간이 끊는다)."""
+        ...
+
+    async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:
+        """이 계획(plan_id)·종류의 결과 행. 없으면 NotFound, 읽지 못하면 Unavailable."""
+        ...
+
+
+class DisabledDbCutoverExecutor:
+    """기본 구현(DB_CUTOVER_EXECUTOR_MODE=disabled). 계획 만들기가 먼저 막으므로 부르지 않는다."""
+
+    DISABLED = "DB_CUTOVER_DISABLED"
+
+    @property
+    def enabled(self) -> bool:
+        return False
+
+    async def start(self, request: DbCutoverRequest) -> DbCutoverStartResult:
+        return DbCutoverStartFailed(self.DISABLED)
+
+    async def poll(self, job_name: str) -> DbCutoverPollResult:
+        return DbCutoverLost(self.DISABLED)
+
+    async def find_run(self, request: DbCutoverRequest) -> CutoverRunResult:
+        return CutoverRunNotFound()
 
 
 class NoCutoverRuns:

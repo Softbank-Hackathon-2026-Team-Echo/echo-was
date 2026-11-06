@@ -32,8 +32,11 @@ STEP_DEFINITIONS: tuple[tuple[MigrationStepKind, int | None], ...] = (
     (MigrationStepKind.DATA_SYNC_CHECK, None),
     (MigrationStepKind.SHIFT, 100),
 )
-LAST_STEP = len(STEP_DEFINITIONS) - 1
 DATA_SYNC_STEP = 3
+# DB 쓰기 전환 단계(API 서버 17). includeCutover 계획만, 모든 종류에서 비율 100% 뒤 마지막(5)이다.
+DB_CUTOVER_STEP = len(STEP_DEFINITIONS)
+# Job 시작·기다림의 예상 초(쓰기 정지 실측 17초 안팎 + Job 파드 시작). 표시용이다.
+DB_CUTOVER_EXPECTED_SECONDS = 30
 # 비율 단계 번호(10·50·100% 순). 필요 건수 목록(requiredRequests)의 순서와 같다.
 SHIFT_STEPS = tuple(
     index for index, (kind, _) in enumerate(STEP_DEFINITIONS) if kind is MigrationStepKind.SHIFT
@@ -63,6 +66,8 @@ RESULT_FAILURE_CODE = "failureCode"
 # 비율 단계의 건수 세기 상태(migration_counting.StepCounting)와 세기를 끝낸 이유.
 RESULT_COUNTING = "counting"
 RESULT_JUDGE_REASON = "judgeReason"
+# DB 쓰기 전환 단계 결과(API 서버 17): Job·종료 코드·결과 행 숫자(아래 CUTOVER_* 키).
+RESULT_CUTOVER = "cutover"
 CONDITION_MAX_ERROR_RATE = "maxErrorRatePercent"
 CONDITION_MAX_P95_MS = "maxP95Ms"
 CONDITION_MAX_REPLICATION_LAG = "maxReplicationLagSeconds"
@@ -89,10 +94,13 @@ def build_steps(
     max_wait_seconds: int,
     requests_per_second: int,
     overhead_seconds: int,
+    *,
+    db_cutover_timeout_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """고정 5단계. 단계 예상 = 여유 + (비율 단계면 건수를 채울 예상 초, 최대 대기 이하).
 
-    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다.
+    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다. db_cutover_timeout_seconds 를
+    주면 맨 뒤에 DB 쓰기 전환 단계(5)를 더한다(그 단계의 maxWaitSeconds = Job 기다림 상한).
     """
     required_by_step = dict(zip(SHIFT_STEPS, required_requests, strict=True))
     steps: list[dict[str, Any]] = []
@@ -116,7 +124,29 @@ def build_steps(
                 STEP_EXPECTED_SECONDS: overhead_seconds + shift_seconds,
             }
         )
+    if db_cutover_timeout_seconds is not None:
+        steps.append(
+            {
+                STEP_INDEX: DB_CUTOVER_STEP,
+                STEP_KIND: MigrationStepKind.DB_CUTOVER.value,
+                STEP_TARGET_WEIGHT: None,
+                STEP_SOURCE_WEIGHT: None,
+                STEP_REQUIRED_REQUESTS: None,
+                STEP_MAX_WAIT_SECONDS: db_cutover_timeout_seconds,
+                STEP_OBSERVE_SECONDS: None,
+                STEP_EXPECTED_SECONDS: overhead_seconds + DB_CUTOVER_EXPECTED_SECONDS,
+            }
+        )
     return steps
+
+
+def last_step(steps: Sequence[dict[str, Any]]) -> int:
+    """마지막 단계 번호(5단계 계획 4, DB 쓰기 전환을 더한 계획 5)."""
+    return len(steps) - 1
+
+
+def has_db_cutover(steps: Sequence[dict[str, Any]]) -> bool:
+    return any(step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value for step in steps)
 
 
 def step_required_requests(

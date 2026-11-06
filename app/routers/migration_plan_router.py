@@ -55,6 +55,7 @@ async def create_migration_plan(
             max_replication_lag_seconds=conditions.max_replication_lag_seconds,
             simulate_fail_at_step=simulate.fail_at_step if simulate is not None else None,
             simulate_reason=simulate.reason if simulate is not None else None,
+            include_db_cutover=request.include_cutover,
         ),
     )
     return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))

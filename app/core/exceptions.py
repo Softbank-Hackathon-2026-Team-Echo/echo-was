@@ -400,6 +400,12 @@ class MigrationPlanOpenError(ConflictError):
         super().__init__("service already has an open migration plan", details=details)
 
 
+class DbCutoverDisabledError(ConflictError):
+    """includeCutover=true 인데 DB 쓰기 전환 실행기가 꺼져 있다(실행기 disabled)."""
+
+    code = "DB_CUTOVER_DISABLED"
+
+
 class SourceNotSingleError(ConflictError):
     """서비스 중 연결이 정확히 하나(비율 100)가 아니다(없음·여럿·이전 중간 비율)."""
 

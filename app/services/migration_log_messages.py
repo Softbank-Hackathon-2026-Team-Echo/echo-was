@@ -40,6 +40,22 @@ MIGRATION_ERROR_MESSAGES: dict[MigrationErrorCode, str] = {
         "The security gate blocked the migration: a required security control failed or could "
         "not be confirmed. Traffic was not changed."
     ),
+    MigrationErrorCode.DB_CUTOVER_FAILED: (
+        "The database cutover job did not move the database writer (nothing changed), so traffic "
+        "is sent back to the source environment."
+    ),
+    MigrationErrorCode.DB_CUTOVER_TIMEOUT: (
+        "The database cutover job did not finish in time. The database writer is unknown, so "
+        "nothing was rolled back automatically."
+    ),
+    MigrationErrorCode.DB_CUTOVER_PARTIAL: (
+        "The database cutover job stopped midway. Nothing was rolled back automatically; follow "
+        "the partial-state recovery runbook."
+    ),
+    MigrationErrorCode.DATA_INTEGRITY_FAILED: (
+        "The database writer moved to the target, but the ledger check found missing or duplicate "
+        "rows (or no result). Nothing was rolled back automatically."
+    ),
 }
 
 # 트래픽 적음으로 통과한 JUDGE_PASSED 줄(data.lowTraffic = true)에 붙이는 문장.
@@ -127,9 +143,26 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
         "Security gate blocked this step: a required security control failed or could not be "
         "confirmed.",
     ),
+    _C.DB_CUTOVER_JOB_CREATED: MigrationLogEntry(
+        _INFO, "Database cutover job created. Waiting for it to finish."
+    ),
+    _C.DB_CUTOVER_JOB_FINISHED: MigrationLogEntry(_INFO, "Database cutover job finished."),
+    _C.DB_CUTOVER_OK: MigrationLogEntry(
+        _INFO,
+        "Database cutover passed: the target is the database writer with no missing or "
+        "duplicate rows.",
+    ),
+    # DB_CUTOVER_FAILED 는 원인 코드 문장을 붙여 쓴다.
+    _C.DB_CUTOVER_FAILED: MigrationLogEntry(_ERROR, "Database cutover failed."),
+    _C.DB_CUTOVER_MANUAL_REQUIRED: MigrationLogEntry(
+        _WARN,
+        "Traffic and the database were left as they are. A person must check the database writer.",
+    ),
 }
 
-_WITH_CAUSE = frozenset({_C.JUDGE_FAILED, _C.DATA_SYNC_FAILED, _C.ROLLBACK_STARTED, _C.FAILED})
+_WITH_CAUSE = frozenset(
+    {_C.JUDGE_FAILED, _C.DATA_SYNC_FAILED, _C.ROLLBACK_STARTED, _C.FAILED, _C.DB_CUTOVER_FAILED}
+)
 
 
 def migration_log_message(

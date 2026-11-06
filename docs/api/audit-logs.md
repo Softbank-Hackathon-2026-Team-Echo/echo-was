@@ -132,6 +132,7 @@
 | `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
 | `DEPLOY_FINISHED` · `ROLLBACK_FINISHED` | 끝 상태(SYSTEM). `trigger = ROLLBACK` 이면 `ROLLBACK_FINISHED`, 예비 따라가기는 `DEPLOY_FINISHED` + `details.trigger` | `deploy_request` | `{status, trigger, cancelReason?, errorCode?, simulated?}` |
 | `MIGRATION_FINISHED` | 끝 상태(SYSTEM) | `migration_plan` | `{status, errorCode?, simulated?}` |
+| `MIGRATION_DB_CUTOVER_STARTED` · `MIGRATION_DB_CUTOVER_FINISHED` | DB 쓰기 전환 단계(API 서버 17)가 컷오버 Job 을 만듦 · 판정함(SYSTEM `migration-worker`). 판정 실패면 `result = FAILED` | `migration_plan` | `{jobName, jobKind, allowPromote?, exitCode?, reason?, writePauseMs?, rowsTotal?, missingRows?, duplicateRows?, mode?, errorCode?, simulated?}` |
 | `SERVICE_DELETED` | 삭제 완료(SYSTEM) | `service` | `{}` |
 | `RESOURCE_READ` | 에이전트의 성공한 읽기(AGENT) | 없음 | `{}` |
 

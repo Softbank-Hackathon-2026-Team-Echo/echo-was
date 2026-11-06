@@ -23,6 +23,7 @@ from app.executors.base import HealthOk, HealthProbeResult
 from app.executors.fake import (
     FakeBuildExecutor,
     FakeDataSyncChecker,
+    FakeDbCutoverExecutor,
     FakeDeployExecutor,
     FakeMainRouteExecutor,
     FakeMetricsProvider,
@@ -105,6 +106,7 @@ class FakeExecutors:
     traffic: Any
     metrics: FakeMetricsProvider
     data_sync: FakeDataSyncChecker
+    db_cutover: FakeDbCutoverExecutor
 
     def as_set(self) -> ExecutorSet:
         return ExecutorSet(
@@ -116,6 +118,7 @@ class FakeExecutors:
             traffic=self.traffic,
             metrics=self.metrics,
             data_sync=self.data_sync,
+            db_cutover=self.db_cutover,
         )
 
 
@@ -130,6 +133,7 @@ def make_fake_executors(clock: FakeClock) -> FakeExecutors:
         traffic=traffic,
         metrics=FakeMetricsProvider(clock, traffic.weight_of),
         data_sync=FakeDataSyncChecker(),
+        db_cutover=FakeDbCutoverExecutor(clock, 0),
     )
 
 

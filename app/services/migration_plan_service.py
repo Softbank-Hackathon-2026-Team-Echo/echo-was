@@ -32,8 +32,9 @@ from app.audit.actions import AuditAction, AuditComponent
 from app.audit.lifecycle import migration_plan_target, record_migration_plan_finished
 from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
-from app.core.config import ExecutorMode
+from app.core.config import DbCutoverExecutorMode, ExecutorMode
 from app.core.exceptions import (
+    DbCutoverDisabledError,
     DeployInProgressError,
     DisasterActiveError,
     EnvironmentUnhealthyError,
@@ -135,6 +136,8 @@ class CreateMigrationPlanCommand:
     max_replication_lag_seconds: float
     simulate_fail_at_step: int | None = None
     simulate_reason: MigrationSimulateReason | None = None
+    # 비율 100% 뒤에 DB 쓰기 전환 단계를 더한다(API 서버 17). 기본 false = 지금과 같은 5단계.
+    include_db_cutover: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,8 +202,14 @@ class MigrationPlanService:
         step_overhead_seconds: int,
         approval_ttl_seconds: int,
         security_gate: SecurityGate | None = None,
+        db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
+        db_cutover_timeout_seconds: int = 180,
+        db_cutover_on_disaster: bool = False,
     ) -> None:
         self._session = session
+        self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
+        self._db_cutover_timeout_seconds = db_cutover_timeout_seconds
+        self._db_cutover_on_disaster = db_cutover_on_disaster
         self._security_gate = security_gate
         self._clock = clock
         self._executor_mode = executor_mode
@@ -259,6 +268,11 @@ class MigrationPlanService:
             and self._executor_mode is not ExecutorMode.FAKE
         ):
             raise SimulateNotAllowedError("simulate is only accepted with fake executors")
+        if command.include_db_cutover and not self._db_cutover_enabled:
+            raise DbCutoverDisabledError("database cutover step is not enabled on this server")
+        include_db_cutover = command.include_db_cutover or (
+            disaster is not None and self._db_cutover_on_disaster and self._db_cutover_enabled
+        )
 
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id)
@@ -290,7 +304,9 @@ class MigrationPlanService:
             await self._check_target_not_in_active_disaster(environment.id)
             await self._check_no_open_deploy_requests(service.id, target)
             target = await self._check_target_ready(source, target)
-            plan = self._new_plan(service, source, target, actor_user_id, command, now)
+            plan = self._new_plan(
+                service, source, target, actor_user_id, command, now, include_db_cutover
+            )
             if disaster is not None:
                 plan.mode = MigrationPlanMode.EMERGENCY
                 plan.disaster_id = disaster.disaster_id
@@ -325,6 +341,8 @@ class MigrationPlanService:
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
                     "mode": plan.mode,
+                    # 기존 계획 줄의 모양을 바꾸지 않게 DB 쓰기 전환을 넣었을 때만 싣는다.
+                    **({"includeCutover": True} if include_db_cutover else {}),
                 },
             )
             await self._record_audit(
@@ -336,6 +354,7 @@ class MigrationPlanService:
                     "sourceEnvironmentId": str(source.environment_id),
                     "targetEnvironmentId": str(target.environment_id),
                     **_disaster_audit_details(plan),
+                    **({"includeCutover": True} if include_db_cutover else {}),
                 },
             )
             view = (await self._views([plan]))[0]
@@ -350,11 +369,18 @@ class MigrationPlanService:
         actor_user_id: uuid.UUID,
         command: CreateMigrationPlanCommand,
         now: datetime,
+        include_db_cutover: bool = False,
     ) -> MigrationPlan:
         required_requests = tuple(command.required_requests or self._required_requests_default)
         max_wait_seconds = command.max_wait_seconds or self._max_wait_seconds_default
         steps = build_steps(
-            required_requests, max_wait_seconds, self._expected_rps, self._step_overhead_seconds
+            required_requests,
+            max_wait_seconds,
+            self._expected_rps,
+            self._step_overhead_seconds,
+            db_cutover_timeout_seconds=(
+                self._db_cutover_timeout_seconds if include_db_cutover else None
+            ),
         )
         simulate = (
             {
