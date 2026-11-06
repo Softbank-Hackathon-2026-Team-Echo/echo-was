@@ -36,7 +36,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회·이전 전후 비교 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건·`blocksMigration`)를 바꾸거나 쓸 때 |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
 | [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API(진입점 Prometheus PromQL·`metricsStatus`·에러 버짓 공식·복제 지연·5초 캐시·basic auth 설정)를 바꾸거나 쓸 때 |
-| [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
+| [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`·반영 실행 상세·이벤트 조회)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
 | [docs/api/ai-residency.md](docs/api/ai-residency.md) | AI 데이터 레지던시 조직 요약(계산 표·민감 등급 판정·정책 위반·기본 정책)을 바꾸거나 쓸 때. 러너 칸 규칙은 [docs/agent-runner.md](docs/agent-runner.md) |
 | [docs/api/auth.md](docs/api/auth.md) · [docs/api/organizations.md](docs/api/organizations.md) | 로그인·세션·Origin·권한 검사 순서·역할 표·거부 기록, 조직·멤버·초대·에이전트 토큰 API 를 바꾸거나 새 엔드포인트에 검사기를 걸 때 |
 
@@ -209,6 +209,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **`simulated` 는 "값을 지어냈는가"다.** 러너가 낸 값을 그대로 저장하고 모델 유무로 덮어쓰지 않는다. 모델 유무는 응답 `aiReviewed`(저장 안 함) 로 보인다. `simulated = true` 는 C-AI-1 증거가 아니다.
 - **만료는 부를 때 한다**(`expire_overdue_runs`, 일꾼 루프 없음). 만료 전환은 `begin()` 안에서 적고 커밋한 뒤 블록 밖에서 409 를 올린다. `GET` 은 쓰지 않는다. 실행 토큰 해시를 지우지 않고 상태로 무효를 판정한다.
 - **입력 사본·이벤트·결과는 저장 전에 가린다**(`mask_secrets_in_json`, 문자열마다. 직렬화 글자 전체에 걸면 잘린 개인 키 블록이 JSON 구조까지 지운다). 입력 사본에 `secretRef`·변수 값을 넣지 않는다.
+- **사람 쪽 조회·이벤트(`GET /prechecks/{id}`·`/logs`)는 `PRECHECK`·`APPLY_PATCH` 를 연다**(`READABLE_RUN_KINDS`, `find_in_organization`, API 서버 10-3). 응답 `kind` 로 구분하고 반영 실행이면 `apply{parentRunId, patchId, patchHash, repo, branch, appliedCommitSha}` 가 찬다(칸은 더하기만, `oneOf` 로 나누지 않는다). 취소·패치 승인·거절은 `find_precheck`(사전 점검만) 그대로다.
 - 이벤트·결과 본문은 FastAPI 본문 인자로 받지 않는다(`parse_runner_payload`). 검증 실패는 422 `RESULT_INVALID` 다. AI `findings` 는 `findings` 표에 넣지 않는다(2차).
 - 러너 토큰 발급 명령(`app.scripts.issue_runner_token`)은 시험 DB 밖에서 함부로 돌리지 않는다. 운영 실행은 README "AI 러너 토큰"을 따른다.
 - **레지던시 기록(`agent_runs.processing`)은 러너 신고 그대로다**(AI 3). 다시 계산하지 않고, `model`·`model_id` 와 맞추지 않는다(거절·실패면 모델이 null 이어도 자료는 나갔다). 기록이 없으면 지어내지 않고 "기록 없음"이며, 그런 실행이 있으면 민감 등급 판정을 `ZERO` 로 내지 않는다. 판정·집계는 `app/services/ai_residency.py` 순수 함수에만 둔다. 정책은 지금 서버 상수뿐이다(조직별 저장은 후속). 리전을 못 고르는 제공자(Anthropic 1P)는 리전 목록에 null 을 넣지 않고 `allowed_regionless_providers` 조건부 허용으로 다룬다(AD-12).

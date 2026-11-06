@@ -19,6 +19,7 @@ from app.services.precheck_patch_service import PrecheckPatchService
 from app.services.precheck_service import PrecheckService
 
 # 조회·이벤트는 뷰어(에이전트 가능). 만들기·취소·패치 승인·거절은 개발자 이상 사람.
+# 조회·이벤트의 {precheck_id} 에는 반영 실행 id(patches[].apply.runId)도 된다(응답 kind 로 구분).
 router = APIRouter(prefix="/api/v1/orgs/{org_id}/prechecks", tags=["precheck"])
 
 Prechecks = Annotated[PrecheckService, Depends(get_precheck_service)]

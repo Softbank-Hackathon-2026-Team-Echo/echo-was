@@ -253,9 +253,10 @@ async def test_patch_approve_with_apply_enabled(
     claimed = await claim(runner, capabilities=["PRECHECK"])
     assert claimed.json()["data"]["run"] is None
 
-    # 반영 실행은 사람 쪽 사전 점검 경로로 열리지 않는다.
-    hidden = await migration.author_client.get(prechecks_path(migration, f"/{apply_run_id}"))
-    assert _error(hidden) == (404, "PRECHECK_NOT_FOUND")
+    # 반영 실행은 사람 쪽 상세로 읽히지만(kind 로 구분, SPEC api-10-3) 패치 결정은 받지 않는다.
+    shown = await migration.author_client.get(prechecks_path(migration, f"/{apply_run_id}"))
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["data"]["kind"] == "APPLY_PATCH"
     decide_hidden = await _decide(migration, apply_run_id, "approve")
     assert _error(decide_hidden) == (404, "PRECHECK_NOT_FOUND")
 
