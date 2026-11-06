@@ -70,7 +70,6 @@ def compute_patch_hash(diff: str) -> str:
 def normalize_apply_result(payload: Mapping[str, Any]) -> NormalizedApplyResult:
     """검사를 통과한 ApplyPatchResult(camelCase JSON 값)를 저장할 값으로 바꾼다."""
     result: dict[str, Any] = {
-        "patchHash": payload["patchHash"],
         "appliedCommitSha": payload["appliedCommitSha"],
         "branch": payload["branch"],
     }

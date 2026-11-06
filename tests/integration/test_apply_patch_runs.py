@@ -89,7 +89,6 @@ def _apply_result(apply_run_id: str, **changes: Any) -> dict[str, Any]:
         "status": "SUCCEEDED",
         "failureCode": None,
         "simulated": False,
-        "patchHash": run_patch("p1")["patchHash"],
         "appliedCommitSha": COMMIT_SHA,
         "branch": f"applied/{apply_run_id}",
     }
@@ -167,7 +166,6 @@ async def test_apply_patch_round_trip(migration: Migration, runner: RunnerFixtur
     row = await run_row(migration, apply_run_id)
     assert row.status == AgentRunStatus.SUCCEEDED
     assert row.result == {
-        "patchHash": patch["patchHash"],
         "appliedCommitSha": COMMIT_SHA,
         "branch": f"applied/{apply_run_id}",
     }
@@ -226,6 +224,26 @@ async def test_apply_patch_failed_result_shows_apply_failed(
     assert finished.details["appliedCommitSha"] is None
 
 
+async def test_apply_patch_success_without_commit_is_applied(
+    migration: Migration, runner: RunnerFixture
+) -> None:
+    """git 없는 사본(VM)에서 반영·검증만 한 성공: 커밋 SHA 는 null 이다."""
+    parent_id, apply_run_id = await _approved_patch(migration, runner)
+    claimed, _ = await _claim_apply(runner)
+
+    response = await claimed.post("result", _apply_result(apply_run_id, appliedCommitSha=None))
+
+    assert response.status_code == 200, response.text
+    patch = await _patch_in_detail(migration, parent_id)
+    assert patch["status"] == "APPLIED"
+    assert (patch["apply"]["appliedCommitSha"], patch["apply"]["branch"]) == (
+        None,
+        f"applied/{apply_run_id}",
+    )
+    finished = (await run_audit_rows(migration, apply_run_id))[-1]
+    assert finished.details["appliedCommitSha"] is None
+
+
 async def test_apply_patch_simulated_result_is_shown(
     migration: Migration, runner: RunnerFixture
 ) -> None:
@@ -260,29 +278,46 @@ async def test_apply_patch_lease_expiry_shows_timed_out(
 # --- AC-2: 지문 ---
 
 
-async def test_apply_patch_hash_mismatch_is_rejected_and_run_stays_open(
+async def _change_snapshot(migration: Migration, apply_run_id: str, **patch_changes: Any) -> None:
+    async with migration.harness.session_factory() as session, session.begin():
+        row = await session.get(AgentRun, uuid.UUID(apply_run_id))
+        assert row is not None
+        snapshot = row.input_snapshot
+        changed = snapshot | {"patch": snapshot["patch"] | patch_changes}
+        await session.execute(
+            update(AgentRun)
+            .where(AgentRun.id == uuid.UUID(apply_run_id))
+            .values(input_snapshot=changed)
+        )
+
+
+async def test_apply_patch_snapshot_hash_differs_from_approval_is_rejected(
     migration: Migration, runner: RunnerFixture
 ) -> None:
+    """준 입력 사본의 patchHash 가 승인 지문과 다르면 성공 결과를 받지 않고 실행은 연 채로 둔다."""
     parent_id, apply_run_id = await _approved_patch(migration, runner)
     claimed, _ = await _claim_apply(runner)
-    wrong = compute_patch_hash("other diff")
+    await _change_snapshot(migration, apply_run_id, patchHash=compute_patch_hash("other diff"))
 
-    for status, changes in (
-        ("SUCCEEDED", {}),
-        ("FAILED", {"failureCode": "PATCH_HASH_MISMATCH", "appliedCommitSha": None}),
-    ):
-        response = await claimed.post(
-            "result", _apply_result(apply_run_id, status=status, patchHash=wrong, **changes)
-        )
-        assert _error(response) == (422, "RESULT_INVALID")
-        assert _details(response) == [{"field": "patchHash", "reason": "PATCH_HASH_MISMATCH"}]
+    response = await claimed.post("result", _apply_result(apply_run_id))
 
+    assert _error(response) == (422, "RESULT_INVALID")
+    assert _details(response) == [
+        {"field": "inputSnapshot.patch.patchHash", "reason": "PATCH_HASH_MISMATCH"}
+    ]
     row = await run_row(migration, apply_run_id)
     assert row.status == AgentRunStatus.CLAIMED
     assert row.result is None
     assert (await _patch_in_detail(migration, parent_id))["status"] == "APPROVED"
-    ok = await claimed.post("result", _apply_result(apply_run_id))
-    assert ok.status_code == 200, ok.text
+    # 러너가 다시 계산해 불일치를 실패로 알리는 길은 열려 있다(계약 2.1).
+    failure = await claimed.post(
+        "result",
+        _apply_result(
+            apply_run_id, status="FAILED", failureCode="PATCH_HASH_MISMATCH", appliedCommitSha=None
+        ),
+    )
+    assert failure.status_code == 200, failure.text
+    assert (await _patch_in_detail(migration, parent_id))["status"] == "APPLY_FAILED"
 
 
 async def test_apply_patch_server_recomputes_hash_from_input_diff(
@@ -291,14 +326,9 @@ async def test_apply_patch_server_recomputes_hash_from_input_diff(
     """입력 사본의 diff 가 승인 지문과 달라졌으면(가린 diff 등) 성공 결과를 받지 않는다."""
     _, apply_run_id = await _approved_patch(migration, runner)
     claimed, data = await _claim_apply(runner)
-    snapshot = data["run"]["inputSnapshot"]
-    changed = snapshot | {"patch": snapshot["patch"] | {"diff": snapshot["patch"]["diff"] + "x"}}
-    async with migration.harness.session_factory() as session, session.begin():
-        await session.execute(
-            update(AgentRun)
-            .where(AgentRun.id == uuid.UUID(apply_run_id))
-            .values(input_snapshot=changed)
-        )
+    await _change_snapshot(
+        migration, apply_run_id, diff=data["run"]["inputSnapshot"]["patch"]["diff"] + "x"
+    )
 
     success = await claimed.post("result", _apply_result(apply_run_id))
 
@@ -306,13 +336,13 @@ async def test_apply_patch_server_recomputes_hash_from_input_diff(
     assert _details(success) == [
         {"field": "inputSnapshot.patch.diff", "reason": "PATCH_HASH_MISMATCH"}
     ]
-    failure = await claimed.post(
+    ok = await claimed.post(
         "result",
         _apply_result(
             apply_run_id, status="FAILED", failureCode="PATCH_HASH_MISMATCH", appliedCommitSha=None
         ),
     )
-    assert failure.status_code == 200, failure.text
+    assert ok.status_code == 200, ok.text
 
 
 async def test_apply_patch_branch_mismatch_is_rejected(
@@ -325,6 +355,18 @@ async def test_apply_patch_branch_mismatch_is_rejected(
 
     assert _error(response) == (422, "RESULT_INVALID")
     assert _details(response) == [{"field": "branch", "reason": "BRANCH_MISMATCH"}]
+    # 실패 결과는 브랜치를 대조하지 않는다(러너가 입력 사본 검사에서 멈춘 경우).
+    failure = await claimed.post(
+        "result",
+        _apply_result(
+            apply_run_id,
+            status="FAILED",
+            failureCode="INPUT_INVALID",
+            appliedCommitSha=None,
+            branch="main",
+        ),
+    )
+    assert failure.status_code == 200, failure.text
 
 
 async def test_precheck_result_patch_hash_must_be_hash_of_diff(
@@ -363,12 +405,15 @@ async def test_result_body_is_chosen_by_run_kind(
         {key: value for key, value in _apply_result(apply_run_id).items() if key != "branch"},
     )
     extra = await claimed.post("result", _apply_result(apply_run_id, checks=[]))
+    with_hash = await claimed.post(
+        "result", _apply_result(apply_run_id, patchHash=run_patch("p1")["patchHash"])
+    )
     bad_sha = await claimed.post("result", _apply_result(apply_run_id, appliedCommitSha="abc"))
     failed_without_code = await claimed.post(
         "result", _apply_result(apply_run_id, status="FAILED", appliedCommitSha=None)
     )
 
-    for response in (precheck_body, missing, extra, bad_sha, failed_without_code):
+    for response in (precheck_body, missing, extra, with_hash, bad_sha, failed_without_code):
         assert _error(response) == (422, "RESULT_INVALID"), response.text
     assert (await run_row(migration, apply_run_id)).status == AgentRunStatus.CLAIMED
 
@@ -493,7 +538,6 @@ def test_openapi_result_body_documents_both_shapes() -> None:
         "status",
         "failureCode",
         "simulated",
-        "patchHash",
         "appliedCommitSha",
         "branch",
     }

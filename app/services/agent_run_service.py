@@ -248,8 +248,8 @@ class AgentRunService:
     ) -> AgentRunStatus:
         """반영 실행 결과를 저장한다(PD-9). 지문이 승인 행과 다르면 422, 그 밖은 결과 저장과 같다.
 
-        - 본문 patchHash ≠ 승인 행 patch_hash → 422 PATCH_HASH_MISMATCH(실패 결과도).
-        - 성공인데 WAS 가 입력 사본 diff 로 다시 계산한 해시 ≠ 승인 행 → 422(가린 diff 등, PD-14).
+        성공 결과만 본다(실패는 그대로 받는다):
+        - 입력 사본 patch.patchHash 또는 그 diff 로 다시 계산한 해시 ≠ 승인 행 → 422(PD-14).
         - branch 가 입력 사본 값(applied/<runId>)과 다름 → 422 BRANCH_MISMATCH.
         """
         now = self._clock.now()
@@ -356,24 +356,26 @@ class AgentRunService:
 def _check_apply_fingerprint(
     run: AgentRun, approval: AgentPatchApproval | None, normalized: NormalizedApplyResult
 ) -> None:
-    """반영 결과가 승인한 그 패치의 것인지 본다. 다르면 422 RESULT_INVALID(저장 없음).
+    """성공 결과가 승인한 그 패치를 반영한 것인지 본다. 다르면 422 RESULT_INVALID(저장 없음).
 
-    승인 행이 없으면(만들 때 같은 트랜잭션이라 정상 흐름에는 없다) 지문을 댈 곳이 없어 거부한다.
+    결과 본문에는 해시 칸이 없다(계약 2.1). WAS 는 러너에게 준 입력 사본의 patchHash 와 diff 를
+    승인 행 해시와 다시 대조한다. 승인 행이 없으면(같은 트랜잭션에서 만들어 정상엔 없다) 거부한다.
+    실패 결과는 대조하지 않는다 — 러너가 해시 불일치를 FAILED 로 알리는 길을 막지 않으려고.
     """
-    result = normalized.result
+    if normalized.status is not AgentRunStatus.SUCCEEDED:
+        return
     if approval is None:
-        raise ResultInvalidError([ErrorField("patchHash", APPROVAL_NOT_FOUND_REASON)])
-    if result["patchHash"] != approval.patch_hash:
-        raise ResultInvalidError([ErrorField("patchHash", PATCH_HASH_MISMATCH_REASON)])
+        raise ResultInvalidError([ErrorField("status", APPROVAL_NOT_FOUND_REASON)])
     patch = run.input_snapshot.get("patch") or {}
-    if normalized.status is AgentRunStatus.SUCCEEDED and (
-        compute_patch_hash(patch.get("diff", "")) != approval.patch_hash
-    ):
+    if patch.get("patchHash") != approval.patch_hash:
+        raise ResultInvalidError(
+            [ErrorField("inputSnapshot.patch.patchHash", PATCH_HASH_MISMATCH_REASON)]
+        )
+    if compute_patch_hash(patch.get("diff", "")) != approval.patch_hash:
         raise ResultInvalidError(
             [ErrorField("inputSnapshot.patch.diff", PATCH_HASH_MISMATCH_REASON)]
         )
-    branch = result["branch"]
-    if branch is not None and branch != run.input_snapshot.get("branch"):
+    if normalized.result["branch"] != run.input_snapshot.get("branch"):
         raise ResultInvalidError([ErrorField("branch", BRANCH_MISMATCH_REASON)])
 
 

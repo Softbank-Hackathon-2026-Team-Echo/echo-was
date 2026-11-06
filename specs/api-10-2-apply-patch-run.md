@@ -1,6 +1,6 @@
 # SPEC — AI 패치 반영 실행을 러너가 가져가고 결과를 받는다 (echo-was, API 서버 10-2)
 
-- 상태: **확정(Confirmed)** · 지민 결정 11/6 10:5x "P2 지금 진행". 세부 규칙은 API 서버 10 결정표의 PD-8·9·12·14(B-1에서 기본값 승인) 그대로
+- 상태: **확정(Confirmed)** · 지민 결정 11/6 10:5x "P2 지금 진행". 세부 규칙은 API 서버 10 결정표의 PD-8·12·14 그대로, PD-9(결과 모양)는 **계약 2.1에 없는 `patchHash` 칸을 빼고** 따른다(아래 3절 — 지시 "계약 칸을 더하지 않는다", 러너 쪽 병행 구현과 같은 5칸)
 - 기준: echo-was main `61fe915`(#84 병합 뒤). 표·칸은 리비전 `201cf5419f4d`에 이미 있다 → **마이그레이션 0**, `alembic heads` = `31bc0563b24b` 하나
 - 앞 작업: [api-10-patch-approval.md](api-10-patch-approval.md) "범위 밖(별도 PR)"의 S3
 - 근거(정본): echo-ai-agent `specs/ai-1-appendix-a-was-runner-contract.md` v1 — 2.1절(`APPLY_PATCH` 결과 `{appliedCommitSha, branch}`, "승인 때의 `patchHash`와 다시 계산한 해시가 같을 때만"), 3.2절(`:claim`·`result`), 4절(반영 대상은 echo-ai-agent 시나리오 사본 브랜치뿐, 운영 저장소·운영 환경에는 쓰지 않음)
@@ -38,30 +38,31 @@
 
 ```json
 {"status": "SUCCEEDED", "failureCode": null, "simulated": false,
- "patchHash": "sha256:…", "appliedCommitSha": "<40자 소문자 hex>", "branch": "applied/<반영 실행 id>"}
+ "appliedCommitSha": "<40자 소문자 hex 또는 null>", "branch": "applied/<반영 실행 id>"}
 ```
+
+계약 2.1의 두 칸 + 모든 결과의 공통 칸(`status`·`failureCode`·`simulated`)뿐이다. `patchHash`를 보내면 모르는 칸(422)이다.
 
 | 칸 | 규칙 |
 |---|---|
 | `status` | `SUCCEEDED`·`FAILED` |
 | `failureCode` | `SUCCEEDED`면 null, `FAILED`면 필수(`^[A-Z][A-Z0-9_]{0,31}$`) |
 | `simulated` | 필수 bool. 러너 가짜 모드면 true(화면 배지) |
-| `patchHash` | 필수. 러너가 반영한 패치의 해시(= 입력 사본 `patch.patchHash`) |
-| `appliedCommitSha` | `^[0-9a-f]{40}$`. `SUCCEEDED`면 필수, `FAILED`면 null 가능 |
-| `branch` | 1~255자. `SUCCEEDED`면 필수, `FAILED`면 null 가능. 값이 있으면 입력 사본 `branch`와 같아야 함 |
+| `appliedCommitSha` | `^[0-9a-f]{40}$` 또는 null. 러너가 커밋하지 못한 사본(git 없음)에서 반영·검증만 했으면 성공이어도 null. `FAILED`면 null |
+| `branch` | 1~255자. `SUCCEEDED`면 필수이고 입력 사본 `branch`와 같아야 함. `FAILED`면 아무 값·null(대조 안 함) |
 | 그 밖 | 모르는 칸·snake_case → 422(`extra=forbid`) |
 
-WAS 검사(위에서부터, 모두 422 `RESULT_INVALID`, 저장 없음, 실행은 열린 채 — 고쳐서 다시 낼 수 있다):
+WAS 지문 검사 — **`SUCCEEDED` 결과만**(위에서부터, 모두 422 `RESULT_INVALID`, 저장 없음, 실행은 열린 채 — 마감 안에 다시 낼 수 있다). 실패 결과는 대조하지 않는다(러너가 해시 불일치를 `FAILED`로 알리는 길을 막지 않으려고):
 
 | 순서 | 경우 | `details` |
 |---|---|---|
-| 1 | 반영 실행을 만든 승인 행이 없음(정상 흐름엔 없음) | `[{field: "patchHash", reason: "APPROVAL_NOT_FOUND"}]` |
-| 2 | 본문 `patchHash` ≠ 승인 행 `patch_hash`(실패 결과도) | `[{field: "patchHash", reason: "PATCH_HASH_MISMATCH"}]` |
-| 3 | `SUCCEEDED`인데 WAS가 입력 사본 `patch.diff`로 **다시 계산한** 해시 ≠ 승인 행(가려진 diff 등) | `[{field: "inputSnapshot.patch.diff", reason: "PATCH_HASH_MISMATCH"}]` |
+| 1 | 반영 실행을 만든 승인 행이 없음(정상 흐름엔 없음) | `[{field: "status", reason: "APPROVAL_NOT_FOUND"}]` |
+| 2 | 러너에게 준 입력 사본 `patch.patchHash` ≠ 승인 행 `patch_hash` | `[{field: "inputSnapshot.patch.patchHash", reason: "PATCH_HASH_MISMATCH"}]` |
+| 3 | WAS가 입력 사본 `patch.diff`로 **다시 계산한** 해시 ≠ 승인 행(가려진 diff 등) | `[{field: "inputSnapshot.patch.diff", reason: "PATCH_HASH_MISMATCH"}]` |
 | 4 | `branch` ≠ 입력 사본 `branch` | `[{field: "branch", reason: "BRANCH_MISMATCH"}]` |
 
 - 끝난 실행·임대 지남·두 번째 제출은 지금 규칙 그대로(409 `RESULT_ALREADY_SUBMITTED`·`RUN_NOT_ACTIVE`, 만료 저장). 상태 검사가 지문 검사보다 먼저다.
-- 저장: `status`·`failure_code`·`simulated`는 표의 칸, `result = {patchHash, appliedCommitSha, branch}`. `model_id`·`prompt_version`·`processing`은 null(이 결과에 칸이 없다 → 레지던시 요약에서 "기록 없음").
+- 저장: `status`·`failure_code`·`simulated`는 표의 칸, `result = {appliedCommitSha, branch}`. `model_id`·`prompt_version`·`processing`은 null(이 결과에 칸이 없다 → 레지던시 요약에서 "기록 없음").
 - 감사 `AGENT_RUN_FINISHED`: `{kind: "APPLY_PATCH", status, failureCode?, simulated, aiReviewed: false, appliedCommitSha}`. 사전 점검 결과의 줄에도 `kind: "PRECHECK"`를 더한다(PD-12).
 - OpenAPI: 요청 본문은 `oneOf [RunResult, ApplyPatchResult]`.
 
@@ -100,18 +101,19 @@ apply: {runId, status, failureCode, finishedAt,
 
 | # | 기준 | 시험 |
 |---|---|---|
-| AC-1 | 스위치 켬 → 승인 → `["PRECHECK"]` 러너는 null → `["PRECHECK","APPLY_PATCH"]` 러너가 `APPLY_PATCH`(입력 사본 = PD-6) → heartbeat(`RUNNING`) → 결과 200 → 상세 패치 `APPLIED`·`apply{appliedCommitSha, branch, simulated}` → 감사 CLAIMED·FINISHED(`kind`, `appliedCommitSha`) → 두 번째 결과 409, 새 사전 점검 201. 실패 결과 `APPLY_FAILED`, 임대 지남 `TIMED_OUT`, 가짜 모드 `simulated: true` | `test_apply_patch_round_trip`·`_failed_`·`_simulated_`·`_lease_expiry_` |
-| AC-2 | 지문: 본문 해시 다름 422(성공·실패 모두, 실행 열린 채, 고쳐 내면 200), 입력 diff 재계산 다름이면 성공 422·실패 200, 브랜치 다름 422, 사전 점검 결과의 해시가 diff와 다르면 422 | `test_apply_patch_hash_mismatch_*`·`_server_recomputes_*`·`_branch_mismatch_*`·`test_precheck_result_patch_hash_must_be_hash_of_diff` |
-| AC-3 | 본문은 종류로 고름: 반영 실행에 RunResult·칸 빠짐·모르는 칸·SHA 형식·실패 코드 없음 422, 사전 점검에 ApplyPatchResult 422 | `test_result_body_is_chosen_by_run_kind`·`test_precheck_run_does_not_accept_apply_result_body` |
+| AC-1 | 스위치 켬 → 승인 → `["PRECHECK"]` 러너는 null → `["PRECHECK","APPLY_PATCH"]` 러너가 `APPLY_PATCH`(입력 사본 = PD-6) → heartbeat(`RUNNING`) → 결과 200 → 상세 패치 `APPLIED`·`apply{appliedCommitSha, branch, simulated}` → 감사 CLAIMED·FINISHED(`kind`, `appliedCommitSha`) → 두 번째 결과 409, 새 사전 점검 201. 커밋 없는 성공(`appliedCommitSha: null`)도 `APPLIED`, 실패 결과 `APPLY_FAILED`, 임대 지남 `TIMED_OUT`, 가짜 모드 `simulated: true` | `test_apply_patch_round_trip`·`_success_without_commit_`·`_failed_`·`_simulated_`·`_lease_expiry_` |
+| AC-2 | 지문(성공 결과만): 입력 사본 해시가 승인과 다름 422(실행 열린 채, 실패로 내면 200), 입력 diff 재계산 다름 422·실패 200, 브랜치 다름 422·실패 200, 사전 점검 결과의 해시가 diff와 다르면 422 | `test_apply_patch_snapshot_hash_*`·`_server_recomputes_*`·`_branch_mismatch_*`·`test_precheck_result_patch_hash_must_be_hash_of_diff` |
+| AC-3 | 본문은 종류로 고름: 반영 실행에 RunResult·성공인데 branch 없음·모르는 칸(`checks`·`patchHash`)·SHA 형식·실패 코드 없음 422, 사전 점검에 ApplyPatchResult 422 | `test_result_body_is_chosen_by_run_kind`·`test_precheck_run_does_not_accept_apply_result_body` |
 | AC-4 | 종류 필터: `PRECHECK`만·빈 값·`CHANGE_PROPOSAL`·소문자는 반영 실행 안 줌, `APPLY_PATCH`만이면 반영만 주고 사전 점검은 안 줌, 두 번 안 줌 | `test_claim_*` |
 | AC-5 | 스위치 꺼짐: 승인은 `APPROVED`·`apply: null`, 반영 실행 0, 반영 러너도 null | `test_switch_off_*` |
 | AC-6 | 권한·문서: 에이전트 토큰·사람 쿠키 403 `RUNNER_FORBIDDEN`, 러너 토큰 401, 반영 실행 토큰으로 부모 결과 401; OpenAPI `oneOf` 2개·`$ref` 없음; 단위(해시 정의·형식·정규화); ruff·format·mypy app·전체 pytest(건너뜀 0)·`alembic heads` 하나 | `test_apply_run_token_*`·`test_openapi_result_body_*`·`tests/test_run_result.py` |
 
 ## 7. 계약 보완 필요(러너 쪽과 맞출 것, 이번에 칸을 더하지 않음)
 
-1. 계약 2.1 결과는 `{appliedCommitSha, branch}`만 적혀 있다. 이 구현은 결정 PD-9대로 공통 칸 `status·failureCode·simulated`와 지문 `patchHash`를 필수로 받는다 → 계약 문서에 `ApplyPatchResult` 전체 모양을 적어야 한다.
+1. 계약 2.1은 결과를 `{appliedCommitSha, branch}`로만 적었다. 공통 칸 `status·failureCode·simulated`를 더한 5칸이 실제 모양이다(러너 쪽과 같음) → 계약 문서에 `ApplyPatchResult` 전체 모양과 `appliedCommitSha` null 허용(커밋 없는 성공)을 적어야 한다. 결정 PD-9의 `patchHash` 칸은 계약에 없어 넣지 않았다 — WAS는 입력 사본으로 대조한다.
 2. 검증 결과(빌드·보안 스캔 `checks[]`), 산출물 요약, 사람이 이어서 할 일(`nextStep`)은 계약에 칸이 없다.
 3. 대상 이미지 digest가 반영 입력 사본에 없다(부모 사전 점검 입력 사본에만 있다).
 4. 이벤트 `step`에 반영 단계(예: `PATCH_APPLY`·`COMMIT`)가 없다 — 지금은 기존 값 중 하나를 써야 한다.
 5. 반영 결과에 `processing`(레지던시) 칸이 없다 → 반영 실행은 레지던시 요약에서 "기록 없음".
-6. 계약 4절 "배포 키로 echo-ai-agent 브랜치에 커밋"과 이번 지시의 "산출물은 검증 통과한 패치 diff만"이 다르면 `appliedCommitSha` 필수 규칙을 다시 정해야 한다.
+6. 계약 4절은 "배포 키로 echo-ai-agent `applied/<runId>` 브랜치에 커밋"이다. 러너 쪽은 push 없는 로컬 커밋 + 샌드박스 검증(빌드·Trivy·healthz)으로 `SUCCEEDED`를 낸다 → `branch`는 원격에 없을 수 있고 `appliedCommitSha`는 로컬 커밋이다. 이 해석을 계약에 적어야 한다.
+7. 실패 코드 목록(러너 쪽 `PATCH_HASH_MISMATCH`·`IMAGE_SCAN_FAILED` 등)이 계약 6절에 없다. WAS는 형식(`^[A-Z][A-Z0-9_]{0,31}$`)만 본다.

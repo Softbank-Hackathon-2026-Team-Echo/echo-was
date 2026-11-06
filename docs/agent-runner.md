@@ -159,17 +159,16 @@ WAS 에는 SHA-256 해시만 있다. 모델(AI)에게 두 토큰을 주지 않�
 
 ```json
 {"status": "SUCCEEDED", "failureCode": null, "simulated": false,
- "patchHash": "sha256:…", "appliedCommitSha": "0123456789abcdef0123456789abcdef01234567", "branch": "applied/<반영 실행 id>"}
+ "appliedCommitSha": "0123456789abcdef0123456789abcdef01234567", "branch": "applied/<반영 실행 id>"}
 ```
 
 | 칸 | 규칙 |
 |---|---|
 | `status` · `failureCode` · `simulated` | `RunResult` 와 같다(`SUCCEEDED` 면 `failureCode` null, `FAILED` 면 필수) |
-| `patchHash` | 필수. 입력 사본 `patch.patchHash`. 승인 행과 다르면 422 `details: [{field: "patchHash", reason: "PATCH_HASH_MISMATCH"}]`(실패 결과도) |
-| `appliedCommitSha` | `^[0-9a-f]{40}$`. `SUCCEEDED` 면 필수, `FAILED` 면 null 가능 |
-| `branch` | `SUCCEEDED` 면 필수, `FAILED` 면 null 가능. 값이 있으면 입력 사본 `branch` 와 같아야 한다(다르면 422 `BRANCH_MISMATCH`) |
-| 서버 재계산 | `SUCCEEDED` 면 WAS 가 입력 사본 `patch.diff` 로 해시를 다시 계산해 승인 행과 다르면 422 `details: [{field: "inputSnapshot.patch.diff", reason: "PATCH_HASH_MISMATCH"}]` |
-| 모르는 칸 | 422 `RESULT_INVALID` |
+| `appliedCommitSha` | `^[0-9a-f]{40}$` 또는 null(커밋하지 못한 사본에서 반영·검증만 한 성공, 실패) |
+| `branch` | `SUCCEEDED` 면 필수이고 입력 사본 `branch` 와 같아야 한다(다르면 422 `BRANCH_MISMATCH`). `FAILED` 면 대조하지 않는다 |
+| 서버 재계산 | `SUCCEEDED` 면 WAS 가 입력 사본의 `patch.patchHash` 와 `patch.diff` 로 다시 계산한 해시를 승인 행과 대조한다. 다르면 422 `details: [{field: "inputSnapshot.patch.patchHash" 또는 "inputSnapshot.patch.diff", reason: "PATCH_HASH_MISMATCH"}]`. 실패 결과는 대조하지 않는다 |
+| 모르는 칸 | 422 `RESULT_INVALID`(`patchHash`·`checks` 도 모르는 칸이다) |
 
 - 422 는 저장하지 않고 실행을 연 채로 둔다(마감 안에 고쳐 다시 낼 수 있다). 끝난 실행·임대 지남·두 번째 제출 규칙은 위와 같다.
 - 사람은 부모 사전 점검 상세의 `patches[].apply` 로 본다([prechecks.md](api/prechecks.md#precheckpatch)): 결과 뒤 패치 `status` 는 `APPLIED`(성공)·`APPLY_FAILED`(실패·시간 초과).
@@ -207,6 +206,6 @@ python -m app.scripts.issue_runner_token --revoke echo-sandbox-runner # 철회(�
 | 데이터 레지던시 | 없음 | `RunResult.processing` 선택 칸(SPEC [specs/ai-3-residency.md](../specs/ai-3-residency.md)). `:claim` 응답은 그대로다 |
 | `blockedAttempts` 확인 | 감사 줄과 맞춰 `auditLogId` | 2차. 늘 `auditLogId: null`, `confirmed: false` |
 | 패치 승인 | 있음 | 사람 쪽 승인·거절 API 가 있다([prechecks.md](api/prechecks.md#패치-승인거절)). 스위치 `PATCH_APPLY_ENABLED`(기본 꺼짐)를 켜야 반영 실행을 만든다 |
-| `APPLY_PATCH` 결과 | `{appliedCommitSha, branch}` | `ApplyPatchResult {status, failureCode, simulated, patchHash, appliedCommitSha, branch}`(PD-9). `checks[]`·산출물 요약·`nextStep`·`processing` 칸은 없다(계약 보완 필요, SPEC api-10-2 7절) |
+| `APPLY_PATCH` 결과 | `{appliedCommitSha, branch}` | 공통 칸을 더한 `ApplyPatchResult {status, failureCode, simulated, appliedCommitSha, branch}`. `appliedCommitSha` 는 성공이어도 null 가능. `checks[]`·산출물 요약·`nextStep`·`processing` 칸은 없다(계약 보완 필요, SPEC api-10-2 7절) |
 | 패치 `origin` | 없음 | 선택 칸 하나 추가(기본 `AI`) |
-| `patchHash` 정의 | "무엇의 해시"가 없음 | `sha256:` + diff UTF-8 해시(PD-14). 사전 점검 결과·반영 결과 모두 WAS 가 다시 계산한다 |
+| `patchHash` 정의 | "무엇의 해시"가 없음 | `sha256:` + diff UTF-8 해시(PD-14). 사전 점검 결과를 받을 때, 반영 성공 결과를 받을 때(입력 사본 diff) WAS 가 다시 계산한다 |

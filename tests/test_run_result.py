@@ -641,7 +641,6 @@ def _apply_body(**changes: Any) -> dict[str, Any]:
         "status": "SUCCEEDED",
         "failureCode": None,
         "simulated": False,
-        "patchHash": compute_patch_hash(APPLY_DIFF),
         "appliedCommitSha": COMMIT_SHA,
         "branch": "applied/11111111-1111-1111-1111-111111111111",
     } | changes
@@ -663,7 +662,6 @@ def test_apply_result_is_normalized_into_columns_and_result() -> None:
     assert normalized.status is AgentRunStatus.SUCCEEDED
     assert (normalized.failure_code, normalized.simulated) == (None, True)
     assert normalized.result == {
-        "patchHash": compute_patch_hash(APPLY_DIFF),
         "appliedCommitSha": COMMIT_SHA,
         "branch": "applied/11111111-1111-1111-1111-111111111111",
     }
@@ -684,28 +682,26 @@ def test_apply_result_failed_may_omit_commit_and_branch() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"appliedCommitSha": None},
         {"branch": None},
         {"failureCode": "BOOM"},
         {"status": "FAILED"},
         {"status": "TIMED_OUT"},
         {"appliedCommitSha": "ABC"},
         {"appliedCommitSha": COMMIT_SHA[:39]},
-        {"patchHash": "sha256:abc"},
+        {"patchHash": compute_patch_hash(APPLY_DIFF)},
         {"branch": ""},
         {"simulated": None},
         {"checks": []},
         {"applied_commit_sha": COMMIT_SHA},
     ],
     ids=[
-        "success-without-commit",
         "success-without-branch",
         "success-with-failure-code",
         "failed-without-failure-code",
         "status-not-allowed",
         "commit-uppercase",
         "commit-short",
-        "hash-format",
+        "patch-hash-not-in-contract",
         "branch-empty",
         "simulated-missing",
         "unknown-field",
@@ -716,8 +712,15 @@ def test_apply_result_shape_violations_are_rejected(changes: dict[str, Any]) -> 
     assert _apply_rejected(_apply_body(**changes))
 
 
-def test_apply_result_requires_patch_hash_and_simulated() -> None:
-    for key in ("patchHash", "simulated", "status"):
+def test_apply_result_success_without_commit_is_accepted() -> None:
+    normalized = _parse_apply(_apply_body(appliedCommitSha=None)).to_normalized()
+
+    assert normalized.status is AgentRunStatus.SUCCEEDED
+    assert normalized.applied_commit_sha is None
+
+
+def test_apply_result_requires_status_and_simulated() -> None:
+    for key in ("simulated", "status"):
         body = _apply_body()
         del body[key]
         assert _apply_rejected(body)

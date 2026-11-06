@@ -410,16 +410,15 @@ class RunResultRequest(ApiRequestModel):
 
 
 class ApplyPatchResultRequest(ApiRequestModel):
-    """반영 실행(APPLY_PATCH) 결과(PD-9). 계약 2.1 `{appliedCommitSha, branch}` + 공통 칸 + 지문.
+    """반영 실행(APPLY_PATCH) 결과. 계약 2.1 `{appliedCommitSha, branch}` + 공통 칸만.
 
-    patchHash 는 러너가 반영한 패치의 해시(입력 사본 patch.patchHash)다. 승인 행과 대조는 서비스.
-    성공이면 커밋 SHA·브랜치가 필수이고, 실패면 둘 다 null 이어도 된다.
+    성공이면 branch 가 필수다. appliedCommitSha 는 러너가 커밋하지 못했으면(git 없는 사본) null.
+    지문(승인 행 patchHash ↔ 입력 사본 diff 재계산)은 서비스가 본다.
     """
 
     status: ResultStatus
     failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
     simulated: bool
-    patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
     applied_commit_sha: Annotated[str, Field(pattern=COMMIT_SHA_PATTERN)] | None = None
     branch: Annotated[str, Field(min_length=1, max_length=MAX_BRANCH_LENGTH)] | None = None
 
@@ -428,10 +427,8 @@ class ApplyPatchResultRequest(ApiRequestModel):
         if self.status == AgentRunStatus.SUCCEEDED:
             if self.failure_code is not None:
                 raise ValueError("failureCode must be null when status is SUCCEEDED")
-            if self.applied_commit_sha is None or self.branch is None:
-                raise ValueError(
-                    "appliedCommitSha and branch are required when status is SUCCEEDED"
-                )
+            if self.branch is None:
+                raise ValueError("branch is required when status is SUCCEEDED")
         if self.status == AgentRunStatus.FAILED and self.failure_code is None:
             raise ValueError("failureCode is required when status is FAILED")
         return self
