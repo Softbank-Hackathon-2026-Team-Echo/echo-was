@@ -478,9 +478,10 @@ async def test_get_precheck_returns_result_fields_and_computed_steps(
     assert detail["finishedAt"] is not None
 
 
-async def test_get_precheck_is_not_found_for_other_org_unknown_id_and_other_kinds(
+async def test_get_precheck_is_not_found_for_other_org_and_unknown_id(
     migration: Migration,
 ) -> None:
+    """종류는 셋 다 읽힌다(CHANGE_PROPOSAL 은 배포 실패 진단, SPEC api-98)."""
     created = await create_precheck(migration)
     other_organization = await create_organization(migration.harness.session_factory, "other-org")
     outsider = await create_member(
@@ -489,18 +490,12 @@ async def test_get_precheck_is_not_found_for_other_org_unknown_id_and_other_kind
         OrganizationRole.ADMIN,
         migration.harness.clock.now(),
     )
-    async with migration.harness.session_factory() as session, session.begin():
-        row = await session.get(AgentRun, created["id"])
-        assert row is not None
-        row.kind = AgentRunKind.CHANGE_PROPOSAL
-
     async with make_client(session_token=outsider.session_token) as client:
         other_org = await client.get(org_path(other_organization.id, f"/prechecks/{created['id']}"))
-    wrong_kind = await migration.author_client.get(prechecks_path(migration, f"/{created['id']}"))
     unknown = await migration.author_client.get(prechecks_path(migration, f"/{UNKNOWN_ID}"))
     logs = await migration.author_client.get(prechecks_path(migration, f"/{UNKNOWN_ID}/logs"))
 
-    for response in (other_org, wrong_kind, unknown, logs):
+    for response in (other_org, unknown, logs):
         assert _error(response) == (404, "PRECHECK_NOT_FOUND")
 
 

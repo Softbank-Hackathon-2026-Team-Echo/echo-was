@@ -14,8 +14,8 @@ downgrade 는 더한 것을 지운다. CVE_WATCH 증거 행이 있으면 옛 CHE
 먼저 그 행을 지운다(감시 증거·의존성 목록이 함께 사라진다).
 
 Revision ID: 9d7fe177bcaf
-Revises: 31bc0563b24b
-Create Date: 2026-11-07 02:55:13.968275
+Revises: 9d8e1f2a3b4c
+Create Date: 2026-11-07 02:55:13.968275 (main #101 병합 뒤 9d8e1f2a3b4c 위로 다시 이음)
 
 """
 
@@ -27,7 +27,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "9d7fe177bcaf"
-down_revision: str | Sequence[str] | None = "31bc0563b24b"
+down_revision: str | Sequence[str] | None = "9d8e1f2a3b4c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

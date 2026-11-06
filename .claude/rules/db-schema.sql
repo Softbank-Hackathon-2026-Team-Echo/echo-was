@@ -104,9 +104,11 @@ CREATE TABLE public.agent_runs (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     processing jsonb,
+    deploy_request_id uuid,
     CONSTRAINT ck_agent_runs_apply_patch_has_parent CHECK ((((kind)::text <> 'APPLY_PATCH'::text) OR (parent_run_id IS NOT NULL))),
     CONSTRAINT ck_agent_runs_claim_consistency CHECK ((((status)::text <> ALL ((ARRAY['CLAIMED'::character varying, 'RUNNING'::character varying])::text[])) OR ((claimed_by_runner_id IS NOT NULL) AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL)))),
     CONSTRAINT ck_agent_runs_deadline_after_created CHECK ((deadline_at > created_at)),
+    CONSTRAINT ck_agent_runs_diagnosis_has_deploy_request CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((deploy_request_id IS NOT NULL) AND (target_environment_id IS NOT NULL)))),
     CONSTRAINT ck_agent_runs_failure_code_only_when_failed CHECK (((failure_code IS NULL) OR ((status)::text = ANY ((ARRAY['FAILED'::character varying, 'TIMED_OUT'::character varying])::text[])))),
     CONSTRAINT ck_agent_runs_finished_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])) = (finished_at IS NOT NULL))),
     CONSTRAINT ck_agent_runs_input_hash_format CHECK (((input_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -796,6 +798,8 @@ CREATE INDEX ix_service_environment_variables_connection_key ON public.service_e
 
 CREATE INDEX ix_services_organization_id ON public.services USING btree (organization_id);
 
+CREATE UNIQUE INDEX uq_agent_runs_deploy_request_id_diagnosis ON public.agent_runs USING btree (deploy_request_id) WHERE ((kind)::text = 'CHANGE_PROPOSAL'::text);
+
 CREATE UNIQUE INDEX uq_agent_runs_run_token_hash ON public.agent_runs USING btree (run_token_hash) WHERE (run_token_hash IS NOT NULL);
 
 CREATE UNIQUE INDEX uq_agent_runs_service_id_open ON public.agent_runs USING btree (service_id) WHERE ((status)::text = ANY ((ARRAY['QUEUED'::character varying, 'CLAIMED'::character varying, 'RUNNING'::character varying])::text[]));
@@ -854,6 +858,9 @@ ALTER TABLE ONLY public.agent_run_events
 
 ALTER TABLE ONLY public.agent_runs
     ADD CONSTRAINT fk_agent_runs_claimed_by_runner_id_agent_runners FOREIGN KEY (claimed_by_runner_id) REFERENCES public.agent_runners(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_deploy_request_id_deploy_requests FOREIGN KEY (deploy_request_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.agent_runs
     ADD CONSTRAINT fk_agent_runs_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;

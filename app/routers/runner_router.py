@@ -9,13 +9,17 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Request
 
 from app.auth.runner_guards import RunnerIdentity, RunTokenRunId
-from app.dependencies import get_agent_run_service
+from app.core.exceptions import ErrorField, ResultInvalidError
+from app.dependencies import get_agent_run_service, get_diagnosis_service
 from app.enums import AgentRunKind
 from app.schemas.response import ApiResponse
 from app.schemas.runner import (
+    DIAGNOSIS_FIELD,
+    DIAGNOSIS_NOT_ALLOWED_REASON,
     ApplyPatchResultRequest,
     ClaimRunRequest,
     ClaimRunResponse,
+    DiagnosisRunResultRequest,
     HeartbeatResponse,
     RunResultRequest,
     SubmitRunEventsRequest,
@@ -25,10 +29,12 @@ from app.schemas.runner import (
     parse_runner_payload,
 )
 from app.services.agent_run_service import AgentRunService
+from app.services.diagnosis_service import DiagnosisService
 
 router = APIRouter(prefix="/api/v1/runner/runs", tags=["runner"])
 
 AgentRuns = Annotated[AgentRunService, Depends(get_agent_run_service)]
+Diagnoses = Annotated[DiagnosisService, Depends(get_diagnosis_service)]
 
 
 @router.post(":claim", response_model=ApiResponse[ClaimRunResponse])
@@ -74,13 +80,25 @@ async def submit_run_result(
     run_id: RunTokenRunId,
     http_request: Request,
     agent_runs: AgentRuns,
+    diagnoses: Diagnoses,
 ) -> ApiResponse[SubmitRunResultResponse]:
-    """본문 모양은 실행 종류로 고른다: APPLY_PATCH 면 ApplyPatchResult, 그 밖은 RunResult(PD-9)."""
+    """본문 모양은 실행 종류로 고른다(PD-9): APPLY_PATCH 면 ApplyPatchResult, 그 밖은 RunResult.
+    RunResult 의 diagnosis 칸은 CHANGE_PROPOSAL(SPEC api-98)만 받는다 — 사전 점검이 보내면 422.
+
+    진단에서 온 반영이 성공하면 같은 환경에 재배포 요청을 만든다(접수 거절은 결과 응답에 영향 없음).
+    """
     raw = await http_request.body()
-    if await agent_runs.find_run_kind(run_id) == AgentRunKind.APPLY_PATCH:
+    kind = await agent_runs.find_run_kind(run_id)
+    if kind == AgentRunKind.APPLY_PATCH:
         apply_request = parse_runner_payload(raw, ApplyPatchResultRequest)
         status = await agent_runs.submit_apply_result(run_id, apply_request.to_normalized())
+        await diagnoses.redeploy_after_apply(run_id)
+    elif kind == AgentRunKind.CHANGE_PROPOSAL:
+        diagnosis_request = parse_runner_payload(raw, DiagnosisRunResultRequest)
+        status = await agent_runs.submit_result(run_id, diagnosis_request.to_normalized())
     else:
         request = parse_runner_payload(raw, RunResultRequest)
+        if DIAGNOSIS_FIELD in request.model_fields_set:
+            raise ResultInvalidError([ErrorField(DIAGNOSIS_FIELD, DIAGNOSIS_NOT_ALLOWED_REASON)])
         status = await agent_runs.submit_result(run_id, request.to_normalized())
     return ApiResponse(data=SubmitRunResultResponse(status=status))
