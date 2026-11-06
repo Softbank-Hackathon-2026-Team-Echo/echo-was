@@ -135,6 +135,6 @@
 ## 다음 (같은 이슈)
 
 - (11/5 됨) `GET …/security/compare?source=&target=` 이전 전후 비교 — 위 절. 게이트와 같은 판정(`is_blocking`)을 쓴다
-- (11/7 됨) WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거: 보안 게이트가 켜진 일꾼이 시작 때와 `SECURITY_PLATFORM_SELF_TEST_INTERVAL_SECONDS`(기본 21600, 300~28800)마다 플랫폼 자기 시험을 돌려 조직 + WAS 버전 범위 증거(`sourceRef = self-test:platform`, 유효 24시간)를 남긴다. C-IAM-2(`WAS_TEST`) = 일회용 에이전트 토큰으로 쓰기 경로 34개(승인 3개 포함) 호출 → 모두 403 `AGENT_READ_ONLY` 면 PASS, C-AUD-1(`AUDIT_LOG`) = 쓰기 경로 이름표 전수 + 최근 24시간 승인·게이트 판정·AI 실행·예외·거부의 감사 줄 대조. 환경 칸이 없어 모든 환경 행이 같은 증거를 쓴다. PASS 면 예외는 적용되지 않는다(그대로 만료) — [5-3 SPEC](../../specs/sec-5-platform-evidence.md)
+- (11/7 됨) WAS 버전 범위 통제(C-IAM-2·C-AUD-1)의 증거: 보안 게이트가 켜진 일꾼이 시작 때와 `SECURITY_PLATFORM_SELF_TEST_INTERVAL_SECONDS`(기본 21600, 300~28800)마다 플랫폼 자기 시험을 돌려 조직 + WAS 버전 범위 증거(`sourceRef = self-test:platform`, 유효 24시간)를 남긴다. C-IAM-2(`WAS_TEST`) = 일회용 에이전트 토큰으로 쓰기 경로 35개(승인 3개·배포 실패 진단 1개 포함) 호출 → 모두 403 `AGENT_READ_ONLY` 면 PASS, C-AUD-1(`AUDIT_LOG`) = 쓰기 경로 이름표 전수 + 최근 24시간 승인·게이트 판정·AI 실행·예외·거부의 감사 줄 대조. 환경 칸이 없어 모든 환경 행이 같은 증거를 쓴다. PASS 면 예외는 적용되지 않는다(그대로 만료) — [5-3 SPEC](../../specs/sec-5-platform-evidence.md)
 - (11/5 됨) C-TLS-1 주기 시험: 보안 게이트가 켜진 일꾼이 `SECURITY_TLS_PROBE_INTERVAL_SECONDS`(기본 1800, 최대 3000)마다 현재 배포가 있는 연결의 대표 주소·환경별 주소를 게이트와 같은 시험기로 시험해 서비스 + 환경 범위 증거(`sourceRef = tls-probe:periodic`, 유효 1시간)
 - (11/6 바뀜) C-SEC-1 은 빌드 비밀 검사에서 만들지 않는다(11/5 의 파생 증거는 C-IMG-2 복사라 지움). 서비스 × 환경의 앱 환경 변수 키 비교로 다시 정의했다 — 위 매트릭스 절·[1-2 SPEC](../../specs/sec-1-2-secret-delivery.md). `policyVersion` 이 `sec-rules-2026.11.06` 으로 바뀌어 그 전에 저장된 빌드 검사 증거는 다시 빌드해야 쓰인다

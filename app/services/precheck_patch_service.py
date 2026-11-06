@@ -7,6 +7,7 @@
 - 스위치가 꺼져 있으면(기본) 결정 행만 남긴다. 켜져 있으면 승인이 반영 실행(APPLY_PATCH)도 만든다.
 """
 
+import hashlib
 import logging
 import uuid
 from collections.abc import Mapping
@@ -121,7 +122,7 @@ class PrecheckPatchService:
         now = self._clock.now()
         is_approval = decision == AgentPatchDecision.APPROVED
         async with self._session.begin():
-            run = await self._runs.find_precheck(organization_id, precheck_id, lock=True)
+            run = await self._runs.find_patch_parent(organization_id, precheck_id, lock=True)
             if run is None:
                 raise PrecheckNotFoundError(str(precheck_id))
             stored = _find_stored_patch(run, patch_id)
@@ -170,8 +171,11 @@ class PrecheckPatchService:
             raise SelfApprovalForbiddenError
 
     async def _check_no_open_run(self, run: AgentRun, now: datetime) -> None:
-        """스위치가 켜져 있을 때만 본다. 임대·마감이 지난 실행은 먼저 끝낸다."""
-        if not self._patch_apply_enabled:
+        """스위치가 켜져 있을 때만 본다(가짜 진단의 반영은 끝난 채로 넣어 열린 실행이 안 생긴다).
+
+        임대·마감이 지난 실행은 먼저 끝낸다.
+        """
+        if not self._patch_apply_enabled or is_simulated_diagnosis(run):
             return
         await expire_overdue_runs(self._runs, self._audit, now, service_id=run.service_id)
         open_run = await self._runs.find_open_for_service(run.service_id)
@@ -196,7 +200,9 @@ class PrecheckPatchService:
         try:
             async with self._session.begin_nested():
                 apply_run_id = None
-                if self._patch_apply_enabled and decision == AgentPatchDecision.APPROVED:
+                if decision == AgentPatchDecision.APPROVED and (
+                    self._patch_apply_enabled or is_simulated_diagnosis(run)
+                ):
                     apply_run = _build_apply_run(run, stored, actor_user_id, now)
                     await insert_agent_run(self._session, self._runs, apply_run)
                     apply_run_id = apply_run.id
@@ -259,27 +265,50 @@ def _check_not_stale(
         raise PatchStaleError("finishedAt", PatchStaleError.EXPIRED_REASON)
 
 
+def is_simulated_diagnosis(run: AgentRun) -> bool:
+    """WAS 가 지어낸 가짜 진단(simulate)인가. 그 패치 승인은 러너 없이 가짜 반영으로 끝낸다."""
+    return run.kind == AgentRunKind.CHANGE_PROPOSAL and run.simulated
+
+
+def simulated_commit_sha(apply_run_id: uuid.UUID, patch_hash: str) -> str:
+    """가짜 반영의 appliedCommitSha. 실제 커밋이 아니다(simulated = true 로 함께 보인다)."""
+    return hashlib.sha256(f"simulated:{apply_run_id}:{patch_hash}".encode()).hexdigest()[:40]
+
+
 def _build_apply_run(
     run: AgentRun, stored: Mapping[str, Any], actor_user_id: uuid.UUID, now: datetime
 ) -> AgentRun:
-    """반영 실행. branch 에 실행 id 가 들어가서 id 를 먼저 정한다."""
+    """반영 실행. branch 에 실행 id 가 들어가서 id 를 먼저 정한다.
+
+    부모가 배포 실패 진단이면 repo 는 그 서비스 저장소이고 diagnosis 묶음(배포 요청·환경·실패
+    커밋)을 더한다(SPEC api-98). 가짜 진단이면 러너에게 주지 않고 성공(simulated)으로 끝낸 채
+    넣는다.
+    """
     apply_run_id = uuid.uuid4()
-    snapshot: dict[str, Any] = mask_secrets_in_json(
-        {
-            "schemaVersion": APPLY_INPUT_SCHEMA_VERSION,
-            "parentRunId": str(run.id),
-            "patch": {
-                "id": stored["id"],
-                "patchHash": stored["patchHash"],
-                "files": stored["files"],
-                "diff": stored["diff"],
-                "origin": patch_origin(stored).value,
-            },
-            "repo": APPLY_REPOSITORY,
-            "branch": f"applied/{apply_run_id}",
+    branch = f"applied/{apply_run_id}"
+    snapshot: dict[str, Any] = {
+        "schemaVersion": APPLY_INPUT_SCHEMA_VERSION,
+        "parentRunId": str(run.id),
+        "patch": {
+            "id": stored["id"],
+            "patchHash": stored["patchHash"],
+            "files": stored["files"],
+            "diff": stored["diff"],
+            "origin": patch_origin(stored).value,
+        },
+        "repo": APPLY_REPOSITORY,
+        "branch": branch,
+    }
+    if run.kind == AgentRunKind.CHANGE_PROPOSAL:
+        deploy_request = run.input_snapshot.get("deployRequest") or {}
+        snapshot["repo"] = deploy_request.get("repo") or APPLY_REPOSITORY
+        snapshot["diagnosis"] = {
+            "deployRequestId": deploy_request.get("id"),
+            "environmentId": str(run.target_environment_id),
+            "sourceCommitSha": deploy_request.get("commitSha"),
         }
-    )
-    return AgentRun(
+    masked: dict[str, Any] = mask_secrets_in_json(snapshot)
+    apply_run = AgentRun(
         id=apply_run_id,
         organization_id=run.organization_id,
         service_id=run.service_id,
@@ -287,10 +316,19 @@ def _build_apply_run(
         source_environment_id=run.source_environment_id,
         target_environment_id=run.target_environment_id,
         parent_run_id=run.id,
-        input_snapshot=snapshot,
-        input_hash=compute_input_hash(snapshot),
+        input_snapshot=masked,
+        input_hash=compute_input_hash(masked),
         requested_by_user_id=actor_user_id,
         deadline_at=now + RUN_DEADLINE,
         created_at=now,
         updated_at=now,
     )
+    if is_simulated_diagnosis(run):
+        apply_run.status = AgentRunStatus.SUCCEEDED
+        apply_run.finished_at = now
+        apply_run.simulated = True
+        apply_run.result = {
+            "appliedCommitSha": simulated_commit_sha(apply_run_id, stored["patchHash"]),
+            "branch": branch,
+        }
+    return apply_run

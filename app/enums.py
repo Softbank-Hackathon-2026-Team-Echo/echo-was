@@ -721,7 +721,7 @@ class SecurityFindingReason(StrEnum):
 
 
 class AgentRunKind(StrEnum):
-    """AI 실행 종류. CHANGE_PROPOSAL 은 P1."""
+    """AI 실행 종류. CHANGE_PROPOSAL 은 실패한 배포의 AI 진단 + 수정안(SPEC api-98)."""
 
     PRECHECK = "PRECHECK"
     APPLY_PATCH = "APPLY_PATCH"
@@ -795,6 +795,32 @@ class AgentPatchBlockReason(StrEnum):
     PROTECTED_FILES_TOUCHED = "PROTECTED_FILES_TOUCHED"
     CHECKS_MISSING = "CHECKS_MISSING"
     CHECK_NOT_PASSED = "CHECK_NOT_PASSED"
+
+
+class DiagnosisResult(StrEnum):
+    """배포 실패 진단(CHANGE_PROPOSAL)의 결론(SPEC api-98)."""
+
+    DIAGNOSED = "DIAGNOSED"  # 원인을 찾았다.
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"  # 근거가 모자라 단정하지 못했다.
+    NO_FAILURE_EVIDENCE = "NO_FAILURE_EVIDENCE"  # 실패 흔적(로그·종료 코드)이 없었다.
+
+
+class DiagnosisCategory(StrEnum):
+    """진단한 원인의 분류."""
+
+    CODE = "CODE"
+    CONFIG = "CONFIG"
+    BUILD = "BUILD"
+    RUNTIME = "RUNTIME"
+    PLATFORM = "PLATFORM"
+
+
+class DiagnosisEvidenceSource(StrEnum):
+    """진단 근거 한 줄의 출처. LOG 는 실패 로그 줄, FILE 은 저장소 파일 줄, CONFIG 는 설정 값."""
+
+    LOG = "LOG"
+    FILE = "FILE"
+    CONFIG = "CONFIG"
 
 
 class AgentRunFailureCode(StrEnum):

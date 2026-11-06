@@ -136,12 +136,12 @@ async def test_self_test_records_passing_evidence_with_was_version_scope(
         assert finding.expires_at - finding.collected_at == EVIDENCE_TTL
     assert iam.reason == SecurityFindingReason.AGENT_WRITES_DENIED
     labels = {item["item_id"]: item for item in iam.items}
-    assert iam.total_items == len(labels) == 34
+    assert iam.total_items == len(labels) == 35
     assert APPROVE_ROUTES <= set(labels)
     assert all(item["target"] == "403 AGENT_READ_ONLY" for item in labels.values())
     assert audit.reason == SecurityFindingReason.AUDIT_TRAIL_COMPLETE
     summary = {item["item_id"]: item["target"] for item in audit.items}
-    assert summary["denial:AGENT_READ_ONLY"] == "34/34"
+    assert summary["denial:AGENT_READ_ONLY"] == "35/35"
 
 
 async def test_self_test_token_is_revoked_and_every_step_is_audited(
@@ -166,7 +166,7 @@ async def test_self_test_token_is_revoked_and_every_step_is_audited(
         (AuditAction.AGENT_TOKEN_REVOKED, AuditComponent.SECURITY_SELF_TEST, token.id),
     ]
     denials = [row for row in rows if row.actor_type == ActorType.AGENT]
-    assert len(denials) == 34
+    assert len(denials) == 35
     assert {(row.result, row.reason, row.actor_agent_token_id) for row in denials} == {
         (AuditResult.DENIED, "AGENT_READ_ONLY", token.id)
     }
@@ -187,7 +187,7 @@ async def test_agent_write_that_passes_fails_iam_evidence(harness: DeployHarness
         "target": "202 OK",
         "reason": SecurityFindingReason.AGENT_WRITE_NOT_DENIED.value,
     }
-    assert sum(item["reason"] == "AGENT_WRITES_DENIED" for item in iam.items) == 33
+    assert sum(item["reason"] == "AGENT_WRITES_DENIED" for item in iam.items) == 34
 
 
 async def test_failed_evidence_blocks_matrix_even_after_older_pass(harness: DeployHarness) -> None:

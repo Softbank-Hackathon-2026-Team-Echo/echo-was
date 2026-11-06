@@ -65,8 +65,8 @@ INPUT_FINDING_LIMIT = 50
 SAME_ENVIRONMENT_REASON = "SAME_ENVIRONMENT"
 _LEVEL_RANK = {LogLevel.INFO: 0, LogLevel.WARN: 1, LogLevel.ERROR: 2}
 _SECRET_REF_KEYS = frozenset({"secretRef", "secret_ref"})
-# 사람 쪽 상세·이벤트로 열 수 있는 실행 종류. CHANGE_PROPOSAL(P1)은 404 다.
-READABLE_RUN_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH)
+# 사람 쪽 상세·이벤트로 열 수 있는 실행 종류. CHANGE_PROPOSAL 은 배포 실패 진단(SPEC api-98)이다.
+READABLE_RUN_KINDS = (AgentRunKind.PRECHECK, AgentRunKind.APPLY_PATCH, AgentRunKind.CHANGE_PROPOSAL)
 
 
 @dataclass(frozen=True)
@@ -140,6 +140,33 @@ async def load_patch_decisions(
     return PatchDecisions(
         {row.patch_id: row for row in rows}, {apply_run.id: apply_run for apply_run in apply_runs}
     )
+
+
+async def load_precheck_view(session: AsyncSession, run: AgentRun) -> PrecheckView:
+    """상세 응답 입력: 실행 + 이벤트 단계 요약 + 패치 결정. 사전 점검·진단·반영 실행 모두 같다."""
+    runs = AgentRunRepository(session)
+    return PrecheckView(
+        run,
+        await _steps(AgentRunEventRepository(session), run.id),
+        await load_patch_decisions(AgentPatchApprovalRepository(session), runs, run.id),
+    )
+
+
+async def _steps(events: AgentRunEventRepository, run_id: uuid.UUID) -> list[PrecheckStep]:
+    steps: dict[AgentRunStep, PrecheckStep] = {}
+    for row in await events.search_step_summaries(run_id):
+        seen = steps.get(row.step)
+        steps[row.step] = (
+            PrecheckStep(row.step, row.first_at, row.last_at, row.level)
+            if seen is None
+            else PrecheckStep(
+                row.step,
+                min(seen.first_at, row.first_at),
+                max(seen.last_at, row.last_at),
+                max(seen.level, row.level, key=_LEVEL_RANK.__getitem__),
+            )
+        )
+    return sorted(steps.values(), key=lambda step: (step.first_at, step.last_at, step.name))
 
 
 async def insert_agent_run(session: AsyncSession, runs: AgentRunRepository, run: AgentRun) -> None:
@@ -252,7 +279,8 @@ class PrecheckService:
         return view
 
     async def _get(self, organization_id: uuid.UUID, precheck_id: uuid.UUID) -> AgentRun:
-        run = await self._runs.find_precheck(organization_id, precheck_id)
+        """취소할 수 있는 실행: 사전 점검과 배포 실패 진단(러너가 안 가져간 진단을 풀어 줄 때)."""
+        run = await self._runs.find_patch_parent(organization_id, precheck_id)
         if run is None:
             raise PrecheckNotFoundError(str(precheck_id))
         return run
@@ -265,27 +293,7 @@ class PrecheckService:
         return run
 
     async def _view(self, run: AgentRun) -> PrecheckView:
-        return PrecheckView(
-            run,
-            await self._steps(run.id),
-            await load_patch_decisions(self._approvals, self._runs, run.id),
-        )
-
-    async def _steps(self, run_id: uuid.UUID) -> list[PrecheckStep]:
-        steps: dict[AgentRunStep, PrecheckStep] = {}
-        for row in await self._events.search_step_summaries(run_id):
-            seen = steps.get(row.step)
-            steps[row.step] = (
-                PrecheckStep(row.step, row.first_at, row.last_at, row.level)
-                if seen is None
-                else PrecheckStep(
-                    row.step,
-                    min(seen.first_at, row.first_at),
-                    max(seen.last_at, row.last_at),
-                    max(seen.level, row.level, key=_LEVEL_RANK.__getitem__),
-                )
-            )
-        return sorted(steps.values(), key=lambda step: (step.first_at, step.last_at, step.name))
+        return await load_precheck_view(self._session, run)
 
     async def _build_input_snapshot(
         self,

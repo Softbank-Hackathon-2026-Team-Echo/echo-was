@@ -23,6 +23,9 @@ from app.enums import (
 )
 
 RECENT_RUNS_LIMIT = 20
+# 요약에서 빼는 실행 종류. 배포 실패 진단(CHANGE_PROPOSAL, SPEC api-98)은 사전 점검 증거가 아니고
+# 레지던시 숫자·판정·위반에도 넣지 않는다.
+RESIDENCY_EXCLUDED_KINDS = frozenset({AgentRunKind.CHANGE_PROPOSAL})
 _PROVIDERS_WITHOUT_REGION_RULE = (AgentRunModelProvider.NONE, AgentRunModelProvider.LOCAL)
 
 
@@ -193,8 +196,15 @@ def summarize_residency(
     to_at: datetime,
     is_truncated: bool = False,
 ) -> ResidencySummary:
-    """기간 안에 끝난 실행을 센다. 응답의 숫자·판정·위반은 모두 여기서 정한다."""
-    ordered = sorted(runs, key=lambda run: (run.finished_at, run.run_id), reverse=True)
+    """기간 안에 끝난 실행을 센다. 응답의 숫자·판정·위반은 모두 여기서 정한다.
+
+    RESIDENCY_EXCLUDED_KINDS(배포 실패 진단)는 세지 않는다.
+    """
+    ordered = sorted(
+        (run for run in runs if run.kind not in RESIDENCY_EXCLUDED_KINDS),
+        key=lambda run: (run.finished_at, run.run_id),
+        reverse=True,
+    )
     records = [run.processing for run in ordered if run.processing is not None]
     unrecorded = len(ordered) - len(records)
     transferred = [record for record in records if record["externalTransfer"]]

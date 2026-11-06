@@ -124,6 +124,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/deploy-requests/{deploy_request_id}/logs", V),
     # 되돌리기는 배포 요청 접수와 같은 검사기(개발자, 에이전트는 쓰기라 403).
     _org("POST", "/deploy-requests/{deploy_request_id}/rollback", D),
+    # 배포 실패 AI 진단 만들기(이슈 #98)는 사전 점검 만들기와 같은 검사기(개발자 이상 사람).
+    _org("POST", "/deploy-requests/{deploy_request_id}/diagnosis", D, human_only=True),
     _org("POST", "/services", D),
     _org("PATCH", "/services/{service_id}", D),
     _org("POST", "/services/{service_id}/deploy-requests", D),
