@@ -50,7 +50,7 @@
 | ID | 결정 | 출처 |
 |---|---|---|
 | D-1 | **기본 꺼짐.** 꺼져 있으면 게이트를 만들지 않아 판정·네트워크·로그 줄·증거 행이 없다(기존 시험 전부 그대로 통과). API·일꾼에 같은 값을 넣는다 | 보안 1 AD-4, #60 리뷰 ④ |
-| D-2 | **판정은 잠금 전·트랜잭션 밖**(TLS 시험이 네트워크라서), **기록은 잠금 안에서 지문이 같을 때.** 판정 뒤 바뀐 현재 배포·환경 설정은 지문이 잡는다(STALE 이 먼저) | 보안 3 §7, 잠금 규칙 |
+| D-2 | **승인 상태·자기 승인 권한은 판정 전에 읽어 먼저 거절한다**(TLS·증거 저장 없음). **판정은 잠금 전·트랜잭션 밖**(TLS 시험이 네트워크라서), **기록은 잠금 안에서 지문이 같을 때.** 상태·자기 승인 권한은 판정 뒤 잠금 트랜잭션에서 다시 확인하며 만료·지문 검사도 유지한다. 판정 뒤 바뀐 현재 배포·환경 설정은 지문이 잡는다(STALE 이 먼저) | 보안 3 §7, 잠금 규칙 |
 | D-3 | 막힌 **승인**: 계획은 `PENDING_APPROVAL` 그대로, `SECURITY_GATE_BLOCKED` 줄을 남기고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`(`details` = `{field: 통제 ID, reason: 사유 코드}`). 고친 뒤 다시 승인할 수 있다. 막힌 **시작**: 트래픽을 바꾸지 않고 `FAILED(SECURITY_GATE_BLOCKED)`, `rollbackStatus = NOT_NEEDED`, 줄 순서 `SECURITY_GATE_BLOCKED → FAILED` | 보안 1 §6 |
 | D-4 | 판정 직전에 **C-IMG-3**(출발·도착 현재 배포 digest, WAS 상태)과 **C-TLS-1**(대표 주소 + 도착 환경 주소)을 새로 확인해 `findings`(`sourceRef = migration-plan:{id}`)에 남긴다. 이 두 통제는 **방금 만든 증거만** 쓴다(일시적인 TLS 시간 초과가 2분 동안 다시 막지 않게) | 보안 1 §5.1 실행 직전 |
 | D-5 | TLS 주소 규칙: 공개 도메인 아래 이름만, 443 만, DNS 로 받은 IP 를 확인한 뒤 **그 IP 로 접속**(인증서는 이름으로 검증). 모두 공인 → 시험, 모두 사설 → 접속 안 함 NA, 루프백·링크 로컬·예약·섞임 → 접속 안 함 UNKNOWN, 도메인 밖 → DNS 도 안 찾고 UNKNOWN, DNS 실패 → UNKNOWN. 주소 하나의 확인 전체에 5초(통제 시간 예산) | 11/4 결정, 보안 1 AD-5 |
@@ -87,6 +87,9 @@
 | AC-8 | 일시적인 TLS 실패 뒤 다시 승인하면 새 시험 결과로 통과 | `test_approve_after_transient_tls_failure_uses_fresh_probe` |
 | AC-9 | 리비전 왕복, 막힌 계획이 있으면 되돌리기가 분명히 실패 | `test_security_gate_revision_downgrade_narrows_check_and_upgrade_restores`, `test_security_gate_revision_downgrade_with_blocked_plans_fails_clearly` |
 | AC-10 | 로컬 `upgrade → downgrade -1 → upgrade → alembic check` | 수동(PR에 결과) |
+
+| AC-11 | 승인 불가 상태·허용되지 않은 자기 승인·다른 조직 요청은 TLS 호출과 새 증거 없이 기존 403/409/404. 자기 승인 거부 감사 유지 | `test_rejected_approval_does_not_probe_or_record_findings`, `test_cross_organization_approval_does_not_evaluate_gate` |
+| AC-12 | 자기 승인 허용 시 게이트 유지. 판정 도중 취소·자기 승인 권한 철회는 다시 거절. 동시 승인도 할 일 하나만 생성 | `test_allowed_self_approval_still_evaluates_gate`, `test_approval_rechecks_state_and_permission_after_gate`, `test_concurrent_approvals_enqueue_one_job` |
 
 ## 7. 리스크
 

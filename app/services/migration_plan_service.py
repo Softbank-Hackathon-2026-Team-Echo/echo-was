@@ -528,8 +528,16 @@ class MigrationPlanService:
 
         보안 게이트가 있으면 지문이 같을 때 판정을 남기고, 막혔으면 승인하지 않고 409 를 올린다.
         """
+        # 승인 불가 요청은 TLS 호출·증거 저장 전에 거절한다.
+        # 판정 중 변경은 아래 잠금 안에서 재검사한다.
         async with self._session.begin():
-            await self._get_in_organization(organization_id, plan_id)
+            plan = await self._get_in_organization(organization_id, plan_id)
+            self._check_pending(plan)
+            organization = await self._organizations.find_by_id(organization_id)
+            if organization is None:
+                raise OrganizationNotFoundError
+            if plan.created_by_user_id == actor_user_id and not organization.allow_self_approval:
+                raise SelfApprovalForbiddenError
         decision = (
             await self._security_gate.evaluate_plan(plan_id)
             if self._security_gate is not None
