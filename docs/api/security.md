@@ -128,7 +128,9 @@
 | `findingId` (여러 번) | 매트릭스 `findingIds`로 고르기, 최대 100개 |
 | `includeExpired` | 기본 `false`(만료되지 않은 것만) |
 
-항목: `id`·`controlId`·`result`·`reason`(정규화 이유, 예: `FIXABLE_HIGH_VULNERABILITY`)·`source`(`TRIVY_IMAGE`·`TRIVY_SECRET`·`GITLEAKS`·`TLS_PROBE`·`MANUAL_REVIEW`·`AI_REVIEW` …)·`origin`(`RULE` 검사 도구 · `HUMAN` 사람 점검 · `AI`)·`mode`·`confirmation`(AI만)·`policyVersion`·`toolVersion`·`serviceId`·`environmentId`·`imageDigest`·`configCommit`·`wasVersion`·`collectedAt`·`expiresAt`·`evidenceRef`(원문 위치, 예: 검사 실행)·`reviewerUserId`·`basisUrl`·`items[]`(`itemId`·`severity`·`target`·`installedVersion`·`fixedVersion`·`line`·`commit`·`reason`, 최대 50)·`totalItems`.
+항목: `id`·`controlId`·`result`·`reason`(정규화 이유, 예: `FIXABLE_HIGH_VULNERABILITY`)·`source`(`TRIVY_IMAGE`·`TRIVY_SECRET`·`GITLEAKS`·`TLS_PROBE`·`MANUAL_REVIEW`·`AI_REVIEW`·`CVE_WATCH` …)·`origin`(`RULE` 검사 도구 · `HUMAN` 사람 점검 · `AI`)·`mode`·`confirmation`(AI만)·`policyVersion`·`toolVersion`·`serviceId`·`environmentId`·`imageDigest`·`configCommit`·`wasVersion`·`collectedAt`·`expiresAt`·`evidenceRef`(원문 위치, 예: 검사 실행)·`reviewerUserId`·`basisUrl`·`items[]`(`itemId`·`severity`·`target`·`installedVersion`·`fixedVersion`·`line`·`commit`·`reason`, 최대 50)·`totalItems`·`remediation`(고칠 방법, CVE 감시 증거만 — `{kind: DEPENDENCY_BUMP, ecosystem, package, fromVersion, toVersion, advisoryId, aliases, severity, summary}`, 그 밖 null. [cve-watch.md](cve-watch.md)).
+
+C-IMG-1 은 빌드 검사(`TRIVY_IMAGE`)와 CVE 감시(`CVE_WATCH`, 배포된 이미지 의존성에 새로 나온 HIGH·CRITICAL 권고) 증거를 함께 받는다. 범위는 이미지 digest 라 같은 digest 의 두 출처 중 나쁜 값이 칸 값이다.
 
 - AI 결과(`origin: AI`)는 PASS가 없고, 사람이 `ESCALATED`로 확인해야 차단 사유가 된다.
 

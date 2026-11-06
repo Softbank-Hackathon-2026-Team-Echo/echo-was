@@ -163,6 +163,10 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/security/exceptions", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/approve", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/revoke", D, human_only=True),
+    # CVE 감시(SPEC sec-6-cve-watch): 조회·주입·진단 요청은 개발자 이상 사람.
+    _org("POST", "/security/cve-watch:check", D, human_only=True),
+    _org("POST", "/security/cve-watch:inject", D, human_only=True),
+    _org("POST", "/security/findings/{finding_id}/diagnosis", D, human_only=True),
     # --- AI 러너 레인 A: 사전 점검(조회는 뷰어·에이전트, 만들기·취소는 개발자 이상 사람) ---
     _org("GET", "/prechecks/{precheck_id}", V),
     _org("GET", "/prechecks/{precheck_id}/logs", V),

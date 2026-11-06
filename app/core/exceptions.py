@@ -740,3 +740,37 @@ class PatchStaleError(ConflictError):
 
     def __init__(self, field: str, reason: str) -> None:
         super().__init__("patch is stale", details=[ErrorField(field=field, reason=reason)])
+
+
+# --- CVE 감시(SPEC sec-6-cve-watch) ---
+
+
+class CveWatchDisabledError(ConflictError):
+    """CVE 감시 스위치(CVE_WATCH_ENABLED)가 꺼져 즉시 조회를 하지 않는다."""
+
+    code = "CVE_WATCH_DISABLED"
+
+
+class CveWatchSimulateNotAllowedError(ConflictError):
+    """가짜 권고 주입 스위치(CVE_WATCH_SIMULATE_ENABLED)가 꺼져 있다."""
+
+    code = "CVE_WATCH_SIMULATE_DISABLED"
+
+
+class FindingNotFoundError(NotFoundError):
+    """보안 증거가 없다. 다른 조직 것도 같다."""
+
+    code = "FINDING_NOT_FOUND"
+
+
+class RemediationNotAvailableError(ConflictError):
+    """증거에 고칠 방법(remediation)이 없거나 고칠 버전이 없다."""
+
+    code = "REMEDIATION_NOT_AVAILABLE"
+
+
+class NotImplementedYetError(AppError):
+    """계약만 정한 경로. 이어 줄 기능(예: 이슈 #98 CHANGE_PROPOSAL)이 병합되기 전이다."""
+
+    code = "NOT_IMPLEMENTED"
+    status_code = 501

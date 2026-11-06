@@ -11,6 +11,7 @@ from app.adapters.registry import get_environment_adapter
 from app.clients.app_secret_store import AppSecretStore, build_app_secret_store
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
+from app.clients.osv import AdvisoryFeed, OsvAdvisoryFeed
 from app.clients.prometheus_client import PrometheusClient
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
 from app.clients.source_repository import FakeSourceRepositoryClient, SourceRepositoryClient
@@ -40,6 +41,7 @@ from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
 from app.services.cost_service import CostService
+from app.services.cve_watch_service import CveWatchService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.disaster_service import DisasterService
@@ -573,3 +575,19 @@ def get_agent_run_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> AgentRunService:
     return AgentRunService(session, clock)
+
+
+def get_advisory_feed(settings: Annotated[Settings, Depends(get_settings)]) -> AdvisoryFeed:
+    """CVE 감시 피드(OSV.dev, SPEC sec-6-cve-watch). 만들 때 네트워크를 쓰지 않는다."""
+    return OsvAdvisoryFeed(
+        settings.cve_watch_osv_url,
+        settings.cve_watch_timeout_seconds,
+        settings.cve_watch_max_advisories,
+    )
+
+
+def get_cve_watch_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> CveWatchService:
+    return CveWatchService(session, clock)

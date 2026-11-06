@@ -2,6 +2,7 @@
 
 실제 실행기 모드(`EXECUTOR_MODE=real`)면 온프레 이미지 받기 자격 갱신 루프도 함께 돌린다.
 보안 게이트가 켜져 있으면(`SECURITY_GATE_ENABLED=true`) 공개 경로 TLS 주기 시험 루프도 돌린다.
+CVE 감시가 켜져 있으면(`CVE_WATCH_ENABLED=true`) OSV 주기 조회 루프(기본 6시간)도 돌린다.
 실행기 묶음과 앱 환경 변수 보관함은 프로세스당 하나이고 멈출 때 HTTP 클라이언트를 닫는다.
 """
 
@@ -16,9 +17,10 @@ from app.core.clock import SystemClock
 from app.core.config import ExecutorMode, get_settings
 from app.core.database import get_engine, get_session_factory
 from app.core.logging import configure_logging
-from app.dependencies import build_source_repository_client
+from app.dependencies import build_source_repository_client, get_advisory_feed
 from app.executors import build_executor_set
 from app.executors.kubernetes.executors import KubernetesDeployExecutor
+from app.services.cve_watch_loop import CveWatchLoop
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.onprem_pull_refresher import OnpremPullSecretRefresher
 from app.services.periodic_tls_probe import PeriodicTlsProbe
@@ -75,6 +77,11 @@ async def main() -> None:
             if tls_checker is not None:
                 tls_probe = PeriodicTlsProbe(session_factory, tls_checker, clock, settings)
                 group.create_task(tls_probe.run(stop))
+            if settings.cve_watch_enabled:
+                cve_watch = CveWatchLoop(
+                    session_factory, get_advisory_feed(settings), clock, settings
+                )
+                group.create_task(cve_watch.run(stop))
     finally:
         await executors.aclose()
         await app_secret_store.aclose()
