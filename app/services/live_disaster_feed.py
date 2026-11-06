@@ -2,7 +2,8 @@
 
 흐름(일꾼, `LIVE_DISASTER_FEED_ENABLED=true` 일 때만, 기본 60초마다)
 1. USGS 요약 피드(GeoJSON)를 HTTP 로 읽는다. 실패하면 피드 상태에 오류 코드만 남기고 다음 주기에
-   다시 한다.
+   다시 한다. 본문은 스트리밍으로 읽고 LIVE_DISASTER_FEED_MAX_BYTES(기본 5MB)를 넘으면 그 주기를
+   버린다(FEED_TOO_LARGE). 이상한 지진 한 건은 그 건만 건너뛰고 수를 센다(last_skipped_count).
 2. 이미 본 지진 id(disaster_feed_states.seen_event_ids)를 빼고 새 지진만 남긴다.
 3. 새 지진마다 살아 있는 환경이 있는 조직 전부를 조직 기준(규모·반경)으로 판정한다.
    맞으면 그 조직에 재난(source = LIVE_FEED, simulated = false, 만든 사람 없음)을 만들고 SYSTEM 감사
@@ -12,7 +13,10 @@
    같은
    트리거를 시작한다. 자동 실행은 SYSTEM 이 계획을 만들고 승인해야 해서 #30(사전 승인) 범위로
    남긴다.
-5. 피드 상태(마지막 조회·성공 시각, 피드 지진 수, 새 지진 수, 오류 코드)와 기억 목록을 고친다.
+5. 피드 상태(마지막 조회·성공 시각, 피드 지진 수, 새 지진 수, 건너뛴 수, 오류 코드)와 기억 목록을
+   고친다. 지진 한 건의 처리(DB 저장 등)가 예상 밖으로 실패해도 그 건만 건너뛰고(기억하지 않아 다음
+   주기에 다시 한다) 나머지를 처리한다. 주기 전체가 예상 밖으로 실패하면 FEED_PROCESSING_FAILED 를
+   바로 남겨 `GET /disasters/feed` 가 ERROR 를 보인다.
 
 시연 주입(`POST /disasters/feed:inject`)은 가짜 지진 한 건을 3·4 단계에 그대로 넣는다(그 조직만,
 source = FEED_INJECTED, simulated = true). 피드 상태는 바꾸지 않는다.
@@ -22,6 +26,7 @@ source = FEED_INJECTED, simulated = true). 피드 상태는 바꾸지 않는다.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Collection
@@ -55,8 +60,9 @@ from app.services.live_disaster_feed_rules import (
     USGS_PROVIDER,
     FeedEvent,
     FeedFormatError,
+    ParsedFeed,
     evaluate_event,
-    parse_usgs_feed,
+    read_usgs_feed,
     remember,
     unseen_events,
 )
@@ -67,6 +73,8 @@ FEED_NAME = "USGS Earthquake Feed (all_hour)"
 FEED_UNREACHABLE = "FEED_UNREACHABLE"
 FEED_HTTP_ERROR = "FEED_HTTP_ERROR"
 FEED_INVALID = "FEED_INVALID"
+FEED_TOO_LARGE = "FEED_TOO_LARGE"
+FEED_PROCESSING_FAILED = "FEED_PROCESSING_FAILED"
 # 마지막 성공이 이 주기 수보다 오래되면 연결 끊김(ERROR)으로 본다(일꾼이 멈춘 경우 포함).
 STALE_AFTER_INTERVALS = 3
 DUPLICATE = "DUPLICATE"
@@ -87,6 +95,7 @@ class FeedPollResult:
     new_event_count: int
     created_disaster_ids: list[uuid.UUID]
     error_code: str | None
+    skipped_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,7 @@ class FeedStatusView:
     last_error_code: str | None
     last_feed_count: int
     last_new_event_count: int
+    last_skipped_count: int
     min_magnitude: Decimal
     radius_km: int
 
@@ -228,6 +238,7 @@ class LiveDisasterFeedService:
             last_error_code=state.last_error_code if state else None,
             last_feed_count=state.last_feed_count if state else 0,
             last_new_event_count=state.last_new_event_count if state else 0,
+            last_skipped_count=state.last_skipped_count if state else 0,
             min_magnitude=organization.live_feed_min_magnitude,
             radius_km=organization.live_feed_radius_km,
         )
@@ -331,7 +342,7 @@ class LiveDisasterFeedPoller:
             return None
         polled_at = self._clock.now()
         try:
-            events = await self._fetch()
+            parsed = await self._fetch()
         except _FeedFetchError as exc:
             await self._record_state(polled_at, error_code=exc.code)
             logger.warning(
@@ -339,19 +350,53 @@ class LiveDisasterFeedPoller:
                 extra={"action": "poll_disaster_feed", "error_code": exc.code},
             )
             return FeedPollResult(0, 0, [], exc.code)
+        try:
+            return await self._process(polled_at, parsed)
+        except Exception:
+            # 예상 밖 실패(DB 끊김 등). 일꾼은 다음 주기에 다시 하고, 상태에는 바로 오류를 남긴다.
+            logger.exception(
+                "live disaster feed processing failed",
+                extra={"action": "poll_disaster_feed", "error_code": FEED_PROCESSING_FAILED},
+            )
+            await self._record_state(polled_at, error_code=FEED_PROCESSING_FAILED)
+            return FeedPollResult(
+                len(parsed.events), 0, [], FEED_PROCESSING_FAILED, parsed.skipped_count
+            )
+
+    async def _process(self, polled_at: datetime, parsed: ParsedFeed) -> FeedPollResult:
+        events = parsed.events
         async with self._session_factory() as session, session.begin():
             state = await session.get(DisasterFeedState, USGS_PROVIDER)
             seen = list(state.seen_event_ids) if state is not None else []
         fresh = unseen_events(events, seen)
         created: list[uuid.UUID] = []
+        processed: list[FeedEvent] = []
+        failed = 0
         for event in fresh:
-            async with self._session_factory() as session:
-                outcomes = await process_feed_event(
-                    session, self._clock, event, DisasterSource.LIVE_FEED
+            try:
+                async with self._session_factory() as session:
+                    outcomes = await process_feed_event(
+                        session, self._clock, event, DisasterSource.LIVE_FEED
+                    )
+            except Exception:
+                # 이 지진 한 건만 건너뛴다(기억하지 않아 다음 주기에 다시 한다). 나머지는 계속.
+                failed += 1
+                logger.exception(
+                    "live disaster feed event skipped",
+                    extra={"action": "poll_disaster_feed", "feed_event_id": event.key},
                 )
+                continue
+            processed.append(event)
             created.extend(item.disaster_id for item in outcomes if item.disaster_id is not None)
+        skipped = parsed.skipped_count + failed
         await self._record_state(
-            polled_at, error_code=None, feed_count=len(events), fresh=fresh, success=True
+            polled_at,
+            error_code=None,
+            feed_count=len(events),
+            fresh=processed,
+            new_event_count=len(fresh),
+            skipped_count=skipped,
+            success=True,
         )
         logger.info(
             "live disaster feed polled",
@@ -359,22 +404,33 @@ class LiveDisasterFeedPoller:
                 "action": "poll_disaster_feed",
                 "feed_count": len(events),
                 "new_event_count": len(fresh),
+                "skipped_count": skipped,
                 "created_disaster_count": len(created),
             },
         )
-        return FeedPollResult(len(events), len(fresh), created, None)
+        return FeedPollResult(len(events), len(fresh), created, None, skipped)
 
-    async def _fetch(self) -> list[FeedEvent]:
+    async def _fetch(self) -> ParsedFeed:
+        limit = self._settings.live_disaster_feed_max_bytes
         try:
-            response = await self._http.get(self._settings.live_disaster_feed_url)
+            async with self._http.stream("GET", self._settings.live_disaster_feed_url) as response:
+                if response.status_code != httpx.codes.OK:
+                    raise _FeedFetchError(FEED_HTTP_ERROR)
+                declared = response.headers.get("content-length")
+                if declared is not None and declared.isdigit() and int(declared) > limit:
+                    raise _FeedFetchError(FEED_TOO_LARGE)
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > limit:
+                        # 상한을 넘는 순간 읽기를 멈춘다(나머지 본문은 받지 않는다).
+                        raise _FeedFetchError(FEED_TOO_LARGE)
         except httpx.HTTPError as exc:
             raise _FeedFetchError(FEED_UNREACHABLE) from exc
-        if response.status_code != httpx.codes.OK:
-            raise _FeedFetchError(FEED_HTTP_ERROR)
         try:
-            payload: Any = response.json()
-            return parse_usgs_feed(payload)
-        except (ValueError, FeedFormatError) as exc:
+            payload: Any = json.loads(bytes(body))
+            return read_usgs_feed(payload)
+        except (ValueError, RecursionError, FeedFormatError) as exc:
             raise _FeedFetchError(FEED_INVALID) from exc
 
     async def _record_state(
@@ -384,9 +440,15 @@ class LiveDisasterFeedPoller:
         error_code: str | None,
         feed_count: int = 0,
         fresh: list[FeedEvent] | None = None,
+        new_event_count: int = 0,
+        skipped_count: int = 0,
         success: bool = False,
     ) -> None:
-        """피드 상태 행을 잠그고 고친다(없으면 만든다). 실패 때는 기억 목록·수를 그대로 둔다."""
+        """피드 상태 행을 잠그고 고친다(없으면 만든다). 실패 때는 기억 목록·수를 그대로 둔다.
+
+        fresh 는 처리를 마친 새 지진(기억할 것), new_event_count 는 처음 본 지진 수
+        (처리 실패 포함)다.
+        """
         async with self._session_factory() as session, session.begin():
             await session.execute(
                 insert(DisasterFeedState)
@@ -394,6 +456,7 @@ class LiveDisasterFeedPoller:
                     provider=USGS_PROVIDER,
                     last_feed_count=0,
                     last_new_event_count=0,
+                    last_skipped_count=0,
                     seen_event_ids=[],
                 )
                 .on_conflict_do_nothing(index_elements=["provider"])
@@ -412,7 +475,8 @@ class LiveDisasterFeedPoller:
             if success:
                 state.last_success_at = polled_at
                 state.last_feed_count = feed_count
-                state.last_new_event_count = len(fresh or [])
+                state.last_new_event_count = new_event_count
+                state.last_skipped_count = skipped_count
                 state.seen_event_ids = remember(state.seen_event_ids, fresh or [])
 
     async def run(self, stop: asyncio.Event) -> None:

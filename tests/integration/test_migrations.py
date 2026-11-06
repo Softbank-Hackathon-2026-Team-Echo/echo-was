@@ -785,7 +785,8 @@ EXPECTED_CONSTRAINTS = {
         "CHECK ((jsonb_typeof(seen_event_ids) = 'array'::text))"
     ),
     ("disaster_feed_states", "ck_disaster_feed_states_counts_non_negative"): (
-        "CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0)))"
+        "CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0) "
+        "AND (last_skipped_count >= 0)))"
     ),
     ("organizations", "ck_organizations_live_feed_min_magnitude_range"): (
         "CHECK (((live_feed_min_magnitude >= (0)::numeric) "

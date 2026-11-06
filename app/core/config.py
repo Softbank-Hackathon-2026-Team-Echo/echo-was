@@ -281,6 +281,11 @@ class Settings(BaseSettings):
     )
     live_disaster_feed_interval_seconds: int = Field(default=60, ge=30, le=3600)
     live_disaster_feed_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # 피드 응답 본문 상한(바이트). 넘으면 읽기를 멈추고 그 주기를 버린다(FEED_TOO_LARGE).
+    # all_hour 피드는 보통 수십 KB 다.
+    live_disaster_feed_max_bytes: int = Field(
+        default=5 * 1024 * 1024, ge=64 * 1024, le=50 * 1024 * 1024
+    )
 
     @field_validator("public_base_domain")
     @classmethod

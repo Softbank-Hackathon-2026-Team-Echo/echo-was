@@ -213,6 +213,7 @@ class LiveFeedStatusResponse(ApiModel):
     last_error_code: str | None
     last_feed_count: int
     last_new_event_count: int
+    last_skipped_count: int
     threshold: LiveFeedThresholdResponse
     evacuation: str
 
@@ -231,6 +232,7 @@ class LiveFeedStatusResponse(ApiModel):
             last_error_code=view.last_error_code,
             last_feed_count=view.last_feed_count,
             last_new_event_count=view.last_new_event_count,
+            last_skipped_count=view.last_skipped_count,
             threshold=LiveFeedThresholdResponse(
                 min_magnitude=float(view.min_magnitude), radius_km=view.radius_km
             ),

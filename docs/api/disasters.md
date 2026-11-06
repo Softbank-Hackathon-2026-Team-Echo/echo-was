@@ -162,9 +162,9 @@
 근거: SPEC [specs/api-18-live-disaster-feed.md](../../specs/api-18-live-disaster-feed.md).
 
 - **출처**: USGS Earthquake Hazards Program 요약 피드 `https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson`(GeoJSON, 인증 없음, 1분 갱신, 지난 1시간 전 세계 지진). `properties.type = earthquake` 이고 규모가 있는 지진만 읽는다.
-- **스위치**: 서버 설정 `LIVE_DISASTER_FEED_ENABLED`(기본 **false**). 켜면 일꾼 프로세스가 `LIVE_DISASTER_FEED_INTERVAL_SECONDS`(기본 60, 30~3600)마다 `LIVE_DISASTER_FEED_URL` 을 읽는다(제한 시간 `LIVE_DISASTER_FEED_TIMEOUT_SECONDS`, 기본 10초). 꺼져 있으면 피드를 부르지 않는다.
+- **스위치**: 서버 설정 `LIVE_DISASTER_FEED_ENABLED`(기본 **false**). 켜면 일꾼 프로세스가 `LIVE_DISASTER_FEED_INTERVAL_SECONDS`(기본 60, 30~3600)마다 `LIVE_DISASTER_FEED_URL` 을 읽는다(제한 시간 `LIVE_DISASTER_FEED_TIMEOUT_SECONDS`, 기본 10초, 본문 상한 `LIVE_DISASTER_FEED_MAX_BYTES`, 기본 5MB — 넘는 순간 읽기를 멈추고 그 주기를 버린다). 꺼져 있으면 피드를 부르지 않는다.
 - **조직 기준**: `organizations.live_feed_min_magnitude`(기본 6.0)·`live_feed_radius_km`(기본 300). 어드민이 `PATCH /orgs/{orgId}/settings` 의 `liveFeedMinMagnitude`(0~10, 소수 한 자리)·`liveFeedRadiusKm`(1~2000)로 바꾼다(생략하면 그대로, 바뀌면 `ORGANIZATION_SETTINGS_CHANGED` details 에 from·to).
-- **판정**: 지진 규모 ≥ 조직 기준 규모 ∧ 그 조직 환경 하나 이상이 진원지에서 조직 기준 반경 안(하버사인, 경계 포함, 좌표는 버튼 재난과 같은 `coordinates`). 맞으면 재난을 만든다: `type = EARTHQUAKE`, `radiusKm` = 조직 기준 반경(규모 식이 아님), `meetsThreshold = true`, `createdBy = null`, `feedEvent` 채움. 버튼 재난의 규모 7.0 기준·반경 식은 쓰지 않는다.
+- **판정**: 지진 규모 ≥ 조직 기준 규모 ∧ 그 조직 환경 하나 이상이 진원지에서 조직 기준 반경 안(하버사인, 경계 포함 — 부동소수 오차로 반경 위 환경이 빠지지 않게 1m 여유를 둔다, 좌표는 버튼 재난과 같은 `coordinates`). 맞으면 재난을 만든다: `type = EARTHQUAKE`, `radiusKm` = 조직 기준 반경(규모 식이 아님), `meetsThreshold = true`, `createdBy = null`, `feedEvent` 채움. 버튼 재난의 규모 7.0 기준·반경 식은 쓰지 않는다.
 - **중복 제거**: 처리한 지진 id(관측망 별칭 `properties.ids` 포함)를 `disaster_feed_states.seen_event_ids` 에 기억해(최근 2000개) 다시 처리하지 않는다. 같은 조직·같은 피드 지진의 재난은 부분 유니크 인덱스가 하나로 막는다(일꾼이 여럿이어도).
 - **대피 계획은 제안만**: 피드 재난은 만든 사람이 없어 계획을 만들지 않는다(`plans = []`). 사람이 `POST /disasters/{id}/evacuate` 를 부르면 버튼 재난과 **같은 트리거**(피해 서비스마다 EMERGENCY 계획, 조직이 자기 승인을 허용하면 바로 승인)를 그 사람 이름으로 돈다. 열린 계획이 있는 서비스는 `SKIPPED MIGRATION_PLAN_OPEN` 이라 여러 번 불러도 겹치지 않는다. 피해·안전 환경은 재난을 만든 순간의 스냅숏이다. 버튼 재난에도 쓸 수 있다. 자동 실행(사람 없이 계획 만들기·승인)은 SYSTEM 승인이 필요해 #30 범위로 남긴다 — `GET /disasters/feed` 의 `evacuation` 은 늘 `SUGGESTED` 다.
 
@@ -184,6 +184,7 @@
   "lastErrorCode": null,
   "lastFeedCount": 12,
   "lastNewEventCount": 1,
+  "lastSkippedCount": 0,
   "threshold": {"minMagnitude": 6.0, "radiusKm": 300},
   "evacuation": "SUGGESTED"
 }
@@ -194,9 +195,9 @@
 | `DISABLED` | 스위치가 꺼져 있다(`ready=false`) |
 | `WAITING` | 켜졌지만 아직 한 번도 읽지 않았다 |
 | `CONNECTED` | 마지막 조회가 성공했고 3주기 안이다(`ready=true`) |
-| `ERROR` | 마지막 조회 실패(`lastErrorCode` = `FEED_UNREACHABLE`·`FEED_HTTP_ERROR`·`FEED_INVALID`) 또는 마지막 성공이 3주기보다 오래됨(일꾼 멈춤 포함) |
+| `ERROR` | 마지막 조회 실패(`lastErrorCode` = `FEED_UNREACHABLE`·`FEED_HTTP_ERROR`·`FEED_INVALID`·`FEED_TOO_LARGE`(본문 상한 초과)·`FEED_PROCESSING_FAILED`(주기 처리 중 예상 밖 실패)) 또는 마지막 성공이 3주기보다 오래됨(일꾼 멈춤 포함). 실패한 주기에 바로 바뀐다 |
 
-`lastFeedCount` 는 마지막 응답의 지진 수(발파 등 제외), `lastNewEventCount` 는 그중 처음 본 지진 수다.
+`lastFeedCount` 는 마지막 응답의 지진 수(발파 등 제외), `lastNewEventCount` 는 그중 처음 본 지진 수다. `lastSkippedCount` 는 이상해서 건너뛴 지진 수다 — 시각이 1970~2100 밖·규모가 숫자 아님/0~10 밖·id 가 `usgs:` 포함 128자 초과·좌표가 범위 밖이거나 숫자 아님, 또는 그 지진의 저장이 예상 밖으로 실패한 경우(기억하지 않아 다음 주기에 다시 한다). 그 건만 건너뛰고 같은 응답의 정상 지진은 그대로 처리한다. 응답 하나의 features 가 10000개를 넘으면 `FEED_INVALID` 로 그 주기를 버린다.
 
 피드 재난의 `feedEvent`:
 

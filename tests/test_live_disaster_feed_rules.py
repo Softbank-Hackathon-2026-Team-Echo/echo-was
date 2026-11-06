@@ -1,6 +1,8 @@
 """실제 재난 피드 순수 규칙(API 서버 18): USGS 읽기·거리·임계·중복 제거."""
 
+import math
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -11,11 +13,14 @@ from app.core.places import Coordinates
 from app.services.disaster_rules import EnvironmentLocation, distance_km
 from app.services.live_disaster_feed_rules import (
     BELOW_THRESHOLD,
+    MAX_ALIASES,
+    MAX_FEED_FEATURES,
     NO_AFFECTED_ENVIRONMENT,
     FeedEvent,
     FeedFormatError,
     evaluate_event,
     parse_usgs_feed,
+    read_usgs_feed,
     remember,
     to_magnitude,
     unseen_events,
@@ -113,7 +118,9 @@ def test_to_magnitude_rounds_half_up_to_one_decimal(value: float, expected: Deci
     assert to_magnitude(value) == expected
 
 
-@pytest.mark.parametrize("value", [-0.1, 10.1, None, "6.0", True, float("nan")])
+@pytest.mark.parametrize(
+    "value", [-0.1, 10.1, None, "6.0", True, float("nan"), float("inf"), 1e100, -1e100, 10**400]
+)
 def test_to_magnitude_rejects_out_of_range_and_non_numbers(value: Any) -> None:
     assert to_magnitude(value) is None
 
@@ -181,3 +188,69 @@ def test_remember_keeps_order_without_duplicates_and_trims_oldest() -> None:
 
     assert remember(seen, [event("c", aliases=("a",))]) == ["usgs:a", "usgs:b", "usgs:c"]
     assert remember(seen, [event("c"), event("d")], limit=3) == ["usgs:b", "usgs:c", "usgs:d"]
+
+
+# --- 입력 내성(PR #103 검증 반영): 이상한 지진 한 건은 그 건만 건너뛰고 센다 ---
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        feature("badtime", 6.0, HASAKI, time_ms=10**100),
+        feature("negtime", 6.0, HASAKI, time_ms=-1),
+        feature("hugemag", 1e100, HASAKI),
+        feature("a" * 200, 6.0, HASAKI),  # feed_event_id 128자를 넘는다
+        feature("badlat", 6.0, (139.69, 91.0, 2.0)),
+        feature("badlng", 6.0, (181.0, 35.0, 2.0)),
+        feature("nanlng", 6.0, (float("nan"), 35.0, 2.0)),
+    ],
+)
+def test_read_usgs_skips_malicious_feature_and_keeps_valid_one(bad: dict[str, Any]) -> None:
+    parsed = read_usgs_feed(collection(bad, feature("good", 6.0, HASAKI)))
+
+    assert [item.event_id for item in parsed.events] == ["good"]
+    assert parsed.skipped_count == 1
+
+
+def test_read_usgs_counts_broken_features_but_not_non_earthquakes() -> None:
+    parsed = read_usgs_feed(
+        collection(
+            feature("blast", 2.0, (-110.0, 40.0, 0.0), kind="quarry blast"),
+            feature("nomag", None, HASAKI),
+            {"type": "Feature", "id": "broken"},
+            "not-an-object",  # type: ignore[arg-type]
+            feature("good", 6.0, HASAKI),
+        )
+    )
+
+    assert [item.event_id for item in parsed.events] == ["good"]
+    assert parsed.skipped_count == 3
+
+
+def test_read_usgs_drops_too_long_aliases_and_caps_alias_count() -> None:
+    many = ",".join(f"a{index}" for index in range(MAX_ALIASES + 10))
+    ids = f",good,{'x' * 200},{many},"
+
+    (parsed,) = parse_usgs_feed(collection(feature("good", 6.0, HASAKI, ids=ids)))
+
+    assert len(parsed.aliases) == MAX_ALIASES
+    assert all(len(key) <= 128 for key in parsed.keys)
+
+
+def test_read_usgs_rejects_too_many_features() -> None:
+    payload = collection(*[feature(f"e{index}", 1.0, HASAKI) for index in range(2)])
+    payload["features"] = payload["features"] * (MAX_FEED_FEATURES // 2 + 1)
+
+    with pytest.raises(FeedFormatError):
+        read_usgs_feed(payload)
+
+
+def test_evaluate_event_includes_environment_exactly_on_radius() -> None:
+    """반경 위의 환경은 부동소수 오차(300.00000000000006)가 있어도 피해다(1m 여유)."""
+    quake = replace(event(magnitude="6.0"), epicenter=Coordinates(0, 0))
+    on_edge = EnvironmentLocation(uuid.uuid4(), Coordinates(0, math.degrees(300 / 6371)))
+    beyond = EnvironmentLocation(uuid.uuid4(), Coordinates(0, math.degrees(300.01 / 6371)))
+
+    assert distance_km(on_edge.coordinates, quake.epicenter) > 300  # type: ignore[arg-type]
+    assert evaluate_event(quake, [on_edge], Decimal("6.0"), 300).matched
+    assert not evaluate_event(quake, [beyond], Decimal("6.0"), 300).matched

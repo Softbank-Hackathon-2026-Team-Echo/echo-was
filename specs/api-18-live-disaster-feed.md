@@ -33,13 +33,13 @@
 | D-5 | 재난 행: `type=EARTHQUAKE`, `radius_km` = 조직 반경(버튼 재난의 규모 식이 아님), `meets_threshold=true`, `created_by_user_id=NULL`, `feed_event_id="usgs:<id>"`, `feed_event={provider, eventId, place, occurredAt, depthKm, url, nearestDistanceKm}`. 피해·안전·모름 분류는 기존 `classify_environments` 를 조직 반경으로. 기준 미달 지진은 저장하지 않는다(로그만) |
 | D-6 | 대피 계획은 제안만(기본이자 유일). 사람의 `POST /disasters/{id}/evacuate` 가 기존 `_trigger_plans` 를 그 사람으로 돈다(멱등: 열린 계획 SKIPPED). 자동 실행은 SYSTEM 이 계획을 만들고 승인해야 하는데 계획의 만든 사람·승인자가 users FK 라 #30 범위다 — 조직 스위치를 만들지 않았다(`evacuation: "SUGGESTED"` 고정) |
 | D-7 | 감사: SYSTEM `live-disaster-feed` 의 `DISASTER_DECLARED`, USER `DISASTER_EVACUATION_REQUESTED`·`DISASTER_FEED_INJECTED`(쓰기 경로 34 → 36) |
-| D-8 | 상태 API `GET /disasters/feed`(뷰어·에이전트): `{name, provider, ready, enabled, connectionStatus(DISABLED·WAITING·CONNECTED·ERROR), feedUrl, pollIntervalSeconds, lastPolledAt, lastSuccessAt, lastErrorCode, lastFeedCount, lastNewEventCount, threshold{minMagnitude, radiusKm}, evacuation}`. 마지막 성공이 3주기보다 오래되면 ERROR(일꾼 멈춤 감지) |
+| D-8 | 상태 API `GET /disasters/feed`(뷰어·에이전트): `{name, provider, ready, enabled, connectionStatus(DISABLED·WAITING·CONNECTED·ERROR), feedUrl, pollIntervalSeconds, lastPolledAt, lastSuccessAt, lastErrorCode, lastFeedCount, lastNewEventCount, lastSkippedCount, threshold{minMagnitude, radiusKm}, evacuation}`. 마지막 성공이 3주기보다 오래되면 ERROR(일꾼 멈춤 감지) |
 | D-9 | 시연 주입 `POST /disasters/feed:inject`(개발자 이상 사람, 에이전트 403): `{epicenter, magnitude, place?}` → 같은 `process_feed_event` 를 그 조직에만, `source=FEED_INJECTED`(simulated=true), `feed_event_id="inject:<uuid hex>"`. 스위치와 상관없고 피드 상태를 바꾸지 않는다 |
 | D-10 | 응답 바뀜(호환): `Disaster.createdBy` 가 null 가능, `feedEvent` 칸 추가, `simulated = (source != LIVE_FEED)` |
 
 ## 4. 데이터 — 마이그레이션 1개 `8748e995387a`(down_revision `9d8e1f2a3b4c`)
 
-- 새 표 `disaster_feed_states`(provider PK, 시각 2·오류 코드·수 2·`seen_event_ids` jsonb 배열).
+- 새 표 `disaster_feed_states`(provider PK, 시각 2·오류 코드·수 3(피드·새·건너뜀)·`seen_event_ids` jsonb 배열).
 - `disasters`: `feed_event_id varchar(128)`·`feed_event jsonb`(NULL, 맨 뒤), `created_by_user_id` NULL 허용, source CHECK 에 `LIVE_FEED`·`FEED_INJECTED`, CHECK `creator_matches_source`·`feed_event_matches_source`·`feed_event_is_object`, 부분 유니크 인덱스.
 - `organizations`: `live_feed_min_magnitude numeric(3,1) DEFAULT 6.0`·`live_feed_radius_km int DEFAULT 300` + 범위 CHECK.
 - 순수 더하기가 아닌 것: `created_by_user_id` NOT NULL 풀기(느슨하게 함)와 source CHECK 넓히기 — 둘 다 옛 파드가 쓰는 값을 그대로 받는다. downgrade 는 피드 재난 행이 있으면 실패(재난은 지울 수 없음).
@@ -49,7 +49,7 @@
 
 - 단위 `tests/test_live_disaster_feed_rules.py`: USGS 파싱(발파·규모 없음·음수 규모 제외, 별칭, 시각), 형식 오류, 규모 반올림, 하버사인(도쿄↔실제 M6.1 = 234km), 임계(규모 미달·반경 밖·경계 포함·모름), 중복 제거(별칭·같은 응답 안), 기억 목록 자르기.
 - 통합 `tests/integration/test_live_disaster_feed.py`: `httpx.MockTransport` 가짜 피드 → LIVE_FEED 재난·SYSTEM 감사·계획 0개·상태 CONNECTED / 스위치 꺼짐 무동작(HTTP 0회·상태 행 없음) / 같은 지진 두 번·id 바뀜 무시 / 유니크 인덱스 DUPLICATE / 먼·작은 지진 무시 / HTTP 503 → ERROR / 3주기 지나면 ERROR / 조직 기준 변경 / evacuate → EMERGENCY 계획(승인 대기·자기 승인 시 APPROVED·두 번째 SKIPPED) / 끝난 재난 evacuate 409 / inject 성공·기준 미달·다른 지역·검증 422.
-- 고친 시험: 마이그레이션(head·CHECK·인덱스·표 목록·왕복 2개), 권한 표 3경로, 감사 쓰기 경로 36개(전체 경로 순회 시험에 evacuate·inject 추가), 재난 응답 모양(`feedEvent`).
+- 고친 시험: 마이그레이션(head·CHECK·인덱스·표 목록·왕복 2개), 권한 표 3경로, 감사 쓰기 경로 37개(#101 진단 1개 합침)(전체 경로 순회 시험에 evacuate·inject 추가), 재난 응답 모양(`feedEvent`).
 
 ## 6. 시연 방법
 
@@ -60,3 +60,10 @@
 ## 7. 하지 않음
 
 - 자동 실행(SYSTEM 계획·승인, #30), 기상청·P2P 파서, 태풍 피드, 알림(SSE·Slack), 피드 재난 자동 종료, 운영 스위치 켜기(별도 `deploy/base.yaml` PR), 프론트 화면(echo-frontend 이슈로 인계).
+
+## 검증 반영 (독립 검증 ISSUES 뒤)
+
+- **병합·사슬**: main(#101)을 merge 로 합쳤다. `8748e995387a` 의 down_revision 을 `9d8e1f2a3b4c`(#101)로 옮겨 Alembic head 를 하나로 둔다. 감사 쓰기 경로 35(#101) + 2(이 SPEC) = 37개.
+- **입력 내성**: 본문은 스트리밍으로 읽고 `LIVE_DISASTER_FEED_MAX_BYTES`(기본 5MB, 64KB~50MB)를 넘으면 읽기를 멈추고 `FEED_TOO_LARGE`(Content-Length 가 이미 넘어도 같다). features 10000개 초과는 `FEED_INVALID`. 지진 한 건이 이상하면(시각 1970~2100 밖, 규모가 아주 큰 수·무한·0~10 밖, id 가 `usgs:` 포함 128자 초과, 좌표 범위 밖) 그 건만 건너뛰고 `disaster_feed_states.last_skipped_count`·상태 API `lastSkippedCount` 에 센다. 별칭은 128자 초과를 버리고 50개까지만 둔다. 지진 한 건의 처리(DB 저장)가 예상 밖으로 실패해도 그 건만 건너뛰고(기억하지 않아 다음 주기에 다시) 나머지를 처리한다. 주기 전체가 예상 밖으로 실패하면 `FEED_PROCESSING_FAILED` 를 바로 남겨 상태 API 가 ERROR 를 보인다.
+- **반경 경계**: 판정은 「반경 이하(경계 포함)」 그대로이고, 부동소수 오차(정확히 300km 위 좌표가 300.00000000000006km)로 경계 환경이 빠지지 않게 비교에 1m(0.001km) 여유를 둔다. 피드 판정(`evaluate_event`)에만 적용하고 버튼 재난 공용 함수는 바꾸지 않았다.
+- **운영 변화(명시)**: 피드 스위치가 기본 OFF 여도 `POST /disasters/feed:inject`(개발자 이상)는 동작해 `FEED_INJECTED` 재난을 만든다. 그 뒤 사람이 `POST /disasters/{id}/evacuate` 를 부르면 조직이 자기 승인을 허용한 경우 계획이 바로 승인돼 **실제 이전이 시작된다**(버튼 재난과 같은 흐름). 롤아웃이 끝나기 전에는 주입하지 않는다(옛 파드가 `createdBy = null` 재난을 읽지 못할 수 있다). 주입·피드 재난이 생긴 DB 는 이 리비전 아래로 downgrade 할 수 없다.

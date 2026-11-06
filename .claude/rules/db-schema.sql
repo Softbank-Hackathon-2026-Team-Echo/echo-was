@@ -286,10 +286,11 @@ CREATE TABLE public.disaster_feed_states (
     last_error_code character varying(64),
     last_feed_count integer NOT NULL,
     last_new_event_count integer NOT NULL,
+    last_skipped_count integer NOT NULL,
     seen_event_ids jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT ck_disaster_feed_states_counts_non_negative CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0))),
+    CONSTRAINT ck_disaster_feed_states_counts_non_negative CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0) AND (last_skipped_count >= 0))),
     CONSTRAINT ck_disaster_feed_states_seen_event_ids_is_array CHECK ((jsonb_typeof(seen_event_ids) = 'array'::text))
 );
 

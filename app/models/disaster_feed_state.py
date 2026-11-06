@@ -24,7 +24,8 @@ class DisasterFeedState(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("jsonb_typeof(seen_event_ids) = 'array'", name="seen_event_ids_is_array"),
         CheckConstraint(
-            "last_feed_count >= 0 AND last_new_event_count >= 0", name="counts_non_negative"
+            "last_feed_count >= 0 AND last_new_event_count >= 0 AND last_skipped_count >= 0",
+            name="counts_non_negative",
         ),
     )
 
@@ -36,4 +37,6 @@ class DisasterFeedState(TimestampMixin, Base):
     )
     last_feed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_new_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 마지막 응답에서 이상해서 건너뛴 지진 수(시각·규모·id·좌표가 범위 밖, 처리 실패).
+    last_skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     seen_event_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)

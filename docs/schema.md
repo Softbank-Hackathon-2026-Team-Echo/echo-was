@@ -373,6 +373,7 @@ erDiagram
 | `last_polled_at`·`last_success_at` | timestamptz | Y | 마지막 조회 · 마지막 성공 |
 | `last_error_code` | varchar(64) | Y | 마지막 조회 실패 코드(성공이면 NULL) |
 | `last_feed_count`·`last_new_event_count` | int | N | 마지막 응답의 지진 수 · 그중 처음 본 수(`>= 0`) |
+| `last_skipped_count` | int | N | 마지막 응답에서 이상해서 건너뛴 지진 수(시각·규모·id·좌표 범위 밖, 처리 실패, `>= 0`) |
 | `seen_event_ids` | jsonb | N | 처리한 지진 id 배열(별칭 포함, 최근 2000개) |
 
 `organizations` 에는 `live_feed_min_magnitude numeric(3,1)`(기본 6.0, 0~10)·`live_feed_radius_km int`(기본 300, 1~2000)를 더했다(피드 조직 기준).

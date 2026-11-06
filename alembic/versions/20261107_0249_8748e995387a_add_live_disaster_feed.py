@@ -48,6 +48,7 @@ def upgrade() -> None:
         sa.Column("last_error_code", sa.String(length=64), nullable=True),
         sa.Column("last_feed_count", sa.Integer(), nullable=False),
         sa.Column("last_new_event_count", sa.Integer(), nullable=False),
+        sa.Column("last_skipped_count", sa.Integer(), nullable=False),
         sa.Column("seen_event_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column(
             "created_at",
@@ -66,7 +67,7 @@ def upgrade() -> None:
             name=op.f("ck_disaster_feed_states_seen_event_ids_is_array"),
         ),
         sa.CheckConstraint(
-            "last_feed_count >= 0 AND last_new_event_count >= 0",
+            "last_feed_count >= 0 AND last_new_event_count >= 0 AND last_skipped_count >= 0",
             name=op.f("ck_disaster_feed_states_counts_non_negative"),
         ),
         sa.PrimaryKeyConstraint("provider", name=op.f("pk_disaster_feed_states")),

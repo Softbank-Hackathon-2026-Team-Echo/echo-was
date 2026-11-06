@@ -1,5 +1,6 @@
 """실제 재난 피드(API 서버 18): 가짜 HTTP 피드 → 재난 → 대피 제안, 스위치, 시연 주입, 상태 API."""
 
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -14,6 +15,8 @@ from app.models import AuditLog, Disaster, DisasterFeedState, MigrationPlan
 from app.services.live_disaster_feed import (
     DUPLICATE,
     FEED_HTTP_ERROR,
+    FEED_PROCESSING_FAILED,
+    FEED_TOO_LARGE,
     LiveDisasterFeedPoller,
     process_feed_event,
 )
@@ -174,6 +177,7 @@ async def test_feed_quake_near_tokyo_creates_live_feed_disaster_without_plans(
     assert status["ready"] is True
     assert status["lastFeedCount"] == 2
     assert status["lastNewEventCount"] == 2
+    assert status["lastSkippedCount"] == 0
     assert status["lastErrorCode"] is None
     assert status["lastPolledAt"] is not None
 
@@ -403,3 +407,138 @@ async def test_inject_validates_body(tokyo: Migration, body: dict[str, Any]) -> 
     )
 
     assert response.status_code == 422
+
+
+# --- 입력 내성(PR #103 검증 반영) ---
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        feature("badtime", 6.0, HASAKI, time_ms=10**100),
+        feature("badmag", 1e100, HASAKI),
+        feature("a" * 200, 6.0, HASAKI),
+    ],
+)
+async def test_malicious_feature_is_skipped_and_valid_quake_still_declared(
+    tokyo: Migration, bad: dict[str, Any]
+) -> None:
+    harness = tokyo.harness
+    _enable(harness)
+    feed = FakeFeed(collection(bad, feature("good", 6.0, HASAKI)))
+
+    result = await _poller(harness, feed).poll_once()
+
+    assert result is not None and result.error_code is None
+    assert result.skipped_count == 1
+    assert len(result.created_disaster_ids) == 1
+    status = await _feed_status(harness)
+    assert status["connectionStatus"] == "CONNECTED"
+    assert (status["lastFeedCount"], status["lastSkippedCount"]) == (1, 1)
+
+
+class _Chunks(httpx.AsyncByteStream):
+    """본문을 64KB 씩 흘리고 실제로 읽힌 바이트를 센다."""
+
+    def __init__(self, raw: bytes) -> None:
+        self.raw = raw
+        self.consumed = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for offset in range(0, len(self.raw), 65536):
+            block = self.raw[offset : offset + 65536]
+            self.consumed += len(block)
+            yield block
+
+
+async def test_oversized_feed_is_rejected_without_reading_it_all(tokyo: Migration) -> None:
+    harness = tokyo.harness
+    _enable(harness)
+    payload = collection(feature("large", 6.0, HASAKI))
+    payload["padding"] = "x" * (harness.settings.live_disaster_feed_max_bytes + 1024 * 1024)
+    stream = _Chunks(json.dumps(payload).encode())
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        poller = LiveDisasterFeedPoller(
+            harness.session_factory, harness.clock, harness.settings, http_client=client
+        )
+        result = await poller.poll_once()
+
+    assert result is not None and result.error_code == FEED_TOO_LARGE
+    assert stream.consumed < len(stream.raw)
+    assert stream.consumed <= harness.settings.live_disaster_feed_max_bytes + 65536
+    assert await _count(harness, Disaster) == 0
+    status = await _feed_status(harness)
+    assert (status["connectionStatus"], status["lastErrorCode"]) == ("ERROR", FEED_TOO_LARGE)
+    assert status["ready"] is False
+
+
+async def test_declared_content_length_over_limit_is_rejected(tokyo: Migration) -> None:
+    harness = tokyo.harness
+    _enable(harness)
+    limit = harness.settings.live_disaster_feed_max_bytes
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-length": str(limit + 1)}, content=b"{}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        poller = LiveDisasterFeedPoller(
+            harness.session_factory, harness.clock, harness.settings, http_client=client
+        )
+        result = await poller.poll_once()
+
+    assert result is not None and result.error_code == FEED_TOO_LARGE
+
+
+async def test_event_processing_failure_skips_only_that_event(
+    tokyo: Migration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """지진 한 건의 저장이 예상 밖으로 실패해도 나머지는 처리하고, 실패한 건은 기억하지 않는다."""
+    from app.services import live_disaster_feed
+
+    harness = tokyo.harness
+    _enable(harness)
+    original = live_disaster_feed.process_feed_event
+
+    async def flaky(session: Any, clock: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        if event.event_id == "boom":
+            raise RuntimeError("simulated db failure")
+        return await original(session, clock, event, *args, **kwargs)
+
+    monkeypatch.setattr(live_disaster_feed, "process_feed_event", flaky)
+    feed = FakeFeed(
+        collection(
+            feature("boom", 6.0, HASAKI, time_ms=1793961000000), feature("good", 6.0, HASAKI)
+        )
+    )
+
+    result = await _poller(harness, feed).poll_once()
+
+    assert result is not None and result.error_code is None
+    assert (result.new_event_count, result.skipped_count) == (2, 1)
+    assert len(result.created_disaster_ids) == 1
+    async with harness.session_factory() as session:
+        state = await session.get(DisasterFeedState, "usgs")
+    assert state is not None
+    assert "usgs:good" in state.seen_event_ids
+    assert "usgs:boom" not in state.seen_event_ids  # 다음 주기에 다시 한다
+
+
+async def test_unexpected_cycle_failure_is_shown_as_error_right_away(
+    tokyo: Migration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = tokyo.harness
+    _enable(harness)
+
+    async def broken(self: Any, polled_at: Any, parsed: Any) -> Any:
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(LiveDisasterFeedPoller, "_process", broken)
+
+    result = await _poller(harness, FakeFeed()).poll_once()
+
+    assert result is not None and result.error_code == FEED_PROCESSING_FAILED
+    status = await _feed_status(harness)
+    assert status["connectionStatus"] == "ERROR"
+    assert status["lastErrorCode"] == FEED_PROCESSING_FAILED
