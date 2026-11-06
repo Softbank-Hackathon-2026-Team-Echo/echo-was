@@ -65,7 +65,7 @@
 | `asOf` | 구간 끝 = 지금을 `step` 배수로 내린 시각(UTC). 시작 = `asOf − range` |
 | `metricsStatus` | `OK`(읽음) · `UNAVAILABLE`(Prometheus 를 못 읽음) · `NOT_CONFIGURED`(`ENTRYPOINT_PROMETHEUS_URL` 없음, 외부 호출 없음) |
 | `metricsErrorCode` | `UNAVAILABLE` 일 때만: `PROMETHEUS_UNREACHABLE`(연결 실패·시간 초과) · `PROMETHEUS_UNAUTHORIZED`(401·403, basic auth 불일치·미설정) · `PROMETHEUS_SECRET_MISSING`(비밀번호 비밀값 없음, 호출 전) · `PROMETHEUS_ERROR`(그 밖의 응답·형식) |
-| `series[]` | 서비스의 살아 있는 연결마다 하나(만든 순서). 데이터가 없으면 `points: []`. `UNAVAILABLE`·`NOT_CONFIGURED` 면 배열 자체가 빈다 |
+| `series[]` | 서비스의 살아 있는 연결마다 하나(만든 순서). 배포 없는 연결(현재 배포 없음 + 비율 0, 첫 배포 전 변수 넣기·첫 배포 실패)은 앱이 없어 빠진다. 데이터가 없으면 `points: []`. `UNAVAILABLE`·`NOT_CONFIGURED` 면 배열 자체가 빈다 |
 | `series[].cloudProvider` | 그 환경을 가르는 Prometheus `cloud_provider` 라벨 값(아래 "환경 가르기") |
 | `points[].t` | 점 시각(UTC) |
 | `points[].rps` | 초당 요청 수(소수 4자리). 이 값이 있는 시각만 점이 된다 |

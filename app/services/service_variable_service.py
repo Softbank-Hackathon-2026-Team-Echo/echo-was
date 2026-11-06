@@ -68,6 +68,7 @@ from app.repositories.service_environment_variable_repository import (
 from app.repositories.service_repository import ServiceRepository
 from app.services.app_env_values import pinned_versions
 from app.services.deploy_support import create_service_connection
+from app.services.migration_guard import check_no_migration_in_progress
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +366,9 @@ class ServiceVariableService:
             raise ServiceEnvironmentNotFoundError
         if not create:
             raise EnvVarNotFoundError
+        # 새 연결은 첫 배포 접수와 같은 가드를 받는다(실행 중 이전이 있으면 409). 이전 지문은 배포
+        # 없는 연결을 보지 않지만, 이전이 도는 동안 서비스의 연결 집합을 바꾸지 않는다.
+        await check_no_migration_in_progress(self._session, service.id)
         connection = await create_service_connection(
             self._session, service, environment, self._settings.public_base_domain
         )

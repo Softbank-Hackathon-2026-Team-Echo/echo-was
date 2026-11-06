@@ -96,7 +96,7 @@
 | `field` | 담는 값 |
 |---|---|
 | `serviceStatus` | 서비스 상태 |
-| `connections` | 살아 있는 연결 전체의 `(id, currentDeploymentId, trafficWeight)` |
+| `connections` | 살아 있는 연결의 `(id, currentDeploymentId, trafficWeight)`. 배포 없는 연결(현재 배포 없음 + 비율 0, 첫 배포 전 변수 넣기·첫 배포 실패가 만든다)은 이전에 관여하지 않으므로 뺀다(이 규칙 전에 저장한 지문도 비교 때 같은 규칙으로 거른다). 그 연결에 배포가 생기면 항목이 새로 나타나 잡힌다 |
 | `sourceEnvironment` · `targetEnvironment` | 환경 `config`·`secret_ref` 의 SHA-256(값 자체는 없음), 접속 상태, 살아 있는가 |
 | `openDeployRequests` | 서비스의 열린 배포 요청 id 목록 |
 
@@ -214,7 +214,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 ### 실행 중 겹침
 
-계획이 `APPROVED`·`RUNNING`·`ROLLING_BACK` 이면 그 서비스의 배포 요청·되돌리기·서비스 삭제 접수는 409 `MIGRATION_IN_PROGRESS`(`details = [{field: "planId", reason: "MIGRATION_IN_PROGRESS", value}]`)다. 일꾼이 만드는 예비 따라가기는 막지 않는다(실행 중에는 생기지 않는다).
+계획이 `APPROVED`·`RUNNING`·`ROLLING_BACK` 이면 그 서비스의 배포 요청·되돌리기·서비스 삭제 접수와 연결을 새로 만드는 환경 변수 넣기([variables.md](variables.md))는 409 `MIGRATION_IN_PROGRESS`(`details = [{field: "planId", reason: "MIGRATION_IN_PROGRESS", value}]`)다. 일꾼이 만드는 예비 따라가기는 막지 않는다(실행 중에는 생기지 않는다).
 
 ## 상태
 
@@ -363,7 +363,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | 승인 대기가 아님 · 실행 중이 아님 | 409 | `PLAN_NOT_PENDING` · `PLAN_NOT_RUNNING` |
 | 지문 다름 · 만료 | 409 | `PLAN_STALE`(+달라진 항목) · `PLAN_EXPIRED` |
 | 보안 게이트가 승인을 막음(게이트를 켰을 때) | 409 | `SECURITY_GATE_BLOCKED`(+통제 ID·사유 코드) |
-| 실행 중 그 서비스의 배포 요청·되돌리기·삭제 | 409 | `MIGRATION_IN_PROGRESS`(+`planId`) |
+| 실행 중 그 서비스의 배포 요청·되돌리기·삭제·새 연결을 만드는 변수 넣기 | 409 | `MIGRATION_IN_PROGRESS`(+`planId`) |
 
 ## 설정
 

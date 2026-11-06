@@ -470,7 +470,8 @@ class SecurityGateBlockedError(ConflictError):
 
 
 class MigrationInProgressError(ConflictError):
-    """이 서비스의 이전 계획이 실행 중이라 배포 요청·되돌리기·서비스 삭제를 받지 않는다."""
+    """이 서비스의 이전 계획이 실행 중이라 배포 요청·되돌리기·서비스 삭제·새 연결을 만드는 변수
+    넣기를 받지 않는다."""
 
     code = "MIGRATION_IN_PROGRESS"
 
