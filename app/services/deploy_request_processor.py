@@ -19,6 +19,7 @@
   만든다.
 """
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, replace
@@ -857,9 +858,12 @@ class DeployRequestProcessor:
     async def _masked_diagnostics(
         self, request: DeployRequest, diagnostics: ContainerDiagnostics | None
     ) -> ContainerDiagnostics | None:
-        """로그 꼬리에서 그 배포의 앱 환경 변수 값을 가린다(API 서버 4-1).
+        """로그 꼬리에서 그 배포의 앱 환경 변수 값을 가린 뒤 줄을 자른다(API 서버 4-1).
 
-        값을 꺼내지 못하면 가릴 수 없으니 로그 꼬리는 버리고 상태 값(사유·종료 코드)만 남긴다.
+        - 값을 꺼내지 못하면 가릴 수 없으니 로그 꼬리는 버리고 상태 값(사유·종료 코드)만 남긴다.
+        - 환경 변수 재조회는 진단 마감(diagnostics.deadline, 없으면 지금 +
+          container_diagnostics_timeout_seconds) 안에서 끝낸다. 넘거나 예상하지 못한 예외면 경고를
+          남기고 진단 없이(None) 실패 처리를 계속한다.
         """
         if diagnostics is None or not diagnostics.log_tail:
             return diagnostics
@@ -868,8 +872,16 @@ class DeployRequestProcessor:
             deployment = await self._deployments.find_by_id(request.deployment_id)
         assert deployment is not None
         await self._lease.extend()
+        loop = asyncio.get_running_loop()
+        deadline = diagnostics.deadline
+        if deadline is None:
+            deadline = loop.time() + self._settings.container_diagnostics_timeout_seconds
         try:
-            env_values = await self._env_resolver.resolve(deployment.config_snapshot)
+            async with asyncio.timeout_at(deadline):
+                env_values = await self._env_resolver.resolve(deployment.config_snapshot)
+        except TimeoutError:
+            self._warn_diagnostics_dropped(request, "CONTAINER_DIAGNOSTICS_TIMEOUT")
+            return None
         except (EnvSecretUnavailableError, ExecutorUnavailableError):
             logger.warning(
                 "container log tail withheld",
@@ -880,7 +892,28 @@ class DeployRequestProcessor:
                 },
             )
             return replace(diagnostics, log_tail=(), log_truncated=False)
+        except Exception as error:
+            self._warn_diagnostics_dropped(
+                request, "CONTAINER_DIAGNOSTICS_FAILED", type(error).__name__
+            )
+            return None
         return replace(diagnostics, log_tail=mask_container_log(diagnostics.log_tail, env_values))
+
+    def _warn_diagnostics_dropped(
+        self, request: DeployRequest, code: str, error_type: str | None = None
+    ) -> None:
+        """진단을 버리고 실패 처리를 계속할 때의 경고.
+
+        예외 문장은 비밀값을 담을 수 있어 쓰지 않고 예외 이름만 쓴다."""
+        logger.warning(
+            "container diagnostics dropped",
+            extra={
+                "action": "mask_container_log",
+                "deploy_request_id": str(request.id),
+                "error_code": code,
+                "error_type": error_type,
+            },
+        )
 
     async def _fail(
         self, code: DeployRequestErrorCode, diagnostics: ContainerDiagnostics | None = None

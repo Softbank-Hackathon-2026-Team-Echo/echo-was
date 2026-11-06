@@ -195,7 +195,7 @@ stateDiagram-v2
 | `repoUrl` | string | 접수 때 고정한 저장소 |
 | `supersededById` | uuid \| null | 이 요청을 밀어낸 요청 |
 | `errorMessage` | string \| null | 오류 코드별 **고정 문장**(외부 응답 원문은 싣지 않는다) |
-| `failure` | `Failure` \| null | `FAILED` 일 때만. 원인과 컨테이너 진단(API 서버 4-1, 아래). 다른 상태는 null |
+| `failure` | `Failure` \| null | `FAILED` 일 때만. 원인과 컨테이너 진단(API 서버 4-1, 아래). 다른 상태는 null. OpenAPI 에서는 선택 칸(required 아님)이지만 응답에는 늘 실린다 |
 | `build` | `{id, status, imageRepository, imageDigest, reused}` \| null | 쓰는 빌드. `reused = true` 면 이 요청이 새로 만든 빌드가 아니다(되돌리기·예비 따라가기는 늘 true) |
 | `deploymentId` | uuid \| null | 빌드 성공 뒤 만든 배포 기록 |
 | `urls` | `{main, environment}` | 대표 주소, 환경별 주소(접수 때 사본) |
@@ -211,7 +211,7 @@ stateDiagram-v2
 | `terminationReason` | string \| null | 마지막 종료 이유: `OOMKilled`·`Error`·`Completed` 등 |
 | `exitCode` | integer \| null | 마지막 종료 코드(137 = OOM·SIGKILL) |
 | `restartCount` | integer \| null | 재시작 횟수 |
-| `logTail` | string[] | 컨테이너 로그 마지막 50줄 이하(재시작했으면 직전 컨테이너). **비밀값을 가린 값**: 그 배포의 앱 환경 변수 값(6자 이상), 접속 문자열 비밀번호(`scheme://user:***@host`), `password=`·`token:` 꼴 값, 토큰 모양(GitHub·AWS·`Bearer`·`sk-`·개인 키). 이미지 받기 실패·로그를 못 읽었을 때는 빈 목록 |
+| `logTail` | string[] | 컨테이너 로그 마지막 50줄 이하(재시작했으면 직전 컨테이너). **비밀값을 가린 값**: 그 배포의 앱 환경 변수 값(6자 이상은 모두, 6자 미만은 키 이름이 민감 키 모양 — `password`·`secret`·`token`·`api_key`·`auth`·`session` 등 — 일 때만, 빈 값 제외), 단독 JWT(`eyJ….….…`), 접속 문자열 비밀번호(`scheme://user:***@host`), `password=`·`token:` 꼴 값, 토큰 모양(GitHub·AWS·`Bearer`·`sk-`·개인 키). 이미지 받기 실패·로그를 못 읽었을 때는 빈 목록 |
 | `logTruncated` | boolean | 50줄보다 앞 줄이 더 있었다 |
 | `previousVersionRunning` | boolean \| null | 되돌린 뒤 이전 버전이 실행 중인가. 이전 배포가 없었으면 `false`(실행 중인 버전 없음), 되돌리기 전·되돌리기 실패·빌드 단계 실패면 `null` |
 
@@ -276,7 +276,7 @@ stateDiagram-v2
 }
 ```
 
-`LogPage`(로그 한 페이지) — `source`(`DEPLOY_JOB`·`BUILD`·`RUNTIME`), `simulated`(행에 저장한 값: `DEPLOY_JOB`·`RUNTIME` 은 요청, `BUILD` 는 빌드), `items[{at, level(INFO·WARN·ERROR), message, code}]`(시간 순, `code` 는 `DEPLOY_JOB` 줄의 코드 — `BUILD`·`RUNTIME` 은 null, API 서버 4-1), `nextCursor`(string \| null, 줄이 없으면 받은 cursor), `hasMore`.
+`LogPage`(로그 한 페이지) — `source`(`DEPLOY_JOB`·`BUILD`·`RUNTIME`), `simulated`(행에 저장한 값: `DEPLOY_JOB`·`RUNTIME` 은 요청, `BUILD` 는 빌드), `items[{at, level(INFO·WARN·ERROR), message, code}]`(시간 순, `code` 는 `DEPLOY_JOB` 줄의 코드 — `BUILD`·`RUNTIME` 은 null, API 서버 4-1. OpenAPI 선택 칸, 응답에는 늘 실린다), `nextCursor`(string \| null, 줄이 없으면 받은 cursor), `hasMore`.
 
 ## 실패 이유 코드 (`errorCode`)
 

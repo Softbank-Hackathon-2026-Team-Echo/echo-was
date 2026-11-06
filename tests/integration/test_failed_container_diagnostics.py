@@ -4,11 +4,16 @@
 이전 버전이 없으면 '실행 중인 버전 없음'으로 나온다.
 """
 
+import asyncio
+import sys
 import uuid
 from typing import Any
 
+import pytest
+
 from app.enums import DeployLogCode, DeployRequestErrorCode
 from app.executors.fake import FakeDeployExecutor
+from app.services.app_env_values import AppEnvResolver
 from app.services.deploy_log_messages import DEPLOY_LOG_ENTRIES, ERROR_MESSAGES
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.rollback_support import (
@@ -184,3 +189,117 @@ async def test_build_failure_has_failure_without_revert(harness: DeployHarness) 
     assert failed["failure"]["code"] == "BUILD_FAILED"
     assert failed["failure"]["previousVersionRunning"] is None
     assert failed["revertStatus"] is None
+
+
+# --- 4-1 검증 반영: 탐침 회귀(통합)·진단 시간 상한·일반 예외 ---
+
+LONG_VALUE = "LongSecretUniqueXYZ123" * 30
+SHORT_SECRET = "A1b2!"
+FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiJwcm9iZS11c2VyIn0" + ".c2lnbmF0dXJlLXByb2JlLXZhbHVl"
+
+
+async def _put(
+    harness: DeployHarness, service_id: str, environment_id: object, name: str, value: str
+) -> None:
+    response = await harness.client.put(
+        f"{harness.services}/{service_id}/environments/{environment_id}/variables/{name}",
+        json={"value": value},
+    )
+    assert response.status_code in (200, 201), response.text
+
+
+async def _crash_after_success(harness: DeployHarness, service_id: str, lines: list[str]) -> None:
+    deployer = _failing_deployer(harness, lines)
+    deployer.fail_service_environment(await _connection_id(harness, service_id))
+
+
+async def test_probe_long_value_short_sensitive_secret_and_jwt_do_not_leak(
+    harness: DeployHarness,
+) -> None:
+    service_id, aws = await _service(harness)
+    await deploy_and_finish(harness, service_id, aws)
+    await _put(harness, service_id, aws, "LONG_SETTING", LONG_VALUE)
+    await _put(harness, service_id, aws, "DB_PASSWORD", SHORT_SECRET)
+    await _crash_after_success(
+        harness,
+        service_id,
+        [
+            f"prefix {LONG_VALUE}",
+            f"login with {SHORT_SECRET} failed",
+            f"세션 {FAKE_JWT}",
+            "fatal: boom",
+        ],
+    )
+
+    failed = await deploy_and_finish(harness, service_id, aws)
+    items = await read_all_logs(harness, failed["id"], "DEPLOY_JOB")
+    rendered = repr(failed) + repr(items) + "".join(harness.responses)
+
+    assert failed["status"] == "FAILED"
+    for secret in ("LongSecretUniqueXYZ123", SHORT_SECRET, FAKE_JWT, "eyJhbGciOiJIUzI1NiJ9"):
+        assert secret not in rendered
+    assert failed["failure"]["logTail"][:3] == ["prefix ***", "login with *** failed", "세션 ***"]
+
+
+def _called_from_diagnostics() -> bool:
+    # resolve 를 부른 쪽이 처리기의 진단 가리기일 때만 늦추거나 깨뜨린다(배포 반영의 조회는 그대로).
+    return sys._getframe(2).f_code.co_name == "_masked_diagnostics"
+
+
+async def test_env_lookup_over_diagnostics_time_limit_fails_without_diagnostics(
+    harness: DeployHarness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    service_id, aws = await _service(harness)
+    await deploy_and_finish(harness, service_id, aws)
+    await _crash_after_success(harness, service_id, ["boot", "fatal: boom"])
+    harness.use_settings(container_diagnostics_timeout_seconds=0.05)
+    original = AppEnvResolver.resolve
+
+    async def slow_resolve(self: AppEnvResolver, snapshot: Any) -> Any:
+        if _called_from_diagnostics():
+            await asyncio.sleep(5)
+        return await original(self, snapshot)
+
+    monkeypatch.setattr(AppEnvResolver, "resolve", slow_resolve)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    failed = await deploy_and_finish(harness, service_id, aws)
+
+    assert loop.time() - started < 4
+    assert (failed["status"], failed["revertStatus"]) == ("FAILED", "SUCCEEDED")
+    failure = failed["failure"]
+    assert (failure["container"], failure["logTail"]) == (None, [])
+    assert failure["message"] == DEPLOY_FAILED
+    assert failure["previousVersionRunning"] is True
+    assert "CONTAINER_DIAGNOSTICS" not in await log_codes(harness, failed["id"])
+    codes = [getattr(r, "error_code", None) for r in caplog.records]
+    assert "CONTAINER_DIAGNOSTICS_TIMEOUT" in codes
+
+
+async def test_unexpected_error_in_env_lookup_fails_without_diagnostics(
+    harness: DeployHarness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    service_id, aws = await _service(harness)
+    await deploy_and_finish(harness, service_id, aws)
+    await _crash_after_success(harness, service_id, ["boot", "fatal: boom"])
+    original = AppEnvResolver.resolve
+
+    async def broken_resolve(self: AppEnvResolver, snapshot: Any) -> Any:
+        if _called_from_diagnostics():
+            raise RuntimeError("unexpected")
+        return await original(self, snapshot)
+
+    monkeypatch.setattr(AppEnvResolver, "resolve", broken_resolve)
+
+    failed = await deploy_and_finish(harness, service_id, aws)
+
+    assert (failed["status"], failed["revertStatus"]) == ("FAILED", "SUCCEEDED")
+    assert failed["failure"]["logTail"] == []
+    assert "CONTAINER_DIAGNOSTICS" not in await log_codes(harness, failed["id"])
+    dropped = [
+        r
+        for r in caplog.records
+        if getattr(r, "error_code", None) == "CONTAINER_DIAGNOSTICS_FAILED"
+    ]
+    assert dropped and getattr(dropped[0], "error_type", None) == "RuntimeError"

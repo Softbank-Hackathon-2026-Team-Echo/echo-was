@@ -198,8 +198,12 @@ class ContainerDiagnostics:
     - termination_reason: 마지막 종료 이유(`OOMKilled`·`Error`·`Completed` 등)
     - exit_code: 마지막 종료 코드(지금 종료 상태가 있으면 그것, 없으면 직전 종료)
     - log_tail: 컨테이너 로그 마지막 CONTAINER_LOG_TAIL_LINES 줄(재시작했으면 직전 컨테이너 로그).
-      실행기가 비밀값 모양을 가린 뒤 담는다. 처리기가 그 배포의 환경 변수 값을 한 번 더 가린다.
+      실행기는 비밀값 모양(mask_secrets)만 가리고 줄 길이는 자르지 않는다. 처리기가 그 배포의
+      환경 변수 값을 가린 **뒤에** 한 줄을 CONTAINER_LOG_LINE_MAX_LENGTH 자로 자른다
+      (container_diagnostics.mask_container_log — 자른 뒤 가리면 잘린 값이 남는다).
     - log_truncated: 그보다 앞 줄이 더 있었다.
+    - deadline: 진단 전체(로그 읽기 + 처리기의 환경 변수 재조회)의 마감 시각(이벤트 루프 시각
+      `loop.time()`). 실행기가 진단을 읽기 시작할 때 정한다. None 이면 처리기가 설정값으로 정한다.
     읽지 못한 값은 None·빈 튜플이다. 읽기 실패는 배포 실패 처리를 막지 않는다.
     """
 
@@ -210,6 +214,7 @@ class ContainerDiagnostics:
     restart_count: int | None = None
     log_tail: tuple[str, ...] = ()
     log_truncated: bool = False
+    deadline: float | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

@@ -16,12 +16,18 @@ from dataclasses import dataclass
 from app.core.log_masking import MASK, mask_secrets
 from app.core.secrets import SecretValue
 from app.enums import DeployLogCode, DeployRequestErrorCode, DeployRequestStatus
-from app.executors.base import ContainerDiagnostics
+from app.executors.base import CONTAINER_LOG_LINE_MAX_LENGTH, ContainerDiagnostics
 from app.models.deploy_request_log import DEPLOY_LOG_MESSAGE_MAX_LENGTH
 from app.services.deploy_log_messages import ERROR_MESSAGES
 
-# 이보다 짧은 환경 변수 값은 가리지 않는다("true"·"8080" 같은 값이 로그 낱말을 모두 지우지 않게).
+# 이 길이 이상인 환경 변수 값은 키와 상관없이 가린다. 더 짧은 값은 키 이름이 SENSITIVE_ENV_KEY
+# 모양일 때만 가린다("true"·"8080"·"1" 같은 짧은 설정값이 로그 낱말을 모두 지우지 않게).
 ENV_VALUE_MIN_MASK_LENGTH = 6
+# 짧은 값도 가리는 민감 키 이름(대소문자 무시, 이름 어디에 있어도).
+SENSITIVE_ENV_KEY = re.compile(
+    r"(?i)password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
+    r"|credential|auth|session|cookie|salt|signing|dsn|database[_-]?url|conn(?:ection)?[_-]?str"
+)
 LAST_ERROR_MAX_LENGTH = 200
 LAST_ERROR_PREFIX = " Last error: "
 
@@ -54,28 +60,71 @@ _SUMMARY = re.compile(
 _NONE = "-"
 
 
+def is_maskable_env_value(key: str, value: str) -> bool:
+    """로그에서 가릴 환경 변수 값인가. 빈 값은 가리지 않는다. ENV_VALUE_MIN_MASK_LENGTH 자 이상이면
+    키와 상관없이, 그보다 짧으면 키 이름이 민감 키 모양(SENSITIVE_ENV_KEY)일 때만 가린다
+    ("true"·"8080"·"1" 같은 짧은 설정값이 로그 낱말을 모두 지우지 않게)."""
+    if not value:
+        return False
+    return len(value) >= ENV_VALUE_MIN_MASK_LENGTH or SENSITIVE_ENV_KEY.search(key) is not None
+
+
 def mask_container_log(
     lines: Sequence[str], env_values: Mapping[str, SecretValue] | None
 ) -> tuple[str, ...]:
-    """그 배포의 환경 변수 값(ENV_VALUE_MIN_MASK_LENGTH 자 이상), 접속 문자열 비밀번호,
-    `password=` 꼴 값, 알려진 토큰 모양을 MASK 로 바꾼 사본."""
-    values = sorted(
-        {
-            value.get_secret_value()
-            for value in (env_values or {}).values()
-            if len(value.get_secret_value()) >= ENV_VALUE_MIN_MASK_LENGTH
-        },
-        key=len,
-        reverse=True,
-    )
+    """그 배포의 환경 변수 값(is_maskable_env_value), 접속 문자열 비밀번호, `password=` 꼴 값,
+    알려진 토큰 모양을 MASK 로 바꾼 뒤 한 줄을 CONTAINER_LOG_LINE_MAX_LENGTH 자로 자른 사본.
+
+    순서가 중요하다: 가리기 → 자르기. 먼저 자르면 잘린 줄 끝의 값 앞부분이 전체 값 비교에 안 맞아
+    그대로 남는다. 실행기는 줄을 자르지 않고 넘긴다. 실행기가 받은 글 자체가 바이트 상한
+    (limitBytes)으로 잘려 마지막 줄 끝에 값 앞부분만 남은 경우를 위해, 가린 뒤에도 마지막 줄 끝이
+    가릴 값의 앞 ENV_VALUE_MIN_MASK_LENGTH 자 이상과 같으면 그 부분을 가린다.
+
+    여러 줄에 걸친 값(PEM 등)도 맞도록 줄을 이어 붙인 글에서 값을 바꾼다. 그 값이 실행기의
+    mask_secrets 로 이미 일부 바뀐 꼴도 함께 찾는다.
+    """
+    values = _mask_targets(env_values)
+    text = "\n".join(lines)
+    for value in values:
+        text = text.replace(value, MASK)
+    split = text.split("\n") if lines else []
+    if split:
+        # 바이트 상한 절단은 받은 글의 끝, 곧 마지막 줄에서만 일어난다.
+        split[-1] = _mask_trailing_prefix(split[-1], values)
     masked: list[str] = []
-    for line in lines:
-        for value in values:
-            line = line.replace(value, MASK)
+    for line in split:
         line = _URL_PASSWORD.sub(rf"\1{MASK}@", line)
         line = _KEY_VALUE_SECRET.sub(rf"\1{MASK}", line)
-        masked.append(mask_secrets(line))
+        masked.append(_cap_line(mask_secrets(line)))
     return tuple(masked)
+
+
+def _mask_targets(env_values: Mapping[str, SecretValue] | None) -> list[str]:
+    targets: set[str] = set()
+    for key, secret in (env_values or {}).items():
+        value = secret.get_secret_value()
+        if not is_maskable_env_value(key, value):
+            continue
+        targets.add(value)
+        pre_masked = mask_secrets(value)
+        if pre_masked != value and pre_masked.strip(MASK + " "):
+            targets.add(pre_masked)
+    # 긴 값부터 바꿔 한 값이 다른 값의 일부일 때 앞부분이 남지 않게 한다.
+    return sorted(targets, key=len, reverse=True)
+
+
+def _mask_trailing_prefix(line: str, values: Sequence[str]) -> str:
+    for value in values:
+        for size in range(len(value) - 1, ENV_VALUE_MIN_MASK_LENGTH - 1, -1):
+            if line.endswith(value[:size]):
+                return line[:-size] + MASK
+    return line
+
+
+def _cap_line(line: str) -> str:
+    if len(line) <= CONTAINER_LOG_LINE_MAX_LENGTH:
+        return line
+    return line[: CONTAINER_LOG_LINE_MAX_LENGTH - 1] + "…"
 
 
 def last_error_line(lines: Sequence[str]) -> str | None:

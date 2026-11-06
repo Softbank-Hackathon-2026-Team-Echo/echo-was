@@ -15,16 +15,21 @@
 - `KubernetesDeployExecutor.poll` 이 `IMAGE_PULL_FAILED`·`CONTAINER_START_FAILED` 를 판정한 **그 호출 안에서**(처리기가 되돌리기를 부르기 전) 판정한 파드·컨테이너 하나를 읽는다.
 - 상태: 이미 읽은 파드 목록의 `containerStatuses[]` 에서 `state.waiting.reason`, `state.terminated` 없으면 `lastState.terminated` 의 `reason`·`exitCode`, `restartCount`.
 - 로그(`CONTAINER_START_FAILED` 만): `GET /api/v1/namespaces/{ns}/pods/{pod}/log?container=app&tailLines=51&limitBytes=262144`. 재시작했으면(`restartCount > 0` 또는 종료 기록 있음) `previous=true` 먼저, 비면(400·404·빈 글) 지금 컨테이너.
-- 상한: 마지막 **50줄**(51번째 줄이 있으면 `log_truncated = true`), 한 줄 **400자**(넘으면 399자 + `…`).
+- 상한: 마지막 **50줄**(51번째 줄이 있으면 `log_truncated = true`), 한 줄 **400자**(넘으면 399자 + `…`). 줄 자르기는 실행기가 아니라 처리기가 **가린 뒤에** 한다(3절).
 - 실패해도 계속: 로그 읽기가 401·403(권한)·5xx·연결 실패·그 밖 4xx 면 `log_tail = ()` 로 두고 경고 `CONTAINER_LOGS_UNAVAILABLE`. 실패 코드·되돌리기는 그대로.
+- 진단 전체 시간 상한(검증 반영): 설정 `container_diagnostics_timeout_seconds`(기본 **10초**, 환경 변수 `CONTAINER_DIAGNOSTICS_TIMEOUT_SECONDS`)가 진단 전체(파드 상태 정리 + 로그 읽기 + 처리기의 환경 변수 재조회)의 절대 상한이다. HTTP 요청마다의 시간 제한은 바이트가 조금씩 오면 늘어나므로 따로 묶는다. 실행기는 시작할 때 마감 시각(`ContainerDiagnostics.deadline`, 이벤트 루프 시각)을 정해 진단에 담고, 처리기는 그 마감 안에서 환경 변수를 다시 조회한다(마감이 없으면 지금 + 설정값). 넘으면 경고 `CONTAINER_DIAGNOSTICS_TIMEOUT` 과 함께 **진단 없이**(`diagnostics = None`) 실패 처리를 계속한다.
+- 예외 범위(검증 반영): 진단 읽기·환경 변수 재조회에서 예상하지 못한 예외(`Exception` 전부)도 경고 `CONTAINER_DIAGNOSTICS_FAILED`(예외 이름만, 문장은 비밀값을 담을 수 있어 쓰지 않음)와 함께 진단 없이 계속한다. 배포 실패 처리·되돌리기는 진단 때문에 멈추지 않는다.
 - 계약 값: `DeployFailed(code, diagnostics: ContainerDiagnostics | None)` — `diagnostics` 는 비교에서 빠지는 선택 칸(기존 판정 시험 호환). `ContainerDiagnostics{container, reason, termination_reason, exit_code, restart_count, log_tail, log_truncated}`.
 
 ## 3. 비밀값 가리기
 
-1. 실행기: `mask_secrets`(GitHub·AWS·`Bearer`·`sk-`·Echo 토큰, 개인 키 블록)를 줄로 나누기 전 글 전체에 건다.
-2. 처리기: 그 배포 기록의 앱 환경 변수 값을 다시 꺼내(`AppEnvResolver`) **6자 이상 값**을 `***` 로 바꾸고, 접속 문자열 비밀번호(`scheme://user:***@host`)와 `password|passwd|pwd|secret|token|api_key|access_key` `=`·`:` 뒤 값을 가린 다음 `mask_secrets` 를 한 번 더 건다.
+1. 실행기: `mask_secrets`(GitHub·AWS·`Bearer`·`sk-`·Echo 토큰, 단독 JWT, 개인 키 블록)를 줄로 나누기 전 글 전체에 건다. **줄 길이는 자르지 않는다.**
+2. 처리기(`mask_container_log`, 한 곳에서 **가리기 → 자르기** 순서): 그 배포 기록의 앱 환경 변수 값을 다시 꺼내(`AppEnvResolver`) 아래 규칙의 값을 `***` 로 바꾸고(줄을 이어 붙인 글에서 바꿔 여러 줄 값도 맞춘다), 접속 문자열 비밀번호(`scheme://user:***@host`)와 `password|passwd|pwd|secret|token|api_key|access_key` `=`·`:` 뒤 값을 가린 다음 `mask_secrets` 를 한 번 더 걸고, **그 뒤에** 한 줄을 400자로 자른다. 먼저 자르면 잘린 줄 끝의 값 앞부분이 전체 값 비교에 안 맞아 남는다(검증 탐침에서 660자 값 누출 재현).
+   - 가릴 환경 변수 값 규칙(검증 반영): 빈 값은 가리지 않는다. **6자 이상 값은 키와 상관없이 모두** 가린다. **6자 미만 값은 키 이름이 민감 키 모양일 때만** 가린다 — `password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth|session|cookie|salt|signing|dsn|database[_-]?url|conn(ection)?[_-]?str`(대소문자 무시, 이름 어디에 있어도). `true`·`false`·`8080`·`1` 같은 짧은 설정값까지 가리면 로그 낱말이 모두 지워지는 오탐이 심해서다. 따라서 민감 키가 아닌 이름(`X`·`MODE` 등)의 5자 이하 값은 가리지 않는다.
+   - 바이트 상한(`limitBytes`)으로 받은 글의 끝이 잘려 마지막 줄 끝에 값 앞부분만 남을 수 있다. 마지막 줄 끝이 가릴 값의 앞 6자 이상과 같으면 그 부분도 가린다.
+   - 실행기의 `mask_secrets` 로 값 일부가 이미 바뀐 꼴(예: 값 안의 GitHub 토큰)도 함께 찾는다.
 3. 값을 못 꺼내면(`ENV_SECRET_UNAVAILABLE`·일시 오류) 가릴 수 없으므로 `log_tail` 을 버리고 상태 값만 남긴다(경고 `container log tail withheld`).
-4. 응답: 배포 작업 로그·`failure` 칸 모두 응답 직전 `mask_secrets` 를 다시 건다(기존 방어).
+4. 응답: 배포 작업 로그·`failure` 칸 모두 응답 직전 `mask_secrets` 를 다시 건다(기존 방어). 단독 JWT(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`)는 `app/core/log_masking.py` 에 더해 모든 로그 응답이 함께 가린다(검증 반영).
 
 ## 4. 배포 작업 로그 줄 (저장)
 
@@ -58,6 +63,8 @@ failure: {
   previousVersionRunning: boolean | null # true 이전 버전 유지 · false 실행 중인 버전 없음 · null 되돌리기 전/실패/빌드 실패
 } | null                                 # status != FAILED 면 null
 ```
+
+- OpenAPI(검증 반영): `DeployRequestDetail.failure` 와 로그 `items[].code` 는 나중에 더한 칸이라 **required 가 아닌 선택 칸**(모델 기본값 `None`)이다 — 옛 생성 클라이언트를 깨지 않는다. 응답 본문에는 `data` 안 칸 관례(`ApiResponse` 설명: 값이 없어도 null 로 늘 싣는다)대로 늘 실린다(`exclude_none` 쓰지 않음).
 
 - 상세(`GET …/deploy-requests/{id}`)만 채운다. 목록 항목에는 없다(요청마다 로그 줄 조회를 피한다).
 - 값은 배포 작업 로그 줄(`CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG`·`FAILED`·`REVERT_*`)로 만든다 — 저장 칸 추가 없음.

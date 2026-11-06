@@ -68,6 +68,17 @@ def test_app_registers_environment_routes() -> None:
     assert not {path for path in paths if path.startswith("/api/v1/environments")}
 
 
+def test_openapi_marks_added_failure_and_log_code_fields_optional() -> None:
+    # API 서버 4-1 에서 더한 칸은 옛 생성 클라이언트를 깨지 않게 required 가 아니다(검증 반영).
+    schemas = app.openapi()["components"]["schemas"]
+
+    for name, field in [("DeployRequestDetailResponse", "failure"), ("LogLineResponse", "code")]:
+        schema = schemas[name]
+        assert field in schema["properties"], name
+        assert field not in schema.get("required", []), name
+    assert "message" in schemas["LogLineResponse"]["required"]
+
+
 def test_app_registers_service_and_deploy_request_routes() -> None:
     paths = app.openapi()["paths"]
 

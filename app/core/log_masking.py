@@ -22,6 +22,8 @@ _TOKENS = re.compile(
     r"|AKIA[0-9A-Z]{16}"  # AWS 액세스 키
     r"|sk-[A-Za-z0-9_-]{20,}"  # API 비밀 키
     r"|echo_(?:agt|rnr|run)_[A-Za-z0-9_-]{20,}"  # Echo 에이전트·러너·실행 토큰
+    # 단독 JWT(헤더.본문.서명, `Bearer` 없이 찍힌 세션·ID 토큰). 서명이 잘린 꼴도 가린다.
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"
 )
 
 

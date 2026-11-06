@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     # ErrImagePull 이 이 시간보다 오래 이어지면 IMAGE_PULL_FAILED.
     deploy_image_pull_grace_seconds: float = Field(default=30.0, ge=0)
     kube_request_timeout_seconds: float = Field(default=15.0, gt=0)
+    # 배포 실패 진단(컨테이너 로그 읽기 + 환경 변수 재조회) 전체 절대 상한(API 서버 4-1).
+    # 넘으면 진단 없이 실패 처리를 계속한다.
+    container_diagnostics_timeout_seconds: float = Field(default=10.0, gt=0)
     # GCE·GKE 메타데이터 서버(워크로드 신원 토큰). 시험에서 바꾼다.
     google_metadata_base_url: str = "http://metadata.google.internal"
 

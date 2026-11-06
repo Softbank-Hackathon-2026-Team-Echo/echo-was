@@ -192,8 +192,9 @@ class DeployRequestDetailResponse(DeployRequestSummaryResponse):
     repo_url: str
     superseded_by_id: uuid.UUID | None
     error_message: str | None
-    # 실패한 요청의 원인·컨테이너 진단(API 서버 4-1). 실패가 아니면 null.
-    failure: FailureResponse | None
+    # 실패한 요청의 원인·컨테이너 진단(API 서버 4-1). 실패가 아니면 null. 나중에 더한 칸이라
+    # OpenAPI 에서는 선택 칸(required 아님)이다 — 응답에는 data 안 칸 관례대로 null 로 늘 싣는다.
+    failure: FailureResponse | None = None
     build: BuildRefResponse | None
     deployment_id: uuid.UUID | None
     urls: UrlsResponse
@@ -266,7 +267,8 @@ class LogLineResponse(ApiModel):
     level: LogLevel
     message: str
     # 배포 작업 로그 줄의 코드(CONTAINER_LOG 등, API 서버 4-1). 빌드·실행 로그는 null.
-    code: str | None
+    # 나중에 더한 칸이라 OpenAPI 에서는 선택 칸이다(응답에는 null 로 늘 싣는다).
+    code: str | None = None
 
 
 class LogPageResponse(ApiModel):
