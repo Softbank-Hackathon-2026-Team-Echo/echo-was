@@ -48,6 +48,9 @@ SNAPSHOT_MAIN_URL = "mainUrl"
 SNAPSHOT_ENVIRONMENT_URL = "environmentUrl"
 # 배포 기록의 앱 환경 변수 참조 {KEY: "<참조>/versions/<n>"}(API 서버 10). 값은 없다.
 SNAPSHOT_ENV_VARS = "envVars"
+# 수동 배포 요청에만 둔다: 주 환경 성공 뒤 함께 띄울 예비 환경 id 목록(이슈 #99 2번). 배포 기록·
+# 예비 따라가기 요청에는 옮기지 않는다(되돌리기가 배포 기록 사본을 쓰므로 다시 띄우지 않게).
+SNAPSHOT_STANDBY_ENVIRONMENT_IDS = "standbyEnvironmentIds"
 SIMULATE_FAIL_AT = "failAt"
 
 

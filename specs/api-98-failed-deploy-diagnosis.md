@@ -73,13 +73,13 @@
 
 ## 5. 감사
 
-USER `DIAGNOSIS_REQUESTED`(쓰기 경로 34번째, `WRITE_ROUTE_ACTIONS`). details `{serviceId, deployRequestId, environmentId, simulated}`.
+USER `DIAGNOSIS_REQUESTED`(쓰기 경로 35개 중 하나, `WRITE_ROUTE_ACTIONS`). details `{serviceId, deployRequestId, environmentId, simulated}`.
 
 ## 6. 시험
 
 - 단위: `tests/test_diagnosis_result.py`(결과 검사·가림·근거 부족·가짜 진단이 러너 스키마 통과), `tests/test_ai_residency.py::test_change_proposal_runs_are_not_counted`.
 - 통합: `tests/integration/test_failed_deploy_diagnosis.py` — 실패 배포 → 진단 201 → 배포 상세 diagnosis → 가짜 결과 → 중복 200 → 승인 → 가짜 반영 → redeployRequestId → 재배포 성공 / 근거 부족 / 409 `DEPLOY_NOT_FAILED`·404·422 / simulate 스위치 / C-AI-1·레지던시 미산입 / 러너 경로(입력 failure·결과 diagnosis·APPLY_PATCH 입력·재배포) / 진단 없는 러너 결과.
-- 기존 시험 갱신: 마이그레이션 카탈로그·head·down/up, 감사 쓰기 경로 34개, OpenAPI 결과 본문 3모양, `apply` 칸 3개.
+- 기존 시험 갱신: 마이그레이션 카탈로그·head·down/up, 감사 쓰기 경로 35개, OpenAPI 결과 본문 3모양, `apply` 칸 3개.
 
 ## 7. 알려진 한계 (지금 하지 않음)
 

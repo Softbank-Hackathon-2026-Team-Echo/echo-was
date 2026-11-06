@@ -195,6 +195,9 @@ class DeployLogCode(StrEnum):
     HEALTH_PROBE_UNREACHABLE = "HEALTH_PROBE_UNREACHABLE"
     SUCCEEDED = "SUCCEEDED"
     STANDBY_SYNC_REQUESTED = "STANDBY_SYNC_REQUESTED"
+    # 요청한 예비 환경(standbyEnvironmentIds)을 띄우지 못했다(이슈 #99).
+    # 문장은 처리기가 고정 사유로 만든다.
+    STANDBY_SKIPPED = "STANDBY_SKIPPED"
     # 배포 실패 진단(API 서버 4-1): 컨테이너 상태 1줄 + 로그 마지막 줄(최대 50, 줄마다 1행).
     CONTAINER_DIAGNOSTICS = "CONTAINER_DIAGNOSTICS"
     CONTAINER_LOG = "CONTAINER_LOG"

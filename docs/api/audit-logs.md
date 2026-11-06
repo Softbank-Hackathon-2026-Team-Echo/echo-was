@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 34개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·배포 실패 진단 1개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 35개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -110,7 +110,8 @@
 | `SERVICE_DELETE_REQUESTED` | `DELETE /services/{id}` | `service` | `{retry?}`. 다시 내리기가 실제로 시작된 재요청이면 `retry: true` |
 | `SERVICE_VARIABLE_SET` | `PUT /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
 | `SERVICE_VARIABLE_DELETED` | `DELETE /services/{id}/environments/{environmentId}/variables/{key}` | `service` | `{environmentId, key}` |
-| `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests`. 배포 실패 진단의 반영 성공 뒤 자동 재배포도 이 줄이다(행위자 = 승인한 사람, 경로 = 승인 요청 또는 러너 결과 요청, 이슈 #98) | `deploy_request` | `{environmentId, ref, commitSha}`, 자동 재배포면 `diagnosisApplyRunId` 가 더해진다 |
+| `SERVICE_VARIABLE_COPIED` | `POST /services/{id}/variables:copy` | `service`(이름표 = `서비스 · 대상 환경 · 키`) | `{environmentId, key, sourceEnvironmentId}`. 복사한 대상·키마다 한 줄(값·비밀 참조·버전 없음, 실패한 항목은 줄 없음, 이슈 #99) |
+| `DEPLOY_REQUESTED` | `POST /services/{id}/deploy-requests`. 배포 실패 진단의 반영 성공 뒤 자동 재배포도 이 줄이다(행위자 = 승인한 사람, 경로 = 승인 요청 또는 러너 결과 요청, 이슈 #98) | `deploy_request` | `{environmentId, ref, commitSha, standbyEnvironmentIds?, diagnosisApplyRunId?}`(예비 환경을 받았을 때만 `standbyEnvironmentIds`, 이슈 #99 · 진단 뒤 자동 재배포일 때만 `diagnosisApplyRunId`, 이슈 #98) |
 | `ROLLBACK_REQUESTED` | `POST /deploy-requests/{id}/rollback` | `deploy_request` | `{rollbackOfId, environmentId}` |
 | `MIGRATION_PLAN_CREATED` | `POST /services/{id}/migration-plans`, 재난 트리거 | `migration_plan` | `{sourceEnvironmentId, targetEnvironmentId}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |
 | `MIGRATION_PLAN_APPROVED` | `POST /migration-plans/{id}/approve`, 재난 트리거의 자기 승인 | `migration_plan` | `{selfApproved}`. 재난이 만든 계획은 `disasterId`·`trigger: "DISASTER"` 를 더한다 |

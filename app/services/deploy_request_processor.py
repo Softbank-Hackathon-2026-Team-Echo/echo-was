@@ -13,6 +13,9 @@
 - 실행기가 컨테이너 실패 진단(사유·종료 코드·로그 마지막 50줄)을 돌려주면 되돌리기 전에
   환경 변수 값을 가려 배포 작업 로그에 남긴다(API 서버 4-1).
 - 배포 작업 로그는 그 줄을 일으킨 전환과 같은 트랜잭션에서, 전환이 반영됐을 때만 쓴다(DeployJobLog).
+- 수동 배포 요청이 예비 환경(config_snapshot.standbyEnvironmentIds, 이슈 #99)을 받았으면 성공 처리
+  트랜잭션에서 그 환경마다 연결을 만들고(없으면) 기존 예비 따라가기와 같은 STANDBY_SYNC 를 넣는다.
+  주 환경이 실패·취소되면 아무것도 만들지 않는다.
 - 되돌리기 요청(trigger = ROLLBACK)은 시작할 때 연결의 현재 배포가 접수 때 값
   (rollback_base_deployment_id)와 다르면 CANCELLED(BASE_CHANGED) 로 끝난다. 빌드는 대상 요청의
   성공한 빌드를 재사용하므로 BUILDING 을 바로 지나 배포 기록(rollback_of_id = 대상의 배포 기록)을
@@ -35,7 +38,11 @@ from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
 from app.core.config import Settings
-from app.core.exceptions import RepoNotAccessibleError, SourceProviderUnavailableError
+from app.core.exceptions import (
+    PublicHostConflictError,
+    RepoNotAccessibleError,
+    SourceProviderUnavailableError,
+)
 from app.core.repo_url import parse_repo_url
 from app.core.secrets import SecretValue
 from app.enums import (
@@ -78,7 +85,9 @@ from app.models.build import ACTIVE_BUILD_UNIQUE_INDEX
 from app.repositories.build_repository import BuildRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
+from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.job_repository import JobRepository
+from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_environment_variable_repository import (
     ServiceEnvironmentVariableRepository,
@@ -91,12 +100,15 @@ from app.services.container_diagnostics import (
     mask_container_log,
 )
 from app.services.deploy_job_log import DeployJobLog
+from app.services.deploy_log_messages import standby_skipped_message
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
     SNAPSHOT_ENV_VARS,
     SNAPSHOT_ENVIRONMENT_URL,
     SNAPSHOT_HEALTH_CHECK_PATH,
     SNAPSHOT_HEALTH_CHECK_TIMEOUT_SECONDS,
+    SNAPSHOT_STANDBY_ENVIRONMENT_IDS,
+    create_service_connection,
     deploy_target,
     deployment_spec,
     enqueue_deploy_request,
@@ -119,6 +131,13 @@ _HEALTH_PROBE_LOG_CODES = {
 }
 # 서비스 중 연결에서 성공하면 예비 연결이 따라가는 요청 종류.
 _STANDBY_SYNC_SOURCE_TRIGGERS = (DeployRequestTrigger.MANUAL, DeployRequestTrigger.ROLLBACK)
+# 요청한 예비 환경(이슈 #99)을 띄우지 못한 고정 사유(STANDBY_SKIPPED 줄 문장).
+_SKIP_NOT_SERVING = "the deployed environment is not serving traffic."
+_SKIP_SERVICE_DELETING = "the service is being deleted."
+_SKIP_MIGRATION = "a migration is in progress for this service."
+_SKIP_DELETED = "the environment was deleted."
+_SKIP_SERVING = "the environment is already serving traffic."
+_SKIP_HOST_CONFLICT = "the environment public host is already in use."
 
 
 @dataclass(frozen=True)
@@ -524,6 +543,8 @@ class DeployRequestProcessor:
         않았으니 보관함을 켠 뒤 그 기록으로 되돌려도 Secret 을 비우면 안 된다.
         """
         snapshot = dict(request.config_snapshot)
+        # 예비 환경 목록은 요청의 의도라 배포 기록에 옮기지 않는다(되돌리기가 그 사본을 쓴다).
+        snapshot.pop(SNAPSHOT_STANDBY_ENVIRONMENT_IDS, None)
         if (
             request.trigger == DeployRequestTrigger.ROLLBACK
             or not self._settings.is_app_secret_store_configured
@@ -753,6 +774,7 @@ class DeployRequestProcessor:
                 await self._route_main(service, connection, request.deployment_id)
 
             is_serving = connection.traffic_weight > 0
+            requested = _requested_standby_ids(request)
             if (
                 is_serving
                 and service.status == ServiceStatus.ACTIVE
@@ -760,11 +782,27 @@ class DeployRequestProcessor:
                 and request.trigger in _STANDBY_SYNC_SOURCE_TRIGGERS
             ):
                 # 예비 연결을 직접 되돌린 경우(비율 0)는 따라가기를 만들지 않는다.
+                synced: set[uuid.UUID] = set()
                 for standby in others:
                     if standby.traffic_weight == 0 and standby.current_deployment_id is not None:
                         created_syncs.append(
                             await self._enqueue_standby_sync(request, standby, now)
                         )
+                        synced.add(standby.id)
+                if requested:
+                    created_syncs.extend(
+                        await self._start_requested_standbys(
+                            request, service, others, requested, synced, now
+                        )
+                    )
+            else:
+                reason = (
+                    _SKIP_NOT_SERVING
+                    if service.status == ServiceStatus.ACTIVE and not service.is_deleted
+                    else _SKIP_SERVICE_DELETING
+                )
+                for environment_id in requested:
+                    await self._skip_standby(request, environment_id, reason, now)
             await self._session.flush()
         self._log("deploy request succeeded", request, DeployRequestStatus.SUCCEEDED)
         for sync_id in created_syncs:
@@ -803,6 +841,76 @@ class DeployRequestProcessor:
             },
         )
 
+    async def _start_requested_standbys(
+        self,
+        request: DeployRequest,
+        service: Service,
+        others: list[ServiceEnvironment],
+        requested: list[uuid.UUID],
+        synced: set[uuid.UUID],
+        now: datetime,
+    ) -> list[uuid.UUID]:
+        """요청한 예비 환경(이슈 #99 2번)마다 연결을 만들고(없으면) STANDBY_SYNC 를 넣는다.
+
+        주 환경 성공 처리 트랜잭션 안(서비스 → 연결 잠금)에서 부른다.
+        - 이미 따라가는 예비 연결은 위 반복이 넣었으므로 건너뛴다.
+        - 실행 중 이전이 있으면 넣기·배포 접수와 같은 규칙으로 하나도 띄우지 않는다
+          (이전 도중에 서비스의 연결 집합을 바꾸지 않는다).
+        - 새 연결은 환경을 FOR SHARE 로 잡은 뒤 살아 있는지 다시 보고 만든다. 환경 삭제의
+          FOR UPDATE 와 줄을 선다. 삭제는 서비스·연결을 잠그지 않아 순서가 뒤집혀도 교착이 없다.
+        - 주소 충돌은 저장점으로 되돌리고 그 환경만 건너뛴다.
+        띄우지 못한 환경은 원본 요청에 STANDBY_SKIPPED 줄을 쓴다.
+        """
+        if await MigrationPlanRepository(self._session).find_in_progress_for_service(service.id):
+            for environment_id in requested:
+                await self._skip_standby(request, environment_id, _SKIP_MIGRATION, now)
+            return []
+        by_environment = {item.environment_id: item for item in others}
+        created: list[uuid.UUID] = []
+        for environment_id in requested:
+            connection = by_environment.get(environment_id)
+            if connection is not None and connection.id in synced:
+                continue
+            if connection is not None and connection.traffic_weight != 0:
+                await self._skip_standby(request, environment_id, _SKIP_SERVING, now)
+                continue
+            if connection is None:
+                environment = await EnvironmentRepository(self._session).find_live_by_id(
+                    service.organization_id, environment_id, for_share=True
+                )
+                if environment is None:
+                    await self._skip_standby(request, environment_id, _SKIP_DELETED, now)
+                    continue
+                try:
+                    async with self._session.begin_nested():
+                        connection = await create_service_connection(
+                            self._session, service, environment, self._settings.public_base_domain
+                        )
+                except PublicHostConflictError:
+                    await self._skip_standby(request, environment_id, _SKIP_HOST_CONFLICT, now)
+                    continue
+            created.append(await self._enqueue_standby_sync(request, connection, now))
+        return created
+
+    async def _skip_standby(
+        self, request: DeployRequest, environment_id: uuid.UUID, reason: str, now: datetime
+    ) -> None:
+        await self._job_log.append(
+            request,
+            DeployLogCode.STANDBY_SKIPPED,
+            now,
+            message=standby_skipped_message(str(environment_id), reason),
+        )
+        logger.warning(
+            "requested standby skipped",
+            extra={
+                "action": "start_requested_standby",
+                "deploy_request_id": str(request.id),
+                "environment_id": str(environment_id),
+                "reason": reason,
+            },
+        )
+
     async def _enqueue_standby_sync(
         self, source: DeployRequest, standby: ServiceEnvironment, now: datetime
     ) -> uuid.UUID:
@@ -831,7 +939,7 @@ class DeployRequestProcessor:
                 **{
                     key: value
                     for key, value in source.config_snapshot.items()
-                    if key != SNAPSHOT_ENV_VARS
+                    if key not in (SNAPSHOT_ENV_VARS, SNAPSHOT_STANDBY_ENVIRONMENT_IDS)
                 },
                 SNAPSHOT_ENVIRONMENT_URL: public_url(standby.public_host),
             },
@@ -1140,6 +1248,14 @@ def _revert_log_code(result: RevertResult, previous: Deployment | None) -> Deplo
     if previous is None:
         return DeployLogCode.REVERT_SUCCEEDED_NO_PREVIOUS
     return DeployLogCode.REVERT_SUCCEEDED
+
+
+def _requested_standby_ids(request: DeployRequest) -> list[uuid.UUID]:
+    """수동 배포 요청이 접수 때 받은 예비 환경 id(이슈 #99). 다른 종류·없으면 빈 목록."""
+    if request.trigger != DeployRequestTrigger.MANUAL:
+        return []
+    raw = request.config_snapshot.get(SNAPSHOT_STANDBY_ENVIRONMENT_IDS) or []
+    return [uuid.UUID(str(item)) for item in raw]
 
 
 def _needs_revert(request: DeployRequest) -> bool:

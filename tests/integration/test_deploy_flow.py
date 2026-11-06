@@ -52,6 +52,9 @@ DETAIL_KEYS = {
     "failure",
     # 이슈 #98: AI 진단 실행 연결
     "diagnosis",
+    # 이슈 #99: 예비 환경 함께 띄우기(칸 이름 가칭)
+    "standbyEnvironmentIds",
+    "standbyDeployRequestIds",
 }
 
 
