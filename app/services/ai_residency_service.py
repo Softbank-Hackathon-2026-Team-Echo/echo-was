@@ -11,6 +11,7 @@ from app.models import AgentRun
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.services.ai_residency import (
     DEFAULT_RESIDENCY_POLICY,
+    RESIDENCY_EXCLUDED_KINDS,
     ResidencyRun,
     ResidencySummary,
     summarize_residency,
@@ -41,12 +42,20 @@ class AiResidencyService:
         self._runs = AgentRunRepository(session)
 
     async def get_summary(self, organization_id: uuid.UUID, days: int) -> ResidencySummary:
-        """[지금 − days, 지금) 안에 끝난 실행의 요약. 최신 5,000건까지 읽고 넘으면 truncated 다."""
+        """[지금 − days, 지금) 안에 끝난 실행의 요약. 최신 5,000건까지 읽고 넘으면 truncated 다.
+
+        빼는 종류(RESIDENCY_EXCLUDED_KINDS, 배포 실패 진단)는 조회 조건에서 먼저 빼고 상한을
+        건다 — 진단이 상한을 먹어 기존 사전 점검을 가리지 않는다(SPEC api-98).
+        """
         to_at = self._clock.now()
         from_at = to_at - timedelta(days=days)
         async with self._session.begin():
             rows = await self._runs.search_finished_for_residency(
-                organization_id, from_at, to_at, RESIDENCY_RUN_LIMIT + 1
+                organization_id,
+                from_at,
+                to_at,
+                RESIDENCY_RUN_LIMIT + 1,
+                excluded_kinds=RESIDENCY_EXCLUDED_KINDS,
             )
         return summarize_residency(
             [_to_residency_run(row) for row in rows[:RESIDENCY_RUN_LIMIT]],

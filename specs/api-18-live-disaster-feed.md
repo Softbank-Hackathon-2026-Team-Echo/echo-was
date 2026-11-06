@@ -2,7 +2,7 @@
 
 - 저장소 경로: `specs/api-18-live-disaster-feed.md`
 - 상태: 구현 PR(지민 지시 11/7, 아이디어 「실제 태풍·지진 알림을 받아 이전시키기」). 병합·운영 스위치 켜기는 별도 승인.
-- 기준: echo-was main `f9680b8`(#100 병합 뒤) · Alembic head `31bc0563b24b` → 새 리비전 `8748e995387a`
+- 기준: echo-was main `f9680b8`(#100 병합 뒤) · Alembic head `31bc0563b24b` → 새 리비전 `8748e995387a`(#101 병합 뒤 main 을 합치며 down_revision 을 #101 의 `9d8e1f2a3b4c` 로 옮겼다)
 - 관련: API 서버 9 재난 API(`specs/api-9-disaster-trigger.md` — D-3 "지진 피드 2차"를 여기서 한다) · #30 SYSTEM 사전 승인(형래) · echo-frontend `src/lib/api/disasters.ts` `LIVE_FEED = {name, ready:false}` 자리
 
 ## 1. 완료 기준
@@ -37,7 +37,7 @@
 | D-9 | 시연 주입 `POST /disasters/feed:inject`(개발자 이상 사람, 에이전트 403): `{epicenter, magnitude, place?}` → 같은 `process_feed_event` 를 그 조직에만, `source=FEED_INJECTED`(simulated=true), `feed_event_id="inject:<uuid hex>"`. 스위치와 상관없고 피드 상태를 바꾸지 않는다 |
 | D-10 | 응답 바뀜(호환): `Disaster.createdBy` 가 null 가능, `feedEvent` 칸 추가, `simulated = (source != LIVE_FEED)` |
 
-## 4. 데이터 — 마이그레이션 1개 `8748e995387a`(down_revision `31bc0563b24b`)
+## 4. 데이터 — 마이그레이션 1개 `8748e995387a`(down_revision `9d8e1f2a3b4c`)
 
 - 새 표 `disaster_feed_states`(provider PK, 시각 2·오류 코드·수 2·`seen_event_ids` jsonb 배열).
 - `disasters`: `feed_event_id varchar(128)`·`feed_event jsonb`(NULL, 맨 뒤), `created_by_user_id` NULL 허용, source CHECK 에 `LIVE_FEED`·`FEED_INJECTED`, CHECK `creator_matches_source`·`feed_event_matches_source`·`feed_event_is_object`, 부분 유니크 인덱스.

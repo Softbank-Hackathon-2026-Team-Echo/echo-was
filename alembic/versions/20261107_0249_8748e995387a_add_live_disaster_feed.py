@@ -18,7 +18,7 @@ downgrade 는 피드 재난(SIMULATED 가 아닌 행)이 있으면 실패한다(
 되돌릴 수 없다). 그 행은 지울 수 없으므로(DELETE 금지 트리거) 그런 DB 는 되돌리지 않는다.
 
 Revision ID: 8748e995387a
-Revises: 31bc0563b24b
+Revises: 9d8e1f2a3b4c
 Create Date: 2026-11-07 02:49:24.754363
 
 """
@@ -31,7 +31,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "8748e995387a"
-down_revision: str | Sequence[str] | None = "31bc0563b24b"
+down_revision: str | Sequence[str] | None = "9d8e1f2a3b4c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
