@@ -85,6 +85,45 @@ def run_target(run: AgentRun) -> AuditTarget:
     return AuditTarget(AuditTargetType.AGENT_RUN, run.id, service.get("name"))
 
 
+def record_run_finished(
+    audit: AuditRecorder,
+    run: AgentRun,
+    *,
+    actor: AuditActor,
+    status: AgentRunStatus,
+    simulated: bool,
+    ai_reviewed: bool,
+    failure_code: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """실행이 SUCCEEDED·FAILED 로 끝났다는 AGENT_RUN_FINISHED 줄을 쓴다.
+
+    러너 결과 제출과 WAS 가 바로 끝내는 가짜 실행(가짜 진단·가짜 반영)이 모두 이 함수를 쓴다.
+    C-AUD-1 자기 시험은 끝난 실행마다 이 줄을 요구하므로, 실행을 끝내는 경로는 같은
+    트랜잭션에서 이 함수를 불러야 한다.
+    """
+    details: dict[str, Any] = {
+        "kind": AgentRunKind(run.kind).value,
+        "status": status.value,
+        "simulated": simulated,
+        "aiReviewed": ai_reviewed,
+    }
+    if extra:
+        details.update(extra)
+    if failure_code is not None:
+        details["failureCode"] = failure_code
+    audit.record(
+        organization_id=run.organization_id,
+        actor=actor,
+        action=AuditAction.AGENT_RUN_FINISHED,
+        result=(
+            AuditResult.SUCCEEDED if status is AgentRunStatus.SUCCEEDED else AuditResult.FAILED
+        ),
+        target=run_target(run),
+        details=details,
+    )
+
+
 async def expire_overdue_runs(
     runs: AgentRunRepository,
     audit: AuditRecorder,
@@ -313,50 +352,29 @@ class AgentRunService:
         return None
 
     def _record_apply_finished(self, run: AgentRun, normalized: NormalizedApplyResult) -> None:
-        details: dict[str, Any] = {
-            "kind": AgentRunKind(run.kind).value,
-            "status": normalized.status.value,
-            "simulated": normalized.simulated,
-            "aiReviewed": False,
-            "appliedCommitSha": normalized.applied_commit_sha,
-        }
-        if normalized.failure_code is not None:
-            details["failureCode"] = normalized.failure_code
-        self._audit.record(
-            organization_id=run.organization_id,
+        record_run_finished(
+            self._audit,
+            run,
             actor=AuditActor.system(AuditComponent.AI_RUNNER),
-            action=AuditAction.AGENT_RUN_FINISHED,
-            result=(
-                AuditResult.SUCCEEDED
-                if normalized.status is AgentRunStatus.SUCCEEDED
-                else AuditResult.FAILED
-            ),
-            target=run_target(run),
-            details=details,
+            status=normalized.status,
+            simulated=normalized.simulated,
+            ai_reviewed=False,
+            failure_code=normalized.failure_code,
+            extra={"appliedCommitSha": normalized.applied_commit_sha},
         )
 
     def _record_finished(self, run: AgentRun, normalized: NormalizedRunResult) -> None:
-        details: dict[str, Any] = {
-            "kind": AgentRunKind(run.kind).value,
-            "status": normalized.status.value,
-            "simulated": normalized.simulated,
-            "aiReviewed": normalized.is_ai_reviewed,
-        }
-        if normalized.failure_code is not None:
-            details["failureCode"] = normalized.failure_code
-        if normalized.processing is not None:
-            details["processing"] = normalized.processing
-        self._audit.record(
-            organization_id=run.organization_id,
+        record_run_finished(
+            self._audit,
+            run,
             actor=AuditActor.system(AuditComponent.AI_RUNNER),
-            action=AuditAction.AGENT_RUN_FINISHED,
-            result=(
-                AuditResult.SUCCEEDED
-                if normalized.status is AgentRunStatus.SUCCEEDED
-                else AuditResult.FAILED
+            status=normalized.status,
+            simulated=normalized.simulated,
+            ai_reviewed=normalized.is_ai_reviewed,
+            failure_code=normalized.failure_code,
+            extra=(
+                {"processing": normalized.processing} if normalized.processing is not None else None
             ),
-            target=run_target(run),
-            details=details,
         )
 
 
