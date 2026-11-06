@@ -20,6 +20,9 @@ from app.enums import (
     AgentRunStatus,
     AgentRunStep,
     AiFindingConfirmation,
+    DiagnosisCategory,
+    DiagnosisEvidenceSource,
+    DiagnosisResult,
     LogLevel,
     SecurityResult,
 )
@@ -132,6 +135,13 @@ class PrecheckPatchApplyResponse(ApiModel):
     applied_commit_sha: str | None
     branch: str | None
     simulated: bool
+    # 저장소 반영 PR. 러너가 push 하지 않아 지금은 늘 null 이다(SPEC api-98).
+    pull_request_url: str | None = None
+    # 배포 실패 진단의 패치 반영이 성공한 뒤 WAS 가 같은 환경에 만든 재배포 요청(SPEC api-98).
+    # 진단이 아닌 사전 점검 패치·반영 전·실패·접수 거절이면 null 이다.
+    redeploy_request_id: uuid.UUID | None = None
+    # 재배포 접수가 거절된 오류 코드(예: MIGRATION_IN_PROGRESS). 거절이 없으면 null.
+    redeploy_rejected_code: str | None = None
 
 
 class PrecheckPatchResponse(ApiModel):
@@ -196,7 +206,58 @@ def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
         applied_commit_sha=result.get("appliedCommitSha"),
         branch=result.get("branch"),
         simulated=apply_run.simulated,
+        pull_request_url=None,
+        redeploy_request_id=result.get("redeployRequestId"),
+        redeploy_rejected_code=result.get("redeployRejectedCode"),
     )
+
+
+class PrecheckDiagnosisEvidenceResponse(ApiModel):
+    source: DiagnosisEvidenceSource
+    line: int | None
+    path: str | None
+    text: str
+
+
+class PrecheckDiagnosisResponse(ApiModel):
+    """배포 실패 진단(kind = CHANGE_PROPOSAL)의 결과(SPEC api-98). 다른 종류면 상세의 칸이 null.
+
+    deployRequestId·environmentId·sourceCommitSha 는 만들 때 고정한 값이라 결과 전에도 있다.
+    결과 칸(result·category·cause·fixable·unfixableReason·evidence)은 결과가 저장된 뒤에만 차고
+    그 전(QUEUED·CLAIMED·RUNNING)과 결과 없이 끝난 실행(TIMED_OUT·CANCELLED)은 null·빈 배열이다.
+    모든 문자열은 비밀값 모양을 가린 값이다.
+    """
+
+    result: DiagnosisResult | None
+    category: DiagnosisCategory | None
+    cause: str | None
+    fixable: bool | None
+    unfixable_reason: str | None
+    evidence: list[PrecheckDiagnosisEvidenceResponse]
+    deploy_request_id: uuid.UUID | None
+    environment_id: uuid.UUID | None
+    source_commit_sha: str | None
+
+    @classmethod
+    def from_run(cls, run: AgentRun) -> Self:
+        stored = (run.result or {}).get("diagnosis") or {}
+        deploy_request = (run.input_snapshot or {}).get("deployRequest") or {}
+        return cls(
+            result=stored.get("result"),
+            category=stored.get("category"),
+            cause=stored.get("cause"),
+            fixable=stored.get("fixable"),
+            unfixable_reason=stored.get("unfixableReason"),
+            evidence=[
+                PrecheckDiagnosisEvidenceResponse.model_validate(
+                    {"line": None, "path": None, **item}
+                )
+                for item in stored.get("evidence", [])
+            ],
+            deploy_request_id=run.deploy_request_id,
+            environment_id=run.target_environment_id,
+            source_commit_sha=deploy_request.get("commitSha"),
+        )
 
 
 class PrecheckBlockedAttemptResponse(ApiModel):
@@ -238,9 +299,10 @@ class PrecheckApplyRunResponse(ApiModel):
 
 
 class PrecheckDetailResponse(ApiModel):
-    """사전 점검(kind = PRECHECK) 또는 반영 실행(kind = APPLY_PATCH)의 상세.
+    """사전 점검(PRECHECK)·반영 실행(APPLY_PATCH)·배포 실패 진단(CHANGE_PROPOSAL)의 상세.
 
     반영 실행이면 `apply` 가 차고 사전 점검 결과 칸(configDiff·findings·patches 등)은 비어 있다.
+    배포 실패 진단이면 `diagnosis` 가 차고 패치는 `patches` 에 있다(SPEC api-98).
     """
 
     id: uuid.UUID
@@ -270,6 +332,9 @@ class PrecheckDetailResponse(ApiModel):
     patches: list[PrecheckPatchResponse]
     blocked_attempts: list[PrecheckBlockedAttemptResponse]
     apply: PrecheckApplyRunResponse | None
+    # 배포 실패 진단(kind = CHANGE_PROPOSAL)이면 진단 결과, 그 밖의 종류면 null(SPEC api-98).
+    # 나중에 더한 칸이라 OpenAPI 에서는 선택 칸이다 — 응답에는 늘 싣는다.
+    diagnosis: PrecheckDiagnosisResponse | None = None
 
     @classmethod
     def from_view(cls, view: PrecheckView) -> Self:
@@ -283,6 +348,11 @@ class PrecheckDetailResponse(ApiModel):
             kind=kind,
             apply=(
                 PrecheckApplyRunResponse.from_run(run) if kind == AgentRunKind.APPLY_PATCH else None
+            ),
+            diagnosis=(
+                PrecheckDiagnosisResponse.from_run(run)
+                if kind == AgentRunKind.CHANGE_PROPOSAL
+                else None
             ),
             service_id=run.service_id,
             source_environment_id=run.source_environment_id,

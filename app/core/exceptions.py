@@ -650,6 +650,17 @@ class PrecheckInProgressError(ConflictError):
         super().__init__("service already has an open agent run", details=details)
 
 
+class DeployNotFailedError(ConflictError):
+    """실패(FAILED)로 끝난 배포 요청만 AI 진단을 시작할 수 있다(SPEC api-98)."""
+
+    code = "DEPLOY_NOT_FAILED"
+
+    def __init__(self, deploy_request_id: str, status: str) -> None:
+        super().__init__(
+            "deploy request has not failed", deploy_request_id=deploy_request_id, status=status
+        )
+
+
 class PrecheckNotFoundError(NotFoundError):
     """사전 점검이 없다. 다른 조직 것과 PRECHECK 가 아닌 실행도 같다."""
 

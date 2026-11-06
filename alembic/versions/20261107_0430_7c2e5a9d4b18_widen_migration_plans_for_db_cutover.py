@@ -3,18 +3,18 @@
 API 서버 17(이전 계획에 DB 쓰기 전환 단계 넣기). CHECK 를 넓히기만 한다(지우고 다시 만든다).
 - migration_plans.current_step·migration_plan_logs.step: 0~4 → 0~5(6번째 단계 DB_CUTOVER)
 - migration_plans.error_code: DB_CUTOVER_FAILED·DB_CUTOVER_TIMEOUT·DB_CUTOVER_PARTIAL·
-  DATA_INTEGRITY_FAILED 를 더한다
+  DATA_INTEGRITY_FAILED·DB_CUTOVER_UNKNOWN 을 더한다
 - migration_plans.rollback_status: SKIPPED(자동으로 되돌리지 않음)를 더한다
 칸·인덱스는 바꾸지 않는다. 옛 파드는 새 값을 쓰지 않으므로 롤아웃 동안 안전하다.
 
-down_revision 은 이 브랜치를 띄울 때 `uv run alembic heads` 로 읽은 head 다. 먼저 병합되는 다른
-마이그레이션이 있으면 병합할 때 down_revision 을 그 head 로 다시 맞춘다(서로 다른 CHECK 라 순서와
-상관없다).
+down_revision 은 main(#101 병합 뒤)의 head `9d8e1f2a3b4c`(agent_runs.deploy_request_id)다. 그
+리비전은 agent_runs 만 바꾸므로 이 CHECK 들과 겹치지 않는다. 이 PR 앞에 다른 마이그레이션이 먼저
+병합되면 병합할 때 down_revision 을 그 head 로 다시 맞춘다.
 
 autogenerate 는 CHECK 정의 변경을 감지하지 못해 직접 적었다.
 
 Revision ID: 7c2e5a9d4b18
-Revises: 31bc0563b24b
+Revises: 9d8e1f2a3b4c
 Create Date: 2026-11-07 04:30:00.000000
 
 """
@@ -26,7 +26,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "7c2e5a9d4b18"
-down_revision: str | Sequence[str] | None = "31bc0563b24b"
+down_revision: str | Sequence[str] | None = "9d8e1f2a3b4c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -52,6 +52,7 @@ NEW_ERROR_CODES = (
     "DB_CUTOVER_TIMEOUT",
     "DB_CUTOVER_PARTIAL",
     "DATA_INTEGRITY_FAILED",
+    "DB_CUTOVER_UNKNOWN",
 )
 OLD_ERROR_CODE_VALUES = f"error_code IN ({_OLD_ERROR_CODES})"
 NEW_ERROR_CODE_VALUES = (

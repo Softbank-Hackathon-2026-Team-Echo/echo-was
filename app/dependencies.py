@@ -42,6 +42,7 @@ from app.services.cost_catalog import CostCatalog, get_cost_catalog
 from app.services.cost_service import CostService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
+from app.services.diagnosis_service import DiagnosisService
 from app.services.disaster_service import DisasterService
 from app.services.environment_connection_service import (
     AdapterResolver,
@@ -576,3 +577,18 @@ def get_agent_run_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> AgentRunService:
     return AgentRunService(session, clock)
+
+
+def get_diagnosis_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    deploy_requests: Annotated[DeployRequestService, Depends(get_deploy_request_service)],
+) -> DiagnosisService:
+    return DiagnosisService(
+        session,
+        clock,
+        deploy_requests,
+        simulate_enabled=settings.ai_diagnosis_simulate_enabled,
+        runner_enabled=settings.ai_diagnosis_runner_enabled,
+    )

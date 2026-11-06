@@ -38,6 +38,8 @@ FINISHED_STATUSES = (
     AgentRunStatus.CANCELLED,
 )
 OPEN_RUN_UNIQUE_INDEX = "uq_agent_runs_service_id_open"
+# 실패한 배포 요청 하나에 진단(CHANGE_PROPOSAL)은 하나뿐이다(SPEC api-98).
+DIAGNOSIS_UNIQUE_INDEX = "uq_agent_runs_deploy_request_id_diagnosis"
 AGENT_RUN_FAILURE_CODE_MAX_LENGTH = 32
 AGENT_RUN_SCENARIO_REF_MAX_LENGTH = 200
 
@@ -87,6 +89,11 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             f"kind <> '{AgentRunKind.APPLY_PATCH.value}' OR parent_run_id IS NOT NULL",
             name="apply_patch_has_parent",
         ),
+        CheckConstraint(
+            f"kind <> '{AgentRunKind.CHANGE_PROPOSAL.value}' OR "
+            "(deploy_request_id IS NOT NULL AND target_environment_id IS NOT NULL)",
+            name="diagnosis_has_deploy_request",
+        ),
         CheckConstraint("deadline_at > created_at", name="deadline_after_created"),
         CheckConstraint("input_hash ~ '^sha256:[0-9a-f]{64}$'", name="input_hash_format"),
         CheckConstraint(
@@ -112,6 +119,12 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             postgresql_where=text(f"status = '{AgentRunStatus.QUEUED.value}'"),
         ),
         Index("ix_agent_runs_organization_id_created_at", "organization_id", "created_at"),
+        Index(
+            DIAGNOSIS_UNIQUE_INDEX,
+            "deploy_request_id",
+            unique=True,
+            postgresql_where=text(f"kind = '{AgentRunKind.CHANGE_PROPOSAL.value}'"),
+        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -168,4 +181,10 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     # 러너가 끝 보고에 밝힌 레지던시 기록(값을 다시 계산하지 않는다). 없으면 "기록 없음"이다.
     processing: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    # CHANGE_PROPOSAL 이 진단하는 실패한 배포 요청(SPEC api-98). 그 밖의 종류는 NULL 이다.
+    deploy_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deploy_requests.id", ondelete="RESTRICT"),
+        nullable=True,
+        sort_order=APPENDED_COLUMN_SORT_ORDER + 1,
     )

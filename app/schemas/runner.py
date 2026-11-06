@@ -29,6 +29,9 @@ from app.enums import (
     AgentRunSeverity,
     AgentRunStatus,
     AgentRunStep,
+    DiagnosisCategory,
+    DiagnosisEvidenceSource,
+    DiagnosisResult,
     LogLevel,
     SecurityResult,
 )
@@ -40,6 +43,7 @@ from app.services.run_result import (
     NormalizedRunResult,
     compute_patch_hash,
     normalize_apply_result,
+    normalize_diagnosis_result,
     normalize_run_result,
 )
 
@@ -53,6 +57,8 @@ MAX_FEATURE_GAPS = 100
 MAX_FINDINGS = 100
 MAX_PATCHES = 10
 MAX_BLOCKED_ATTEMPTS = 50
+MAX_EVIDENCE = 20
+MAX_EVIDENCE_LINE = 10_000_000
 MAX_MODEL_ID_LENGTH = 64
 MAX_PROMPT_VERSION_LENGTH = 32
 FAILURE_CODE_PATTERN = "^[A-Z][A-Z0-9_]{0,31}$"
@@ -68,6 +74,9 @@ MAX_PROCESSING_DATA_CLASSES = 5
 MAX_EXTERNAL_TRANSFER_BYTES = 2**63 - 1
 BODY_TOO_LARGE_REASON = "BODY_TOO_LARGE"
 NUL_CHARACTER_REASON = "NUL_CHARACTER"
+# RunResult.diagnosis 는 배포 실패 진단(CHANGE_PROPOSAL) 실행만 보낸다(SPEC api-98).
+DIAGNOSIS_FIELD = "diagnosis"
+DIAGNOSIS_NOT_ALLOWED_REASON = "DIAGNOSIS_NOT_ALLOWED"
 _BODY_FIELD = "body"
 
 Text = Annotated[str, Field(min_length=1, max_length=MAX_STRING_LENGTH)]
@@ -377,8 +386,54 @@ class RunProcessingRequest(ApiRequestModel):
         return self
 
 
+class RunDiagnosisEvidenceRequest(ApiRequestModel):
+    """진단 근거 한 줄. LOG 는 실패 로그(logTail)의 줄 번호, FILE 은 저장소 파일 경로·줄 번호다."""
+
+    source: DiagnosisEvidenceSource
+    line: Annotated[int, Field(ge=1, le=MAX_EVIDENCE_LINE)] | None = None
+    path: Annotated[str, Field(min_length=1, max_length=MAX_STRING_LENGTH)] | None = None
+    text: Text
+
+    @model_validator(mode="after")
+    def _check_file_has_path(self) -> Self:
+        if self.source is DiagnosisEvidenceSource.FILE and self.path is None:
+            raise ValueError("path is required when source is FILE")
+        return self
+
+
+class RunDiagnosisRequest(ApiRequestModel):
+    """배포 실패 진단(SPEC api-98). deployRequestId·environmentId·sourceCommitSha 는 WAS 가 채운다.
+
+    - DIAGNOSED 면 category·cause 가 필수다. 그 밖의 결론이면 fixable 이 false 다.
+    - fixable 이 false 면 unfixableReason 이 필수다(화면이 패치 대신 사유를 보인다).
+    """
+
+    result: DiagnosisResult
+    category: DiagnosisCategory | None = None
+    cause: OptionalText = None
+    fixable: StrictBool
+    unfixable_reason: OptionalText = None
+    evidence: Annotated[list[RunDiagnosisEvidenceRequest], Field(max_length=MAX_EVIDENCE)] = []
+
+    @model_validator(mode="after")
+    def _check_result_fields(self) -> Self:
+        if self.result is DiagnosisResult.DIAGNOSED:
+            if self.category is None or not self.cause:
+                raise ValueError("category and cause are required when result is DIAGNOSED")
+        elif self.fixable:
+            raise ValueError("fixable must be false unless result is DIAGNOSED")
+        if not self.fixable and not self.unfixable_reason:
+            raise ValueError("unfixableReason is required when fixable is false")
+        return self
+
+
 class RunResultRequest(ApiRequestModel):
-    """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다."""
+    """결과 한 번. simulated 는 값을 지어냈는지 여부(필수), model 이 null 이면 AI 검토 없음이다.
+
+    diagnosis 는 배포 실패 진단(CHANGE_PROPOSAL) 실행에만 보낸다(SPEC api-98). 사전 점검 실행이
+    이 칸을 보내면(null 이어도) 422 RESULT_INVALID 다(경로가 실행 종류로 가른다). OpenAPI 에서
+    진단 결과를 따로 된 모양으로 두지 않는 것은 oneOf 가 겹치지 않게 하려는 것이다.
+    """
 
     status: ResultStatus
     failure_code: Annotated[str, Field(pattern=FAILURE_CODE_PATTERN)] | None = None
@@ -393,6 +448,7 @@ class RunResultRequest(ApiRequestModel):
     blocked_attempts: Annotated[
         list[RunBlockedAttemptRequest], Field(max_length=MAX_BLOCKED_ATTEMPTS)
     ] = []
+    diagnosis: RunDiagnosisRequest | None = None
 
     @model_validator(mode="after")
     def _check_failure_code_and_patch_ids(self) -> Self:
@@ -407,6 +463,25 @@ class RunResultRequest(ApiRequestModel):
 
     def to_normalized(self) -> NormalizedRunResult:
         return normalize_run_result(self.model_dump(mode="json", by_alias=True))
+
+
+class DiagnosisRunResultRequest(RunResultRequest):
+    """배포 실패 진단(CHANGE_PROPOSAL) 결과 읽기: RunResult 와 같은 칸 + 진단 검사(SPEC api-98).
+
+    OpenAPI 에는 따로 싣지 않는다(RunResult 의 diagnosis 칸이 그 모양이다). 서버가 실행 종류로
+    이 모델을 골라 진단 전용 검사를 더한다.
+    diagnosis 를 빼면(진단을 못 하는 러너) WAS 가 근거 부족(INSUFFICIENT_EVIDENCE)으로 마무리한다.
+    패치는 DIAGNOSED·fixable 진단에만 붙일 수 있다. 패치 모양·검사는 사전 점검과 같다.
+    """
+
+    @model_validator(mode="after")
+    def _check_patches_need_fixable_diagnosis(self) -> Self:
+        if self.patches and (self.diagnosis is None or not self.diagnosis.fixable):
+            raise ValueError("patches require a fixable DIAGNOSED diagnosis")
+        return self
+
+    def to_normalized(self) -> NormalizedRunResult:
+        return normalize_diagnosis_result(self.model_dump(mode="json", by_alias=True))
 
 
 class ApplyPatchResultRequest(ApiRequestModel):
