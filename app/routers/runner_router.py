@@ -10,8 +10,10 @@ from fastapi import APIRouter, Body, Depends, Request
 
 from app.auth.runner_guards import RunnerIdentity, RunTokenRunId
 from app.dependencies import get_agent_run_service
+from app.enums import AgentRunKind
 from app.schemas.response import ApiResponse
 from app.schemas.runner import (
+    ApplyPatchResultRequest,
     ClaimRunRequest,
     ClaimRunResponse,
     HeartbeatResponse,
@@ -66,13 +68,19 @@ async def submit_run_events(
 @router.post(
     "/{run_id}/result",
     response_model=ApiResponse[SubmitRunResultResponse],
-    openapi_extra=openapi_request_body(RunResultRequest),
+    openapi_extra=openapi_request_body(RunResultRequest, ApplyPatchResultRequest),
 )
 async def submit_run_result(
     run_id: RunTokenRunId,
     http_request: Request,
     agent_runs: AgentRuns,
 ) -> ApiResponse[SubmitRunResultResponse]:
-    request = parse_runner_payload(await http_request.body(), RunResultRequest)
-    status = await agent_runs.submit_result(run_id, request.to_normalized())
+    """본문 모양은 실행 종류로 고른다: APPLY_PATCH 면 ApplyPatchResult, 그 밖은 RunResult(PD-9)."""
+    raw = await http_request.body()
+    if await agent_runs.find_run_kind(run_id) == AgentRunKind.APPLY_PATCH:
+        apply_request = parse_runner_payload(raw, ApplyPatchResultRequest)
+        status = await agent_runs.submit_apply_result(run_id, apply_request.to_normalized())
+    else:
+        request = parse_runner_payload(raw, RunResultRequest)
+        status = await agent_runs.submit_result(run_id, request.to_normalized())
     return ApiResponse(data=SubmitRunResultResponse(status=status))

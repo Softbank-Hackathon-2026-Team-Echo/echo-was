@@ -157,13 +157,15 @@ class AgentRunRepository:
         )
         return list((await self._session.scalars(statement)).all())
 
-    async def lock_next_queued(self, now: datetime) -> AgentRun | None:
-        """가져갈 사전 점검 하나. 다른 러너가 잠근 행은 건너뛴다(SKIP LOCKED)."""
+    async def lock_next_queued(
+        self, now: datetime, kinds: Sequence[AgentRunKind]
+    ) -> AgentRun | None:
+        """가져갈 실행 하나(주어진 종류 중 오래된 순). 다른 러너가 잠근 행은 건너뛴다."""
         statement = (
             select(AgentRun)
             .where(
                 AgentRun.status == AgentRunStatus.QUEUED,
-                AgentRun.kind == AgentRunKind.PRECHECK,
+                AgentRun.kind.in_(kinds),
                 AgentRun.deadline_at > now,
             )
             .order_by(AgentRun.created_at, AgentRun.id)

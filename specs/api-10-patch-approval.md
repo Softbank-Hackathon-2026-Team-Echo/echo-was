@@ -10,7 +10,7 @@
 
 사람(개발자 이상)이 사전 점검 결과의 `PROPOSED` 패치를 승인하거나 거절한다. 결정은 `agent_patch_approvals`에 한 번만 남고(지우지 않음), 감사에 USER 줄이 남는다. 패치 상태는 **저장하지 않고 계산**한다: 결과 JSON의 검증 상태(BLOCKED·PROPOSED) + 결정 행 + 반영 실행 상태.
 
-승인하면 계약 4절대로 반영 실행(`APPLY_PATCH`)을 만들 수 있지만, **스위치 `PATCH_APPLY_ENABLED`의 기본값은 꺼짐**이다. 꺼져 있으면 실행을 만들지 않고 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기")로 보인다. 러너가 반영 실행을 가져가는 길(S3)이 아직 없으므로, 켜면 실행이 `QUEUED`로 15분 머문 뒤 `TIMED_OUT`이 되고 그동안 그 서비스의 새 사전 점검이 409다 — 그래서 기본 꺼짐.
+승인하면 계약 4절대로 반영 실행(`APPLY_PATCH`)을 만들 수 있지만, **스위치 `PATCH_APPLY_ENABLED`의 기본값은 꺼짐**이다. 꺼져 있으면 실행을 만들지 않고 패치는 `APPROVED`·`apply: null`("승인됨 · 반영 대기")로 보인다. 러너가 반영 실행을 가져가는 길(S3)은 [api-10-2-apply-patch-run.md](api-10-2-apply-patch-run.md)로 WAS 쪽에 생겼다. 다만 **러너가 `capabilities`에 `APPLY_PATCH`를 넣는 버전이 배포되기 전에** 켜면 여전히 실행이 `QUEUED`로 15분 머문 뒤 `TIMED_OUT`이 되고 그동안 그 서비스의 새 사전 점검이 409다 — 그래서 기본 꺼짐은 그대로이고, 켜는 것은 러너 배포 확인 뒤 별도 PR이다.
 
 ## 2. 확인된 사실(기준 커밋)
 
@@ -94,7 +94,7 @@
 
 - `AgentPatchStatus`에 `REJECTED`·`APPROVED`·`APPLIED`·`APPLY_FAILED`를 더한다(JSON 안 값·응답용, DB CHECK 없음). 결과 저장 때 재계산(`run_result.py`)은 지금처럼 `PROPOSED`·`BLOCKED`만 쓴다.
 - `origin`: 저장된 패치에 없으면 `AI`(PD-11).
-- `apply.status`는 반영 실행의 `AgentRunStatus`. `appliedCommitSha`·`branch`는 반영 결과를 받는 S3에서 더한다(지금은 칸 없음).
+- `apply.status`는 반영 실행의 `AgentRunStatus`. `appliedCommitSha`·`branch`·`simulated`는 S3([api-10-2-apply-patch-run.md](api-10-2-apply-patch-run.md) 4절)에서 더했다.
 - 조회: 부모 실행 + 결정 행(`run_id`로 한 번) + 반영 실행(`apply_run_id` 목록으로 한 번). N+1 없음. `GET`은 여전히 쓰지 않는다.
 - 반영 실행은 사람 쪽 `GET /prechecks/{id}`로 직접 열리지 않는다(PRECHECK 아님 → 404 유지, PD-10).
 
@@ -142,4 +142,4 @@
 ## 10. 운영 영향
 
 - 스위치 기본 꺼짐: 승인·거절은 기록만, 실행·서비스 잠금 영향 0.
-- 스위치 켜면 반영 실행이 열려 있는 동안(최대 15분) 그 서비스의 새 사전 점검·다음 승인은 409 `PRECHECK_IN_PROGRESS`. 러너 반영(S3)이 생기기 전에는 켜지 않는다.
+- 스위치 켜면 반영 실행이 열려 있는 동안(최대 15분) 그 서비스의 새 사전 점검·다음 승인은 409 `PRECHECK_IN_PROGRESS`. WAS 쪽 S3는 생겼다([api-10-2](api-10-2-apply-patch-run.md)). `APPLY_PATCH`를 가져가는 러너가 배포되기 전에는 켜지 않는다.

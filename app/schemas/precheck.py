@@ -119,10 +119,18 @@ class PrecheckPatchApprovalResponse(ApiModel):
 
 
 class PrecheckPatchApplyResponse(ApiModel):
+    """반영 실행. 결과(appliedCommitSha·branch)는 러너가 결과를 낸 뒤에만 찬다(SPEC api-10-2).
+
+    simulated 는 반영 실행 표의 값이다(결과 전에는 false). 가짜 모드 결과면 화면이 배지를 단다.
+    """
+
     run_id: uuid.UUID
     status: AgentRunStatus
     failure_code: str | None
     finished_at: datetime | None
+    applied_commit_sha: str | None
+    branch: str | None
+    simulated: bool
 
 
 class PrecheckPatchResponse(ApiModel):
@@ -178,11 +186,15 @@ def _approval_response(approval: AgentPatchApproval) -> PrecheckPatchApprovalRes
 
 
 def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
+    result = apply_run.result or {}
     return PrecheckPatchApplyResponse(
         run_id=apply_run.id,
         status=AgentRunStatus(apply_run.status),
         failure_code=apply_run.failure_code,
         finished_at=apply_run.finished_at,
+        applied_commit_sha=result.get("appliedCommitSha"),
+        branch=result.get("branch"),
+        simulated=apply_run.simulated,
     )
 
 

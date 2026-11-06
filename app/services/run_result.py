@@ -6,8 +6,10 @@
 - status·failureCode·simulated·processing 은 표의 칸으로만 두고 result JSON 에서 뺀다.
 - processing 의 dataClasses 는 enum 정의 순서로 정렬한다.
 - 모든 문자열의 비밀값 모양을 가린다.
+- 패치 해시는 `sha256:` + diff 문자열(UTF-8)의 SHA-256 이다(PD-14). 러너·WAS 가 같이 계산한다.
 """
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -43,6 +45,40 @@ class NormalizedRunResult:
     @property
     def is_ai_reviewed(self) -> bool:
         return self.model_id is not None
+
+
+@dataclass(frozen=True)
+class NormalizedApplyResult:
+    """반영 실행(APPLY_PATCH) 결과. status·failureCode·simulated 는 표의 칸, 나머지는 result."""
+
+    status: AgentRunStatus
+    failure_code: str | None
+    simulated: bool
+    result: dict[str, Any]
+
+    @property
+    def applied_commit_sha(self) -> str | None:
+        value: str | None = self.result["appliedCommitSha"]
+        return value
+
+
+def compute_patch_hash(diff: str) -> str:
+    """패치 지문의 해시(PD-14): `sha256:` + diff 문자열 UTF-8 바이트의 SHA-256."""
+    return f"sha256:{hashlib.sha256(diff.encode()).hexdigest()}"
+
+
+def normalize_apply_result(payload: Mapping[str, Any]) -> NormalizedApplyResult:
+    """검사를 통과한 ApplyPatchResult(camelCase JSON 값)를 저장할 값으로 바꾼다."""
+    result: dict[str, Any] = {
+        "appliedCommitSha": payload["appliedCommitSha"],
+        "branch": payload["branch"],
+    }
+    return NormalizedApplyResult(
+        status=AgentRunStatus(payload["status"]),
+        failure_code=payload["failureCode"],
+        simulated=payload["simulated"],
+        result=result,
+    )
 
 
 def patch_block_reason(patch: Mapping[str, Any]) -> AgentPatchBlockReason | None:

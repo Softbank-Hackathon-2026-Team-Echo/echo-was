@@ -21,15 +21,20 @@ from app.schemas.runner import (
     MAX_DIFF_BYTES,
     MAX_FINDINGS,
     MAX_PATCHES,
+    ApplyPatchResultRequest,
     RunResultRequest,
     SubmitRunEventsRequest,
     openapi_request_body,
     parse_runner_payload,
 )
-from app.services.run_result import NormalizedRunResult, compute_patch_status, patch_origin
+from app.services.run_result import (
+    NormalizedRunResult,
+    compute_patch_hash,
+    compute_patch_status,
+    patch_origin,
+)
 
 ENVIRONMENT_ID = "11111111-1111-1111-1111-111111111111"
-PATCH_HASH = "sha256:" + "a" * 64
 AT = "2026-11-05T00:00:00Z"
 PASSED_CHECK = {
     "name": "TESTS",
@@ -77,15 +82,17 @@ def _finding(**changes: Any) -> dict[str, Any]:
 
 
 def _patch(**changes: Any) -> dict[str, Any]:
-    return {
+    """patchHash 를 주지 않으면 diff 의 해시다(PD-14)."""
+    body = {
         "id": "p1",
-        "patchHash": PATCH_HASH,
         "files": ["Dockerfile"],
         "diff": "--- a/Dockerfile\n+++ b/Dockerfile\n",
         "reason": "base image",
         "touchesProtectedFiles": False,
         "checks": [PASSED_CHECK],
     } | changes
+    body.setdefault("patchHash", compute_patch_hash(body["diff"]))
+    return body
 
 
 def _parse(body: dict[str, Any]) -> RunResultRequest:
@@ -524,9 +531,11 @@ def test_result_normalized_masks_token_shaped_strings(prefix: str) -> None:
     assert normalized.result["findings"][0]["reason"] == f"leaked {MASK} here"
 
 
-@pytest.mark.parametrize("model", [RunResultRequest, SubmitRunEventsRequest])
+@pytest.mark.parametrize(
+    "model", [RunResultRequest, SubmitRunEventsRequest, ApplyPatchResultRequest]
+)
 def test_openapi_request_body_has_no_dangling_references(
-    model: type[RunResultRequest] | type[SubmitRunEventsRequest],
+    model: type[RunResultRequest] | type[SubmitRunEventsRequest] | type[ApplyPatchResultRequest],
 ) -> None:
     body = openapi_request_body(model)
 
@@ -593,3 +602,132 @@ def test_events_validation_rejects_batch_size(count: int) -> None:
 
     with pytest.raises(ResultInvalidError):
         parse_runner_payload(raw, SubmitRunEventsRequest)
+
+
+# --- 패치 해시(PD-14)·반영 결과(PD-9, SPEC api-10-2) ---
+
+APPLY_DIFF = "--- a/Dockerfile\n+++ b/Dockerfile\n@@ -1 +1 @@\n-FROM a\n+FROM b\n"
+COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_compute_patch_hash_is_sha256_of_utf8_diff() -> None:
+    assert compute_patch_hash("abc") == (
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
+    assert compute_patch_hash("한글") == compute_patch_hash("한글")
+    assert compute_patch_hash("a") != compute_patch_hash("a\n")
+
+
+def test_patch_hash_that_is_not_hash_of_diff_is_rejected() -> None:
+    body = _result(patches=[_patch(patchHash="sha256:" + "a" * 64)])
+
+    ((field, reason),) = _rejected(body)
+
+    assert field == "patches.0"
+    assert "patchHash must be sha256 of diff" in reason
+
+
+def test_patch_hash_is_checked_against_raw_diff_before_masking() -> None:
+    token = "ghp_" + "A" * 36
+    normalized = _normalize(_result(patches=[_patch(diff=f"+TOKEN={token}\n")]))
+
+    stored = normalized.result["patches"][0]
+    assert stored["patchHash"] == compute_patch_hash(f"+TOKEN={token}\n")
+    assert token not in stored["diff"]
+
+
+def _apply_body(**changes: Any) -> dict[str, Any]:
+    return {
+        "status": "SUCCEEDED",
+        "failureCode": None,
+        "simulated": False,
+        "appliedCommitSha": COMMIT_SHA,
+        "branch": "applied/11111111-1111-1111-1111-111111111111",
+    } | changes
+
+
+def _parse_apply(body: dict[str, Any]) -> ApplyPatchResultRequest:
+    return parse_runner_payload(json.dumps(body).encode(), ApplyPatchResultRequest)
+
+
+def _apply_rejected(body: dict[str, Any]) -> list[tuple[str, str]]:
+    with pytest.raises(ResultInvalidError) as caught:
+        _parse_apply(body)
+    return [(item.field, item.reason) for item in caught.value.details or []]
+
+
+def test_apply_result_is_normalized_into_columns_and_result() -> None:
+    normalized = _parse_apply(_apply_body(simulated=True)).to_normalized()
+
+    assert normalized.status is AgentRunStatus.SUCCEEDED
+    assert (normalized.failure_code, normalized.simulated) == (None, True)
+    assert normalized.result == {
+        "appliedCommitSha": COMMIT_SHA,
+        "branch": "applied/11111111-1111-1111-1111-111111111111",
+    }
+    assert normalized.applied_commit_sha == COMMIT_SHA
+
+
+def test_apply_result_failed_may_omit_commit_and_branch() -> None:
+    body = _apply_body(status="FAILED", failureCode="BUILD_FAILED")
+    del body["appliedCommitSha"], body["branch"]
+
+    normalized = _parse_apply(body).to_normalized()
+
+    assert normalized.status is AgentRunStatus.FAILED
+    assert normalized.result["appliedCommitSha"] is None
+    assert normalized.result["branch"] is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"branch": None},
+        {"failureCode": "BOOM"},
+        {"status": "FAILED"},
+        {"status": "TIMED_OUT"},
+        {"appliedCommitSha": "ABC"},
+        {"appliedCommitSha": COMMIT_SHA[:39]},
+        {"patchHash": compute_patch_hash(APPLY_DIFF)},
+        {"branch": ""},
+        {"simulated": None},
+        {"checks": []},
+        {"applied_commit_sha": COMMIT_SHA},
+    ],
+    ids=[
+        "success-without-branch",
+        "success-with-failure-code",
+        "failed-without-failure-code",
+        "status-not-allowed",
+        "commit-uppercase",
+        "commit-short",
+        "patch-hash-not-in-contract",
+        "branch-empty",
+        "simulated-missing",
+        "unknown-field",
+        "snake-case",
+    ],
+)
+def test_apply_result_shape_violations_are_rejected(changes: dict[str, Any]) -> None:
+    assert _apply_rejected(_apply_body(**changes))
+
+
+def test_apply_result_failed_with_commit_sha_is_rejected() -> None:
+    """SPEC 3절: FAILED 면 appliedCommitSha 는 null 이다(실패한 반영의 커밋을 보이지 않는다)."""
+    body = _apply_body(status="FAILED", failureCode="BUILD_FAILED", appliedCommitSha=COMMIT_SHA)
+
+    assert _apply_rejected(body)
+
+
+def test_apply_result_success_without_commit_is_accepted() -> None:
+    normalized = _parse_apply(_apply_body(appliedCommitSha=None)).to_normalized()
+
+    assert normalized.status is AgentRunStatus.SUCCEEDED
+    assert normalized.applied_commit_sha is None
+
+
+def test_apply_result_requires_status_and_simulated() -> None:
+    for key in ("simulated", "status"):
+        body = _apply_body()
+        del body[key]
+        assert _apply_rejected(body)

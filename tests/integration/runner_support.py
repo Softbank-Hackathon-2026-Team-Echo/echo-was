@@ -3,7 +3,6 @@
 migration 픽스처(shop-api: aws-seoul 서비스 중 + gcp-seoul 예비, 개발자 A·B) 위에서 쓴다.
 """
 
-import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from sqlalchemy import select
 
 from app.auth.tokens import hash_token, new_runner_token
 from app.models import AgentRun, AgentRunner, AuditLog
+from app.services.run_result import compute_patch_hash
 from tests.integration.auth_support import SessionFactory, make_client, org_path
 from tests.integration.migration_support import Migration
 
@@ -167,17 +167,18 @@ PASSED_PATCH_CHECK = {"name": "TESTS", "result": "PASS", "summary": "19 passed"}
 
 
 def run_patch(patch_id: str = "p1", **changes: Any) -> dict[str, Any]:
-    """검사를 통과한 패치(PROPOSED). patchHash 는 id 로 정해지고, origin 은 주지 않으면 빠진다."""
+    """검사를 통과한 패치(PROPOSED). diff 는 id 로 정해지고 patchHash 는 주지 않으면 diff 의 해시다
+    (PD-14). origin 은 주지 않으면 빠진다."""
     body: dict[str, Any] = {
         "id": patch_id,
-        "patchHash": f"sha256:{hashlib.sha256(patch_id.encode()).hexdigest()}",
         "files": ["scenarios/demo-app/Dockerfile"],
-        "diff": "--- a/Dockerfile\n+++ b/Dockerfile\n@@ -1 +1 @@\n-FROM a\n+FROM b\n",
+        "diff": f"--- a/Dockerfile\n+++ b/Dockerfile\n@@ -1 +1 @@\n-FROM a\n+FROM {patch_id}\n",
         "reason": "base image differs",
         "touchesProtectedFiles": False,
         "checks": [PASSED_PATCH_CHECK],
-    }
-    return body | changes
+    } | changes
+    body.setdefault("patchHash", compute_patch_hash(body["diff"]))
+    return body
 
 
 async def run_row(migration: Migration, run_id: str) -> AgentRun:

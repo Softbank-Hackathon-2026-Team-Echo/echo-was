@@ -212,6 +212,9 @@ async def test_patch_approve_with_apply_enabled(
         "status": "QUEUED",
         "failureCode": None,
         "finishedAt": None,
+        "appliedCommitSha": None,
+        "branch": None,
+        "simulated": False,
     }
     assert data == await _patch_in_detail(migration, run_id)
     apply_runs = await _apply_runs(migration)
@@ -246,11 +249,9 @@ async def test_patch_approve_with_apply_enabled(
     assert len(audit) == 1
     assert audit[0].details["applyRunId"] == apply_run_id
 
-    # 러너는 아직 반영 실행을 가져가지 못한다.
+    # 사전 점검만 하는 러너는 반영 실행을 받지 않는다(가져가기·결과는 test_apply_patch_runs.py).
     claimed = await claim(runner, capabilities=["PRECHECK"])
     assert claimed.json()["data"]["run"] is None
-    claimed_apply = await claim(runner, capabilities=["PRECHECK", "APPLY_PATCH"])
-    assert claimed_apply.json()["data"]["run"] is None
 
     # 반영 실행은 사람 쪽 사전 점검 경로로 열리지 않는다.
     hidden = await migration.author_client.get(prechecks_path(migration, f"/{apply_run_id}"))
