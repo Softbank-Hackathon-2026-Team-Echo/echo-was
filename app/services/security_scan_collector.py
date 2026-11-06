@@ -4,8 +4,6 @@
 - 원문은 실제 빌드 실행기만 준다(`BuildSecurityScanReader`). 가짜 실행기면 아무것도 남기지 않는다.
 - 원문의 build_id·digest 가 그 빌드와 다르면 버린다.
 - 보고서가 없으면(검사 실패) UNKNOWN 증거를 남긴다.
-- 두 비밀 검사(이미지 Trivy secret·소스 gitleaks)는 C-IMG-2 와 함께 C-SEC-1(비밀 전달 경로) 증거도
-  만든다(빌드 하나에 최대 5건). C-SEC-1 은 원문을 읽었을 때만 남긴다.
 - 실패해도 예외를 올리지 않는다. 배포는 계속하고, 증거가 없으면 판정이 UNKNOWN 으로 본다.
 - 빌드 반영과 수집 사이에 일꾼이 죽으면 그 빌드는 다시 모으지 않는다(다시 빌드하거나 주기 재검사).
 """
@@ -26,7 +24,6 @@ from app.repositories.service_repository import ServiceRepository
 from app.services.security_finding_service import SecurityFindingService
 from app.services.security_normalizers import (
     NormalizedFinding,
-    derive_delivery_path_finding,
     normalize_gitleaks,
     normalize_trivy_image,
     normalize_trivy_image_secrets,
@@ -119,7 +116,10 @@ class BuildSecurityScanCollector:
         )
         collected_at = self._collected_at(scan.scanned_at)
         trivy = scan.trivy_report or {}
-        secret_scans = [
+        return [
+            normalize_trivy_image(
+                trivy, scope=scope, collected_at=collected_at, tool_version=scan.trivy_version
+            ),
             normalize_trivy_image_secrets(
                 trivy, scope=scope, collected_at=collected_at, tool_version=scan.trivy_version
             ),
@@ -129,19 +129,6 @@ class BuildSecurityScanCollector:
                 collected_at=collected_at,
                 tool_version=scan.gitleaks_version,
             ),
-        ]
-        # 같은 비밀 검사 원문 → C-SEC-1(조직 범위). 원문을 못 읽었으면 만들지 않는다.
-        delivery_paths = [
-            derived
-            for secret in secret_scans
-            if (derived := derive_delivery_path_finding(secret)) is not None
-        ]
-        return [
-            normalize_trivy_image(
-                trivy, scope=scope, collected_at=collected_at, tool_version=scan.trivy_version
-            ),
-            *secret_scans,
-            *delivery_paths,
         ]
 
     def _collected_at(self, scanned_at: datetime | None) -> datetime:

@@ -8,6 +8,7 @@
 - **앱은 다시 배포해야 바뀐다**(자동 재시작 없음). 응답 `pendingRedeploy` 로 보인다.
 - `environmentId` 는 환경 id(서비스 상세의 `environments[].environment.id`)다. 연결(`serviceEnvironmentId`)이 아니다.
 - **연결은 그 환경의 첫 배포 요청 때 생긴다.** 그 전에는 404 `SERVICE_ENVIRONMENT_NOT_FOUND` 다.
+- **이전 보안 통제 C-SEC-1 이 키 이름을 본다**(값은 안 본다). 서비스 중 환경에 있는 키가 이전 도착 환경에 없으면 그 도착으로의 이전이 막힌다(매트릭스 `encryption` 칸 FAIL, 게이트 409). 대기 환경에도 같은 키를 넣어 둔다([security.md](security.md)).
 
 ## 엔드포인트
 

@@ -3,6 +3,7 @@
 게이트는 harness.tls_checker 를 넣은 시험에서만 켜진다(enable_gate). DNS·TLS 는 가짜다.
 """
 
+import uuid
 from datetime import timedelta
 
 from sqlalchemy import func, select
@@ -19,21 +20,22 @@ from app.enums import (
 )
 from app.models import AgentRun, Finding
 from app.services.security_finding_service import SecurityFindingService
-from app.services.security_normalizers import derive_delivery_path_finding, normalize_gitleaks
+from app.services.security_normalizers import normalize_secret_delivery
 from app.services.security_rules import POLICY_VERSION, SecurityScope
 from tests.integration.migration_support import Migration
 from tests.integration.security_gate_support import (
     PRIVATE_IP,
     PUBLIC_IP,
+    SECRET_VALUE,
     add_exception,
     add_precheck,
     connection_hosts,
     enable_gate,
     gate_findings,
     prepare_passing_gate,
+    put_variable,
     record_passing_evidence,
     revoke_exception,
-    target_digest,
 )
 
 _C = SecurityControlId
@@ -45,7 +47,6 @@ NO_EVIDENCE_BLOCKING = {
     _C.IMG_1.value,
     _C.IMG_2.value,
     _C.IAM_2.value,
-    _C.SEC_1.value,
     _C.AUD_1.value,
     _C.AI_1.value,
     _C.DB_1.value,
@@ -149,44 +150,6 @@ async def test_approve_with_evidence_exceptions_and_precheck_runs_migration(
     # C-DB-1·C-DST-1 은 기한부 예외로 통과(값은 WARN)했고 예외 ID 가 판정에 남는다.
     assert len(passed["exceptionIds"]) == 2
     assert len(await gate_findings(migration, _C.TLS_1)) == 2
-
-
-async def test_approve_passes_c_sec_1_on_build_scan_evidence_without_exception(
-    migration: Migration,
-) -> None:
-    """빌드 비밀 검사에서 만든 C-SEC-1(조직 범위)로 통과하고, 다른 이미지의 경고는 막지 않는다."""
-    harness = migration.harness
-    enable_gate(migration)
-    await record_passing_evidence(migration, include_delivery_path=False)
-    await add_exception(migration, _C.DB_1)
-    await add_exception(migration, _C.DST_1)
-    await add_precheck(migration)
-    organization_id = harness.organization.id
-    scanned_at = harness.clock.now() - timedelta(minutes=1)
-    this_image = SecurityScope(organization_id, image_digest=await target_digest(migration))
-    other_image = SecurityScope(organization_id, image_digest="sha256:" + "e" * 64)
-    leak = {"RuleID": "github-pat", "File": "app/settings.py", "StartLine": 7}
-    derived = [
-        derive_delivery_path_finding(
-            normalize_gitleaks(report, scope=scope, collected_at=scanned_at)
-        )
-        for report, scope in (([], this_image), ([leak], other_image))
-    ]
-    clean, warned = (item for item in derived if item is not None)
-    async with harness.session_factory() as session:
-        await SecurityFindingService(session).record_all([clean, warned])
-    plan = await migration.create_plan()
-
-    approved = await migration.approve(plan["id"])
-
-    assert approved["status"] == MigrationPlanStatus.APPROVED
-    passed = (await migration.log_rows(plan["id"]))[1].data
-    assert passed is not None
-    assert passed["blocking"] == []
-    # 예외는 C-DB-1·C-DST-1 둘뿐이고, C-SEC-1 은 두 증거(PASS·WARN)를 썼다.
-    assert len(passed["exceptionIds"]) == 2
-    used = set(passed["findingIds"])
-    assert {str(clean.finding.finding_id), str(warned.finding.finding_id)} <= used
 
 
 async def test_start_with_revoked_exception_fails_plan_without_traffic_change(
@@ -314,3 +277,72 @@ async def test_approve_after_transient_tls_failure_uses_fresh_probe(
     assert first.status_code == 409
     assert _blocking(first.json()["details"]) == {_C.TLS_1.value: {_R.EVIDENCE_UNKNOWN.value}}
     assert second.status_code == 202, second.text
+
+
+# --- C-SEC-1: 출발 연결의 앱 환경 변수 키가 도착 연결에 모두 있어야 한다 (sec-1-2) ---
+
+
+async def test_approve_is_blocked_on_sec_1_until_target_has_every_source_secret_key(
+    migration: Migration,
+) -> None:
+    await prepare_passing_gate(migration)
+    for key in ("API_KEY", "DB_URL"):
+        await put_variable(migration, migration.aws, key)
+    await put_variable(migration, migration.gcp, "API_KEY")
+    plan = await migration.create_plan()
+
+    blocked = await migration.act(plan["id"], "approve")
+
+    assert blocked.status_code == 409, blocked.text
+    assert _blocking(blocked.json()["details"]) == {_C.SEC_1.value: {_R.CONTROL_FAILED.value}}
+    (missing,) = await gate_findings(migration, _C.SEC_1)
+    assert (missing.result, missing.reason) == (
+        SecurityResult.FAIL,
+        SecurityFindingReason.SECRETS_MISSING,
+    )
+    assert (missing.source, missing.environment_id) == ("WAS_STATE", migration.gcp.id)
+    # 근거는 빠진 키 이름뿐이다. 값은 증거·응답 어디에도 없다.
+    assert missing.items == [{"item_id": "DB_URL"}]
+    assert SECRET_VALUE not in blocked.text
+    assert SECRET_VALUE not in str(missing.items)
+    lines = await migration.log_rows(plan["id"])
+    assert str(missing.id) in (lines[-1].data or {})["findingIds"]
+
+    await put_variable(migration, migration.gcp, "DB_URL")
+    migration.harness.clock.advance(1)
+    approved = await migration.act(plan["id"], "approve")
+
+    assert approved.status_code == 202, approved.text
+    ready = (await gate_findings(migration, _C.SEC_1))[-1]
+    assert (ready.result, ready.reason, ready.items) == (
+        SecurityResult.PASS,
+        SecurityFindingReason.SECRETS_READY,
+        [],
+    )
+
+
+async def test_stored_sec_1_state_evidence_is_not_reused_by_the_gate(
+    migration: Migration,
+) -> None:
+    """저장된 WAS 상태 C-SEC-1 PASS(앞 판정의 기록)는 쓰지 않고 지금 키로 다시 계산한다."""
+    await prepare_passing_gate(migration)
+    await put_variable(migration, migration.aws, "API_KEY")
+    now = migration.harness.clock.now()
+    stale_pass = normalize_secret_delivery(
+        set(),
+        set(),
+        scope=SecurityScope(
+            migration.harness.organization.id,
+            service_id=uuid.UUID(migration.service_id),
+            environment_id=migration.gcp.id,
+        ),
+        collected_at=now - timedelta(minutes=1),
+    )
+    async with migration.harness.session_factory() as session:
+        await SecurityFindingService(session).record_all([stale_pass], "migration-plan:earlier")
+    plan = await migration.create_plan()
+
+    blocked = await migration.act(plan["id"], "approve")
+
+    assert blocked.status_code == 409, blocked.text
+    assert _blocking(blocked.json()["details"]) == {_C.SEC_1.value: {_R.CONTROL_FAILED.value}}

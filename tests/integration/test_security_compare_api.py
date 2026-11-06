@@ -113,14 +113,15 @@ async def _record_fixable_high(harness: DeployHarness, service_id: str, digest: 
 
 
 async def _add_organization_exception(
-    harness: DeployHarness, control: SecurityControlId
+    harness: DeployHarness, control: SecurityControlId, *, was_version: str | None = None
 ) -> SecurityException:
-    """조직 범위 기한부 예외(요청 = 시험 어드민, 승인 = 다른 사용자)."""
+    """조직(·WAS 버전) 범위 기한부 예외(요청 = 시험 어드민, 승인 = 다른 사용자)."""
     approver = await create_user(harness.session_factory, "compare-approver")
     created_at = harness.clock.now() - timedelta(minutes=5)
     exception = SecurityException(
         organization_id=harness.organization.id,
         control_id=control,
+        was_version=was_version,
         reason="시연 범위: 증거 수집 전 임시 면제",
         requested_by_user_id=harness.admin.user.id,
         approved_by_user_id=approver.id,
@@ -193,14 +194,17 @@ async def test_compare_cells_equal_matrix_rows_and_mark_target_blocks(
 async def test_exception_lifts_mandatory_unknown_on_target(harness: DeployHarness) -> None:
     aws = await harness.add_environment("aws-seoul")
     gcp = await harness.add_environment("gcp-seoul")
+    harness.use_settings(was_version="was-compare-test")
 
-    before = _rows(await _compare(harness, aws.id, gcp.id))["encryption"]
-    exception = await _add_organization_exception(harness, SecurityControlId.SEC_1)
-    after = _rows(await _compare(harness, aws.id, gcp.id))["encryption"]
+    before = _rows(await _compare(harness, aws.id, gcp.id))["auditLog"]
+    exception = await _add_organization_exception(
+        harness, SecurityControlId.AUD_1, was_version="was-compare-test"
+    )
+    after = _rows(await _compare(harness, aws.id, gcp.id))["auditLog"]
 
-    # 서비스가 없는 환경의 encryption 필수 통제는 C-SEC-1 뿐이다(증거 없음 → UNKNOWN).
+    # 감사 기록 칸의 필수 통제는 C-AUD-1(WAS 버전 범위) 뿐이다(증거 없음 → UNKNOWN).
     assert before["blocksMigration"] is True
-    assert before["blockingControlIds"] == [SecurityControlId.SEC_1.value]
+    assert before["blockingControlIds"] == [SecurityControlId.AUD_1.value]
     assert after["blocksMigration"] is False
     assert after["blockingControlIds"] == []
     assert after["target"]["gateStatus"] == SecurityGateStatus.WAIVED.value

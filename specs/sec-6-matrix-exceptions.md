@@ -138,7 +138,7 @@ C-DB-1·C-DST-1(·C-AI-1·C-IMG-3)은 규칙표에서 `cell=None`·실행(EXECUT
 ## 6. 완료 기준 (AC)
 
 - **AC-1 예외가 칸에 붙는다** — 통합 시험(`DeployHarness`, 시험 안에서 예외 행을 직접 넣음):
-  (a) 조직 범위 C-SEC-1 ACTIVE 예외 → 모든 환경 `encryption` 칸 `hasException` true, `exception.id/controlId/reason/expiresAt/approvedBy{id,login}`가 넣은 값과 같고, C-SEC-1 줄 `gateStatus` WAIVED·`reasons`에 `EXCEPTION_APPLIED`·`result`는 예외 없을 때와 같은 증거 값. 서비스가 없는 환경(칸에 다른 필수 통제 C-TLS-1 줄이 없음)의 `encryption` 칸 `gateStatus`는 WAIVED, 서비스가 배포돼 C-TLS-1 증거가 없는 환경은 C-TLS-1 때문에 BLOCKED(칸 규칙 1이 2보다 먼저).
+  (a) (11/6 C-SEC-1 이 서비스·환경 범위로 바뀌어 시험은 WAS 버전 범위 C-AUD-1·`auditLog` 칸으로 옮김) 조직 범위 C-SEC-1 ACTIVE 예외 → 모든 환경 `encryption` 칸 `hasException` true, `exception.id/controlId/reason/expiresAt/approvedBy{id,login}`가 넣은 값과 같고, C-SEC-1 줄 `gateStatus` WAIVED·`reasons`에 `EXCEPTION_APPLIED`·`result`는 예외 없을 때와 같은 증거 값. 서비스가 없는 환경(칸에 다른 필수 통제 C-TLS-1 줄이 없음)의 `encryption` 칸 `gateStatus`는 WAIVED, 서비스가 배포돼 C-TLS-1 증거가 없는 환경은 C-TLS-1 때문에 BLOCKED(칸 규칙 1이 2보다 먼저).
   (b) WAS 버전 범위 C-IAM-2 예외: 서버 `was_version`이 예외 값과 같으면 `iam` 칸 WAIVED·`hasException` true, 다르거나 None이면 BLOCKED·`hasException` false·`exception` null.
   (c) 자기 승인 예외(요청자 = 승인자): 조직 `allow_self_approval` true → WAIVED, false → BLOCKED.
 - **AC-2 안 맞는 예외는 무시된다** — 승인 전(PENDING)·철회(REVOKED)·만료·다른 조직·다른 환경 범위(환경 단위 통제, 예 C-IAM-1 예외를 환경 A로 만들면 환경 B 칸에는 안 붙음) 예외는 `hasException` false·`exception` null, 그 통제가 필수면 `gateStatus` BLOCKED·선택이면 PASS(환경 단위 통제는 모두 선택이라 C-IAM-1 예는 PASS + `hasException` false로 확인). 만료 예외는 `reasons`에 `EXCEPTION_EXPIRED`. 같은 칸에 유효 예외가 둘이면 칸 `exception`은 먼저 만료되는 것.

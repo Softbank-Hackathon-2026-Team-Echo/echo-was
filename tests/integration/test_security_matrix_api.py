@@ -26,6 +26,7 @@ from app.services.security_finding_service import SecurityFindingService, to_sec
 from app.services.security_normalizers import (
     NormalizedFinding,
     normalize_gitleaks,
+    normalize_secret_delivery,
     normalize_trivy_image,
 )
 from app.services.security_rules import (
@@ -39,6 +40,8 @@ from app.services.security_rules import (
 )
 from tests.integration.auth_support import create_organization, create_user
 from tests.integration.deploy_harness import DeployHarness
+from tests.integration.migration_support import Migration
+from tests.integration.security_gate_support import SECRET_VALUE, put_variable
 
 CELLS = ("iam", "encryption", "auditLog", "policy")
 RESULTS = {r.value for r in SecurityResult}
@@ -386,41 +389,40 @@ def _passing_was_finding(
 # AC-1 예외가 칸에 붙는다
 
 
-async def test_organization_exception_marks_encryption_cell_in_every_environment(
+async def test_organization_exception_marks_audit_cell_in_every_environment(
     harness: DeployHarness,
 ) -> None:
     await _deployed(harness)
     await harness.add_environment("gcp-seoul")
+    harness.use_settings(was_version=WAS_VERSION)
     before = await _matrix(harness)
     approver = await _approver(harness)
 
-    exception = await _add_exception(harness, SecurityControlId.SEC_1, approver)
+    exception = await _add_exception(
+        harness, SecurityControlId.AUD_1, approver, was_version=WAS_VERSION
+    )
     matrix = await _matrix(harness)
 
     for name in ("aws-seoul", "gcp-seoul"):
-        cell = _row(matrix, name)["cells"]["encryption"]
+        cell = _row(matrix, name)["cells"]["auditLog"]
         assert cell["hasException"] is True
         assert cell["exception"]["id"] == str(exception.id)
-        assert cell["exception"]["controlId"] == SecurityControlId.SEC_1.value
+        assert cell["exception"]["controlId"] == SecurityControlId.AUD_1.value
         assert cell["exception"]["reason"] == EXCEPTION_REASON
         assert datetime.fromisoformat(cell["exception"]["expiresAt"]) == exception.expires_at
         assert cell["exception"]["approvedBy"] == {
             "id": str(approver.id),
             "login": "exception-approver",
         }
-        control = _control(cell, SecurityControlId.SEC_1)
+        control = _control(cell, SecurityControlId.AUD_1)
         assert control["gateStatus"] == WAIVED
         assert SecurityReasonCode.EXCEPTION_APPLIED.value in control["reasons"]
         assert control["exception"] == cell["exception"]
-        previous = _control(_row(before, name)["cells"]["encryption"], SecurityControlId.SEC_1)
+        previous = _control(_row(before, name)["cells"]["auditLog"], SecurityControlId.AUD_1)
         assert control["result"] == previous["result"] == SecurityResult.UNKNOWN.value
         assert datetime.fromisoformat(cell["expiresAt"]) == exception.expires_at
-    # 서비스 없는 환경은 필수 통제가 C-SEC-1 뿐이다. 서비스가 있으면 증거 없는 C-TLS-1 이 막는다.
-    without_service = _row(matrix, "gcp-seoul")["cells"]["encryption"]
-    assert without_service["gateStatus"] == WAIVED
-    deployed = _row(matrix, "aws-seoul")["cells"]["encryption"]
-    assert _control(deployed, SecurityControlId.TLS_1)["gateStatus"] == BLOCKED
-    assert deployed["gateStatus"] == BLOCKED
+        # 감사 기록 칸의 필수 통제는 C-AUD-1 뿐이다(C-AUD-2 는 선택).
+        assert cell["gateStatus"] == WAIVED
 
 
 @pytest.mark.parametrize(
@@ -458,12 +460,15 @@ async def test_self_approved_exception_follows_organization_switch(
     harness: DeployHarness, allowed: bool, gate_status: str, is_applied: bool
 ) -> None:
     await harness.add_environment("aws-seoul")
+    harness.use_settings(was_version=WAS_VERSION)
     await _allow_self_approval(harness, allowed=allowed)
-    await _add_exception(harness, SecurityControlId.SEC_1, harness.admin.user)
+    await _add_exception(
+        harness, SecurityControlId.AUD_1, harness.admin.user, was_version=WAS_VERSION
+    )
 
-    cell = (await _matrix(harness))["rows"][0]["cells"]["encryption"]
+    cell = (await _matrix(harness))["rows"][0]["cells"]["auditLog"]
 
-    control = _control(cell, SecurityControlId.SEC_1)
+    control = _control(cell, SecurityControlId.AUD_1)
     assert cell["gateStatus"] == control["gateStatus"] == gate_status
     if is_applied:
         assert cell["hasException"] is True
@@ -477,21 +482,23 @@ async def test_self_approved_exception_follows_organization_switch(
 @pytest.mark.parametrize("kind", ["pending", "revoked", "other-organization"])
 async def test_unusable_exception_is_ignored(harness: DeployHarness, kind: str) -> None:
     await harness.add_environment("aws-seoul")
+    harness.use_settings(was_version=WAS_VERSION)
     approver = await _approver(harness)
+    aud = SecurityControlId.AUD_1
     match kind:
         case "pending":
-            await _add_exception(harness, SecurityControlId.SEC_1, None)
+            await _add_exception(harness, aud, None, was_version=WAS_VERSION)
         case "revoked":
-            await _add_exception(harness, SecurityControlId.SEC_1, approver, revoked=True)
+            await _add_exception(harness, aud, approver, was_version=WAS_VERSION, revoked=True)
         case _:
             other = await create_organization(harness.session_factory, "other-org")
             await _add_exception(
-                harness, SecurityControlId.SEC_1, approver, organization_id=other.id
+                harness, aud, approver, organization_id=other.id, was_version=WAS_VERSION
             )
 
-    cell = (await _matrix(harness))["rows"][0]["cells"]["encryption"]
+    cell = (await _matrix(harness))["rows"][0]["cells"]["auditLog"]
 
-    control = _control(cell, SecurityControlId.SEC_1)
+    control = _control(cell, aud)
     _assert_no_exception(cell, control)
     assert control["gateStatus"] == BLOCKED
     assert cell["gateStatus"] == BLOCKED
@@ -500,17 +507,19 @@ async def test_unusable_exception_is_ignored(harness: DeployHarness, kind: str) 
 
 async def test_expired_exception_adds_reason_and_stays_blocked(harness: DeployHarness) -> None:
     await harness.add_environment("aws-seoul")
+    harness.use_settings(was_version=WAS_VERSION)
     await _add_exception(
         harness,
-        SecurityControlId.SEC_1,
+        SecurityControlId.AUD_1,
         await _approver(harness),
+        was_version=WAS_VERSION,
         created_ago=timedelta(days=2),
         expires_in=timedelta(days=1),
     )
 
-    cell = (await _matrix(harness))["rows"][0]["cells"]["encryption"]
+    cell = (await _matrix(harness))["rows"][0]["cells"]["auditLog"]
 
-    control = _control(cell, SecurityControlId.SEC_1)
+    control = _control(cell, SecurityControlId.AUD_1)
     _assert_no_exception(cell, control)
     assert control["gateStatus"] == BLOCKED
     assert SecurityReasonCode.EXCEPTION_EXPIRED.value in control["reasons"]
@@ -574,7 +583,9 @@ async def test_matrix_controls_match_direct_rule_evaluation(harness: DeployHarne
     approver = await _approver(harness)
     await _add_exception(harness, SecurityControlId.IMG_1, approver, image_digest=digest)
     await _add_exception(harness, SecurityControlId.IAM_2, approver, was_version=WAS_VERSION)
-    await _add_exception(harness, SecurityControlId.SEC_1, harness.admin.user)
+    await _add_exception(
+        harness, SecurityControlId.AUD_1, harness.admin.user, was_version=WAS_VERSION
+    )
     await _add_exception(harness, SecurityControlId.CI_1, None)
     await _add_exception(harness, SecurityControlId.AUD_2, approver, environment_id=environment_id)
 
@@ -589,6 +600,13 @@ async def test_matrix_controls_match_direct_rule_evaluation(harness: DeployHarne
         exception_models = await SecurityExceptionRepository(session).search_for_judgement(
             organization_id, now - EXCEPTION_MAX_DURATION
         )
+    # C-SEC-1 은 매트릭스가 조회 때 계산한다(변수가 없는 서비스 중 연결 하나 → PASS).
+    secret_delivery = normalize_secret_delivery(
+        set(),
+        set(),
+        scope=SecurityScope(organization_id, service_id=service_id, environment_id=environment_id),
+        collected_at=now,
+    )
     decision = evaluate_security(
         SecurityTarget(
             scope=SecurityScope(
@@ -602,7 +620,7 @@ async def test_matrix_controls_match_direct_rule_evaluation(harness: DeployHarne
             allow_self_approval=True,
         ),
         SecurityCheckPhase.PREPARATION,
-        [to_security_finding(model) for model in finding_models],
+        [*(to_security_finding(model) for model in finding_models), secret_delivery.finding],
         [to_security_exception(model) for model in exception_models],
         now,
     )
@@ -627,7 +645,7 @@ async def test_exception_does_not_change_evidence_results(harness: DeployHarness
 
     await _add_exception(harness, SecurityControlId.IMG_1, approver, image_digest=digest)
     await _add_exception(harness, SecurityControlId.IAM_2, approver, was_version=WAS_VERSION)
-    await _add_exception(harness, SecurityControlId.SEC_1, approver)
+    await _add_exception(harness, SecurityControlId.AUD_1, approver, was_version=WAS_VERSION)
     await _add_exception(
         harness,
         SecurityControlId.TLS_1,
@@ -680,3 +698,34 @@ async def test_was_version_evidence_counts_and_passing_control_ignores_exception
     # 선택 통제 C-IAM-1 의 UNKNOWN 은 칸 값에 남아도 게이트를 막지 않는다.
     assert cell["result"] == SecurityResult.UNKNOWN.value
     assert cell["gateStatus"] == GATE_PASS
+
+
+# --- C-SEC-1: 서비스 중 연결의 앱 환경 변수 키가 각 연결에 있는가 (sec-1-2) ---
+
+
+async def test_matrix_marks_standby_missing_serving_secret_keys(migration: Migration) -> None:
+    harness = migration.harness
+    for key in ("API_KEY", "DB_URL"):
+        await put_variable(migration, migration.aws, key)
+    await put_variable(migration, migration.gcp, "API_KEY")
+
+    matrix = await _matrix(harness)
+
+    serving = _control(_row(matrix, "aws-seoul")["cells"]["encryption"], SecurityControlId.SEC_1)
+    standby = _control(_row(matrix, "gcp-seoul")["cells"]["encryption"], SecurityControlId.SEC_1)
+    assert (serving["result"], serving["serviceId"]) == ("PASS", migration.service_id)
+    assert (standby["result"], standby["gateStatus"]) == ("FAIL", BLOCKED)
+    assert standby["reasons"] == [SecurityReasonCode.CONTROL_FAILED.value]
+    # 조회 때 계산하고 저장하지 않는다. id 는 조회마다 같다.
+    again = _control(
+        _row(await _matrix(harness), "gcp-seoul")["cells"]["encryption"], SecurityControlId.SEC_1
+    )
+    assert again["findingIds"] == standby["findingIds"] != serving["findingIds"]
+    assert (await _findings(harness, controlId="C-SEC-1"))["total"] == 0
+    assert SECRET_VALUE not in str(matrix)
+
+    await put_variable(migration, migration.gcp, "DB_URL")
+    after = await _matrix(harness)
+
+    ready = _control(_row(after, "gcp-seoul")["cells"]["encryption"], SecurityControlId.SEC_1)
+    assert (ready["result"], ready["gateStatus"]) == ("PASS", GATE_PASS)
