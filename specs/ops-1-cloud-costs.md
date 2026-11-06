@@ -12,7 +12,7 @@
 
 1. 프론트: 비용 화면·호출 없음. `echo-frontend/src/lib/api/evacuation.ts:85` `COST_BY_KIND = { onprem: 90, gcp: 58, aws: 55 }`(대피 후보 `scores.cost` 0~100 점수 상수, 가중치 0.1).
 2. echo-was: 라우터는 `app/routers/`, 읽기 라우트 선례 `security_router.py`(`ViewerAccess`). YAML 라이브러리 의존성 없음 → 표준 `tomllib`·`json`만 쓴다. Dockerfile `COPY app ./app`이라 `app/data/`가 이미지에 들어간다.
-3. AWS 청구: Cost Explorer가 읽힌다(계정 706878591119). 서비스별 금액은 크레딧이 상계된 순액(≈0). `RECORD_TYPE` 묶음으로 2026-11-04: Usage **6.7374**, Credit **-6.7374**, 순 0.0000 USD, `Estimated=true`. 값은 **계정 전체**(aws-tokyo + 서울 onprem 시연 EC2 + ECR 등)이고 비용 배분 태그가 없어 환경별로 나눌 수 없다. 요청당 $0.01, 관제 서버(GKE)의 AWS 역할에 `ce:GetCostAndUsage` 권한 없음.
+3. AWS 청구: Cost Explorer가 읽힌다(계정 <ACCOUNT_ID>). 서비스별 금액은 크레딧이 상계된 순액(≈0). `RECORD_TYPE` 묶음으로 2026-11-04: Usage **6.7374**, Credit **-6.7374**, 순 0.0000 USD, `Estimated=true`. 값은 **계정 전체**(aws-tokyo + 서울 onprem 시연 EC2 + ECR 등)이고 비용 배분 태그가 없어 환경별로 나눌 수 없다. 요청당 $0.01, 관제 서버(GKE)의 AWS 역할에 `ce:GetCostAndUsage` 권한 없음.
 4. GCP 청구: 결제 계정 연결됨, BigQuery 데이터셋 0개 → 청구 내보내기 없음 → 추정만.
 5. 실제 자원(읽기 전용 CLI, Terraform 대조)과 공개 단가(AWS Price List API·Cloud Billing Catalog API·Google 가격 문서) — 4절 데이터 파일의 값 그대로. 계산 결과: aws-tokyo 0.4896/시간·11.75/일, gcp-seoul 0.3243·7.78, 공용 0.1846·4.43, 합계 0.9985·23.96(USD).
 6. 목록가 추정(aws-tokyo 11.75/일)이 실측 사용 금액(계정 6.74/일)보다 크다 — 무료 플랜이 m7i-flex.large 시간을 $0 처리한 것으로 보이나 미검증. **이 차이를 숨기지 않고 응답 note로 보여 주는 것이 이 API의 정직성 포인트다.**

@@ -167,7 +167,7 @@ class AppSecretStore(Protocol):
 ## 6. 이 PR 밖에서 M1이 할 일 (구현 뒤)
 
 1. GSA `echo-dev-echo-was`에 `roles/secretmanager.admin`과 IAM 조건을 gcloud로 적용한다.
-   - 조건: `resource.name.startsWith("projects/573662116412/secrets/echo-app-")`. 안 되면 `resource.name.extract("secrets/{rest}").startsWith("echo-app-")`.
+   - 조건: `resource.name.startsWith("projects/<GCP_PROJECT_NUMBER>/secrets/echo-app-")`. 안 되면 `resource.name.extract("secrets/{rest}").startsWith("echo-app-")`.
    - 운영 파드에서 만들기·버전 추가·읽기를 시험한다.
    - 같은 값으로 echo-infra `control-plane.tf` PR을 올린다.
    - 조건이 만들기(create)에 안 먹으면 대안: 조건 없는 커스텀 역할(`secretmanager.secrets.create`만)을 더한다(읽기·버전은 조건부 admin이 막음).
