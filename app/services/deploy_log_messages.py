@@ -93,6 +93,10 @@ DEPLOY_LOG_ENTRIES: dict[DeployLogCode, DeployLogEntry] = {
     DeployLogCode.STANDBY_SYNC_REQUESTED: DeployLogEntry(
         _INFO, _S.SUCCEEDED, "A standby environment was asked to follow this version."
     ),
+    # 문장은 처리기가 환경 id 와 고정 사유로 만든다(standby_skipped_message).
+    DeployLogCode.STANDBY_SKIPPED: DeployLogEntry(
+        _WARN, _S.SUCCEEDED, "A requested standby environment was not started."
+    ),
     # 문장은 처리기가 진단 값으로 만든다(container_diagnostics.diagnostics_message·로그 한 줄).
     DeployLogCode.CONTAINER_DIAGNOSTICS: DeployLogEntry(
         _ERROR, _S.FAILED, "Container status was read before withdrawing the failed version."
@@ -154,3 +158,8 @@ def deploy_log_message(
     if code is DeployLogCode.FAILED and error_code is not None:
         return ERROR_MESSAGES[error_code]
     return DEPLOY_LOG_ENTRIES[code].message
+
+
+def standby_skipped_message(environment_id: str, reason: str) -> str:
+    """요청한 예비 환경을 띄우지 못한 줄(이슈 #99). reason 은 처리기의 고정 사유 문장이다."""
+    return f"Requested standby environment {environment_id} was not started: {reason}"

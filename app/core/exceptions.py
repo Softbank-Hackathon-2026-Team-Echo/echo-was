@@ -504,6 +504,18 @@ class EnvVarNotFoundError(NotFoundError):
         super().__init__("environment variable not found")
 
 
+class EnvVarAlreadyExistsError(ConflictError):
+    """복사 대상에 같은 키가 이미 있고 overwrite = false 다(이슈 #99).
+
+    복사 응답 failed 의 코드로만 나온다.
+    """
+
+    code = "ENV_VAR_ALREADY_EXISTS"
+
+    def __init__(self) -> None:
+        super().__init__("environment variable already exists")
+
+
 class EnvVarKeyInvalidError(InvalidInputError):
     code = "ENV_VAR_KEY_INVALID"
 

@@ -13,6 +13,11 @@
 
 서비스에 실행 중인 이전 계획이 있으면 409 MIGRATION_IN_PROGRESS 다(서비스 행을 잠근 뒤 본다).
 
+예비 환경 함께 띄우기(이슈 #99 2번): standbyEnvironmentIds 는 접수 때 확인만 하고 요청
+config_snapshot 에 적는다(표 칸을 더하지 않는다). 연결 만들기·STANDBY_SYNC 는 일꾼이 주 환경
+성공 처리 때 한다(DeployRequestProcessor._succeed). 상세 응답 standbyDeployRequestIds 는 그
+결과를 읽는다.
+
 되돌리기 접수는 같은 순서로 잠그고, 이력에서 고른 성공 요청의 빌드·커밋·배포 기록 설정 사본으로
 trigger = ROLLBACK 요청을 넣는다. 접수 순간 연결의 현재 배포를 rollback_base_deployment_id 에
 적어 두고, 일꾼이 시작할 때 다시 비교한다.
@@ -22,6 +27,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +77,7 @@ from app.services.container_diagnostics import (
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
+    SNAPSHOT_STANDBY_ENVIRONMENT_IDS,
     build_config_snapshot,
     create_service_connection,
     deploy_target,
@@ -82,6 +89,8 @@ from app.services.migration_guard import check_no_migration_in_progress
 logger = logging.getLogger(__name__)
 
 INVALID_CURSOR_REASON = "INVALID_CURSOR"
+STANDBY_SAME_AS_ENVIRONMENT_REASON = "SAME_AS_ENVIRONMENT"
+STANDBY_DUPLICATE_REASON = "DUPLICATE"
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,8 @@ class CreateDeployCommand:
     ref_type: RefType
     ref_value: str
     simulate_fail_at: SimulatedFailureStage | None
+    # 주 환경 성공 뒤 함께 띄울 예비 환경(이슈 #99 2번). 비면 예전과 같다.
+    standby_environment_ids: tuple[uuid.UUID, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,8 @@ class DeployRequestView:
     rollbackable: bool = False
     # 상세만 채운다. 실패한 요청의 원인·컨테이너 진단(API 서버 4-1).
     failure: FailureDetail | None = None
+    # 상세만 채운다. 이 요청이 성공해 만든 예비 따라가기(STANDBY_SYNC) 요청 id(이슈 #99).
+    standby_request_ids: tuple[uuid.UUID, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -165,6 +178,7 @@ class DeployRequestService:
         command: CreateDeployCommand,
     ) -> DeployRequestView:
         self._check_simulate_allowed(command.simulate_fail_at)
+        _check_standby_command(command)
 
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id)
@@ -173,6 +187,13 @@ class DeployRequestService:
                 organization_id, command.environment_id
             )
             _check_environment_accepts(environment)
+            for standby_id in command.standby_environment_ids:
+                # 같은 조직의 살아 있는 환경만(아니면 404 ENVIRONMENT_NOT_FOUND),
+                # 접속 확인 실패면 409. 성공 처리 때 다시 본다(그 사이 지워졌으면 그 환경만
+                # STANDBY_SKIPPED 줄).
+                _check_environment_accepts(
+                    await self._environments.get_live_by_id(organization_id, standby_id)
+                )
             repo = parse_repo_url(service.repo_url)
 
         commit_sha = await self._source_client.resolve_ref(repo, command.ref_value)
@@ -209,7 +230,9 @@ class DeployRequestService:
                 repo_url=service.repo_url,
                 commit_sha=commit_sha,
                 status=DeployRequestStatus.QUEUED,
-                config_snapshot=build_config_snapshot(service, connection),
+                config_snapshot=_with_standby_ids(
+                    build_config_snapshot(service, connection), command.standby_environment_ids
+                ),
                 simulate=_simulate(command.simulate_fail_at),
                 simulated=self._executor_mode is ExecutorMode.FAKE,
                 created_at=now,
@@ -225,16 +248,21 @@ class DeployRequestService:
                 self._clock,
                 AuditComponent.API,
             )
+            details: dict[str, object] = {
+                "environmentId": str(environment.id),
+                "ref": command.ref_value,
+                "commitSha": commit_sha,
+            }
+            if command.standby_environment_ids:
+                details["standbyEnvironmentIds"] = [
+                    str(item) for item in command.standby_environment_ids
+                ]
             self._audit.record(
                 organization_id=organization_id,
                 actor=AuditActor.user(actor_user_id),
                 action=AuditAction.DEPLOY_REQUESTED,
                 target=await deploy_request_target(self._session, request),
-                details={
-                    "environmentId": str(environment.id),
-                    "ref": command.ref_value,
-                    "commitSha": commit_sha,
-                },
+                details=details,
             )
         _log_accepted("deploy request accepted", "create_deploy_request", request, superseded_id)
         return DeployRequestView(deploy_request=request, environment=environment, build=None)
@@ -370,6 +398,9 @@ class DeployRequestService:
         async with self._session.begin():
             request = await self._get_in_organization(organization_id, deploy_request_id)
             view = (await self._views([request]))[0]
+            standby_ids = await self._deploy_requests.search_standby_sync_ids_by_source(request.id)
+            if standby_ids:
+                view = replace(view, standby_request_ids=tuple(standby_ids))
             if request.status != DeployRequestStatus.FAILED:
                 return view
             rows = await self._logs.search_by_codes(request.id, FAILURE_LOG_CODES)
@@ -577,6 +608,23 @@ def _check_environment_accepts(environment: Environment) -> None:
         raise EnvironmentUnhealthyError(
             "environment connection check failed", environment_id=str(environment.id)
         )
+
+
+def _check_standby_command(command: CreateDeployCommand) -> None:
+    """예비 환경 목록 규칙(스키마 밖). 주 환경과 같거나 중복이면 VALIDATION_ERROR."""
+    standby_ids = command.standby_environment_ids
+    if command.environment_id in standby_ids:
+        raise RequestFieldInvalidError("standbyEnvironmentIds", STANDBY_SAME_AS_ENVIRONMENT_REASON)
+    if len(set(standby_ids)) != len(standby_ids):
+        raise RequestFieldInvalidError("standbyEnvironmentIds", STANDBY_DUPLICATE_REASON)
+
+
+def _with_standby_ids(
+    snapshot: dict[str, Any], standby_environment_ids: Sequence[uuid.UUID]
+) -> dict[str, Any]:
+    if standby_environment_ids:
+        snapshot[SNAPSHOT_STANDBY_ENVIRONMENT_IDS] = [str(item) for item in standby_environment_ids]
+    return snapshot
 
 
 def _simulate(simulate_fail_at: SimulatedFailureStage | None) -> dict[str, str] | None:

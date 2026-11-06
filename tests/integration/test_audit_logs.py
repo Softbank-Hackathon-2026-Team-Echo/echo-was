@@ -144,7 +144,7 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 33
+    assert len(WRITE_ROUTE_ACTIONS) == 34
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
@@ -465,6 +465,30 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         variable_details,
     )
     variable_secret_ref = _data(variable_resaved)["secretRef"]
+    # 복사(이슈 #99): 대상·키마다 한 줄, 키와 원본 환경만 적는다(값 없음).
+    variable_copied = await client.post(
+        f"{service_path}/variables:copy",
+        json={
+            "sourceEnvironmentId": str(migration.aws.id),
+            "targetEnvironmentIds": [str(migration.gcp.id)],
+            "keys": ["DATABASE_URL"],
+        },
+    )
+    assert _data(variable_copied)["failed"] == []
+    await ledger.expect_one(
+        variable_copied,
+        AuditAction.SERVICE_VARIABLE_COPIED,
+        admin.user,
+        team_id,
+        "service",
+        service_id,
+        "pay-api · gcp-seoul · DATABASE_URL",
+        {
+            "environmentId": str(migration.gcp.id),
+            "key": "DATABASE_URL",
+            "sourceEnvironmentId": str(migration.aws.id),
+        },
+    )
     await ledger.expect_one(
         await client.delete(variable_path),
         AuditAction.SERVICE_VARIABLE_DELETED,

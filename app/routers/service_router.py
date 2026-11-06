@@ -136,6 +136,7 @@ async def create_deploy_request(
             ref_type=ref_type,
             ref_value=ref_value,
             simulate_fail_at=request.simulate.fail_at if request.simulate is not None else None,
+            standby_environment_ids=tuple(request.standby_environment_ids),
         ),
     )
     return ApiResponse(data=DeployRequestDetailResponse.from_view(view))

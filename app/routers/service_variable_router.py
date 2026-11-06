@@ -8,17 +8,23 @@ from app.core.secrets import SecretValue
 from app.dependencies import get_service_variable_service
 from app.schemas.response import ApiResponse
 from app.schemas.service_variable import (
+    CopyServiceVariablesRequest,
     PutServiceVariableRequest,
     SavedServiceVariableResponse,
+    ServiceVariableCopyResponse,
     ServiceVariableListResponse,
     ServiceVariableResponse,
 )
 from app.services.service_variable_service import ServiceVariableService
 
-# 목록은 뷰어(에이전트 가능), 넣기·바꾸기는 사람 개발자, 삭제는 사람 어드민.
+# 목록은 뷰어(에이전트 가능), 넣기·바꾸기·복사는 사람 개발자, 삭제는 사람 어드민.
 router = APIRouter(
     prefix="/api/v1/orgs/{org_id}/services/{service_id}/environments/{environment_id}/variables",
     tags=["service-variable"],
+)
+# 환경을 경로에 두지 않는 서비스 단위 경로(복사, 이슈 #99).
+service_router = APIRouter(
+    prefix="/api/v1/orgs/{org_id}/services/{service_id}", tags=["service-variable"]
 )
 
 Variables = Annotated[ServiceVariableService, Depends(get_service_variable_service)]
@@ -72,3 +78,16 @@ async def delete_service_variable(
         access.organization_id, service_id, environment_id, key, access.user.id
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@service_router.post("/variables:copy", response_model=ApiResponse[ServiceVariableCopyResponse])
+async def copy_service_variables(
+    access: HumanDeveloperAccess,
+    service_id: uuid.UUID,
+    request: CopyServiceVariablesRequest,
+    variables: Variables,
+) -> ApiResponse[ServiceVariableCopyResponse]:
+    result = await variables.copy_variables(
+        access.organization, service_id, request.to_command(), access.user.id
+    )
+    return ApiResponse(data=ServiceVariableCopyResponse.from_result(result))

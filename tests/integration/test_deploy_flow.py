@@ -50,6 +50,9 @@ DETAIL_KEYS = {
     "rollbackOfRequestId",
     # API 서버 4-1: 실패 원인·컨테이너 진단
     "failure",
+    # 이슈 #99: 예비 환경 함께 띄우기(칸 이름 가칭)
+    "standbyEnvironmentIds",
+    "standbyDeployRequestIds",
 }
 
 
