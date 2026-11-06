@@ -1832,7 +1832,10 @@ async def test_db_cutover_step_revision_round_trip_and_blocks_downgrade_with_ste
             )
         )
         await connection.run_sync(run_alembic(lambda config: command.upgrade(config, "head")))
-        await transaction.commit()
+        # 되돌린다(commit 하지 않는다): 이 내리기는 CVE 감시 리비전(findings 칸 지우고
+        # 다시 더하기)도 지나가므로 commit 하면 칸 순번(attnum)이 밀려 모델-마이그레이션
+        # 카탈로그 비교가 깨진다.
+        await transaction.rollback()
     migration.harness.use_settings(db_cutover_executor_mode="fake")
     plan = await migration.create_plan(includeCutover=True)
     await migration.approve(plan["id"])
