@@ -250,12 +250,14 @@ class DiagnosisService:
         # 다른 요청은 pending 으로 재배포 없이 돌아간다(쓴 요청이 잇는다, SPEC api-19 D-11).
         repo_commit_sha: str | None = None
         repo_fields: dict[str, Any] | None = None
+        skip_reason: str | None = "COMMIT_DISABLED"
         if self._apply_commit is not None:
             committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
             if committed.stopped or committed.pending:
                 return committed.run
             repo_commit_sha = committed.ref
             repo_fields = committed.result_fields
+            skip_reason = committed.skip_reason
         rejected_code: str | None = None
         redeploy_id: uuid.UUID | None = None
         async with self._session.begin():
@@ -284,6 +286,11 @@ class DiagnosisService:
             actor_user_id = apply_run.requested_by_user_id
             service_id = failed.service_id
             commit_sha = repo_commit_sha or failed.commit_sha
+            repository_skip_reason = (
+                ("SIMULATED" if apply_run.simulated else skip_reason)
+                if not (apply_run.result or {}).get("repoCommitted")
+                else None
+            )
             command = CreateDeployCommand(
                 environment_id=failed.environment_id,
                 ref_type=RefType.COMMIT,
@@ -314,6 +321,15 @@ class DiagnosisService:
                 {
                     REDEPLOY_REQUEST_ID_KEY: str(redeploy_id) if redeploy_id else None,
                     REDEPLOY_REJECTED_CODE_KEY: rejected_code,
+                    "redeployFinishedAt": self._clock.now().isoformat(),
+                    **(
+                        {
+                            "repositorySkipReason": repository_skip_reason,
+                            "repositoryFinishedAt": self._clock.now().isoformat(),
+                        }
+                        if repository_skip_reason
+                        else {}
+                    ),
                 },
             )
             updated = await self._runs.find_by_id(apply_run_id)

@@ -22,6 +22,7 @@
 - 목록(`GET /prechecks`)은 없다. 화면은 만들 때 받은 id 로 부른다. 최근 실행과 레지던시 기록은 조직 요약 [ai-residency.md](ai-residency.md) 의 `recentRuns` 로 본다.
 - 러너는 반영 실행(`APPLY_PATCH`)을 `:claim` 으로 가져가고 `ApplyPatchResult` 로 결과를 낸다([agent-runner.md](../agent-runner.md#반영-실행-apply_patch), SPEC [api-10-2](../../specs/api-10-2-apply-patch-run.md)). 사전 점검 패치는 반영 성공 뒤 새 배포로 잇지 않는다(사람이 고객 저장소에 커밋). 배포 실패 진단의 패치만 같은 환경 재배포를 자동으로 만든다([deploy-diagnosis.md](deploy-diagnosis.md)).
 - 코드: `app/routers/precheck_router.py`, `app/services/precheck_service.py`, `app/services/precheck_patch_service.py`.
+- 후속 읽기 상태 `patches[].apply.followUp` / 반영 상세 `apply.followUp`의 additive v1 검토 계약은 [CONTRACT](../ai-followup/CONTRACT.md)를 따른다. 샌드박스 종료와 저장소 반영·재배포 접수·실제 배포 성공은 서로 다르며, 실효 후속 SLA가 없어 `followUp.deadlineAt`은 null이다. 자동복구는 이 읽기 계약에 포함되지 않는다.
 
 ## 만들기 `POST /prechecks`
 

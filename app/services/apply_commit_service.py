@@ -155,6 +155,7 @@ class CommitOutcome:
     stopped: bool = False
     pending: bool = False
     result_fields: dict[str, Any] | None = None
+    skip_reason: str | None = None
 
 
 def _claim_is_live(result: dict[str, Any], now: datetime) -> bool:
@@ -203,7 +204,7 @@ class ApplyCommitService:
         재승인) GitHub 커밋·PR 은 한 번, 재배포는 하나다.
         """
         if not self._enabled:
-            return CommitOutcome()
+            return CommitOutcome(skip_reason="COMMIT_DISABLED")
         now = self._clock.now()
         async with self._session.begin():
             apply_run = await self._runs.find_by_id(apply_run_id, lock=True)
@@ -307,6 +308,7 @@ class ApplyCommitService:
             PULL_REQUEST_URL_KEY: committed.pull_request_url,
             REPO_COMMIT_KEY: True,
             COMMIT_STATE_KEY: COMMIT_DONE,
+            "repositoryFinishedAt": self._clock.now().isoformat(),
         }
         logger.info(
             "apply committed to service repository",
@@ -389,6 +391,7 @@ class ApplyCommitService:
                     "appliedCommitSha": None,
                     PULL_REQUEST_URL_KEY: None,
                     COMMIT_STATE_KEY: COMMIT_FAILED,
+                    "repositoryFinishedAt": now.isoformat(),
                 },
             )
             return await self._runs.find_by_id(apply_run_id)

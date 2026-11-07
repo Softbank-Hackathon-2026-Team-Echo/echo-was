@@ -871,6 +871,23 @@ class AgentPatchStatus(StrEnum):
     APPLY_FAILED = "APPLY_FAILED"
 
 
+class RepositoryFollowupState(StrEnum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
+class RedeployFollowupState(StrEnum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    PENDING = "PENDING"
+    CREATED = "CREATED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+
 class AgentPatchBlockReason(StrEnum):
     """수정안이 BLOCKED 인 이유."""
 

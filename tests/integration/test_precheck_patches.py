@@ -43,6 +43,7 @@ from tests.integration.runner_support import (
     run_result,
     run_row,
 )
+from tests.test_apply_followup import NOT_DIAGNOSIS_FOLLOWUP
 
 UNKNOWN_ID = "00000000-0000-0000-0000-000000000001"
 DAY = 24 * 60 * 60
@@ -218,6 +219,7 @@ async def test_patch_approve_with_apply_enabled(
         "pullRequestUrl": None,
         "redeployRequestId": None,
         "redeployRejectedCode": None,
+        "followUp": NOT_DIAGNOSIS_FOLLOWUP,
     }
     assert data == await _patch_in_detail(migration, run_id)
     apply_runs = await _apply_runs(migration)
