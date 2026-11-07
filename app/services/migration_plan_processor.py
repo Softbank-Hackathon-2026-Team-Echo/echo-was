@@ -1,9 +1,10 @@
 """일꾼이 이전 계획 하나를 단계대로 진행한다.
 
-단계(고정): 0 사전 확인 → 1 비율 10% → 2 비율 50% → 3 데이터 확인 → 4 비율 100%.
+새 계획: 0 사전 확인 → 1~4 비율 5·10·25·50% → 5 데이터 확인 → 6~7 비율 75·100%.
+DB 쓰기 전환을 넣으면 단계 8을 더한다. 옛 계획은 저장된 단계대로 실행한다.
 비율 단계는 APPLY(트래픽 실행기로 비율 적용) → OBSERVE(건수 세기: 출발·도착 누적 카운터를 주기마다
-읽어 도착이 요청 N건을 5xx 허용 안에서 처리했는지 센다) → JUDGE(헬스체크)이고, 사전 확인·데이터
-확인은 JUDGE 만 있다. 세기 규칙은 migration_counting 에 있다. 판정을 통과하면 사람 개입 없이 다음
+읽어 도착이 요청 N건을 5xx 허용 안에서 처리했는지 센다) → JUDGE(헬스체크 + 최소 관찰 대기)이고,
+사전 확인·데이터 확인은 JUDGE 만 있다. 세기 규칙은 migration_counting 에 있다. 통과하면 다음
 단계로 간다. 판정 실패·판단 불가·적용 실패·사람의 중단·일꾼 상실은 출발 100% 로 되돌린다
 (ROLLING_BACK). p95 는 판정에 쓰지 않고 단계를 끝낼 때 한 번 읽어 참고 값으로만 남긴다.
 
@@ -159,6 +160,7 @@ from app.services.migration_plan_support import (
     SIMULATE_FAIL_AT_STEP,
     SIMULATE_REASON,
     STEP_MAX_WAIT_SECONDS,
+    STEP_MIN_OBSERVE_SECONDS,
     STEP_TARGET_WEIGHT,
     MigrationTargets,
     fingerprint_changes,
@@ -711,6 +713,9 @@ class MigrationPlanProcessor:
         if stored is None or reason_value is None:
             return await self._restart_counting(plan, MigrationStepPhase.JUDGE)
         counting = StepCounting.from_json(stored)
+        min_observe_until = counting.started_at + timedelta(
+            seconds=int(plan.steps[index].get(STEP_MIN_OBSERVE_SECONDS, 0))
+        )
         is_low_traffic = MigrationJudgeReason(reason_value) is MigrationJudgeReason.LOW_TRAFFIC
         simulated = _simulated_failure(plan, index)
         health: HealthProbeResult
@@ -723,7 +728,8 @@ class MigrationPlanProcessor:
             targets = await self._targets(plan)
             await self._lease.extend()
             health = await self._probe(targets)
-            p95_ms = await self._read_p95(targets)
+            if not isinstance(health, HealthOk) or self._clock.now() >= min_observe_until:
+                p95_ms = await self._read_p95(targets)
         metrics_json = _shift_metrics_json(
             counting, health=health, p95_ms=p95_ms, is_low_traffic=is_low_traffic
         )
@@ -735,6 +741,11 @@ class MigrationPlanProcessor:
             if not _is_at(plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.JUDGE):
                 return None
             if isinstance(health, HealthOk):
+                if now < min_observe_until:
+                    # 헬스 실패는 기다리지 않는다. 건수 판정은 저장값을 유지하고,
+                    # 다음 실행도 헬스부터 확인한 뒤 통과시킨다.
+                    poll = timedelta(seconds=self._settings.migration_count_poll_seconds)
+                    return JobOutcome.again(min(now + poll, min_observe_until))
                 outcome = await self._pass_step(
                     plan, metrics_json, MigrationLogCode.JUDGE_PASSED, now, log_data=log_data
                 )

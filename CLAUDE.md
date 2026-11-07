@@ -61,7 +61,8 @@ app/
 │                     #   security_rules(공통 보안 규칙표·판정·매트릭스 칸 요약, 순수 계산, 보안 3)
 │                     #   security_normalizers(Trivy·gitleaks·TLS 시험 원문 → 공통 증거, 비밀값 원문 버림, 보안 2)
 │                     #   SecurityFindingService(증거 기록·사람 점검 기록·판정용 조회, 보안 2)
-│                     #   BuildSecurityScanCollector(빌드 성공 직후 보안 검사 원문 → findings C-IMG-1·C-IMG-2, 실패해도 배포 계속, 보안 2·11)
+│                     #   BuildSecurityScanCollector(성공/검증된 실패 빌드의 원문 → C-IMG-1·C-IMG-2, 적용 전 누락 수집 복구, 보안 2·11)
+│                     #   DeploySecurityGate(실제 apply 전 Build/digest·C-IMG-1/2 판정, 최초·예비·재사용·AI 재배포·ROLLBACK 공통, 보안 11-2)
 │                     #   SecurityMatrixService(환경 × 4칸 매트릭스·증거 목록, 서비스 단위 통제는 지금 이미지로, C-SEC-1 은 서비스 중 연결 기준 키 비교를 조회 때 계산, 보안 4)
 │                     #   SecurityCompareService(이전 전후 비교: 두 환경 매트릭스 칸 + 도착 기준 blocksMigration = 게이트 is_blocking, 보안 5-2)
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
@@ -71,6 +72,7 @@ app/
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1·C-SEC-1(출발·도착 앱 환경 변수 키) 확인, 기본 꺼짐, 보안 5)
+│                     #     통제별 예산 초과는 읽기 롤백 뒤 CONTROL_TIMEOUT/UNKNOWN. 통제별 저장 증거 조회, TLS는 트랜잭션 밖.
 │                     #   PeriodicTlsProbe(게이트가 켜진 일꾼의 공개 경로 TLS 주기 시험 → C-TLS-1 준비 증거, 매트릭스용)
 │                     #   PrecheckService(AI 사전 점검 만들기·조회·이벤트·취소·입력 사본) · AgentRunService(러너: 가져가기·하트비트·이벤트·결과, 부를 때 만료)
 │                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)

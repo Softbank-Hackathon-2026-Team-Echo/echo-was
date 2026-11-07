@@ -19,6 +19,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 ```
 
 - 사용자는 웹 콘솔에서 클러스터를 **환경**으로 등록하고, **서비스**(Git 저장소)를 등록한 뒤 **원터치 배포**(브랜치·커밋 → 빌드 → 배포 → 헬스체크)로 환경에 올리고, 클라우드 사이를 옮긴다.
+- 실제 배포는 적용 직전 고객 빌드의 이미지 취약점·시크릿 검사와 digest를 확인한다. 필수 검사 실패·누락은 유효한 기한부 예외가 없으면 차단한다. 최초·예비·재사용·AI 재배포·되돌리기에도 적용한다([계약](specs/sec-11-2-deploy-image-gate.md)).
 - 사람은 **GitHub 로그인**으로 들어와 고객 회사 단위의 **조직** 멤버로서 역할(뷰어 < 개발자 < 어드민)만큼 일한다. 서비스·환경·배포는 조직에 속하고 다른 조직에는 보이지 않는다. AI 에이전트는 조직에서 발급한 토큰으로 그 조직을 **읽기만** 한다. 권한이 없어 막힌 요청은 기록한다.
 - 이 서버는 그 기록(무엇이 어디에 어떤 버전으로 몇 % 돌고 있나)의 주인이다. 실제 클러스터 조작은 환경 종류별 어댑터와 실행기가 한다. **지금 어댑터와 실행기는 가짜(simulated)다** — 네트워크 호출 없이 정해진 결과를 돌려주고 응답에 `simulated: true` 를 단다.
 
@@ -40,7 +41,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 | 실행기(빌드·배포·대표 주소·헬스·내리기·트래픽·지표·데이터 확인) | 있음(가짜 + 실제) | 실제 구현: GitHub Actions 빌드 + 쿠버네티스 직접 반영·내리기(`EXECUTOR_MODE=real`, API 서버 3-2, 운영 기본값은 `fake`), HTTP 헬스체커, 고정 진입점 실행기(트래픽 비율·대표 주소·지표, `ENTRYPOINT_EXECUTOR_MODE=http`), 복제 지연 확인(`DATA_SYNC_CHECKER_MODE=postgres`, 인프라 7) ([docs/executors.md](docs/executors.md)) |
 | 소스 저장소 클라이언트 | 있음 | 가짜(기본) + 실제 GitHub App(공개·비공개 저장소). 실제 App 생성·설치는 별도 승인 |
 | GitHub 로그인·세션 | 있음 | GitHub App 사용자 인증 → httpOnly 세션 쿠키(DB 는 해시, 7일), 로그아웃, `/me`, 변경 요청 Origin 확인 ([docs/api/auth.md](docs/api/auth.md)). 실제 로그인은 App 설정 뒤 |
-| 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 고정 5단계·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
+| 이전 계획 | 있음(트래픽·지표·복제는 가짜) | 계획 만들기(출발 100% → 같은 이미지의 예비, 비율 6단계·최소 관찰·예상 시간·롤백 조건)·승인(다른 개발자, 조직 스위치로 자기 승인)·낡은 계획 거부(지문)·일꾼 단계 실행·자동 롤백·중단·실행 로그 ([docs/api/migration-plans.md](docs/api/migration-plans.md)) |
 | 조직·역할 권한 | 있음 | 조직·멤버·초대·에이전트 토큰 API, 모든 라우트의 검사기, 403 거부 기록(`audit_logs`) ([docs/api/organizations.md](docs/api/organizations.md)) |
 | 감사 로그 | 있음 | 쓰기 24개 경로 + 초대 적용(USER), 배포·이전·서비스 삭제의 끝(SYSTEM), 403 거부, AI 에이전트의 성공한 읽기(AGENT)를 누가·언제·무엇을·결과로 저장. 조직별 조회·거르기. 줄은 고치거나 지울 수 없다 ([docs/api/audit-logs.md](docs/api/audit-logs.md)) |
 
@@ -92,7 +93,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
    │          └ 출발 = 비율 100 연결 하나, 도착 = 같은 digest 의 예비. 열린 배포 요청이 있으면 409. 지문 저장
 승인          POST /orgs/{orgId}/migration-plans/{id}/approve (다른 개발자, 202 APPROVED = 실행 시작. 지문 다르면 STALE)
    │
-일꾼          0 사전 확인 → 1 비율 10% → 2 50% → 3 데이터 확인 → 4 100% (단계마다 적용 → 도착 요청 N건 세기(최대 30초) → 헬스체크 판정)
+일꾼          0 사전 확인 → 1~4 비율 5·10·25·50% → 5 데이터 확인 → 6~7 비율 75·100% (비율 단계마다 건수 확인 + 최소 관찰 3초, 선택 DB 전환 8)
    │          └ 판정 실패·판단 불가·적용 실패·중단·일꾼 상실 → 출발 100% 로 롤백(ROLLED_BACK)
 성공          도착이 서비스 중(100), 출발은 예비(0). 실행 로그 = 계획 단계 번호와 같은 번호
 ```
@@ -199,15 +200,15 @@ curl -s 'localhost:8000/api/v1/orgs/<조직 id>/deploy-requests/<요청 id>/logs
 
 ```bash
 # 0) aws-seoul 에 배포(서비스 중 100%) → gcp-seoul 에 같은 브랜치 배포(예비 0%, versionStatus=IN_SYNC)
-# 1) 계획 만들기 (개발자 A). 201 PENDING_APPROVAL, steps 5개, expectedSeconds=17(합성 트래픽 50 rps 기준)
+# 1) 계획 만들기 (개발자 A). 201 PENDING_APPROVAL, steps 8개, expectedSeconds=34(합성 트래픽 50 rps 기준)
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/services/<서비스 id>/migration-plans \
   -H 'Origin: http://localhost:3000' -H 'Content-Type: application/json' -b 'echo_session=<A 의 쿠키>' \
   -d '{"targetEnvironmentId": "<gcp 환경 id>"}'
 # 2) 승인 (개발자 B. A 가 승인하면 403 SELF_APPROVAL_FORBIDDEN — 어드민이 PATCH /settings {"allowSelfApproval": true} 로 허용 가능)
 curl -s -X POST localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id>/approve \
   -H 'Origin: http://localhost:3000' -b 'echo_session=<B 의 쿠키>'
-# 3) 약 17초(합성 트래픽 50 rps 기준) 동안 단건을 1초 간격으로 폴링: currentStep 0→4, 비율 (90,10) → (50,50) → (0,100), SUCCEEDED
-#    비율 단계마다 progress 에 "도착 처리 14/50건 · 5xx 0/허용 1" 이 보인다. 트래픽이 없으면 단계마다 30초 뒤 트래픽 적음으로 넘어간다
+# 3) 약 18초 관찰(합성 트래픽 50 rps, 네트워크 지연 제외; 표시 예상 34초) 동안 1초 간격으로 폴링: currentStep 0→7, 도착 비율 5→10→25→50→75→100, SUCCEEDED
+#    첫 비율 단계의 progress 에 "도착 처리 5/7건 · 5xx 0/허용 1" 이 보인다. 트래픽이 없으면 단계마다 30초 뒤 트래픽 적음으로 넘어간다
 curl -s localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id> -b 'echo_session=<쿠키>'
 curl -s localhost:8000/api/v1/orgs/<조직 id>/migration-plans/<계획 id>/logs -b 'echo_session=<쿠키>'
 # 4) 서비스 상세: gcp SERVING(100) · aws STANDBY(0, IN_SYNC), activeMigrationPlanId=null
@@ -345,7 +346,8 @@ docker compose down                                   # DB 끄기 (데이터는 
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `5` | 헬스체크 재확인 간격(요청 하나 제한 5초) |
 | `FAKE_EXECUTOR_STEP_SECONDS` | `2.0` | 가짜 실행기가 한 작업을 끝내는 시간 |
 | `WORKER_POLL_INTERVAL_SECONDS`·`WORKER_LEASE_SECONDS`·`WORKER_CONCURRENCY` | `1.0`·`30`·`1` | 일꾼 폴링 간격·임대 시간·동시 루프 수. 일꾼은 여러 개 띄워도 된다 |
-| `MIGRATION_REQUIRED_REQUESTS_DEFAULT`·`MIGRATION_MAX_WAIT_SECONDS_DEFAULT`·`MIGRATION_EXPECTED_RPS` | `20,50,50`·`30`·`50` | 이전 비율 단계 필요 건수(10·50·100%)·단계 최대 대기(5~300)·예상 rps(예상 시간·가짜 카운터) |
+| `MIGRATION_REQUIRED_REQUESTS_DEFAULT`·`MIGRATION_MAX_WAIT_SECONDS_DEFAULT`·`MIGRATION_EXPECTED_RPS` | `7,10,20,30,30,30`·`30`·`50` | 이전 비율 단계 필요 건수(5·10·25·50·75·100%)·단계 최대 대기(5~300)·예상 rps(예상 시간·가짜 카운터) |
+| `MIGRATION_MIN_OBSERVE_SECONDS` | `3` | 비율 적용 시각부터 최소 관찰(0~60초), 계획 생성 때 단계별 저장 |
 | `MIGRATION_COUNT_POLL_SECONDS`·`MIGRATION_COUNTS_STALE_SECONDS`·`MIGRATION_P95_REFERENCE_WINDOW_SECONDS` | `1`·`5`·`30` | 카운터 읽기 주기·마감 때 오래된 읽기 기준·p95 참고 창 |
 | `MIGRATION_STEP_OVERHEAD_SECONDS`·`MIGRATION_PLAN_APPROVAL_TTL_SECONDS`·`MIGRATION_ROLLBACK_MAX_ATTEMPTS` | `2`·`86400`·`3` | 단계 여유 시간·승인 대기 만료·롤백 최대 시도 |
 | `SECURITY_GATE_ENABLED`·`WAS_VERSION` | `false`·(없음) | 보안 게이트(이전 승인·일꾼 시작 판정, 실행 직전 TLS 시험. API·일꾼 같은 값)·판정 범위의 WAS 버전([docs/api/migration-plans.md](docs/api/migration-plans.md) "보안 게이트") |

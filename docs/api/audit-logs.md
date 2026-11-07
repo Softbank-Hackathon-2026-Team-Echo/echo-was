@@ -135,6 +135,7 @@
 | `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{kind, status, failureCode?, simulated, aiReviewed, processing?}`(`processing` 은 레지던시 기록이 있을 때만). 반영 실행(`APPLY_PATCH`)이면 `aiReviewed: false` + `appliedCommitSha`(실패면 null) |
 | `AGENT_RUN_TIMED_OUT` | 임대·마감이 지난 실행을 부를 때 만료(SYSTEM `ai-runner`) | `agent_run` | `{failureCode}` |
 | `DEPLOY_FINISHED` · `ROLLBACK_FINISHED` | 끝 상태(SYSTEM). `trigger = ROLLBACK` 이면 `ROLLBACK_FINISHED`, 예비 따라가기는 `DEPLOY_FINISHED` + `details.trigger` | `deploy_request` | `{status, trigger, cancelReason?, errorCode?, simulated?}` |
+| DEPLOY_SECURITY_CHECKED | 실제 배포 적용 전(SYSTEM, deploy-worker) | deploy_request | checkType: DEPLOY_IMAGE_V1, buildId, deploymentId, serviceId, environmentId, imageDigest, commitSha, trigger, policyVersion, decidedAt, phase, artifactMatches, missingSources, controls, findingIds, exceptionIds. 차단은 FAILED/SECURITY_GATE_BLOCKED, 예외 통과는 controls에 WARN. 재시도마다 기록 |
 | `MIGRATION_FINISHED` | 끝 상태(SYSTEM) | `migration_plan` | `{status, errorCode?, simulated?}` |
 | `MIGRATION_DB_CUTOVER_STARTED` · `MIGRATION_DB_CUTOVER_FINISHED` | DB 쓰기 전환 단계(API 서버 17)가 컷오버 Job 을 만듦 · 판정함(SYSTEM `migration-worker`). 판정 실패면 `result = FAILED` | `migration_plan` | `{jobName, jobKind, allowPromote?, exitCode?, reason?, writePauseMs?, rowsTotal?, missingRows?, duplicateRows?, mode?, errorCode?, simulated?}` |
 | `SERVICE_DELETED` | 삭제 완료(SYSTEM) | `service` | `{}` |

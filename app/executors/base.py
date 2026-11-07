@@ -154,6 +154,8 @@ class BuildSucceeded:
 @dataclass(frozen=True)
 class BuildFailed:
     code: DeployRequestErrorCode = DeployRequestErrorCode.BUILD_FAILED
+    # 실패한 실행에도 검증된 build-result 가 남으면 보안 증거 수집에만 쓴다. 배포 성공 아님.
+    artifact: BuildSucceeded | None = None
 
 
 type BuildPollResult = BuildRunning | BuildSucceeded | BuildFailed
@@ -174,6 +176,8 @@ class BuildSecurityScan:
     gitleaks_version: str | None
     trivy_report: dict[str, Any] | None
     gitleaks_report: object | None
+    repository: str | None = None
+    commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
