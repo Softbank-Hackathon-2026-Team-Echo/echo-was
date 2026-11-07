@@ -123,7 +123,7 @@ class CreateMigrationPlanRequest(ApiRequestModel):
     """이전 계획 만들기.
 
     requiredRequests 는 비율 단계 순서로 6개, 옛 요청의 3개는 각각 두 번씩 펼친다.
-    생략하면 설정 기본값(10·10·20·30·30·30건, 최대 대기 30초)이다.
+    생략하면 설정 기본값(7·10·20·30·30·30건, 최대 대기 30초)이다.
     """
 
     target_environment_id: uuid.UUID
