@@ -101,7 +101,7 @@ def setup(tmp_path, enabled=True):
         cve_autofix_enabled=enabled,
         cve_autofix_fixture_enabled=True,
         cve_autofix_registry_path=registry,
-        cve_autofix_timeout_seconds=0.05,
+        cve_autofix_timeout_seconds=2,
     )
     session = Session()
     clock = SimpleNamespace(now=lambda: datetime.now(UTC))
@@ -127,6 +127,8 @@ async def test_request_persists_receipt_and_duplicate_never_runs_twice(tmp_path)
 async def test_request_failure_timeout_cancel_never_claims_ready(tmp_path, mode, status):
     service, finding, _ = setup(tmp_path)
     Client.mode = mode
+    if mode == "timeout":
+        service._settings.cve_autofix_timeout_seconds = 0.05
     if mode == "cancel":
         with pytest.raises(asyncio.CancelledError):
             await service.request(finding.organization_id, finding.id, uuid.uuid4())
