@@ -18,7 +18,7 @@
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -39,6 +39,7 @@ from app.models import AgentRun, DeployRequest
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.user_repository import UserRepository
+from app.services.job_lease import JobLease, LeaseLostError
 from app.services.patch_text import (
     PatchApplyError,
     UnsafePathError,
@@ -155,6 +156,8 @@ class CommitOutcome:
     stopped: bool = False
     pending: bool = False
     result_fields: dict[str, Any] | None = None
+    skip_reason: str | None = None
+    owner: str | None = None
 
 
 def _claim_is_live(result: dict[str, Any], now: datetime) -> bool:
@@ -179,8 +182,10 @@ class ApplyCommitService:
         writer: RepoCommitWriter | None,
         *,
         enabled: bool,
+        lease: JobLease | None = None,
     ) -> None:
         self._session = session
+        self._lease = lease
         self._clock = clock
         self._writer = writer
         self._enabled = enabled
@@ -203,7 +208,7 @@ class ApplyCommitService:
         재승인) GitHub 커밋·PR 은 한 번, 재배포는 하나다.
         """
         if not self._enabled:
-            return CommitOutcome()
+            return CommitOutcome(skip_reason="COMMIT_DISABLED")
         now = self._clock.now()
         async with self._session.begin():
             apply_run = await self._runs.find_by_id(apply_run_id, lock=True)
@@ -227,23 +232,46 @@ class ApplyCommitService:
             failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
             if failed is None:
                 return CommitOutcome()
-            await self._runs.patch_result(
-                apply_run_id,
-                now,
-                {COMMIT_STATE_KEY: COMMIT_IN_PROGRESS, COMMIT_CLAIMED_AT_KEY: now.isoformat()},
-            )
+            owner = str(uuid.uuid4())
+            expected_owner = result.get("commitOwner")
+            if expected_owner is not None and not isinstance(expected_owner, str):
+                return CommitOutcome(run=apply_run, stopped=True)
+            if not await self._runs.claim_commit(apply_run_id, now, owner, expected_owner):
+                return CommitOutcome(run=apply_run, pending=True)
+            if self._lease is not None:
+                await self._lease.hold()
         try:
-            return await self._commit(apply_run, result, parent, failed)
+            await self._hold_owner(apply_run_id, owner)
+            outcome = await self._commit(
+                apply_run, {**result, "commitOwner": owner}, parent, failed
+            )
+            if not outcome.stopped:
+                await self._hold_owner(apply_run_id, owner)
+            return replace(outcome, owner=owner)
         except BaseException:
-            # 예상 못 한 오류(취소 포함): 표시를 풀어 다음 요청이 TTL 을 기다리지 않게 한다.
-            await self._release(apply_run_id)
+            # 늦은 취소가 새 소유자의 claim을 지우지 않도록 정확 세대만 해제한다.
+            await self._release(apply_run_id, owner)
             raise
 
-    async def _release(self, apply_run_id: uuid.UUID) -> None:
+    async def _hold_owner(self, apply_run_id: uuid.UUID, owner: str) -> None:
+        async with self._session.begin():
+            fresh = await self._runs.find_by_id(apply_run_id, lock=True)
+            if (
+                fresh is None
+                or fresh.status != AgentRunStatus.SUCCEEDED
+                or (fresh.result or {}).get("commitOwner") != owner
+                or (fresh.result or {}).get(COMMIT_STATE_KEY) != COMMIT_IN_PROGRESS
+                or REDEPLOY_REQUEST_ID_KEY in (fresh.result or {})
+            ):
+                raise LeaseLostError
+            if self._lease is not None:
+                await self._lease.hold()
+
+    async def _release(self, apply_run_id: uuid.UUID, owner: str) -> None:
         try:
             async with self._session.begin():
-                await self._runs.patch_result(
-                    apply_run_id, self._clock.now(), {COMMIT_STATE_KEY: None}
+                await self._runs.patch_owned_commit(
+                    apply_run_id, self._clock.now(), owner, {COMMIT_STATE_KEY: None}
                 )
         except Exception:
             logger.exception(
@@ -275,19 +303,22 @@ class ApplyCommitService:
                 patched = apply_patch(originals, _diff(apply_run))
             except PatchApplyError as exc:
                 raise RepoCommitError(RepoCommitErrorCode.PATCH_CONFLICT, exc.reason) from None
-            committed = await self._writer.commit_and_open_pull_request(
-                RepoCommitRequest(
-                    repo=request.repo,
-                    base_commit_sha=request.base_commit_sha,
-                    branch=request.branch,
-                    files=patched,
-                    message=request.message,
-                    pr_title=request.pr_title,
-                    pr_body=request.pr_body,
-                    pr_base=request.pr_base,
-                    modes=modes,
-                )
+            prepared = RepoCommitRequest(
+                repo=request.repo,
+                base_commit_sha=request.base_commit_sha,
+                branch=request.branch,
+                files=patched,
+                message=request.message,
+                pr_title=request.pr_title,
+                pr_body=request.pr_body,
+                pr_base=request.pr_base,
+                modes=modes,
             )
+            if COMMIT_CLAIMED_AT_KEY in result:
+                # 이전 요청의 효과는 모른다. ref 부재 한 번으로 재송신하지 않는다.
+                committed = await self._writer.reconcile(prepared)
+            else:
+                committed = await self._writer.commit_and_open_pull_request(prepared)
         except RepoCommitError as exc:
             logger.warning(
                 "repo commit failed",
@@ -298,7 +329,9 @@ class ApplyCommitService:
                     "detail": exc.detail,
                 },
             )
-            return CommitOutcome(run=await self._fail(apply_run.id, exc.code), stopped=True)
+            return CommitOutcome(
+                run=await self._fail(apply_run.id, exc.code, result["commitOwner"]), stopped=True
+            )
         fields: dict[str, Any] = {
             SANDBOX_COMMIT_SHA_KEY: result.get("appliedCommitSha"),
             SANDBOX_BRANCH_KEY: result.get("branch"),
@@ -307,6 +340,7 @@ class ApplyCommitService:
             PULL_REQUEST_URL_KEY: committed.pull_request_url,
             REPO_COMMIT_KEY: True,
             COMMIT_STATE_KEY: COMMIT_DONE,
+            "repositoryFinishedAt": self._clock.now().isoformat(),
         }
         logger.info(
             "apply committed to service repository",
@@ -372,24 +406,25 @@ class ApplyCommitService:
             pr_base=failed.ref_value if failed.ref_type == RefType.BRANCH else None,
         )
 
-    async def _fail(self, apply_run_id: uuid.UUID, code: str) -> AgentRun | None:
+    async def _fail(self, apply_run_id: uuid.UUID, code: str, owner: str) -> AgentRun | None:
         """반영 실행을 FAILED·code 로 바꾼다. appliedCommitSha 는 null(계약: 실패면 null)."""
         now = self._clock.now()
         async with self._session.begin():
             # 행 잠금 아래에서 읽고 쓴다(다른 요청이 그 사이 쓴 칸을 덮지 않는다).
             fresh = await self._runs.find_by_id(apply_run_id, lock=True)
             current = dict((fresh.result if fresh else None) or {})
-            await self._runs.fail_after_success(
+            await self._runs.patch_owned_commit(
                 apply_run_id,
                 now,
-                code,
+                owner,
                 {
-                    **current,
                     SANDBOX_COMMIT_SHA_KEY: current.get("appliedCommitSha"),
                     "appliedCommitSha": None,
                     PULL_REQUEST_URL_KEY: None,
                     COMMIT_STATE_KEY: COMMIT_FAILED,
+                    "repositoryFinishedAt": now.isoformat(),
                 },
+                fail_code=code,
             )
             return await self._runs.find_by_id(apply_run_id)
 

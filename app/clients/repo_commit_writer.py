@@ -19,7 +19,9 @@
 로그에 남기지 않는다(상태 코드만). 시험은 httpx.MockTransport 를 transport 로 넣는다.
 """
 
+import hashlib
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -66,10 +68,11 @@ class RepoCommitErrorCode:
 class RepoCommitError(Exception):
     """저장소 반영 실패. code 가 반영 실행의 failureCode 가 된다(값·토큰은 넣지 않는다)."""
 
-    def __init__(self, code: str, detail: str | None = None) -> None:
+    def __init__(self, code: str, detail: str | None = None, *, uncertain: bool = False) -> None:
         super().__init__(code if detail is None else f"{code}: {detail}")
         self.code = code
         self.detail = detail
+        self.uncertain = uncertain
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,10 @@ class RepoCommitWriter(Protocol):
         """
         ...
 
+    async def reconcile(self, request: RepoCommitRequest) -> RepoCommitResult:
+        """확인된 기존 효과만 읽는다. 불명·부재·부분 완료는 예외이며 새 쓰기 금지."""
+        ...
+
     async def commit_and_open_pull_request(self, request: RepoCommitRequest) -> RepoCommitResult:
         """브랜치 + 커밋 + PR.
 
@@ -154,6 +161,18 @@ class FakeRepoCommitWriter:
         if missing:
             raise RepoCommitError(RepoCommitErrorCode.FILE_NOT_FOUND)
         return {path: self.files[path] for path in paths}
+
+    async def reconcile(self, request: RepoCommitRequest) -> RepoCommitResult:
+        if any(
+            old.repo == request.repo
+            and old.branch == request.branch
+            and old.base_commit_sha == request.base_commit_sha
+            and old.files == request.files
+            and old.modes == request.modes
+            for old in self.requests
+        ):
+            return RepoCommitResult(self.commit_sha, request.branch, self.pull_request_url)
+        raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "effect_unconfirmed")
 
     async def commit_and_open_pull_request(self, request: RepoCommitRequest) -> RepoCommitResult:
         self.requests.append(request)
@@ -281,6 +300,130 @@ class GithubAppRepoCommitWriter:
             },
         )
         return RepoCommitResult(commit_sha, request.branch, url)
+
+    async def reconcile(self, request: RepoCommitRequest) -> RepoCommitResult:
+        """기존 효과를 GET만으로 증명한다.
+
+        토큰 발급·부분 완료 이어쓰기·부재 후 재송신은 하지 않는다.
+        """
+        token = self._tokens.get(request.repo.full_name)
+        if token is None:
+            raise RepoCommitError(RepoCommitErrorCode.WRITE_UNAVAILABLE, "read_token_required")
+        base = f"/repos/{request.repo.owner}/{request.repo.name}"
+        async with self._http() as http:
+            commit_sha = await self._find_branch(http, token, base, request.branch)
+            if commit_sha is None:
+                raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "effect_unconfirmed")
+            original_tree = await self._commit_tree(http, token, base, request.base_commit_sha)
+            response = await self._send(http, "GET", f"{base}/git/commits/{commit_sha}", token)
+            _raise_for_unexpected(response, "read_commit")
+            body = _json(response)
+            tree = body.get("tree")
+            parents = body.get("parents")
+            if (
+                not isinstance(tree, dict)
+                or not isinstance(tree.get("sha"), str)
+                or parents != [{"sha": request.base_commit_sha}]
+            ):
+                # GitHub parents에는 url/html_url도 있으므로 SHA만 별도로 비교한다.
+                parent_shas = (
+                    [p.get("sha") for p in parents if isinstance(p, dict)]
+                    if isinstance(parents, list)
+                    else None
+                )
+                if (
+                    not isinstance(tree, dict)
+                    or not isinstance(tree.get("sha"), str)
+                    or parent_shas != [request.base_commit_sha]
+                ):
+                    raise RepoCommitError(RepoCommitErrorCode.BRANCH_CONFLICT, "parent")
+            original = await self._read_tree_entries(http, token, base, original_tree)
+            actual = await self._read_tree_entries(http, token, base, tree["sha"])
+            expected = dict(original)
+            for path, content in request.files.items():
+                old = original.get(path)
+                mode = request.modes.get(path, FILE_MODE)
+                if old is None or old[0] != mode or mode not in EDITABLE_MODES or old[1] != "blob":
+                    raise RepoCommitError(RepoCommitErrorCode.PATH_REJECTED, "mode")
+                encoded = content.encode("utf-8")
+                sha = hashlib.sha1(f"blob {len(encoded)}\0".encode() + encoded).hexdigest()
+                expected[path] = (mode, "blob", sha)
+            if expected != actual:
+                raise RepoCommitError(RepoCommitErrorCode.BRANCH_CONFLICT, "tree")
+            pr_base = request.pr_base
+            if pr_base is None:
+                info = await self._send(http, "GET", base, token)
+                _raise_for_unexpected(info, "read_repository")
+                pr_base = _json(info).get("default_branch")
+            if not isinstance(pr_base, str) or not pr_base:
+                raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "base_unconfirmed")
+            response = await self._send(
+                http,
+                "GET",
+                f"{base}/pulls",
+                token,
+                params={
+                    "head": f"{request.repo.owner}:{request.branch}",
+                    "base": pr_base,
+                    "state": "all",
+                    "per_page": "100",
+                },
+            )
+            _raise_for_unexpected(response, "read_pull_requests")
+            try:
+                items = response.json()
+            except ValueError:
+                raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "pr_json") from None
+            if not isinstance(items, list) or len(items) != 1 or response.headers.get("link"):
+                raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "pr_unconfirmed")
+            pr = items[0]
+            head = pr.get("head") if isinstance(pr, dict) else None
+            target = pr.get("base") if isinstance(pr, dict) else None
+            if (
+                not isinstance(head, dict)
+                or not isinstance(target, dict)
+                or head.get("ref") != request.branch
+                or head.get("sha") != commit_sha
+                or target.get("ref") != pr_base
+                or not isinstance(head.get("repo"), dict)
+                or not isinstance(target.get("repo"), dict)
+                or head["repo"].get("full_name") != request.repo.full_name
+                or target["repo"].get("full_name") != request.repo.full_name
+                or type(pr.get("number")) is not int
+                or pr["number"] <= 0
+                or pr.get("html_url")
+                != f"https://github.com/{request.repo.full_name}/pull/{pr['number']}"
+            ):
+                raise RepoCommitError(RepoCommitErrorCode.BRANCH_CONFLICT, "pr_identity")
+            return RepoCommitResult(commit_sha, request.branch, pr["html_url"])
+
+    async def _read_tree_entries(
+        self, http: httpx.AsyncClient, token: SecretValue, base: str, tree_sha: str
+    ) -> dict[str, tuple[str, str, str]]:
+        response = await self._send(
+            http, "GET", f"{base}/git/trees/{tree_sha}", token, params={"recursive": "1"}
+        )
+        _raise_for_unexpected(response, "read_tree")
+        body = _json(response)
+        if body.get("truncated") is not False or not isinstance(body.get("tree"), list):
+            raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "tree_incomplete")
+        entries: dict[str, tuple[str, str, str]] = {}
+        paths: set[str] = set()
+        for entry in body["tree"]:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("path"), str)
+                or not isinstance(entry.get("mode"), str)
+                or entry.get("type") not in ("tree", "blob", "commit")
+                or not isinstance(entry.get("sha"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", entry["sha"]) is None
+                or entry["path"] in paths
+            ):
+                raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "tree_invalid")
+            paths.add(entry["path"])
+            if entry["type"] != "tree":
+                entries[entry["path"]] = (entry["mode"], entry["type"], entry["sha"])
+        return entries
 
     async def _commit_tree(
         self, http: httpx.AsyncClient, token: SecretValue, base: str, commit_sha: str
@@ -513,13 +656,18 @@ class GithubAppRepoCommitWriter:
     ) -> httpx.Response:
         headers = {"Authorization": f"Bearer {token.get_secret_value()}", "Accept": accept}
         try:
-            return await http.request(method, path, headers=headers, json=json, params=params)
+            response = await http.request(method, path, headers=headers, json=json, params=params)
         except httpx.TransportError as exc:
             logger.warning(
                 "github unreachable",
                 extra={"action": "repo_commit", "exc_type": type(exc).__name__},
             )
-            raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "transport") from None
+            raise RepoCommitError(
+                RepoCommitErrorCode.WRITE_FAILED, "transport", uncertain=method != "GET"
+            ) from None
+        if method != "GET" and response.status_code >= 500:
+            raise RepoCommitError(RepoCommitErrorCode.WRITE_FAILED, "remote_5xx", uncertain=True)
+        return response
 
 
 def _raise_for_unexpected(response: httpx.Response, action: str) -> None:

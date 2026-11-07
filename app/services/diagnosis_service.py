@@ -76,6 +76,7 @@ from app.services.container_diagnostics import (
 )
 from app.services.deploy_request_service import CreateDeployCommand, DeployRequestService
 from app.services.integrity import violated_constraint_name
+from app.services.job_lease import LeaseLostError
 from app.services.precheck_service import (
     PrecheckView,
     compute_input_hash,
@@ -243,6 +244,9 @@ class DiagnosisService:
 
         접수 거절(AppError, 예: 이전 중 409·서비스 삭제 중)은 savepoint 로 접수 쓰기만 되돌리고
         그 코드를 redeployRejectedCode 로 남긴다 — 반영 결과·승인 응답은 성공 그대로다.
+
+        저장소 쓰기 소유권을 잃은 늦은 요청(LeaseLostError)은 재배포 연결만 건너뛰고 경고 로그를
+        남긴 뒤 지금의 반영 실행을 돌려준다(새 owner 의 칸은 건드리지 않는다).
         """
         # 재배포 커밋(SPEC api-19): AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 행 잠금 트랜잭션 밖에서
         # (GitHub 호출) 서비스 저장소에 커밋·PR 을 만들고 그 커밋을 쓴다. 실패면 재배포 없음.
@@ -250,12 +254,31 @@ class DiagnosisService:
         # 다른 요청은 pending 으로 재배포 없이 돌아간다(쓴 요청이 잇는다, SPEC api-19 D-11).
         repo_commit_sha: str | None = None
         repo_fields: dict[str, Any] | None = None
+        commit_owner: str | None = None
+        skip_reason: str | None = "COMMIT_DISABLED"
         if self._apply_commit is not None:
-            committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
+            try:
+                committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
+            except LeaseLostError:
+                # 저장소 쓰기 소유권을 잃은 늦은 요청(claim TTL 경과 뒤 다른 요청이 넘겨받음).
+                # 반영 결과는 이미 커밋됐다. 행은 새 owner 것이므로 이 요청은 아무 칸도 쓰지
+                # 않고 재배포 연결만 건너뛴다(새 owner 가 잇는다). 응답은 결과 저장 성공 그대로다.
+                logger.warning(
+                    "diagnosis redeploy skipped: repository commit ownership lost",
+                    extra={
+                        "action": "redeploy_after_apply",
+                        "apply_run_id": str(apply_run_id),
+                        "reason": "COMMIT_OWNERSHIP_LOST",
+                    },
+                )
+                async with self._session.begin():
+                    return await self._runs.find_by_id(apply_run_id)
             if committed.stopped or committed.pending:
                 return committed.run
             repo_commit_sha = committed.ref
             repo_fields = committed.result_fields
+            commit_owner = committed.owner
+            skip_reason = committed.skip_reason
         rejected_code: str | None = None
         redeploy_id: uuid.UUID | None = None
         async with self._session.begin():
@@ -268,11 +291,19 @@ class DiagnosisService:
                 return None
             if apply_run.status != AgentRunStatus.SUCCEEDED:
                 return None
-            if repo_fields:
-                # 저장소 칸만 부분 갱신(이미 기록된 redeployRequestId 등은 그대로 둔다).
-                await self._runs.patch_result(apply_run_id, self._clock.now(), repo_fields)
             if REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {}):
-                return await self._runs.find_by_id(apply_run_id)
+                return apply_run
+            if (
+                commit_owner is not None
+                and (apply_run.result or {}).get("commitOwner") != commit_owner
+            ):
+                return apply_run
+            if repo_fields:
+                # 소유권 상실 뒤 늦게 온 성공은 새 claim·연결을 덮지 못한다.
+                if commit_owner is None or not await self._runs.patch_owned_commit(
+                    apply_run_id, self._clock.now(), commit_owner, repo_fields
+                ):
+                    return apply_run
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
             if parent is None or parent.deploy_request_id is None:
                 return None
@@ -284,6 +315,11 @@ class DiagnosisService:
             actor_user_id = apply_run.requested_by_user_id
             service_id = failed.service_id
             commit_sha = repo_commit_sha or failed.commit_sha
+            repository_skip_reason = (
+                ("SIMULATED" if apply_run.simulated else skip_reason)
+                if not (apply_run.result or {}).get("repoCommitted")
+                else None
+            )
             command = CreateDeployCommand(
                 environment_id=failed.environment_id,
                 ref_type=RefType.COMMIT,
@@ -308,14 +344,25 @@ class DiagnosisService:
                 )
                 rejected_code = REDEPLOY_INTERNAL_ERROR_CODE
             # 재배포 칸만 부분 갱신(행 잠금 아래, 저장소 칸·러너 결과는 그대로).
-            await self._runs.patch_result(
-                apply_run_id,
-                self._clock.now(),
-                {
-                    REDEPLOY_REQUEST_ID_KEY: str(redeploy_id) if redeploy_id else None,
-                    REDEPLOY_REJECTED_CODE_KEY: rejected_code,
-                },
-            )
+            link_fields = {
+                REDEPLOY_REQUEST_ID_KEY: str(redeploy_id) if redeploy_id else None,
+                REDEPLOY_REJECTED_CODE_KEY: rejected_code,
+                "redeployFinishedAt": self._clock.now().isoformat(),
+                **(
+                    {
+                        "repositorySkipReason": repository_skip_reason,
+                        "repositoryFinishedAt": self._clock.now().isoformat(),
+                    }
+                    if repository_skip_reason
+                    else {}
+                ),
+            }
+            if commit_owner is None:
+                await self._runs.patch_result(apply_run_id, self._clock.now(), link_fields)
+            elif not await self._runs.patch_owned_commit(
+                apply_run_id, self._clock.now(), commit_owner, link_fields
+            ):
+                raise RuntimeError("apply commit ownership changed inside locked transaction")
             updated = await self._runs.find_by_id(apply_run_id)
         logger.info(
             "diagnosis redeploy linked",
