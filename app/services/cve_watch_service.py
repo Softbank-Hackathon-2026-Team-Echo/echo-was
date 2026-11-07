@@ -36,6 +36,7 @@ from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
 from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.osv import Advisory, AdvisoryFeed, AdvisoryMatch, canonical_advisory_id
 from app.core.clock import Clock
+from app.core.config import Settings
 from app.core.exceptions import (
     FindingNotFoundError,
     NotImplementedYetError,
@@ -251,13 +252,16 @@ class CveWatchService:
         await self._audit(organization_id, view, actor_user_id, advisory=advisory)
         return view
 
-    async def request_diagnosis(self, organization_id: uuid.UUID, finding_id: uuid.UUID) -> None:
-        """증거의 고칠 방법으로 AI 진단 실행(CHANGE_PROPOSAL)을 만든다 — 지금은 계약만(501).
-
-        이슈 #98(SPEC api-98)의 CHANGE_PROPOSAL 은 실패한 배포 요청(deploy_request_id)이
-        있어야 한다.
-        CVE 증거에서 시작하려면 agent_runs 에 finding_id 를 더하는 후속이 필요하다(SPEC 2-d).
-        """
+    async def request_diagnosis(
+        self,
+        organization_id: uuid.UUID,
+        finding_id: uuid.UUID,
+        *,
+        settings: Settings | None = None,
+        actor_user_id: uuid.UUID | None = None,
+        operation: str = "START",
+    ) -> dict[str, Any] | None:
+        """기존 404/409/501을 보존하고 명시적으로 켠 fixture만 결정론적 수정으로 잇는다."""
         async with self._session.begin():
             finding = await self._repository.find_finding(organization_id, finding_id)
         if finding is None:
@@ -268,6 +272,18 @@ class CveWatchService:
         ):
             raise RemediationNotAvailableError(
                 "finding has no dependency bump remediation", finding_id=str(finding_id)
+            )
+        if settings is not None and actor_user_id is not None and operation == "CANCEL":
+            from app.services.cve_autofix_service import CveAutofixService
+
+            return await CveAutofixService(self._session, self._clock, settings).cancel(
+                organization_id, finding_id, actor_user_id
+            )
+        if settings is not None and settings.cve_autofix_enabled and actor_user_id is not None:
+            from app.services.cve_autofix_service import CveAutofixService
+
+            return await CveAutofixService(self._session, self._clock, settings).request(
+                organization_id, finding_id, actor_user_id
             )
         raise NotImplementedYetError(
             "diagnosis run for CVE findings waits for CHANGE_PROPOSAL (issue #98)",

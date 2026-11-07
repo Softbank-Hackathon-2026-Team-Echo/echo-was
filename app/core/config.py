@@ -1,6 +1,7 @@
 import re
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
@@ -308,6 +309,11 @@ class Settings(BaseSettings):
     # OSV 로 조회해 새 HIGH·CRITICAL 취약점을 C-IMG-1 증거(source CVE_WATCH)로 남기고, 즉시 조회
     # API(`POST /security/cve-watch:check`)도 열린다. 끄면 둘 다 없다(조회 API 409).
     cve_watch_enabled: bool = False
+    # 독립 로컬 fixture의 결정론적 dependency-bump만. 운영 자동 수정·수집과 분리한다.
+    cve_autofix_enabled: bool = False
+    cve_autofix_fixture_enabled: bool = False
+    cve_autofix_registry_path: Path | None = None
+    cve_autofix_timeout_seconds: float = Field(default=120, gt=0, le=180)
     cve_watch_interval_seconds: int = Field(default=21600, ge=300, le=86400)
     # 가짜 권고 주입 API(`POST /security/cve-watch:inject`, simulated 증거 — 판정에 쓰지 않음).
     cve_watch_simulate_enabled: bool = True

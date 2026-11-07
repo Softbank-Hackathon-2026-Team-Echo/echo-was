@@ -18,6 +18,7 @@ from app.enums import (
     SecurityResult,
 )
 from app.models import Finding
+from app.schemas.cve_autofix import CveAutofixReceiptResponse
 from app.schemas.migration_plan import UserRefResponse
 from app.schemas.response import ApiModel
 from app.services.security_compare_service import (
@@ -309,6 +310,7 @@ class FindingRemediationResponse(ApiModel):
     aliases: list[str] = []
     severity: str | None = None
     summary: str | None = None
+    autofix: CveAutofixReceiptResponse | None = None
 
     @classmethod
     def from_raw(cls, raw: Any) -> "FindingRemediationResponse | None":
