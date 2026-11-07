@@ -1,0 +1,138 @@
+[
+  {
+    "id": "demo-tohoku",
+    "isSimulated": true,
+    "source": "DEMO",
+    "collectedAt": "2026-11-07T07:49:21.515660+00:00",
+    "occurredAt": "2011-03-11T05:46:24.120000+00:00",
+    "scenarioLabel": "시연: 도호쿠 실제 지진·가상 도쿄→서울 이전 성공",
+    "liveState": "DEMO",
+    "enabled": true,
+    "blockReason": null,
+    "radiusKm": 600,
+    "radiusSource": "DEMO_ASSUMPTION",
+    "event": {
+      "eventId": "official20110311054624120_30",
+      "lat": 38.297,
+      "lng": 142.373,
+      "magnitude": 9.1,
+      "originSource": "REAL_HISTORICAL",
+      "source": "USGS_FDSN",
+      "occurredAt": "2011-03-11T05:46:24.120000+00:00",
+      "collectedAt": "2026-11-07T07:49:21.515660+00:00",
+      "sourceUrl": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2011-03-11T05:40:00&endtime=2011-03-11T06:00:00&minmagnitude=8&limit=1",
+      "rawSha256": "sha256:cd524fe59ff6ffd2be249efc030c167f88efad8029f1e0125b589dd5ecea539c",
+      "shakeMapUrl": "https://earthquake.usgs.gov/product/shakemap/official20110311054624120_30/atlas/1594161746661/download/intensity.jpg",
+      "detailSourceUrl": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=official20110311054624120_30&format=geojson",
+      "detailRawSha256": "sha256:d9cf0301f748786d5ff881edba71e1b19c5b5008b3abeb893e8e88240433ba4a"
+    },
+    "environments": [
+      {
+        "id": "demo-tokyo",
+        "label": "시연 도쿄",
+        "lat": 35.6762,
+        "lng": 139.6503,
+        "role": "SOURCE"
+      },
+      {
+        "id": "demo-seoul",
+        "label": "시연 서울",
+        "lat": 37.5665,
+        "lng": 126.978,
+        "role": "TARGET"
+      }
+    ],
+    "mockMigrationSeconds": 42,
+    "timeline": [
+      {
+        "stage": "DETECTED",
+        "offsetSeconds": 0,
+        "sourceWeight": 100,
+        "targetWeight": 0
+      },
+      {
+        "stage": "PREFLIGHT",
+        "offsetSeconds": 2,
+        "sourceWeight": 100,
+        "targetWeight": 0
+      },
+      {
+        "stage": "SHIFT_10",
+        "offsetSeconds": 8,
+        "sourceWeight": 90,
+        "targetWeight": 10
+      },
+      {
+        "stage": "SHIFT_50",
+        "offsetSeconds": 20,
+        "sourceWeight": 50,
+        "targetWeight": 50
+      },
+      {
+        "stage": "SIMULATED_SUCCESS",
+        "offsetSeconds": 42,
+        "sourceWeight": 0,
+        "targetWeight": 100
+      }
+    ]
+  },
+  {
+    "id": "demo-kumamoto",
+    "isSimulated": true,
+    "source": "DEMO",
+    "collectedAt": "2026-11-07T07:49:22.081725+00:00",
+    "occurredAt": "2016-04-15T16:25:06.220000+00:00",
+    "scenarioLabel": "시연: 구마모토 실제 지진·가상 안전 대상 없음 차단",
+    "liveState": "DEMO",
+    "enabled": true,
+    "blockReason": "NO_SAFE_TARGET",
+    "radiusKm": 300,
+    "radiusSource": "DEMO_ASSUMPTION",
+    "event": {
+      "eventId": "us20005iis",
+      "lat": 32.7906,
+      "lng": 130.7543,
+      "magnitude": 7,
+      "originSource": "REAL_HISTORICAL",
+      "source": "USGS_FDSN",
+      "occurredAt": "2016-04-15T16:25:06.220000+00:00",
+      "collectedAt": "2026-11-07T07:49:22.081725+00:00",
+      "sourceUrl": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2016-04-15T16:20:00&endtime=2016-04-15T16:30:00&minmagnitude=7&limit=1",
+      "rawSha256": "sha256:205bb2d32f8faee1e9b1ed6c0ebf11e1a3ee0874a4ca85eeaffe2a1375da7ed9",
+      "shakeMapUrl": "https://earthquake.usgs.gov/product/shakemap/us20005iis/atlas/1594162257045/download/intensity.jpg",
+      "detailSourceUrl": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=us20005iis&format=geojson",
+      "detailRawSha256": "sha256:4c7670efdd658c5c74163783b35793a1a704616511e720f700328668857f5b0f"
+    },
+    "environments": [
+      {
+        "id": "demo-kumamoto",
+        "label": "시연 구마모토",
+        "lat": 32.7906,
+        "lng": 130.7543,
+        "role": "SOURCE"
+      },
+      {
+        "id": "demo-fukuoka",
+        "label": "시연 후쿠오카(같은 위험 반경)",
+        "lat": 33.59,
+        "lng": 130.4,
+        "role": "TARGET_AT_RISK"
+      }
+    ],
+    "mockMigrationSeconds": null,
+    "timeline": [
+      {
+        "stage": "DETECTED",
+        "offsetSeconds": 0,
+        "sourceWeight": 100,
+        "targetWeight": 0
+      },
+      {
+        "stage": "BLOCKED",
+        "offsetSeconds": 2,
+        "sourceWeight": 100,
+        "targetWeight": 0
+      }
+    ]
+  }
+]

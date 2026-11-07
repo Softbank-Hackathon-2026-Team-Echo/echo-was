@@ -31,20 +31,21 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
 from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
+from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.clock import Clock
 from app.core.config import Settings
 from app.core.places import Coordinates
@@ -114,6 +115,7 @@ class FeedStatusView:
     last_skipped_count: int
     min_magnitude: Decimal
     radius_km: int
+    automatic_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,11 +130,28 @@ async def process_feed_event(
     event: FeedEvent,
     source: DisasterSource,
     organization_ids: Collection[uuid.UUID] | None = None,
+    on_created: Callable[[FeedOutcome, FeedEvent], Awaitable[None]] | None = None,
 ) -> list[FeedOutcome]:
     """지진 하나를 조직마다 판정해 맞는 조직에 재난을 만든다. 한 트랜잭션, 조직마다 savepoint.
 
     organization_ids 를 주면 그 조직만 본다(시연 주입). 안 주면 살아 있는 환경이 있는 조직 전부다.
     """
+    if on_created is not None:
+        async with session.begin():
+            target_ids = (
+                sorted(organization_ids)
+                if organization_ids is not None
+                else await EnvironmentRepository(session).search_organization_ids_with_live()
+            )
+        results: list[FeedOutcome] = []
+        for organization_id in target_ids:
+            # 조직별 커밋 직후 소비: 다른 조직/지진 수집 전체를 기다리지 않는다.
+            items = await process_feed_event(session, clock, event, source, [organization_id])
+            results.extend(items)
+            for item in items:
+                if item.disaster_id is not None:
+                    await on_created(item, event)
+        return results
     now = clock.now()
     outcomes: list[FeedOutcome] = []
     environments = EnvironmentRepository(session)
@@ -144,8 +163,25 @@ async def process_feed_event(
             else await environments.search_organization_ids_with_live()
         )
         for organization_id in target_ids:
-            organization = await session.get(Organization, organization_id)
+            organization = await session.scalar(
+                select(Organization)
+                .where(Organization.id == organization_id)
+                .with_for_update(key_share=True)
+            )
             if organization is None:
+                continue
+            # 대표 id가 바뀐 수정 수신도 조직 잠금 안에서 같은 원본 별칭으로 판정한다.
+            existing = await session.scalar(
+                select(Disaster.id).where(
+                    Disaster.organization_id == organization_id,
+                    or_(
+                        Disaster.feed_event_id.in_(event.keys),
+                        *[Disaster.feed_event["eventKeys"].contains([key]) for key in event.keys],
+                    ),
+                )
+            )
+            if existing is not None:
+                outcomes.append(FeedOutcome(organization_id, None, DUPLICATE))
                 continue
             live = await environments.search_all_live(organization_id)
             radius = organization.live_feed_radius_km
@@ -170,7 +206,10 @@ async def process_feed_event(
                 unknown_environment_ids=[str(item) for item in classification.unknown],
                 created_by_user_id=None,
                 feed_event_id=event.key,
-                feed_event=event.summary(decision.nearest_distance_km),
+                feed_event={
+                    **event.summary(decision.nearest_distance_km),
+                    "collectedAt": now.isoformat(),
+                },
                 started_at=now,
                 created_at=now,
                 updated_at=now,
@@ -243,6 +282,7 @@ class LiveDisasterFeedService:
             last_skipped_count=state.last_skipped_count if state else 0,
             min_magnitude=organization.live_feed_min_magnitude,
             radius_km=organization.live_feed_radius_km,
+            automatic_enabled=self._settings.auto_dr_enabled,
         )
 
     def _connection_status(self, state: DisasterFeedState | None) -> LiveFeedConnectionStatus:
@@ -324,8 +364,12 @@ class LiveDisasterFeedPoller:
         clock: Clock,
         settings: Settings,
         http_client: httpx.AsyncClient | None = None,
+        tls_checker: PublicHostTlsChecker | None = None,
     ) -> None:
         self._session_factory = session_factory
+        from app.services.disaster_automation import DisasterAutomation
+
+        self._automation = DisasterAutomation(session_factory, clock, settings, tls_checker)
         self._clock = clock
         self._settings = settings
         self._owns_client = http_client is None
@@ -378,7 +422,11 @@ class LiveDisasterFeedPoller:
             try:
                 async with self._session_factory() as session:
                     outcomes = await process_feed_event(
-                        session, self._clock, event, DisasterSource.LIVE_FEED
+                        session,
+                        self._clock,
+                        event,
+                        DisasterSource.LIVE_FEED,
+                        on_created=self._consume_created,
                     )
             except Exception:
                 # 이 지진 한 건만 건너뛴다(기억하지 않아 다음 주기에 다시 한다). 나머지는 계속.
@@ -411,6 +459,10 @@ class LiveDisasterFeedPoller:
             },
         )
         return FeedPollResult(len(events), len(fresh), created, None, skipped)
+
+    async def _consume_created(self, outcome: FeedOutcome, event: FeedEvent) -> None:
+        assert outcome.disaster_id is not None
+        await self._automation.consume(outcome.organization_id, outcome.disaster_id, event)
 
     async def _fetch(self) -> ParsedFeed:
         limit = self._settings.live_disaster_feed_max_bytes

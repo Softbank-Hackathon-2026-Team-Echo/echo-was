@@ -148,7 +148,10 @@ async def test_create_returns_same_classification_as_preview_and_disaster_shape(
     disaster_id = disaster.pop("id")
     started_at = disaster.pop("startedAt")
     assert uuid.UUID(disaster_id) and started_at
+    # 기존 응답 필드는 그대로 유지하고, 가상 진원·시연 반경의 출처만 추가한다.
     assert disaster == {
+        "originSource": "SYNTHETIC",
+        "radiusSource": "DEMO_ASSUMPTION",
         "type": "EARTHQUAKE",
         "source": "SIMULATED",
         "simulated": True,

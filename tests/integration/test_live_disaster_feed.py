@@ -154,6 +154,8 @@ async def test_feed_quake_near_tokyo_creates_live_feed_disaster_without_plans(
     response = await harness.client.get(disasters_path(harness, f"/{disaster.id}"))
     body = response.json()["data"]
     assert body["source"] == "LIVE_FEED"
+    assert body["originSource"] == "LIVE_USGS"
+    assert body["radiusSource"] == "ORGANIZATION_POLICY"
     assert body["simulated"] is False
     assert body["createdBy"] is None
     assert body["magnitude"] == 6.1
@@ -354,6 +356,10 @@ async def test_inject_flows_through_feed_path_marked_simulated(tokyo: Migration)
     assert data["feedEventId"].startswith("inject:")
     disaster = data["disaster"]
     assert disaster["source"] == "FEED_INJECTED"
+    assert disaster["originSource"] == "SYNTHETIC"
+    # 주입은 가상 진원이지만 반경은 실피드와 같은 조직 정책을 사용한다.
+    assert disaster["radiusSource"] == "ORGANIZATION_POLICY"
+    assert disaster["radiusKm"] == harness.organization.live_feed_radius_km
     assert disaster["simulated"] is True
     assert disaster["createdBy"] is None
     assert disaster["feedEvent"]["provider"] == "inject"

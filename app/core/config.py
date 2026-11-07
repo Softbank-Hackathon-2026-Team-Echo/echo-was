@@ -321,6 +321,10 @@ class Settings(BaseSettings):
     # 읽어 조직 기준(규모·반경)에 맞는 지진으로 재난(source = LIVE_FEED)을 만든다. 기본은 꺼짐이고,
     # 꺼져 있으면 일꾼이 피드를 부르지 않는다. 시연 주입(POST /disasters/feed:inject)은 스위치와
     # 상관없다.
+    auto_dr_enabled: bool = False
+    auto_dr_consent_ids: list[str] = Field(default_factory=list)
+    auto_dr_max_event_age_seconds: int = Field(default=900, ge=1, le=3600)
+    disaster_history_demo_enabled: bool = False
     live_disaster_feed_enabled: bool = False
     live_disaster_feed_url: str = Field(
         default="https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",

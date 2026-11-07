@@ -50,6 +50,8 @@ class AuditAction(StrEnum):
     DISASTER_ENDED = "DISASTER_ENDED"
     DISASTER_EVACUATION_REQUESTED = "DISASTER_EVACUATION_REQUESTED"
     DISASTER_FEED_INJECTED = "DISASTER_FEED_INJECTED"
+    DISASTER_AUTO_DR_CONSENTED = "DISASTER_AUTO_DR_CONSENTED"
+    DISASTER_AUTO_DR_REVOKED = "DISASTER_AUTO_DR_REVOKED"
     # --- 서버(SYSTEM): 끝 상태 ---
     DEPLOY_FINISHED = "DEPLOY_FINISHED"
     ROLLBACK_FINISHED = "ROLLBACK_FINISHED"
@@ -167,6 +169,11 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("POST", f"{_ORG}/disasters/{{disaster_id}}/evacuate"): (
         AuditAction.DISASTER_EVACUATION_REQUESTED
     ),
+    ("POST", f"{_ORG}/disasters/auto-dr/consents"): AuditAction.DISASTER_AUTO_DR_CONSENTED,
+    (
+        "POST",
+        f"{_ORG}/disasters/auto-dr/consents/{{consent_id}}/revoke",
+    ): AuditAction.DISASTER_AUTO_DR_REVOKED,
     ("POST", f"{_ORG}/disasters/feed:inject"): AuditAction.DISASTER_FEED_INJECTED,
 }
 

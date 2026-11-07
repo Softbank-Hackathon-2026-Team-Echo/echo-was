@@ -3,12 +3,21 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.guards import HumanDeveloperAccess, ViewerAccess
+from app.auth.guards import HumanAdminAccess, HumanDeveloperAccess, ViewerAccess
+from app.core.clock import Clock
+from app.core.config import Settings, get_settings
 from app.core.places import Coordinates
-from app.dependencies import get_disaster_service, get_live_disaster_feed_service
+from app.dependencies import (
+    get_clock,
+    get_disaster_service,
+    get_live_disaster_feed_service,
+    get_session,
+)
 from app.enums import DisasterStatus, DisasterType
 from app.models.disaster import MAX_MAGNITUDE, MIN_MAGNITUDE
+from app.schemas.auto_dr import AutoDrConsentResponse, CreateAutoDrConsentRequest
 from app.schemas.disaster import (
     MAGNITUDE_DECIMAL_PLACES,
     MAGNITUDE_MAX_DIGITS,
@@ -23,7 +32,10 @@ from app.schemas.disaster import (
     InjectFeedEventResponse,
     LiveFeedStatusResponse,
 )
+from app.schemas.disaster_history import DisasterHistoryResponse
 from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
+from app.services.auto_dr_policy import AutoDrConsentService
+from app.services.disaster_history_service import DisasterHistoryService
 from app.services.disaster_service import DisasterInput, DisasterService
 from app.services.live_disaster_feed import LiveDisasterFeedService
 
@@ -32,6 +44,51 @@ router = APIRouter(prefix="/api/v1/orgs/{org_id}/disasters", tags=["disaster"])
 
 Disasters = Annotated[DisasterService, Depends(get_disaster_service)]
 LiveFeed = Annotated[LiveDisasterFeedService, Depends(get_live_disaster_feed_service)]
+
+
+# 정적 경로는 /{disaster_id}보다 먼저 등록한다.
+@router.get("/history", response_model=ApiResponse[DisasterHistoryResponse])
+async def get_disaster_history(
+    access: ViewerAccess,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ApiResponse[DisasterHistoryResponse]:
+    return ApiResponse(
+        data=DisasterHistoryService().get_history(enabled=settings.disaster_history_demo_enabled)
+    )
+
+
+# 사전동의는 자동 실행을 허용하되 스위치를 켜지는 않는다.
+@router.post(
+    "/auto-dr/consents", status_code=201, response_model=ApiResponse[AutoDrConsentResponse]
+)
+async def create_auto_dr_consent(
+    access: HumanAdminAccess,
+    request: CreateAutoDrConsentRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> ApiResponse[AutoDrConsentResponse]:
+    consent_id = await AutoDrConsentService(session, clock).create_consent(
+        access.organization_id,
+        access.user.id,
+        request.service_id,
+        request.source_environment_id,
+        request.target_environment_id,
+        request.expires_at,
+    )
+    return ApiResponse(data=AutoDrConsentResponse(consentId=consent_id))
+
+
+@router.post("/auto-dr/consents/{consent_id}/revoke", response_model=ApiResponse[None])
+async def revoke_auto_dr_consent(
+    access: HumanAdminAccess,
+    consent_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> ApiResponse[None]:
+    await AutoDrConsentService(session, clock).revoke_consent(
+        access.organization_id, access.user.id, consent_id
+    )
+    return ApiResponse(data=None)
 
 
 # `/{disaster_id}` 보다 먼저 등록한다(feed 가 id 로 읽히지 않게).
