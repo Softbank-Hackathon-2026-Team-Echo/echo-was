@@ -5,7 +5,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.guards import HumanDeveloperAccess, ViewerAccess
+from app.core.clock import Clock
 from app.dependencies import (
+    get_clock,
     get_diagnosis_service,
     get_precheck_patch_service,
     get_precheck_service,
@@ -31,6 +33,7 @@ router = APIRouter(prefix="/api/v1/orgs/{org_id}/prechecks", tags=["precheck"])
 Prechecks = Annotated[PrecheckService, Depends(get_precheck_service)]
 PrecheckPatches = Annotated[PrecheckPatchService, Depends(get_precheck_patch_service)]
 Diagnoses = Annotated[DiagnosisService, Depends(get_diagnosis_service)]
+Clocks = Annotated[Clock, Depends(get_clock)]
 
 
 @router.post(
@@ -40,11 +43,12 @@ async def create_precheck(
     access: HumanDeveloperAccess,
     request: CreatePrecheckRequest,
     prechecks: Prechecks,
+    clock: Clocks,
 ) -> ApiResponse[PrecheckDetailResponse]:
     view = await prechecks.create_precheck(
         access.organization_id, access.user.id, request.service_id, request.target_environment_id
     )
-    return ApiResponse(data=PrecheckDetailResponse.from_view(view))
+    return ApiResponse(data=PrecheckDetailResponse.from_view(view, now=clock.now()))
 
 
 @router.get("/{precheck_id}", response_model=ApiResponse[PrecheckDetailResponse])
@@ -52,9 +56,10 @@ async def get_precheck(
     access: ViewerAccess,
     precheck_id: uuid.UUID,
     prechecks: Prechecks,
+    clock: Clocks,
 ) -> ApiResponse[PrecheckDetailResponse]:
     view = await prechecks.get_precheck(access.organization_id, precheck_id)
-    return ApiResponse(data=PrecheckDetailResponse.from_view(view))
+    return ApiResponse(data=PrecheckDetailResponse.from_view(view, now=clock.now()))
 
 
 @router.get("/{precheck_id}/logs", response_model=ApiResponse[PrecheckLogPageResponse])
@@ -74,9 +79,10 @@ async def cancel_precheck(
     access: HumanDeveloperAccess,
     precheck_id: uuid.UUID,
     prechecks: Prechecks,
+    clock: Clocks,
 ) -> ApiResponse[PrecheckDetailResponse]:
     view = await prechecks.cancel_precheck(access.organization_id, precheck_id, access.user.id)
-    return ApiResponse(data=PrecheckDetailResponse.from_view(view))
+    return ApiResponse(data=PrecheckDetailResponse.from_view(view, now=clock.now()))
 
 
 @router.post(
@@ -88,6 +94,7 @@ async def approve_precheck_patch(
     patch_id: str,
     request: DecidePrecheckPatchRequest,
     patches: PrecheckPatches,
+    clock: Clocks,
     diagnoses: Diagnoses,
 ) -> ApiResponse[PrecheckPatchResponse]:
     view = await patches.approve_patch(
@@ -104,7 +111,7 @@ async def approve_precheck_patch(
         linked = await diagnoses.redeploy_after_apply(view.apply_run.id)
         if linked is not None:
             view = replace(view, apply_run=linked)
-    return ApiResponse(data=PrecheckPatchResponse.from_view(view))
+    return ApiResponse(data=PrecheckPatchResponse.from_view(view, now=clock.now()))
 
 
 @router.post(
@@ -116,6 +123,7 @@ async def reject_precheck_patch(
     patch_id: str,
     request: DecidePrecheckPatchRequest,
     patches: PrecheckPatches,
+    clock: Clocks,
 ) -> ApiResponse[PrecheckPatchResponse]:
     view = await patches.reject_patch(
         access.organization_id,
@@ -125,4 +133,4 @@ async def reject_precheck_patch(
         request.patch_hash,
         request.reason,
     )
-    return ApiResponse(data=PrecheckPatchResponse.from_view(view))
+    return ApiResponse(data=PrecheckPatchResponse.from_view(view, now=clock.now()))

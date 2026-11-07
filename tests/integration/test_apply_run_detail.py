@@ -31,6 +31,7 @@ from tests.integration.runner_support import (
     run_patch,
     run_row,
 )
+from tests.test_apply_followup import NOT_DIAGNOSIS_FOLLOWUP
 
 COMMIT_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 APPLY_REPO = "Softbank-Hackathon-2026-Team-Echo/echo-ai-agent"
@@ -148,6 +149,10 @@ async def test_apply_run_detail_and_events_for_applied_run(
         "repo": APPLY_REPO,
         "branch": branch,
         "appliedCommitSha": None,
+        "pullRequestUrl": None,
+        "redeployRequestId": None,
+        "redeployRejectedCode": None,
+        "followUp": NOT_DIAGNOSIS_FOLLOWUP,
     }
     assert queued["startedAt"] is None and queued["finishedAt"] is None
     assert await _get(migration, apply_run_id, "/logs") == {"items": [], "nextAfter": 0}
@@ -177,6 +182,10 @@ async def test_apply_run_detail_and_events_for_applied_run(
         "repo": APPLY_REPO,
         "branch": branch,
         "appliedCommitSha": COMMIT_SHA,
+        "pullRequestUrl": None,
+        "redeployRequestId": None,
+        "redeployRejectedCode": None,
+        "followUp": NOT_DIAGNOSIS_FOLLOWUP,
     }
     row = await run_row(migration, apply_run_id)
     assert row.started_at is not None and row.finished_at is not None
@@ -400,4 +409,24 @@ def test_openapi_precheck_detail_documents_kind_and_apply() -> None:
         "repo",
         "branch",
         "appliedCommitSha",
+        "pullRequestUrl",
+        "redeployRequestId",
+        "redeployRejectedCode",
+        "followUp",
     }
+    assert "followUp" not in schemas["PrecheckApplyRunResponse"]["required"]
+    assert schemas["RepositoryFollowupState"]["enum"] == [
+        "NOT_REQUIRED",
+        "PENDING",
+        "IN_PROGRESS",
+        "SUCCEEDED",
+        "FAILED",
+        "UNKNOWN",
+    ]
+    assert schemas["RedeployFollowupState"]["enum"] == [
+        "NOT_REQUIRED",
+        "PENDING",
+        "CREATED",
+        "REJECTED",
+        "UNKNOWN",
+    ]

@@ -6,7 +6,7 @@ CLAIMED·RUNNING·TIMED_OUT·CANCELLED)면 비어 있다.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Self
 
 from pydantic import Field, JsonValue, field_validator
@@ -24,12 +24,15 @@ from app.enums import (
     DiagnosisEvidenceSource,
     DiagnosisResult,
     LogLevel,
+    RedeployFollowupState,
+    RepositoryFollowupState,
     SecurityResult,
 )
 from app.models import AgentPatchApproval, AgentRun, AgentRunEvent
 from app.schemas.ai_residency import AgentRunProcessingResponse
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.schemas.runner import PATCH_HASH_PATTERN
+from app.services.apply_followup import project_apply_followup
 from app.services.precheck_service import PrecheckLogPage, PrecheckPatchView, PrecheckView
 from app.services.run_result import CHECK_PASSED, compute_patch_status, patch_origin
 
@@ -122,6 +125,28 @@ class PrecheckPatchApprovalResponse(ApiModel):
     reason: str | None
 
 
+class RepositoryFollowupResponse(ApiModel):
+    state: RepositoryFollowupState
+    reason_code: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class RedeployFollowupResponse(ApiModel):
+    state: RedeployFollowupState
+    reason_code: str
+    finished_at: datetime | None = None
+
+
+class ApplyFollowupResponse(ApiModel):
+    schema_version: int = 1
+    applicable: bool | None
+    repository: RepositoryFollowupResponse
+    redeploy: RedeployFollowupResponse
+    updated_at: datetime | None = None
+    deadline_at: datetime | None = None
+
+
 class PrecheckPatchApplyResponse(ApiModel):
     """반영 실행. 결과(appliedCommitSha·branch)는 러너가 결과를 낸 뒤에만 찬다(SPEC api-10-2).
 
@@ -143,6 +168,7 @@ class PrecheckPatchApplyResponse(ApiModel):
     redeploy_request_id: uuid.UUID | None = None
     # 재배포 접수가 거절된 오류 코드(예: MIGRATION_IN_PROGRESS). 거절이 없으면 null.
     redeploy_rejected_code: str | None = None
+    follow_up: ApplyFollowupResponse | None = None
 
 
 class PrecheckPatchResponse(ApiModel):
@@ -163,7 +189,13 @@ class PrecheckPatchResponse(ApiModel):
     apply: PrecheckPatchApplyResponse | None = None
 
     @classmethod
-    def from_view(cls, view: PrecheckPatchView) -> Self:
+    def from_view(
+        cls,
+        view: PrecheckPatchView,
+        *,
+        parent_kind: AgentRunKind | None = None,
+        now: datetime | None = None,
+    ) -> Self:
         stored = view.stored
         approval = view.approval
         apply_run = view.apply_run
@@ -183,7 +215,11 @@ class PrecheckPatchResponse(ApiModel):
                 ),
                 "verification": verification,
                 "approval": _approval_response(approval) if approval is not None else None,
-                "apply": _apply_response(apply_run) if apply_run is not None else None,
+                "apply": (
+                    _apply_response(apply_run, parent_kind=parent_kind, now=now)
+                    if apply_run is not None
+                    else None
+                ),
             }
         )
 
@@ -197,7 +233,9 @@ def _approval_response(approval: AgentPatchApproval) -> PrecheckPatchApprovalRes
     )
 
 
-def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
+def _apply_response(
+    apply_run: AgentRun, *, now: datetime | None = None, parent_kind: AgentRunKind | None = None
+) -> PrecheckPatchApplyResponse:
     result = apply_run.result or {}
     return PrecheckPatchApplyResponse(
         run_id=apply_run.id,
@@ -210,6 +248,9 @@ def _apply_response(apply_run: AgentRun) -> PrecheckPatchApplyResponse:
         pull_request_url=result.get("pullRequestUrl"),
         redeploy_request_id=result.get("redeployRequestId"),
         redeploy_rejected_code=result.get("redeployRejectedCode"),
+        follow_up=ApplyFollowupResponse.model_validate(
+            project_apply_followup(apply_run, now=now or datetime.now(UTC), parent_kind=parent_kind)
+        ),
     )
 
 
@@ -283,9 +324,13 @@ class PrecheckApplyRunResponse(ApiModel):
     repo: str | None
     branch: str | None
     applied_commit_sha: str | None
+    pull_request_url: str | None = None
+    redeploy_request_id: uuid.UUID | None = None
+    redeploy_rejected_code: str | None = None
+    follow_up: ApplyFollowupResponse | None = None
 
     @classmethod
-    def from_run(cls, run: AgentRun) -> Self:
+    def from_run(cls, run: AgentRun, *, now: datetime | None = None) -> Self:
         snapshot = run.input_snapshot or {}
         patch = snapshot.get("patch") or {}
         result = run.result or {}
@@ -296,6 +341,12 @@ class PrecheckApplyRunResponse(ApiModel):
             repo=snapshot.get("repo"),
             branch=snapshot.get("branch"),
             applied_commit_sha=result.get("appliedCommitSha"),
+            pull_request_url=result.get("pullRequestUrl"),
+            redeploy_request_id=result.get("redeployRequestId"),
+            redeploy_rejected_code=result.get("redeployRejectedCode"),
+            follow_up=ApplyFollowupResponse.model_validate(
+                project_apply_followup(run, now=now or datetime.now(UTC))
+            ),
         )
 
 
@@ -338,8 +389,9 @@ class PrecheckDetailResponse(ApiModel):
     diagnosis: PrecheckDiagnosisResponse | None = None
 
     @classmethod
-    def from_view(cls, view: PrecheckView) -> Self:
+    def from_view(cls, view: PrecheckView, *, now: datetime | None = None) -> Self:
         run = view.run
+        now = now or datetime.now(UTC)
         kind = AgentRunKind(run.kind)
         result = run.result or {}
         sandbox = result.get("sandbox")
@@ -348,7 +400,9 @@ class PrecheckDetailResponse(ApiModel):
             id=run.id,
             kind=kind,
             apply=(
-                PrecheckApplyRunResponse.from_run(run) if kind == AgentRunKind.APPLY_PATCH else None
+                PrecheckApplyRunResponse.from_run(run, now=now)
+                if kind == AgentRunKind.APPLY_PATCH
+                else None
             ),
             diagnosis=(
                 PrecheckDiagnosisResponse.from_run(run)
@@ -398,7 +452,9 @@ class PrecheckDetailResponse(ApiModel):
                 PrecheckFindingResponse.model_validate(item) for item in result.get("findings", [])
             ],
             patches=[
-                PrecheckPatchResponse.from_view(view.decisions.patch_view(item))
+                PrecheckPatchResponse.from_view(
+                    view.decisions.patch_view(item), parent_kind=kind, now=now
+                )
                 for item in result.get("patches", [])
             ],
             blocked_attempts=[

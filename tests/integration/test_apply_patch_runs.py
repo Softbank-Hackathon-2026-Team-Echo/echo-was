@@ -34,6 +34,7 @@ from tests.integration.runner_support import (
     run_result,
     run_row,
 )
+from tests.test_apply_followup import NOT_DIAGNOSIS_FOLLOWUP
 
 COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 APPLY_CAPABILITIES = ["PRECHECK", "APPLY_PATCH"]
@@ -165,6 +166,7 @@ async def test_apply_patch_round_trip(migration: Migration, runner: RunnerFixtur
         "pullRequestUrl": None,
         "redeployRequestId": None,
         "redeployRejectedCode": None,
+        "followUp": NOT_DIAGNOSIS_FOLLOWUP,
     }
     row = await run_row(migration, apply_run_id)
     assert row.status == AgentRunStatus.SUCCEEDED
