@@ -11,6 +11,7 @@ from app.adapters.registry import get_environment_adapter
 from app.clients.app_secret_store import AppSecretStore, build_app_secret_store
 from app.clients.github_source_repository import GithubAppSourceRepositoryClient
 from app.clients.github_user import GithubUserClient, HttpGithubUserClient
+from app.clients.osv import AdvisoryFeed, OsvAdvisoryFeed
 from app.clients.prometheus_client import PrometheusClient
 from app.clients.repo_commit_writer import GithubAppRepoCommitWriter, RepoCommitWriter
 from app.clients.secret_client import EnvVarSecretClient, SecretClient
@@ -42,6 +43,7 @@ from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
 from app.services.cost_service import CostService
+from app.services.cve_watch_service import CveWatchService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.diagnosis_service import DiagnosisService
@@ -54,6 +56,7 @@ from app.services.environment_kind_service import EnvironmentKindService
 from app.services.environment_service import EnvironmentService
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
+from app.services.live_disaster_feed import LiveDisasterFeedService
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
@@ -469,6 +472,9 @@ def get_migration_plan_service(
             if tls_checker is not None
             else None
         ),
+        db_cutover_mode=settings.db_cutover_executor_mode,
+        db_cutover_timeout_seconds=settings.migration_db_cutover_timeout_seconds,
+        db_cutover_on_disaster=settings.migration_db_cutover_on_disaster,
     )
 
 
@@ -486,6 +492,14 @@ def get_disaster_service(
             item.partition("=")[0].strip() for item in settings.entrypoint_environment_map
         ),
     )
+
+
+def get_live_disaster_feed_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> LiveDisasterFeedService:
+    return LiveDisasterFeedService(session=session, clock=clock, settings=settings)
 
 
 def get_security_matrix_service(
@@ -624,3 +638,19 @@ def get_diagnosis_service(
             session, clock, repo_writer, enabled=settings.ai_apply_commit_enabled
         ),
     )
+
+
+def get_advisory_feed(settings: Annotated[Settings, Depends(get_settings)]) -> AdvisoryFeed:
+    """CVE 감시 피드(OSV.dev, SPEC sec-6-cve-watch). 만들 때 네트워크를 쓰지 않는다."""
+    return OsvAdvisoryFeed(
+        settings.cve_watch_osv_url,
+        settings.cve_watch_timeout_seconds,
+        settings.cve_watch_max_advisories,
+    )
+
+
+def get_cve_watch_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> CveWatchService:
+    return CveWatchService(session, clock)

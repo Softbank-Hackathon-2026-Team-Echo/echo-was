@@ -11,6 +11,7 @@ from app.models.deploy_request import DeployRequest
 from app.models.deploy_request_log import DeployRequestLog
 from app.models.deployment import Deployment
 from app.models.disaster import Disaster
+from app.models.disaster_feed_state import DisasterFeedState
 from app.models.environment import Environment
 from app.models.finding import Finding
 from app.models.invitation import Invitation
@@ -20,6 +21,7 @@ from app.models.migration_plan_log import MigrationPlanLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.security_exception import SecurityException
 from app.models.service import Service
+from app.models.service_dependency_snapshot import ServiceDependencySnapshot
 from app.models.service_environment import ServiceEnvironment
 from app.models.service_environment_variable import ServiceEnvironmentVariable
 from app.models.user import User
@@ -38,6 +40,7 @@ __all__ = [
     "DeployRequestLog",
     "Deployment",
     "Disaster",
+    "DisasterFeedState",
     "Environment",
     "Finding",
     "Invitation",
@@ -48,6 +51,7 @@ __all__ = [
     "OrganizationMember",
     "SecurityException",
     "Service",
+    "ServiceDependencySnapshot",
     "ServiceEnvironment",
     "ServiceEnvironmentVariable",
     "User",

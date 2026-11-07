@@ -14,7 +14,12 @@ from app.enums import (
     SecurityFindingSource,
     SecurityResult,
 )
-from app.models.base import Base, TimestampMixin, UuidPrimaryKeyMixin
+from app.models.base import (
+    APPENDED_COLUMN_SORT_ORDER,
+    Base,
+    TimestampMixin,
+    UuidPrimaryKeyMixin,
+)
 
 
 def _values(enum: type[StrEnum]) -> str:
@@ -28,6 +33,7 @@ FINDING_POLICY_VERSION_MAX_LENGTH = 32
 FINDING_TOOL_VERSION_MAX_LENGTH = 32
 FINDING_SOURCE_REF_MAX_LENGTH = 500
 FINDING_WAS_VERSION_MAX_LENGTH = 64
+FINDING_DEDUPE_KEY_MAX_LENGTH = 400
 
 
 class Finding(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -72,6 +78,16 @@ class Finding(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "organization_id",
             "control_id",
             "collected_at",
+        ),
+        CheckConstraint(
+            "remediation IS NULL OR jsonb_typeof(remediation) = 'object'",
+            name="remediation_is_object",
+        ),
+        Index(
+            "ix_findings_organization_id_dedupe_key",
+            "organization_id",
+            "dedupe_key",
+            postgresql_where=text("dedupe_key IS NOT NULL"),
         ),
     )
 
@@ -118,3 +134,14 @@ class Finding(UuidPrimaryKeyMixin, TimestampMixin, Base):
     confirmation: Mapped[AiFindingConfirmation | None] = mapped_column(String(16), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # 고칠 방법(SPEC sec-6-cve-watch). CVE_WATCH 증거만 채운다:
+    # {kind: DEPENDENCY_BUMP, ecosystem, package, fromVersion, toVersion, advisoryId}. 그 밖은 NULL.
+    remediation: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER
+    )
+    # 중복 제거 열쇠(SPEC sec-6-cve-watch). 같은 열쇠의 만료 전 증거가 있으면 새로 만들지 않는다.
+    dedupe_key: Mapped[str | None] = mapped_column(
+        String(FINDING_DEDUPE_KEY_MAX_LENGTH),
+        nullable=True,
+        sort_order=APPENDED_COLUMN_SORT_ORDER + 1,
+    )

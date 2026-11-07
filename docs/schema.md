@@ -346,19 +346,37 @@ erDiagram
 | `id` | uuid | N | PK | |
 | `organization_id` | uuid | N | FK `organizations.id` RESTRICT, 인덱스 `(organization_id, status, created_at)` | 조직 |
 | `type` | varchar(16) | N | `EARTHQUAKE`·`TYPHOON` | |
-| `source` | varchar(16) | N | `SIMULATED`, 기본 `SIMULATED` | 지금은 버튼뿐이다 |
+| `source` | varchar(16) | N | `SIMULATED`·`LIVE_FEED`·`FEED_INJECTED`, 기본 `SIMULATED` | 버튼 · 실제 지진 피드 · 시연 주입(API 서버 18) |
 | `magnitude` | numeric(3,1) | N | 0~10 | 규모 |
 | `epicenter_lat`·`epicenter_lng` | double precision | N | −90~90 · −180~180 | 진원지 |
 | `radius_km` | int | N | `>= 0` | 서버가 계산한 반경 |
 | `meets_threshold` | bool | N | | 이전 대상 기준을 넘었나(미달이면 계획을 만들지 않고 복귀도 막지 않는다) |
 | `status` | varchar(16) | N | `ACTIVE`·`ENDED`, `(status = 'ENDED') = (ended_at IS NOT NULL)` | ACTIVE 이고 기준을 넘은 재난의 피해 환경은 도착이 될 수 없다 |
 | `affected_environment_ids`·`safe_environment_ids`·`unknown_environment_ids` | jsonb | N | 배열 | 환경 id 문자열. **만든 순간의 스냅숏**이고 고치지 않는다 |
-| `created_by_user_id`(N)·`ended_by_user_id` | uuid | | FK `users.id` RESTRICT | 누른 사람 · 끝낸 사람 |
+| `created_by_user_id`·`ended_by_user_id` | uuid | Y | FK `users.id` RESTRICT, `(source = 'SIMULATED') = (created_by_user_id IS NOT NULL)` | 누른 사람(피드 재난은 NULL) · 끝낸 사람 |
 | `started_at`(N)·`ended_at` | timestamptz | | | 주입 시계 |
+| `feed_event_id` | varchar(128) | Y | `(source = 'SIMULATED') = (feed_event_id IS NULL)`, 부분 유니크 `(organization_id, feed_event_id) WHERE feed_event_id IS NOT NULL` | 피드 원본 id(`usgs:us7000twg9`, 주입은 `inject:<hex>`), 맨 뒤 칸(API 서버 18) |
+| `feed_event` | jsonb | Y | 객체 | 피드 지진 요약 `{provider, eventId, place, occurredAt, depthKm, url, nearestDistanceKm}` |
 | (삭제 금지) | | | `BEFORE DELETE` 트리거 `trg_disasters_prevent_delete` → `prevent_append_only_delete()` | |
 
 - 상태는 조건부 UPDATE 로만 바꾼다(`ACTIVE` → `ENDED`). 건너뛴 서비스는 저장하지 않는다(감사 줄 `details.skippedPlans`).
 - revision `250e2535417a` downgrade 는 더한 것만 지운다. 재난 기록과 계획의 재난 연결 정보가 사라지고, 계획 행과 `mode = EMERGENCY` 값은 남는다.
+- revision `8748e995387a`(API 서버 18) downgrade 는 피드 재난 행(SIMULATED 가 아닌 행)이 있으면 실패한다(만든 사람 NOT NULL·source CHECK 를 되돌릴 수 없고 재난은 지울 수 없다).
+
+### `disaster_feed_states` — 실제 재난 피드 상태 (API 서버 18)
+
+피드마다 한 행(`provider` PK, 지금은 `usgs`). 일꾼이 조회할 때마다 고치고 API(`GET /disasters/feed`)는 읽기만 한다. 시연 주입은 바꾸지 않는다.
+
+| 칸 | 타입 | NULL | 뜻 |
+|---|---|---|---|
+| `provider` | varchar(32) | N | PK |
+| `last_polled_at`·`last_success_at` | timestamptz | Y | 마지막 조회 · 마지막 성공 |
+| `last_error_code` | varchar(64) | Y | 마지막 조회 실패 코드(성공이면 NULL) |
+| `last_feed_count`·`last_new_event_count` | int | N | 마지막 응답의 지진 수 · 그중 처음 본 수(`>= 0`) |
+| `last_skipped_count` | int | N | 마지막 응답에서 이상해서 건너뛴 지진 수(시각·규모·id·좌표 범위 밖, 처리 실패, `>= 0`) |
+| `seen_event_ids` | jsonb | N | 처리한 지진 id 배열(별칭 포함, 최근 2000개) |
+
+`organizations` 에는 `live_feed_min_magnitude numeric(3,1)`(기본 6.0, 0~10)·`live_feed_radius_km int`(기본 300, 1~2000)를 더했다(피드 조직 기준).
 
 ### `findings` — 보안 증거 (보안·거버넌스 2)
 

@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from app.enums import (
     AiFindingConfirmation,
+    RemediationKind,
     SecurityCheckPhase,
     SecurityCompareChange,
     SecurityControlId,
@@ -293,6 +294,29 @@ class FindingItemResponse(ApiModel):
     reason: str | None = None
 
 
+class FindingRemediationResponse(ApiModel):
+    """고칠 방법. DEPENDENCY_BUMP: package 를 fromVersion → toVersion 으로 올린다.
+
+    toVersion 이 null 이면 아직 고친 버전이 없다.
+    """
+
+    kind: RemediationKind
+    ecosystem: str | None = None
+    package: str | None = None
+    from_version: str | None = None
+    to_version: str | None = None
+    advisory_id: str | None = None
+    aliases: list[str] = []
+    severity: str | None = None
+    summary: str | None = None
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "FindingRemediationResponse | None":
+        if not isinstance(raw, dict) or raw.get("kind") not in set(RemediationKind):
+            return None
+        return cls.model_validate(raw)
+
+
 class SecurityFindingResponse(ApiModel):
     id: uuid.UUID
     control_id: SecurityControlId
@@ -318,6 +342,8 @@ class SecurityFindingResponse(ApiModel):
     basis_url: str | None
     items: list[FindingItemResponse]
     total_items: int
+    # 고칠 방법(SPEC sec-6-cve-watch). CVE_WATCH 증거만 있고 그 밖은 null.
+    remediation: FindingRemediationResponse | None = None
 
     @classmethod
     def from_model(cls, model: Finding) -> "SecurityFindingResponse":
@@ -347,6 +373,7 @@ class SecurityFindingResponse(ApiModel):
             basis_url=model.basis_url,
             items=[FindingItemResponse.model_validate(item) for item in _items(model.items)],
             total_items=model.total_items,
+            remediation=FindingRemediationResponse.from_raw(model.remediation),
         )
 
 

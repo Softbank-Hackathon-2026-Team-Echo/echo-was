@@ -32,8 +32,9 @@ from app.audit.actions import AuditAction, AuditComponent
 from app.audit.lifecycle import migration_plan_target, record_migration_plan_finished
 from app.audit.recorder import AuditActor, AuditRecorder
 from app.core.clock import Clock
-from app.core.config import ExecutorMode
+from app.core.config import DbCutoverExecutorMode, ExecutorMode
 from app.core.exceptions import (
+    DbCutoverDisabledError,
     DeployInProgressError,
     DisasterActiveError,
     EnvironmentUnhealthyError,
@@ -45,6 +46,7 @@ from app.core.exceptions import (
     PlanNotPendingError,
     PlanNotRunningError,
     PlanStaleError,
+    PromoteAckRequiredError,
     RequestFieldInvalidError,
     SecurityGateBlockedError,
     SelfApprovalForbiddenError,
@@ -101,9 +103,11 @@ from app.services.migration_plan_support import (
     expected_seconds,
     fingerprint_changes,
     initial_step_results,
+    needs_promote_ack,
     read_fingerprint,
     single_source,
     skip_pending_steps,
+    stamp_promote,
 )
 from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
 
@@ -135,6 +139,8 @@ class CreateMigrationPlanCommand:
     max_replication_lag_seconds: float
     simulate_fail_at_step: int | None = None
     simulate_reason: MigrationSimulateReason | None = None
+    # 비율 100% 뒤에 DB 쓰기 전환 단계를 더한다(API 서버 17). 기본 false = 지금과 같은 5단계.
+    include_db_cutover: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,8 +205,14 @@ class MigrationPlanService:
         step_overhead_seconds: int,
         approval_ttl_seconds: int,
         security_gate: SecurityGate | None = None,
+        db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
+        db_cutover_timeout_seconds: int = 180,
+        db_cutover_on_disaster: bool = False,
     ) -> None:
         self._session = session
+        self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
+        self._db_cutover_timeout_seconds = db_cutover_timeout_seconds
+        self._db_cutover_on_disaster = db_cutover_on_disaster
         self._security_gate = security_gate
         self._clock = clock
         self._executor_mode = executor_mode
@@ -259,6 +271,11 @@ class MigrationPlanService:
             and self._executor_mode is not ExecutorMode.FAKE
         ):
             raise SimulateNotAllowedError("simulate is only accepted with fake executors")
+        if command.include_db_cutover and not self._db_cutover_enabled:
+            raise DbCutoverDisabledError("database cutover step is not enabled on this server")
+        include_db_cutover = command.include_db_cutover or (
+            disaster is not None and self._db_cutover_on_disaster and self._db_cutover_enabled
+        )
 
         async with self._session.begin():
             service = await self._services.get_live_by_id(organization_id, service_id)
@@ -290,10 +307,15 @@ class MigrationPlanService:
             await self._check_target_not_in_active_disaster(environment.id)
             await self._check_no_open_deploy_requests(service.id, target)
             target = await self._check_target_ready(source, target)
-            plan = self._new_plan(service, source, target, actor_user_id, command, now)
+            plan = self._new_plan(
+                service, source, target, actor_user_id, command, now, include_db_cutover
+            )
             if disaster is not None:
                 plan.mode = MigrationPlanMode.EMERGENCY
                 plan.disaster_id = disaster.disaster_id
+                if include_db_cutover:
+                    # 긴급 이전의 DB 쓰기 전환은 승격을 허용한다: 승인 때 동의를 받는다.
+                    plan.steps = stamp_promote(plan.steps)
             else:
                 # 서비스 행을 잠근 뒤라 판정 사이에 다른 계획이 끝나거나 생기지 않는다.
                 plan.mode = decide_plan_mode(
@@ -325,6 +347,8 @@ class MigrationPlanService:
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
                     "mode": plan.mode,
+                    # 기존 계획 줄의 모양을 바꾸지 않게 DB 쓰기 전환을 넣었을 때만 싣는다.
+                    **({"includeCutover": True} if include_db_cutover else {}),
                 },
             )
             await self._record_audit(
@@ -336,6 +360,7 @@ class MigrationPlanService:
                     "sourceEnvironmentId": str(source.environment_id),
                     "targetEnvironmentId": str(target.environment_id),
                     **_disaster_audit_details(plan),
+                    **({"includeCutover": True} if include_db_cutover else {}),
                 },
             )
             view = (await self._views([plan]))[0]
@@ -350,11 +375,18 @@ class MigrationPlanService:
         actor_user_id: uuid.UUID,
         command: CreateMigrationPlanCommand,
         now: datetime,
+        include_db_cutover: bool = False,
     ) -> MigrationPlan:
         required_requests = tuple(command.required_requests or self._required_requests_default)
         max_wait_seconds = command.max_wait_seconds or self._max_wait_seconds_default
         steps = build_steps(
-            required_requests, max_wait_seconds, self._expected_rps, self._step_overhead_seconds
+            required_requests,
+            max_wait_seconds,
+            self._expected_rps,
+            self._step_overhead_seconds,
+            db_cutover_timeout_seconds=(
+                self._db_cutover_timeout_seconds if include_db_cutover else None
+            ),
         )
         simulate = (
             {
@@ -522,11 +554,18 @@ class MigrationPlanService:
     # --- 승인·거절·취소 ---
 
     async def approve_plan(
-        self, organization_id: uuid.UUID, plan_id: uuid.UUID, actor_user_id: uuid.UUID
+        self,
+        organization_id: uuid.UUID,
+        plan_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        *,
+        acknowledge_promote: bool = False,
     ) -> MigrationPlanView:
         """승인 = 실행 시작. 할 일을 넣고 APPROVED 로 바꾼다. 지문이 다르면 STALE 로 끝낸다.
 
         보안 게이트가 있으면 지문이 같을 때 판정을 남기고, 막혔으면 승인하지 않고 409 를 올린다.
+        재난 긴급 이전 + DB 쓰기 전환 계획(승격 허용)은 acknowledge_promote 가 없으면 아무것도
+        바꾸지 않고 422(PROMOTE_ACK_REQUIRED)다. 동의는 승인 감사 줄에 남긴다.
         """
         async with self._session.begin():
             await self._get_in_organization(organization_id, plan_id)
@@ -545,6 +584,13 @@ class MigrationPlanService:
             locked = await self._lock(plan_id)
             plan = locked.plan
             self._check_pending(plan)
+            promote_ack_required = needs_promote_ack(plan.steps)
+            if promote_ack_required and not acknowledge_promote:
+                raise PromoteAckRequiredError(
+                    "approving this emergency plan promotes the target database; "
+                    "send acknowledgePromote: true",
+                    plan_id=str(plan.id),
+                )
             is_self = plan.created_by_user_id == actor_user_id
             if is_self and not organization.allow_self_approval:
                 raise SelfApprovalForbiddenError
@@ -584,7 +630,11 @@ class MigrationPlanService:
                         plan,
                         organization_id,
                         actor_user_id,
-                        {"selfApproved": is_self, **_disaster_audit_details(plan)},
+                        {
+                            "selfApproved": is_self,
+                            **_disaster_audit_details(plan),
+                            **({"acknowledgePromote": True} if promote_ack_required else {}),
+                        },
                     )
             view = await self._reload_view(plan_id)
         _raise_rejection(rejection)

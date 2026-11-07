@@ -17,10 +17,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
-from app.enums import BuildStatus
+from app.enums import BuildStatus, DependencySnapshotSource
 from app.executors.base import BuildSecurityScan, BuildSecurityScanReader
 from app.repositories.build_repository import BuildRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.cve_watch_packages import packages_from_trivy_report
+from app.services.cve_watch_service import CveWatchService
 from app.services.security_finding_service import SecurityFindingService
 from app.services.security_normalizers import (
     NormalizedFinding,
@@ -85,7 +87,30 @@ class BuildSecurityScanCollector:
         except SQLAlchemyError:
             logger.exception("security scan not recorded", extra=_extra(build_id))
             return 0
+        await self._record_dependencies(scan, target)
         return len(findings)
+
+    async def _record_dependencies(self, scan: BuildSecurityScan, target: _ScanTarget) -> None:
+        """Trivy 원문의 패키지 목록을 CVE 감시용 의존성 목록으로 남긴다(SPEC sec-6-cve-watch).
+
+        실패해도 배포·증거 기록에는 영향이 없다(로그만).
+        """
+        try:
+            packages = packages_from_trivy_report(scan.trivy_report or {})
+            await CveWatchService(self._session, self._clock).record_snapshot(
+                organization_id=target.organization_id,
+                service_id=target.service_id,
+                image_digest=target.image_digest,
+                source=DependencySnapshotSource.BUILD_SCAN,
+                packages=packages,
+                source_ref=scan.source_ref,
+                collected_at=self._collected_at(scan.scanned_at),
+            )
+        except Exception as exc:
+            logger.warning(
+                "dependency snapshot not recorded",
+                extra={**_extra(target.build_id), "error_type": type(exc).__name__},
+            )
 
     async def _find_target(self, build_id: uuid.UUID) -> _ScanTarget | None:
         async with self._session.begin():

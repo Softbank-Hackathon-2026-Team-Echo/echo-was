@@ -12,7 +12,7 @@
 | `POST /services/{serviceId}/migration-plans` | 201 `MigrationPlanDetail` | 404 `SERVICE_NOT_FOUND`·`ENVIRONMENT_NOT_FOUND`, 409(아래 "만들기"), 422 `VALIDATION_ERROR`·`SIMULATE_NOT_ALLOWED` | 개발자(사람) |
 | `GET /services/{serviceId}/migration-plans?status&page&size` | 200 `Page[MigrationPlanSummary]`(최신순) | 404 `SERVICE_NOT_FOUND`, 422 | 뷰어·에이전트 |
 | `GET /migration-plans/{planId}` | 200 `MigrationPlanDetail` | 404 `MIGRATION_PLAN_NOT_FOUND` | 뷰어·에이전트 |
-| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED`·`SECURITY_GATE_BLOCKED`(게이트를 켰을 때) | 개발자(사람) |
+| `POST /migration-plans/{planId}/approve` | 202 `MigrationPlanDetail`(`APPROVED`). 본문 선택 `{"acknowledgePromote": true}` — `promoteWarning` 이 있는 계획(재난 긴급 이전 + DB 쓰기 전환)은 필수 | 422 `PROMOTE_ACK_REQUIRED`(승격 동의 없음, 계획 그대로), 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_STALE`·`PLAN_EXPIRED`·`SECURITY_GATE_BLOCKED`(게이트를 켰을 때) | 개발자(사람) |
 | `POST /migration-plans/{planId}/reject` | 200 `MigrationPlanDetail`(`REJECTED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/cancel` | 200 `MigrationPlanDetail`(`CANCELLED`) | 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/abort` | 202 `MigrationPlanDetail`(멱등) | 409 `PLAN_NOT_RUNNING` | 개발자(사람) |
@@ -29,9 +29,12 @@
   "requiredRequests": [20, 50, 50],
   "maxWaitSeconds": 30,
   "rollbackConditions": {"maxErrorRatePercent": 1.0, "maxP95Ms": 800, "maxReplicationLagSeconds": 1.0},
-  "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"}
+  "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"},
+  "includeCutover": false
 }
 ```
+
+`includeCutover`(기본 `false`, API 서버 17): `true` 면 비율 100% 뒤에 DB 쓰기 전환 단계(`DB_CUTOVER`, index 5)를 더해 6단계로 만든다. 서버의 `DB_CUTOVER_EXECUTOR_MODE` 가 `disabled`(기본)면 409 `DB_CUTOVER_DISABLED`. 빼거나 `false` 면 지금과 같은 5단계이고 이미 만든 계획은 저장된 단계 그대로다. 재난 트리거 계획은 `MIGRATION_DB_CUTOVER_ON_DISASTER=true`(기본 false)이고 실행기가 켜져 있을 때만 이 단계를 넣는다.
 
 | 칸 | 규칙 |
 |---|---|
@@ -78,7 +81,31 @@
 | 1 | `SHIFT` | 90 / 10 | 비율 적용 → 도착 요청 20건 세기(최대 30초) → 헬스체크 | 2 + 4 |
 | 2 | `SHIFT` | 50 / 50 | 같음(50건) | 2 + 2 |
 | 3 | `DATA_SYNC_CHECK` | — | 출발 → 도착 복제 지연 ≤ `maxReplicationLagSeconds` | 2 |
-| 4 | `SHIFT` | 0 / 100 | 같음(50건). 통과하면 `SUCCEEDED` | 2 + 1 |
+| 4 | `SHIFT` | 0 / 100 | 같음(50건). 통과하면 `SUCCEEDED`(5단계 계획) | 2 + 1 |
+| 5 | `DB_CUTOVER` | — | `includeCutover=true` 계획만. 컷오버 Job 을 만들고 끝날 때까지 기다려(상한 = 이 단계 `maxWaitSeconds` = `MIGRATION_DB_CUTOVER_TIMEOUT_SECONDS`) 이 계획 id 의 결과 행으로 판정. 통과하면 `SUCCEEDED` | 2 + 30 |
+
+### DB 쓰기 전환 단계 `DB_CUTOVER` (API 서버 17, [SPEC](../../specs/api-17-cutover-step.md))
+
+- **Job**: 서울 GKE `echo-ops` 네임스페이스에 echo-infra 컷오버 Job(`replication/cutover-job`)을 만든다. 이름 `echo-cutover-<계획 앞 8자>-1`, 환경 변수 `KIND`·`PLAN_ID`·`ALLOW_PROMOTE` 만(VAP). 계획 종류별: `PLANNED` → `KIND=cutover`, `EMERGENCY` → `cutover` + `ALLOW_PROMOTE=true`(A 에 닿지 않으면 승격), `FAILBACK` → `rollback`.
+- **순서**: APPLY(요청 시각 저장 → Job 만들기, 같은 이름이 있으면 그 Job) → OBSERVE(`MIGRATION_DB_CUTOVER_POLL_SECONDS` 마다 Job 상태) → JUDGE(결과 표 `echo_ops.cutover_runs WHERE plan_id = 계획 id AND kind = CUTOVER|ROLLBACK`).
+- **판정과 실패 정책**: 롤백 Job 은 자동으로 부르지 않는다.
+
+| 상황 | 결과 | `rollbackStatus` | 트래픽 |
+|---|---|---|---|
+| 종료 0 + 결과 행 누락 0·중복 0 / 종료 0 + `ALREADY_WRITER` | 통과 | — | 도착 100% |
+| 종료 1 + 출발이 쓰기 담당(데이터 확인) 또는 쓰기 담당 확인 불가 + 로그 `NO_CHANGE` · Job 을 분명히 못 만듦(거절·보내기 전 실패·같은 이름 404 + 결과 행 없음) | `ROLLED_BACK`(`DB_CUTOVER_FAILED`) | `SUCCEEDED` | 출발 100% 로 되돌림 |
+| 종료 1 인데 쓰기 담당이 도착(로그 `NO_CHANGE` 여도) 또는 미확인 + 표식 없음 · 생성 응답 유실 뒤 Job·행 확인 불가 · 상태 조회 연속 5번 실패(행 없음) | `FAILED`(`DB_CUTOVER_UNKNOWN`) | `SKIPPED` | 그대로(결과를 모르면 되돌리지 않는다, 사람이 쓰기 담당 확인) |
+| 종료 2 · 알 수 없는 종료 · Job 사라짐(행 없음) | `FAILED`(`DB_CUTOVER_PARTIAL`) | `SKIPPED` | 그대로(사람이 "부분 상태 복구") |
+| 상한 초과(행 없음) | `FAILED`(`DB_CUTOVER_TIMEOUT`) | `SKIPPED` | 그대로 |
+| 누락·중복 > 0 · 종료 0 인데 행 없음·못 읽음 | `FAILED`(`DATA_INTEGRITY_FAILED`) | `SKIPPED` | 그대로(쓰기 담당 = 도착) |
+
+  종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 그 행으로 판정한다. 종료 1 의 근거 우선순위는 **결과 행 > 지금 쓰기 담당 확인 > 로그 표식**이다(로그는 Job 이 끝날 때 기록이라 지금보다 오래될 수 있다). `DB_CUTOVER_UNKNOWN` 뒤 사람이 할 일(쓰기 담당 확인 → 가중치 수동 조정 → 새 계획)은 [SPEC 4-4a](../../specs/api-17-cutover-step.md).
+- **중단·일꾼 상실**: Job 을 요청한 뒤에는 Job 이 끝나 판정할 때까지 되돌리지 않는다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난다). 판정이 통과면 중단 요청이 있어도 `SUCCEEDED` 다.
+- **응답**: `steps[5].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
+- **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 3)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.
+- **단계 결과 cutover 추가 칸**: `startUncertain`(생성 응답 유실) · `startConfirmed`(같은 이름 조회로 다시 찾음) · `pollErrors`(상태 조회 연속 실패 수) · `writer`(종료 1 뒤 확인한 쓰기 담당 SOURCE·TARGET·UNKNOWN).
+- **로그 코드**: `DB_CUTOVER_JOB_CREATED` · `DB_CUTOVER_JOB_FINISHED` · `DB_CUTOVER_OK` · `DB_CUTOVER_FAILED`(원인 문장 붙음) · `DB_CUTOVER_MANUAL_REQUIRED`(자동으로 되돌리지 않음). data 에 Job 이름·종류·종료 코드·이유·결과 숫자.
+- **감사**: SYSTEM(`migration-worker`) `MIGRATION_DB_CUTOVER_STARTED`(Job 만듦) · `MIGRATION_DB_CUTOVER_FINISHED`(판정, 실패면 `errorCode`).
 
 단계 예상 = `MIGRATION_STEP_OVERHEAD_SECONDS`(2) + (SHIFT 면 min(`maxWaitSeconds`, ceil(필요 건수 ÷ (`MIGRATION_EXPECTED_RPS` × 비율 ÷ 100)))). 계획 예상 = 합(기본 50 rps 기준 **17초**). 비율 목록은 바꿀 수 없고, 단계별 사람 승인은 없다.
 
@@ -228,7 +255,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 단계 결과(`steps[i].result.status`): `PENDING`·`RUNNING`·`PASSED`·`FAILED`·`SKIPPED`. 롤백·실패로 끝나면 남은 단계는 `SKIPPED`, 중단·일꾼 상실로 멈춘 단계는 `FAILED`(`failureCode` = 그 원인).
 
-원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `SECURITY_GATE_BLOCKED`(일꾼 시작 때 보안 게이트가 막음, 트래픽 그대로). 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED`.
+원인 코드(`errorCode`·`failureCode`, `errorMessage` 는 코드별 고정 문장): `PREFLIGHT_FAILED` · `TRAFFIC_APPLY_FAILED` · `HEALTH_CHECK_FAILED` · `METRICS_UNAVAILABLE` · `THRESHOLD_EXCEEDED` · `TARGET_NOT_RECEIVING` · `DATA_LAG_EXCEEDED` · `ABORTED` · `WORKER_LOST` · `INTERNAL_ERROR` · `SECURITY_GATE_BLOCKED`(일꾼 시작 때 보안 게이트가 막음, 트래픽 그대로) · `DB_CUTOVER_FAILED` · `DB_CUTOVER_TIMEOUT` · `DB_CUTOVER_PARTIAL` · `DATA_INTEGRITY_FAILED` · `DB_CUTOVER_UNKNOWN`(DB 쓰기 전환 단계, 위 표). 롤백 결과 `rollbackStatus`: `SUCCEEDED` · `FAILED` · `NOT_NEEDED` · `SKIPPED`(DB 쓰기 전환 실패를 자동으로 되돌리지 않음, 사람 확인).
 
 ## `simulate` (가짜 모드 시연)
 
@@ -244,6 +271,10 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `HEALTH` | 1·2·4 | 건수는 정상, 헬스 503 → `HEALTH_CHECK_FAILED` |
 | `TRAFFIC` | 1·2·4 | 그 단계 비율 적용 실패(`metrics = null`) → `TRAFFIC_APPLY_FAILED` |
 | `DATA_LAG` | 3 | 복제 지연 30초 → `DATA_LAG_EXCEEDED` |
+| `DB_CUTOVER_FAIL` | 5(`includeCutover=true` 만) | Job 없이 종료 1 → 트래픽 롤백, `DB_CUTOVER_FAILED` |
+| `DB_CUTOVER_PARTIAL` | 5 | 종료 2 → `FAILED`(`DB_CUTOVER_PARTIAL`, `SKIPPED`) |
+| `DB_CUTOVER_TIMEOUT` | 5 | 끝나지 않음 → 상한 뒤 `FAILED`(`DB_CUTOVER_TIMEOUT`, `SKIPPED`) |
+| `DATA_INTEGRITY` | 5 | 종료 0, 누락 1건 → `FAILED`(`DATA_INTEGRITY_FAILED`, `SKIPPED`) |
 
 `LATENCY` 는 8-1 에서 뺐다(요청 422). 저장된 옛 계획의 `LATENCY` 는 아무 실패도 만들지 않는다.
 
@@ -383,5 +414,12 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `CUTOVER_RUNS_DATABASE` | `app` | 컷오버 결과 표가 있는 고객 DB 이름. 빈 값이면 읽지 않는다(`result` 칸 전부 null) |
 | `CUTOVER_RESULTS_NOT_BEFORE` | (없음) | 이보다 먼저 끝난 계획은 읽지 않는다(시간대가 있는 ISO 8601, 없으면 시작 때 설정 오류). 표가 생기기 전 계획에 나중 행이 붙지 않게 한다. 운영 `2026-11-04T13:30:00Z` |
 | `CUTOVER_RESULT_CACHE_SECONDS` | 5 | 못 찾음·창 열림·실패 결과를 다시 쓰는 시간(초, 1 이상) |
+| `DB_CUTOVER_EXECUTOR_MODE` | `disabled` | DB 쓰기 전환 단계 실행기(`disabled`·`fake`·`kubernetes`). `disabled` 면 `includeCutover=true` 409 |
+| `DB_CUTOVER_JOB_IMAGE` | (없음) | `kubernetes` 일 때 필수. echo-infra `deploy/values.env` 의 `CUTOVER_IMAGE`(@sha256 digest, VAP 고정)와 글자까지 같아야 한다 |
+| `DB_CUTOVER_NAMESPACE` | `echo-ops` | Job 네임스페이스 |
+| `DB_CUTOVER_KUBE_API_URL` · `DB_CUTOVER_SERVICE_ACCOUNT_DIR` | `https://kubernetes.default.svc` · `/var/run/secrets/kubernetes.io/serviceaccount` | 같은 클러스터 창구와 파드 SA 토큰·CA |
+| `MIGRATION_DB_CUTOVER_TIMEOUT_SECONDS` | 180 | Job 기다림 상한(10~1800). Job `activeDeadlineSeconds`(120)+유예(30)보다 길게 |
+| `MIGRATION_DB_CUTOVER_POLL_SECONDS` | 3 | Job 상태 확인 주기(1~60) |
+| `MIGRATION_DB_CUTOVER_ON_DISASTER` | `false` | 재난 긴급 이전 계획에도 이 단계를 넣는가 |
 
 `MIGRATION_OBSERVE_SECONDS_DEFAULT` 는 8-1 에서 없앴다(설정에 남아 있어도 무시한다).

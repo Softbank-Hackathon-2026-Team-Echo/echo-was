@@ -14,9 +14,9 @@ import pytest
 from httpx import Response
 from sqlalchemy import select
 
-from app.audit.actions import AuditAction
+from app.audit.actions import AuditAction, AuditComponent
 from app.core.exceptions import ServiceDeletingError
-from app.enums import AgentRunKind, AgentRunStatus, ServiceStatus
+from app.enums import ActorType, AgentRunKind, AgentRunStatus, AuditResult, ServiceStatus
 from app.models import AgentRun, AuditLog, DeployRequest, Service
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.services import ai_residency_service
@@ -209,6 +209,42 @@ async def test_simulated_diagnosis_approve_apply_and_redeploy(migration: Migrati
     assert repeated.status_code == 200, repeated.text
     assert _data(repeated)["apply"]["redeployRequestId"] == redeploy_id
 
+    # 가짜 진단·가짜 반영도 러너 결과 제출처럼 끝날 때 종료 줄을 정확히 하나씩 남긴다(C-AUD-1).
+    finished = await _finished_rows(migration)
+    assert {target: len(rows) for target, rows in finished.items()} == {
+        uuid.UUID(run_id): 1,
+        uuid.UUID(apply["runId"]): 1,
+    }
+    for target, kind in ((run_id, "CHANGE_PROPOSAL"), (apply["runId"], "APPLY_PATCH")):
+        (row,) = finished[uuid.UUID(target)]
+        assert (row.actor_type, row.component, row.result) == (
+            ActorType.SYSTEM,
+            AuditComponent.API,
+            AuditResult.SUCCEEDED,
+        )
+        assert row.details["simulated"] is True
+        assert row.details["kind"] == kind
+        assert row.details["status"] == "SUCCEEDED"
+        assert row.details["aiReviewed"] is False
+    (apply_row,) = finished[uuid.UUID(apply["runId"])]
+    assert apply_row.details["appliedCommitSha"] == apply["appliedCommitSha"]
+
+
+async def _finished_rows(migration: Migration) -> dict[uuid.UUID, list[AuditLog]]:
+    async with migration.harness.session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(AuditLog)
+                .where(AuditLog.action == AuditAction.AGENT_RUN_FINISHED)
+                .order_by(AuditLog.seq)
+            )
+        ).all()
+    grouped: dict[uuid.UUID, list[AuditLog]] = {}
+    for row in rows:
+        assert row.target_id is not None
+        grouped.setdefault(row.target_id, []).append(row)
+    return grouped
+
 
 @pytest.mark.parametrize(
     ("error", "code"),
@@ -384,6 +420,9 @@ async def test_simulated_insufficient_evidence_has_reason_and_no_patch(
     assert run["diagnosis"]["fixable"] is False
     assert run["diagnosis"]["unfixableReason"]
     assert run["diagnosis"]["evidence"] == []
+    finished = await _finished_rows(migration)
+    assert list(finished) == [uuid.UUID(run["id"])]
+    assert finished[uuid.UUID(run["id"])][0].details["simulated"] is True
 
 
 # --- 거절 ---

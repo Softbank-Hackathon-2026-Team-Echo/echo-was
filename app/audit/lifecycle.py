@@ -119,3 +119,26 @@ async def record_migration_plan_finished(
         target=await migration_plan_target(session, plan),
         details=details,
     )
+
+
+async def record_migration_db_cutover(
+    session: AsyncSession,
+    clock: Clock,
+    plan: MigrationPlan,
+    *,
+    action: AuditAction,
+    result: AuditResult,
+    details: dict[str, Any],
+) -> None:
+    """DB 쓰기 전환 단계의 SYSTEM 줄(Job 만듦·판정). 그 변경이 반영된 트랜잭션 안에서 부른다."""
+    service = await session.get_one(Service, plan.service_id)
+    if plan.simulated:
+        details = {**details, "simulated": True}
+    AuditRecorder(session, clock).record(
+        organization_id=service.organization_id,
+        actor=AuditActor.system(AuditComponent.MIGRATION_WORKER),
+        action=action,
+        result=result,
+        target=await migration_plan_target(session, plan),
+        details=details,
+    )

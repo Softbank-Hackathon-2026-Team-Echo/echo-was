@@ -27,6 +27,7 @@ from app.executors.postgres_cutover_runs import (
     CUTOVER_RESULT_QUERY_FAILED,
     CUTOVER_RESULT_SECRET_MISSING,
     CUTOVER_RESULT_UNREACHABLE,
+    CUTOVER_RUN_BY_PLAN_QUERY,
     CUTOVER_RUNS_QUERY,
     PostgresCutoverRunReader,
 )
@@ -539,3 +540,32 @@ async def test_cache_reading_removes_lock_when_task_is_cancelled() -> None:
         await task
 
     assert cache._locks == {}
+
+
+# --- 계획 id 로 찾기(API 서버 17) ---
+
+
+async def test_find_by_plan_queries_plan_id_and_kind_and_maps_extra_columns() -> None:
+    plan_id = uuid.uuid4()
+    connector = _Connector(_row(mode="PROMOTE", rpo_estimate_ms=850))
+
+    result = await _reader(connector).find_by_plan(TARGET, CutoverKind.CUTOVER, plan_id)
+
+    assert isinstance(result, CutoverRun)
+    assert (result.mode, result.rpo_estimate_ms) == ("PROMOTE", 850)
+    [(query, args)] = connector.connection.queries
+    assert query == CUTOVER_RUN_BY_PLAN_QUERY
+    assert "WHERE plan_id = $1 AND kind = $2" in query
+    assert args == (plan_id, "CUTOVER")
+
+
+async def test_find_by_plan_errors_become_unavailable_and_missing_is_not_found() -> None:
+    missing = await _reader(_Connector(None)).find_by_plan(
+        TARGET, CutoverKind.ROLLBACK, uuid.uuid4()
+    )
+    broken = await _reader(_Connector(connect_error=OSError("down"))).find_by_plan(
+        TARGET, CutoverKind.ROLLBACK, uuid.uuid4()
+    )
+
+    assert isinstance(missing, CutoverRunNotFound)
+    assert broken == CutoverRunUnavailable(CUTOVER_RESULT_UNREACHABLE)

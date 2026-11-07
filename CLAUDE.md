@@ -34,6 +34,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회·이전 전후 비교 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건·`blocksMigration`)를 바꾸거나 쓸 때 |
+| [docs/api/cve-watch.md](docs/api/cve-watch.md) | CVE 감시(OSV 피드 → 서비스 의존성 목록 → C-IMG-1 `CVE_WATCH` 증거·`remediation`, 즉시 조회·가짜 권고 주입·진단 연결 501)를 바꾸거나 쓸 때 |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
 | [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API(진입점 Prometheus PromQL·`metricsStatus`·에러 버짓 공식·복제 지연·5초 캐시·basic auth 설정)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`·반영 실행 상세·이벤트 조회)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
@@ -66,6 +67,7 @@ app/
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   DisasterService(재난 미리보기·만들기·종료, 피해 서비스 긴급 계획 트리거) · disaster_rules(반경·거리·분류·도착 고르기, 순수 계산)
+│                     #   live_disaster_feed(실제 지진 피드 USGS 주기 조회·시연 주입·상태, 기본 꺼짐, API 서버 18) · live_disaster_feed_rules(피드 읽기·중복 제거·조직 기준 판정, 순수 계산)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1·C-SEC-1(출발·도착 앱 환경 변수 키) 확인, 기본 꺼짐, 보안 5)

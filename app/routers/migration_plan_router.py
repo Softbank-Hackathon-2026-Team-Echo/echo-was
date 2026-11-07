@@ -1,12 +1,13 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 
 from app.auth.guards import HumanDeveloperAccess, ViewerAccess
 from app.dependencies import get_migration_plan_result_service, get_migration_plan_service
 from app.enums import MigrationPlanStatus
 from app.schemas.migration_plan import (
+    ApproveMigrationPlanRequest,
     CreateMigrationPlanRequest,
     MigrationLogPageResponse,
     MigrationPlanDetailResponse,
@@ -55,6 +56,7 @@ async def create_migration_plan(
             max_replication_lag_seconds=conditions.max_replication_lag_seconds,
             simulate_fail_at_step=simulate.fail_at_step if simulate is not None else None,
             simulate_reason=simulate.reason if simulate is not None else None,
+            include_db_cutover=request.include_cutover,
         ),
     )
     return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))
@@ -103,10 +105,22 @@ async def get_migration_plan(
     response_model=ApiResponse[MigrationPlanDetailResponse],
 )
 async def approve_migration_plan(
-    access: HumanDeveloperAccess, plan_id: uuid.UUID, migration_plans: MigrationPlans
+    access: HumanDeveloperAccess,
+    plan_id: uuid.UUID,
+    migration_plans: MigrationPlans,
+    request: Annotated[ApproveMigrationPlanRequest | None, Body()] = None,
 ) -> ApiResponse[MigrationPlanDetailResponse]:
-    """승인하면 바로 실행이 시작된다(별도 실행 버튼 없음)."""
-    view = await migration_plans.approve_plan(access.organization_id, plan_id, access.user.id)
+    """승인하면 바로 실행이 시작된다(별도 실행 버튼 없음).
+
+    본문은 선택이다. 재난 긴급 이전 + DB 쓰기 전환 계획(상세 promoteWarning 이 있음)은
+    `{"acknowledgePromote": true}` 가 없으면 422 PROMOTE_ACK_REQUIRED 다.
+    """
+    view = await migration_plans.approve_plan(
+        access.organization_id,
+        plan_id,
+        access.user.id,
+        acknowledge_promote=request.acknowledge_promote if request is not None else False,
+    )
     return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))
 
 

@@ -3,6 +3,10 @@
 행에는 서비스·계획 id 가 없어 시간 창으로 찾는다. 창은 [그 계획 finished_at, 같은 서비스의 다음 계획
 created_at)이고(다음 계획이 없으면 끝이 없다), 복귀(FAILBACK) 계획은 ROLLBACK, 그 밖은 CUTOVER 행을
 본다. 고객 DB 는 트랜잭션 밖에서 읽고 저장하지 않는다. 읽지 못해도 예외를 올리지 않는다(상세는 200).
+
+DB 쓰기 전환 단계가 있는 계획(API 서버 17)은 컷오버가 계획 안(finished_at 전)에서 일어나 시간 창에
+걸리지 않는다. 그 단계가 계획 id 로 읽어 단계 결과에 적어 둔 행을 그대로 쓴다(고객 DB 를 다시 읽지
+않는다. simulated 계획이면 가짜 행이다).
 """
 
 import asyncio
@@ -27,7 +31,9 @@ from app.executors.base import (
 )
 from app.models import Environment, MigrationPlan
 from app.repositories.migration_plan_repository import MigrationPlanRepository
+from app.services.migration_db_cutover import stored_cutover_run
 from app.services.migration_plan_service import MigrationPlanView
+from app.services.migration_plan_support import has_db_cutover
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +129,8 @@ class MigrationPlanResultService:
     async def find_cutover_run(self, view: MigrationPlanView) -> CutoverRun | None:
         """그 계획의 컷오버 결과. 읽는 조건 밖이거나 행이 없거나 읽지 못하면 None."""
         plan = view.plan
+        if has_db_cutover(plan.steps):
+            return stored_cutover_run(plan.step_results) if plan.finished_at is not None else None
         if not self._should_read(plan):
             return None
         cached = self._cache.find(plan.id, self._clock.now())

@@ -279,6 +279,21 @@ CREATE TABLE public.deployments (
     CONSTRAINT ck_deployments_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'IN_PROGRESS'::character varying, 'SUCCEEDED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])))
 );
 
+CREATE TABLE public.disaster_feed_states (
+    provider character varying(32) NOT NULL,
+    last_polled_at timestamp with time zone,
+    last_success_at timestamp with time zone,
+    last_error_code character varying(64),
+    last_feed_count integer NOT NULL,
+    last_new_event_count integer NOT NULL,
+    last_skipped_count integer NOT NULL,
+    seen_event_ids jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_disaster_feed_states_counts_non_negative CHECK (((last_feed_count >= 0) AND (last_new_event_count >= 0) AND (last_skipped_count >= 0))),
+    CONSTRAINT ck_disaster_feed_states_seen_event_ids_is_array CHECK ((jsonb_typeof(seen_event_ids) = 'array'::text))
+);
+
 CREATE TABLE public.disasters (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     organization_id uuid NOT NULL,
@@ -293,20 +308,25 @@ CREATE TABLE public.disasters (
     affected_environment_ids jsonb NOT NULL,
     safe_environment_ids jsonb NOT NULL,
     unknown_environment_ids jsonb NOT NULL,
-    created_by_user_id uuid NOT NULL,
+    created_by_user_id uuid,
     ended_by_user_id uuid,
     started_at timestamp with time zone NOT NULL,
     ended_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    feed_event_id character varying(128),
+    feed_event jsonb,
     CONSTRAINT ck_disasters_affected_environment_ids_is_array CHECK ((jsonb_typeof(affected_environment_ids) = 'array'::text)),
+    CONSTRAINT ck_disasters_creator_matches_source CHECK ((((source)::text = 'SIMULATED'::text) = (created_by_user_id IS NOT NULL))),
     CONSTRAINT ck_disasters_ended_at_consistency CHECK ((((status)::text = 'ENDED'::text) = (ended_at IS NOT NULL))),
     CONSTRAINT ck_disasters_epicenter_lat_range CHECK (((epicenter_lat >= ('-90'::integer)::double precision) AND (epicenter_lat <= (90)::double precision))),
     CONSTRAINT ck_disasters_epicenter_lng_range CHECK (((epicenter_lng >= ('-180'::integer)::double precision) AND (epicenter_lng <= (180)::double precision))),
+    CONSTRAINT ck_disasters_feed_event_is_object CHECK (((feed_event IS NULL) OR (jsonb_typeof(feed_event) = 'object'::text))),
+    CONSTRAINT ck_disasters_feed_event_matches_source CHECK ((((source)::text = 'SIMULATED'::text) = (feed_event_id IS NULL))),
     CONSTRAINT ck_disasters_magnitude_range CHECK (((magnitude >= (0)::numeric) AND (magnitude <= (10)::numeric))),
     CONSTRAINT ck_disasters_radius_km_non_negative CHECK ((radius_km >= 0)),
     CONSTRAINT ck_disasters_safe_environment_ids_is_array CHECK ((jsonb_typeof(safe_environment_ids) = 'array'::text)),
-    CONSTRAINT ck_disasters_source_valid CHECK (((source)::text = 'SIMULATED'::text)),
+    CONSTRAINT ck_disasters_source_valid CHECK (((source)::text = ANY ((ARRAY['SIMULATED'::character varying, 'LIVE_FEED'::character varying, 'FEED_INJECTED'::character varying])::text[]))),
     CONSTRAINT ck_disasters_status_valid CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'ENDED'::character varying])::text[]))),
     CONSTRAINT ck_disasters_type_valid CHECK (((type)::text = ANY ((ARRAY['EARTHQUAKE'::character varying, 'TYPHOON'::character varying])::text[]))),
     CONSTRAINT ck_disasters_unknown_environment_ids_is_array CHECK ((jsonb_typeof(unknown_environment_ids) = 'array'::text))
@@ -359,6 +379,8 @@ CREATE TABLE public.findings (
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    remediation jsonb,
+    dedupe_key character varying(400),
     CONSTRAINT ck_findings_ai_confirmation_consistency CHECK ((((source)::text = 'AI_REVIEW'::text) = (confirmation IS NOT NULL))),
     CONSTRAINT ck_findings_ai_result_not_pass CHECK ((((source)::text <> 'AI_REVIEW'::text) OR ((result)::text = ANY ((ARRAY['WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying])::text[])))),
     CONSTRAINT ck_findings_confirmation_valid CHECK (((confirmation IS NULL) OR ((confirmation)::text = ANY ((ARRAY['UNCONFIRMED'::character varying, 'ESCALATED'::character varying, 'DISMISSED'::character varying])::text[])))),
@@ -368,8 +390,9 @@ CREATE TABLE public.findings (
     CONSTRAINT ck_findings_items_is_array CHECK ((jsonb_typeof(items) = 'array'::text)),
     CONSTRAINT ck_findings_manual_review_has_basis CHECK ((((source)::text <> 'MANUAL_REVIEW'::text) OR ((reviewer_user_id IS NOT NULL) AND (basis_url IS NOT NULL)))),
     CONSTRAINT ck_findings_mode_valid CHECK (((mode)::text = ANY ((ARRAY['REAL'::character varying, 'CACHE'::character varying, 'SIMULATED'::character varying])::text[]))),
+    CONSTRAINT ck_findings_remediation_is_object CHECK (((remediation IS NULL) OR (jsonb_typeof(remediation) = 'object'::text))),
     CONSTRAINT ck_findings_result_valid CHECK (((result)::text = ANY ((ARRAY['PASS'::character varying, 'WARN'::character varying, 'FAIL'::character varying, 'UNKNOWN'::character varying, 'NA'::character varying])::text[]))),
-    CONSTRAINT ck_findings_source_valid CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, 'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, 'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, 'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, 'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, 'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, 'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, 'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, 'AI_REVIEW'::character varying])::text[]))),
+    CONSTRAINT ck_findings_source_valid CHECK (((source)::text = ANY ((ARRAY['TRIVY_IMAGE'::character varying, 'TRIVY_CONFIG'::character varying, 'TRIVY_SECRET'::character varying, 'GITLEAKS'::character varying, 'TLS_PROBE'::character varying, 'MANUAL_REVIEW'::character varying, 'WAS_TEST'::character varying, 'WAS_STATE'::character varying, 'AUDIT_LOG'::character varying, 'PRECHECK'::character varying, 'ENTRYPOINT'::character varying, 'DATA_ENGINE'::character varying, 'CLOUD_API'::character varying, 'KUBERNETES_API'::character varying, 'GITHUB_API'::character varying, 'AI_REVIEW'::character varying, 'CVE_WATCH'::character varying])::text[]))),
     CONSTRAINT ck_findings_total_items_non_negative CHECK ((total_items >= 0))
 );
 
@@ -424,7 +447,7 @@ CREATE TABLE public.migration_plan_logs (
     CONSTRAINT ck_migration_plan_logs_data_is_object CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT ck_migration_plan_logs_level_valid CHECK (((level)::text = ANY ((ARRAY['INFO'::character varying, 'WARN'::character varying, 'ERROR'::character varying])::text[]))),
     CONSTRAINT ck_migration_plan_logs_seq_positive CHECK ((seq >= 1)),
-    CONSTRAINT ck_migration_plan_logs_step_range CHECK (((step >= 0) AND (step <= 4)))
+    CONSTRAINT ck_migration_plan_logs_step_range CHECK (((step >= 0) AND (step <= 5)))
 );
 
 CREATE TABLE public.migration_plans (
@@ -466,9 +489,9 @@ CREATE TABLE public.migration_plans (
     mode character varying(16) DEFAULT 'PLANNED'::character varying NOT NULL,
     disaster_id uuid,
     CONSTRAINT ck_migration_plans_approved_consistency CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL))),
-    CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 4))),
+    CONSTRAINT ck_migration_plans_current_step_range CHECK (((current_step >= 0) AND (current_step <= 5))),
     CONSTRAINT ck_migration_plans_error_code_consistency CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying])::text[])) = (error_code IS NOT NULL))),
-    CONSTRAINT ck_migration_plans_error_code_valid CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, 'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, 'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, 'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, 'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, 'TARGET_NOT_RECEIVING'::character varying, 'SECURITY_GATE_BLOCKED'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_error_code_valid CHECK (((error_code)::text = ANY ((ARRAY['PREFLIGHT_FAILED'::character varying, 'TRAFFIC_APPLY_FAILED'::character varying, 'HEALTH_CHECK_FAILED'::character varying, 'METRICS_UNAVAILABLE'::character varying, 'THRESHOLD_EXCEEDED'::character varying, 'DATA_LAG_EXCEEDED'::character varying, 'ABORTED'::character varying, 'WORKER_LOST'::character varying, 'INTERNAL_ERROR'::character varying, 'TARGET_NOT_RECEIVING'::character varying, 'SECURITY_GATE_BLOCKED'::character varying, 'DB_CUTOVER_FAILED'::character varying, 'DB_CUTOVER_TIMEOUT'::character varying, 'DB_CUTOVER_PARTIAL'::character varying, 'DATA_INTEGRITY_FAILED'::character varying, 'DB_CUTOVER_UNKNOWN'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_expected_seconds_non_negative CHECK ((expected_seconds >= 0)),
     CONSTRAINT ck_migration_plans_fingerprint_is_object CHECK ((jsonb_typeof(fingerprint) = 'object'::text)),
     CONSTRAINT ck_migration_plans_finished_at_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[])) = (finished_at IS NOT NULL))),
@@ -476,7 +499,7 @@ CREATE TABLE public.migration_plans (
     CONSTRAINT ck_migration_plans_observe_seconds_range CHECK (((observe_seconds >= 1) AND (observe_seconds <= 600))),
     CONSTRAINT ck_migration_plans_rollback_attempts_non_negative CHECK ((rollback_attempts >= 0)),
     CONSTRAINT ck_migration_plans_rollback_conditions_is_object CHECK ((jsonb_typeof(rollback_conditions) = 'object'::text)),
-    CONSTRAINT ck_migration_plans_rollback_status_valid CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'NOT_NEEDED'::character varying])::text[]))),
+    CONSTRAINT ck_migration_plans_rollback_status_valid CHECK (((rollback_status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'NOT_NEEDED'::character varying, 'SKIPPED'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_simulate_is_object CHECK ((jsonb_typeof(simulate) = 'object'::text)),
     CONSTRAINT ck_migration_plans_status_valid CHECK (((status)::text = ANY ((ARRAY['PENDING_APPROVAL'::character varying, 'APPROVED'::character varying, 'RUNNING'::character varying, 'ROLLING_BACK'::character varying, 'SUCCEEDED'::character varying, 'ROLLED_BACK'::character varying, 'FAILED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'STALE'::character varying])::text[]))),
     CONSTRAINT ck_migration_plans_step_phase_valid CHECK (((step_phase)::text = ANY ((ARRAY['APPLY'::character varying, 'OBSERVE'::character varying, 'JUDGE'::character varying])::text[]))),
@@ -504,6 +527,10 @@ CREATE TABLE public.organizations (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     allow_self_approval boolean DEFAULT false NOT NULL,
+    live_feed_min_magnitude numeric(3,1) DEFAULT 6.0 NOT NULL,
+    live_feed_radius_km integer DEFAULT 300 NOT NULL,
+    CONSTRAINT ck_organizations_live_feed_min_magnitude_range CHECK (((live_feed_min_magnitude >= (0)::numeric) AND (live_feed_min_magnitude <= (10)::numeric))),
+    CONSTRAINT ck_organizations_live_feed_radius_km_range CHECK (((live_feed_radius_km >= 1) AND (live_feed_radius_km <= 2000))),
     CONSTRAINT ck_organizations_name_not_empty CHECK ((char_length((name)::text) >= 1)),
     CONSTRAINT ck_organizations_slug_format CHECK (((slug)::text ~ '^[a-z0-9](-?[a-z0-9]){0,38}$'::text))
 );
@@ -533,6 +560,24 @@ CREATE TABLE public.security_exceptions (
     CONSTRAINT ck_security_exceptions_max_duration CHECK ((expires_at <= (created_at + '7 days'::interval))),
     CONSTRAINT ck_security_exceptions_reason_present CHECK (((char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 1000))),
     CONSTRAINT ck_security_exceptions_revocation_consistency CHECK (((revoked_by_user_id IS NULL) = (revoked_at IS NULL)))
+);
+
+CREATE TABLE public.service_dependency_snapshots (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    image_digest character varying(71) NOT NULL,
+    source character varying(16) NOT NULL,
+    source_ref character varying(500),
+    packages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    package_count integer DEFAULT 0 NOT NULL,
+    collected_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_service_dependency_snapshots_image_digest_format CHECK (((image_digest)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT ck_service_dependency_snapshots_package_count_non_negative CHECK ((package_count >= 0)),
+    CONSTRAINT ck_service_dependency_snapshots_packages_is_array CHECK ((jsonb_typeof(packages) = 'array'::text)),
+    CONSTRAINT ck_service_dependency_snapshots_source_valid CHECK (((source)::text = ANY ((ARRAY['BUILD_SCAN'::character varying, 'RUNNER_SBOM'::character varying])::text[])))
 );
 
 CREATE TABLE public.service_environment_variables (
@@ -649,6 +694,9 @@ ALTER TABLE ONLY public.deploy_requests
 ALTER TABLE ONLY public.deployments
     ADD CONSTRAINT pk_deployments PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.disaster_feed_states
+    ADD CONSTRAINT pk_disaster_feed_states PRIMARY KEY (provider);
+
 ALTER TABLE ONLY public.disasters
     ADD CONSTRAINT pk_disasters PRIMARY KEY (id);
 
@@ -678,6 +726,9 @@ ALTER TABLE ONLY public.organizations
 
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT pk_security_exceptions PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT pk_service_dependency_snapshots PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.service_environment_variables
     ADD CONSTRAINT pk_service_environment_variables PRIMARY KEY (id);
@@ -754,6 +805,8 @@ CREATE INDEX ix_disasters_organization_id_status_created_at ON public.disasters 
 
 CREATE INDEX ix_findings_organization_id_control_id_collected_at ON public.findings USING btree (organization_id, control_id, collected_at);
 
+CREATE INDEX ix_findings_organization_id_dedupe_key ON public.findings USING btree (organization_id, dedupe_key) WHERE (dedupe_key IS NOT NULL);
+
 CREATE INDEX ix_invitations_github_id ON public.invitations USING btree (github_id);
 
 CREATE INDEX ix_jobs_status_run_after ON public.jobs USING btree (status, run_after);
@@ -765,6 +818,8 @@ CREATE INDEX ix_migration_plans_service_id_created_at ON public.migration_plans 
 CREATE INDEX ix_organization_members_user_id ON public.organization_members USING btree (user_id);
 
 CREATE INDEX ix_security_exceptions_organization_id_control_id_expires_at ON public.security_exceptions USING btree (organization_id, control_id, expires_at);
+
+CREATE INDEX ix_service_dependency_snapshots_service_digest_collected ON public.service_dependency_snapshots USING btree (service_id, image_digest, collected_at);
 
 CREATE INDEX ix_service_environment_variables_connection_key ON public.service_environment_variables USING btree (service_environment_id, key);
 
@@ -781,6 +836,8 @@ CREATE UNIQUE INDEX uq_builds_service_id_repo_url_commit_sha_not_failed ON publi
 CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_active ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = ANY ((ARRAY['BUILDING'::character varying, 'DEPLOYING'::character varying, 'VERIFYING'::character varying])::text[]));
 
 CREATE UNIQUE INDEX uq_deploy_requests_service_environment_id_queued ON public.deploy_requests USING btree (service_environment_id) WHERE ((status)::text = 'QUEUED'::text);
+
+CREATE UNIQUE INDEX uq_disasters_organization_id_feed_event_id ON public.disasters USING btree (organization_id, feed_event_id) WHERE (feed_event_id IS NOT NULL);
 
 CREATE UNIQUE INDEX uq_environments_org_name_live ON public.environments USING btree (organization_id, name) WHERE (is_deleted = false);
 
@@ -992,6 +1049,12 @@ ALTER TABLE ONLY public.security_exceptions
 
 ALTER TABLE ONLY public.security_exceptions
     ADD CONSTRAINT fk_security_exceptions_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT fk_service_dependency_snapshots_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.service_dependency_snapshots
+    ADD CONSTRAINT fk_service_dependency_snapshots_service_id_services FOREIGN KEY (service_id) REFERENCES public.services(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.service_environment_variables
     ADD CONSTRAINT fk_service_environment_variables_connection FOREIGN KEY (service_environment_id) REFERENCES public.service_environments(id) ON DELETE RESTRICT;

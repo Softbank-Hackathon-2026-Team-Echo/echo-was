@@ -190,6 +190,14 @@ class MetricsProvider(Protocol):
 - 제한 시간이 지나면 `close` 를 기다리지 않고 `terminate` 로 끊는다(끊긴 망에서 `close` 가 제한 시간을 넘기지 않게).
 - 실패는 예외 대신 `CutoverRunUnavailable(code)`: 매핑 없음 `CUTOVER_RESULT_ENV_UNMAPPED`, 비밀값 없음 `CUTOVER_RESULT_SECRET_MISSING`, 접속 실패·시간 초과(`OSError`·`TimeoutError`·`asyncpg.InterfaceError`) `CUTOVER_RESULT_UNREACHABLE`, 서버가 거절(`asyncpg.PostgresError`: 권한 없음·표 없음 등) `CUTOVER_RESULT_QUERY_FAILED`. 경고 로그는 부르는 쪽이 코드와 계획·환경 id 로만 남긴다.
 
+### DB 쓰기 전환 (`DbCutoverExecutor`, API 서버 17)
+
+- `start(request) -> DbCutoverStarted(job_name) | DbCutoverStartFailed(code, retryable)`, `poll(job_name) -> DbCutoverRunning | DbCutoverFinished(exit_code, reason) | DbCutoverLost(code)`, `find_run(request) -> CutoverRunResult`(이 계획 id·종류의 결과 행). 예외를 올리지 않는다.
+- 기본 `DisabledDbCutoverExecutor`(`DB_CUTOVER_EXECUTOR_MODE=disabled`): 계획 만들기가 먼저 409 로 막는다.
+- 가짜 `FakeDbCutoverExecutor`(`fake`): Job 없이 `FAKE_EXECUTOR_STEP_SECONDS` 뒤 종료 0, 결과 행은 쓰기 정지 1500ms·장부 100·누락 0·중복 0. 시험은 `exit_code`·`reason`·`never_finish`·`lost`·`start_failure`·`run`·`no_run` 으로 바꾼다.
+- 실제 `KubernetesDbCutoverExecutor`(`kubernetes`, `app/executors/kubernetes/cutover_job.py`): 파드 SA 토큰(호출마다 파일에서 읽음)으로 같은 클러스터 창구(`https://kubernetes.default.svc`)를 부른다. `POST /apis/batch/v1/namespaces/echo-ops/jobs` — 모양은 echo-infra `job.example.yaml`·VAP 그대로(SA `echo-cutover`, 컨테이너 1개, `DB_CUTOVER_JOB_IMAGE`, env `KIND`·`PLAN_ID`·`ALLOW_PROMOTE` 만). 409 면 기존 Job 의 `PLAN_ID`·`KIND` 가 같을 때만 같은 Job(아니면 `JOB_NAME_CONFLICT`). 401·403 `JOB_CREATE_UNAUTHORIZED`, 400·422(VAP 거부) `JOB_CREATE_REJECTED`, 5xx·429·연결 실패 `JOB_CREATE_UNREACHABLE`(retryable). 상태는 Job 조건 `Complete`(종료 0, 파드 로그 끝 200줄에서 `ALREADY_WRITER`·`ALREADY_DONE`·`승격 완료`→`PROMOTED`) / `Failed`(파드 `cutover` 컨테이너 종료 코드) / 404 사라짐 / 그 밖·닿지 못함 = 진행 중. 결과 행은 `PostgresCutoverRunReader.find_by_plan`(`WHERE plan_id = $1 AND kind = $2`).
+- 필요한 권한(echo-infra `echo-ops.yaml` Role `echo-was-cutover-jobs` → KSA `echo-was/echo-was`): jobs create·get, pods list, pods/log get.
+
 ### 내리기 (`TeardownExecutor`)
 
 - 서비스 삭제 때 연결 하나를 클러스터에서 내린다(실제 구현은 앱 네임스페이스 삭제). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.
