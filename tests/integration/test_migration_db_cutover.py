@@ -1,6 +1,6 @@
 """이전 계획의 DB 쓰기 전환 단계(API 서버 17, SPEC api-17-cutover-step).
 
-includeCutover=false 는 지금과 같은 5단계, true 면 비율 100% 뒤 DB_CUTOVER 단계(5)가 컷오버 Job 을
+includeCutover=false 는 지금과 같은 8단계, true 면 비율 100% 뒤 DB_CUTOVER 단계(8)가 컷오버 Job 을
 만들고 기다려 결과 행으로 판정한다. 실패 정책: 종료 1 → 트래픽 롤백, 부분 상태·상한 초과·누락 →
 자동으로 되돌리지 않음(rollbackStatus SKIPPED).
 """
@@ -77,7 +77,7 @@ async def _audit(migration: Migration, plan_id: str) -> list[AuditLog]:
 # --- 기본(false): 지금과 같다 ---
 
 
-async def test_without_include_cutover_plan_is_unchanged_five_steps(migration: Migration) -> None:
+async def test_without_include_cutover_plan_has_eight_steps(migration: Migration) -> None:
     _enable(migration)
     fake = _fake(migration)
 
@@ -88,7 +88,10 @@ async def test_without_include_cutover_plan_is_unchanged_five_steps(migration: M
         "PREFLIGHT",
         "SHIFT",
         "SHIFT",
+        "SHIFT",
+        "SHIFT",
         "DATA_SYNC_CHECK",
+        "SHIFT",
         "SHIFT",
     ]
     assert final["status"] == "SUCCEEDED"
@@ -107,7 +110,7 @@ async def test_include_cutover_rejected_when_executor_disabled(migration: Migrat
 
 async def test_cutover_simulate_without_include_cutover_is_422(migration: Migration) -> None:
     _enable(migration)
-    response = await migration.request_plan(simulate={"failAtStep": 5, "reason": "DB_CUTOVER_FAIL"})
+    response = await migration.request_plan(simulate={"failAtStep": 8, "reason": "DB_CUTOVER_FAIL"})
 
     assert response.status_code == 422
 
@@ -122,11 +125,11 @@ async def test_include_cutover_runs_job_after_full_shift_and_records_result(
     fake = _fake(migration)
 
     final, codes = await _run(migration, includeCutover=True)
-    step = final["steps"][5]
+    step = final["steps"][8]
     audit = await _audit(migration, final["id"])
 
     assert final["status"] == "SUCCEEDED"
-    assert _statuses(final) == ["PASSED"] * 6
+    assert _statuses(final) == ["PASSED"] * 9
     assert (step["kind"], step["maxWaitSeconds"]) == ("DB_CUTOVER", 90)
     assert codes == CUTOVER_SUCCESS_LOG_CODES
     # 트래픽을 100% 옮긴 뒤에 Job 을 만들었다.
@@ -175,8 +178,8 @@ async def test_already_writer_reason_passes_without_result_row(migration: Migrat
     final, codes = await _run(migration, includeCutover=True)
 
     assert final["status"] == "SUCCEEDED"
-    assert final["steps"][5]["cutover"]["reason"] == "ALREADY_WRITER"
-    assert final["steps"][5]["cutover"]["run"] is None
+    assert final["steps"][8]["cutover"]["reason"] == "ALREADY_WRITER"
+    assert final["steps"][8]["cutover"]["run"] is None
     assert codes[-2:] == ["DB_CUTOVER_OK", "SUCCEEDED"]
 
 
@@ -196,7 +199,7 @@ async def test_job_exit_one_rolls_traffic_back_to_source(migration: Migration) -
     )
     assert final["errorMessage"] == MIGRATION_ERROR_MESSAGES[MigrationErrorCode.DB_CUTOVER_FAILED]
     assert await migration.weights() == (100, 0)
-    assert _statuses(final) == ["PASSED"] * 5 + ["FAILED"]
+    assert _statuses(final) == ["PASSED"] * 8 + ["FAILED"]
     assert codes[-3:] == ["DB_CUTOVER_FAILED", "ROLLBACK_STARTED", "ROLLBACK_APPLIED"]
 
 
@@ -207,7 +210,7 @@ async def test_job_create_failure_rolls_traffic_back(migration: Migration) -> No
     final, _ = await _run(migration, includeCutover=True)
 
     assert (final["status"], final["errorCode"]) == ("ROLLED_BACK", "DB_CUTOVER_FAILED")
-    assert final["steps"][5]["cutover"]["startFailure"] == "JOB_CREATE_REJECTED"
+    assert final["steps"][8]["cutover"]["startFailure"] == "JOB_CREATE_REJECTED"
     assert await migration.weights() == (100, 0)
 
 
@@ -253,8 +256,8 @@ async def test_unsafe_cutover_failure_leaves_traffic_and_db_for_a_person(
     )
     # 트래픽은 도착 100% 그대로(쓰기 담당이 도착이거나 알 수 없다).
     assert await migration.weights() == (0, 100)
-    assert final["steps"][5]["result"]["failureCode"] == error_code
-    assert final["steps"][5]["cutover"]["reason"] == reason
+    assert final["steps"][8]["result"]["failureCode"] == error_code
+    assert final["steps"][8]["cutover"]["reason"] == reason
     assert codes[-3:] == ["DB_CUTOVER_FAILED", "DB_CUTOVER_MANUAL_REQUIRED", "FAILED"]
     assert audit[-1].result == "FAILED"
     assert audit[-1].details["errorCode"] == error_code
@@ -271,7 +274,7 @@ async def test_job_that_never_finishes_times_out_without_rollback(migration: Mig
         "DB_CUTOVER_TIMEOUT",
         "SKIPPED",
     )
-    assert final["steps"][5]["cutover"]["reason"] == "TIMED_OUT"
+    assert final["steps"][8]["cutover"]["reason"] == "TIMED_OUT"
     assert fake.polls >= 2
     assert await migration.weights() == (0, 100)
     assert "DB_CUTOVER_JOB_FINISHED" not in codes
@@ -323,7 +326,7 @@ async def test_simulated_cutover_failures_do_not_call_executor(
     fake = _fake(migration)
 
     final, _ = await _run(
-        migration, includeCutover=True, simulate={"failAtStep": 5, "reason": reason}
+        migration, includeCutover=True, simulate={"failAtStep": 8, "reason": reason}
     )
 
     assert (final["status"], final["errorCode"], final["rollbackStatus"]) == (
@@ -333,7 +336,7 @@ async def test_simulated_cutover_failures_do_not_call_executor(
     )
     assert await migration.weights() == weights
     assert fake.started == [] and fake.polls == 0
-    assert final["steps"][5]["cutover"]["jobName"].startswith("simulated-cutover-")
+    assert final["steps"][8]["cutover"]["jobName"].startswith("simulated-cutover-")
 
 
 # --- 중단: Job 을 만든 뒤에는 판정까지 기다린다 ---

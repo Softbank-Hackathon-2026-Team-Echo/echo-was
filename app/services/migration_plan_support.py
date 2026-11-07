@@ -24,20 +24,23 @@ from app.repositories.service_environment_repository import ServiceEnvironmentRe
 from app.services.deploy_support import deploy_target
 from app.services.migration_counting import expected_shift_seconds
 
-# 고정 단계: (종류, 도착 비율). 비율 목록은 바꾸지 않는다.
+# 새 계획의 단계: 저장된 계획을 읽을 때는 그 계획의 steps 를 쓴다.
 STEP_DEFINITIONS: tuple[tuple[MigrationStepKind, int | None], ...] = (
     (MigrationStepKind.PREFLIGHT, None),
+    (MigrationStepKind.SHIFT, 5),
     (MigrationStepKind.SHIFT, 10),
+    (MigrationStepKind.SHIFT, 25),
     (MigrationStepKind.SHIFT, 50),
     (MigrationStepKind.DATA_SYNC_CHECK, None),
+    (MigrationStepKind.SHIFT, 75),
     (MigrationStepKind.SHIFT, 100),
 )
-DATA_SYNC_STEP = 3
-# DB 쓰기 전환 단계(API 서버 17). includeCutover 계획만, 모든 종류에서 비율 100% 뒤 마지막(5)이다.
+DATA_SYNC_STEP = 5
+# includeCutover 계획만 비율 100% 뒤에 DB 쓰기 전환을 더한다.
 DB_CUTOVER_STEP = len(STEP_DEFINITIONS)
 # Job 시작·기다림의 예상 초(쓰기 정지 실측 17초 안팎 + Job 파드 시작). 표시용이다.
 DB_CUTOVER_EXPECTED_SECONDS = 30
-# 비율 단계 번호(10·50·100% 순). 필요 건수 목록(requiredRequests)의 순서와 같다.
+# 새 계획의 비율 단계 번호. 필요 건수 목록(requiredRequests)의 순서와 같다.
 SHIFT_STEPS = tuple(
     index for index, (kind, _) in enumerate(STEP_DEFINITIONS) if kind is MigrationStepKind.SHIFT
 )
@@ -56,6 +59,7 @@ STEP_SOURCE_WEIGHT = "sourceWeight"
 # (응답에는 내보내지 않는다).
 STEP_OBSERVE_SECONDS = "observeSeconds"
 STEP_REQUIRED_REQUESTS = "requiredRequests"
+STEP_MIN_OBSERVE_SECONDS = "minObserveSeconds"
 STEP_MAX_WAIT_SECONDS = "maxWaitSeconds"
 STEP_EXPECTED_SECONDS = "expectedSeconds"
 RESULT_STATUS = "status"
@@ -95,19 +99,21 @@ def build_steps(
     requests_per_second: int,
     overhead_seconds: int,
     *,
+    min_observe_seconds: int = 4,
     db_cutover_timeout_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
-    """고정 5단계. 단계 예상 = 여유 + (비율 단계면 건수를 채울 예상 초, 최대 대기 이하).
-
-    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다. db_cutover_timeout_seconds 를
-    주면 맨 뒤에 DB 쓰기 전환 단계(5)를 더한다(그 단계의 maxWaitSeconds = Job 기다림 상한).
-    """
+    """새 계획의 8단계와 선택 DB 전환. 설정값을 각 비율 단계에 고정한다."""
     required_by_step = dict(zip(SHIFT_STEPS, required_requests, strict=True))
     steps: list[dict[str, Any]] = []
     for index, (kind, target_weight) in enumerate(STEP_DEFINITIONS):
         required = required_by_step.get(index)
         shift_seconds = (
-            expected_shift_seconds(required, max_wait_seconds, requests_per_second, target_weight)
+            max(
+                min_observe_seconds,
+                expected_shift_seconds(
+                    required, max_wait_seconds, requests_per_second, target_weight
+                ),
+            )
             if required is not None and target_weight is not None
             else 0
         )
@@ -119,6 +125,7 @@ def build_steps(
                 STEP_TARGET_WEIGHT: target_weight,
                 STEP_SOURCE_WEIGHT: 100 - target_weight if target_weight is not None else None,
                 STEP_REQUIRED_REQUESTS: required,
+                STEP_MIN_OBSERVE_SECONDS: min_observe_seconds if is_shift else None,
                 STEP_MAX_WAIT_SECONDS: max_wait_seconds if is_shift else None,
                 STEP_OBSERVE_SECONDS: max_wait_seconds if is_shift else None,
                 STEP_EXPECTED_SECONDS: overhead_seconds + shift_seconds,
@@ -132,6 +139,7 @@ def build_steps(
                 STEP_TARGET_WEIGHT: None,
                 STEP_SOURCE_WEIGHT: None,
                 STEP_REQUIRED_REQUESTS: None,
+                STEP_MIN_OBSERVE_SECONDS: None,
                 STEP_MAX_WAIT_SECONDS: db_cutover_timeout_seconds,
                 STEP_OBSERVE_SECONDS: None,
                 STEP_EXPECTED_SECONDS: overhead_seconds + DB_CUTOVER_EXPECTED_SECONDS,
@@ -141,7 +149,7 @@ def build_steps(
 
 
 def last_step(steps: Sequence[dict[str, Any]]) -> int:
-    """마지막 단계 번호(5단계 계획 4, DB 쓰기 전환을 더한 계획 5)."""
+    """저장된 단계 목록의 마지막 번호."""
     return len(steps) - 1
 
 
@@ -190,11 +198,13 @@ def promote_warning(steps: Sequence[dict[str, Any]]) -> str | None:
 def step_required_requests(
     steps: Sequence[dict[str, Any]], index: int, defaults: Sequence[int]
 ) -> int:
-    """비율 단계의 필요 건수. 8-1 전에 만든 계획(값 없음)은 설정 기본값을 쓴다."""
+    """저장값 우선. 8-1 이전의 3개 비율 단계는 당시 기본값으로 실행한다."""
     stored = steps[index].get(STEP_REQUIRED_REQUESTS)
     if stored is not None:
         return int(stored)
-    return int(defaults[SHIFT_STEPS.index(index)])
+    shift_indices = [i for i in range(len(steps)) if step_kind(steps, i) is MigrationStepKind.SHIFT]
+    fallback = (20, 50, 50) if len(shift_indices) == 3 else defaults
+    return int(fallback[shift_indices.index(index)])
 
 
 def expected_seconds(steps: Sequence[dict[str, Any]]) -> int:

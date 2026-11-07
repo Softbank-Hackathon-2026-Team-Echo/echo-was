@@ -91,7 +91,7 @@ async def test_entrypoint_counters_pass_a_shift_step_by_request_count(
     assert await harness.worker().run_once()
     started = await migration.plan_row(plan["id"])
     positions = []
-    for _ in range(2):
+    for _ in range(4):
         harness.clock.advance(1)
         assert await harness.worker().run_once()
         row = await migration.plan_row(plan["id"])
@@ -99,16 +99,16 @@ async def test_entrypoint_counters_pass_a_shift_step_by_request_count(
     final = await migration.get_plan(plan["id"])
     stored = await migration.plan_row(plan["id"])
 
-    # 단계 1(10%): 도착은 초당 10건이라 기준값 뒤 2초에 필요 20건을 채운다.
+    # 단계 1(5%): 초당 5건으로 2초에 10건을 채우고 최소 관찰 4초에 다음 단계로 간다.
     assert (started.current_step, started.step_phase) == (1, "OBSERVE")
-    assert positions == [(1, "OBSERVE"), (2, "OBSERVE")]
+    assert positions == [(1, "OBSERVE"), (1, "JUDGE"), (1, "JUDGE"), (2, "OBSERVE")]
     step = final["steps"][1]["result"]
     assert step["status"] == "PASSED"
     assert step["metrics"]["lowTraffic"] is False
-    assert step["metrics"]["requestCount"] == 20
-    assert step["metrics"]["sourceRequestCount"] == 180
+    assert step["metrics"]["requestCount"] == 10
+    assert step["metrics"]["sourceRequestCount"] == 190
     assert stored.step_results[1][RESULT_JUDGE_REASON] == MigrationJudgeReason.COUNT_REACHED.value
     assert final["status"] == "RUNNING" and final["errorCode"] is None
-    assert entrypoint.weights == {"aws": 50, "gcp": 50}
-    assert await migration.weights() == (50, 50)
+    assert entrypoint.weights == {"aws": 90, "gcp": 10}
+    assert await migration.weights() == (90, 10)
     assert "GET /counters" in entrypoint.paths

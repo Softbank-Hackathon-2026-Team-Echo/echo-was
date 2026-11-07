@@ -73,7 +73,7 @@ async def test_simulated_error_rate_with_running_clock_rolls_back_first_shift(
     assert (step["status"], step["failureCode"]) == ("FAILED", "THRESHOLD_EXCEEDED")
     # 필요 20건 · 기준 1% → 허용 1, 기준값 뒤에 만든 5xx = 허용 + 1.
     assert (step["metrics"]["errors5xx"], step["metrics"]["allowedErrors5xx"]) == (2, 1)
-    assert [s["result"]["status"] for s in final["steps"]] == ["PASSED", "FAILED"] + ["SKIPPED"] * 3
+    assert [s["result"]["status"] for s in final["steps"]] == ["PASSED", "FAILED"] + ["SKIPPED"] * 6
     assert codes[-3:] == ["JUDGE_FAILED", "ROLLBACK_STARTED", "ROLLBACK_APPLIED"]
     assert await migration.weights() == (100, 0)
     if entrypoint is not None:
@@ -172,5 +172,5 @@ async def test_entrypoint_p95_null_stays_null_and_judgement_is_unchanged(
     # 판정은 p95 와 상관없이 같다(참고 값).
     assert (final["status"], final["errorCode"]) == ("SUCCEEDED", None)
     assert "GET /summary" in entrypoint.paths
-    for step in (1, 2, 4):
+    for step in (1, 2, 3, 4, 6, 7):
         assert final["steps"][step]["result"]["metrics"]["p95Ms"] == target_p95_ms

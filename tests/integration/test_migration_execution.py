@@ -64,10 +64,10 @@ async def _lose_lease(migration: Migration, times: int = 3) -> None:
 @pytest.mark.parametrize(
     ("step", "reason", "error_code", "failure_line", "metric", "value"),
     [
-        # 필요 50건 · 기준 1% → 허용 1, 만든 5xx = 허용 + 1.
+        # 필요 10건 · 기준 1% → 허용 1, 만든 5xx = 허용 + 1.
         (2, "ERROR_RATE", "THRESHOLD_EXCEEDED", "JUDGE_FAILED", "errors5xx", 2),
-        (4, "HEALTH", "HEALTH_CHECK_FAILED", "JUDGE_FAILED", "healthStatus", "HTTP_ERROR"),
-        (3, "DATA_LAG", "DATA_LAG_EXCEEDED", "DATA_SYNC_FAILED", "replicationLagSeconds", 30.0),
+        (7, "HEALTH", "HEALTH_CHECK_FAILED", "JUDGE_FAILED", "healthStatus", "HTTP_ERROR"),
+        (5, "DATA_LAG", "DATA_LAG_EXCEEDED", "DATA_SYNC_FAILED", "replicationLagSeconds", 30.0),
         (1, "TARGET_NOT_RECEIVING", "TARGET_NOT_RECEIVING", "JUDGE_FAILED", "requestCount", 0),
         (2, "TARGET_NOT_RECEIVING", "TARGET_NOT_RECEIVING", "JUDGE_FAILED", "requestCount", 0),
     ],
@@ -97,7 +97,7 @@ async def test_simulated_judge_failure_rolls_back_to_source(
     result = final["steps"][step]["result"]
     assert (result["status"], result["failureCode"]) == ("FAILED", error_code)
     assert result["metrics"][metric] == value
-    assert _step_statuses(final) == ["PASSED"] * step + ["FAILED"] + ["SKIPPED"] * (4 - step)
+    assert _step_statuses(final) == ["PASSED"] * step + ["FAILED"] + ["SKIPPED"] * (7 - step)
     assert codes[-3:] == [failure_line, "ROLLBACK_STARTED", "ROLLBACK_APPLIED"]
     assert migration.traffic_keys()[-1] == f"{plan['id']}:rollback:0"
 
@@ -127,7 +127,7 @@ async def test_traffic_apply_failure_rolls_back_without_metrics(migration: Migra
         "ROLLBACK_APPLIED",
     ]
     failed_line = rows[-3]
-    assert (failed_line.step, failed_line.data) == (2, {"sourceWeight": 50, "targetWeight": 50})
+    assert (failed_line.step, failed_line.data) == (2, {"sourceWeight": 90, "targetWeight": 10})
     # 처리기가 실패를 만들었으므로 단계 2 의 비율 호출은 없다.
     assert migration.traffic_keys() == [f"{plan['id']}:1", f"{plan['id']}:rollback:0"]
     assert await migration.weights() == (100, 0)
@@ -148,7 +148,7 @@ async def test_unavailable_counts_or_replication_lag_rolls_back(
     await migration.harness.run_until_idle()
     final = await migration.get_plan(plan["id"])
 
-    failed_step = 1 if unavailable == "counts" else 3
+    failed_step = 1 if unavailable == "counts" else 5
     assert (final["status"], final["errorCode"]) == ("ROLLED_BACK", "METRICS_UNAVAILABLE")
     assert final["steps"][failed_step]["result"]["failureCode"] == "METRICS_UNAVAILABLE"
     assert await migration.weights() == (100, 0)
@@ -168,11 +168,11 @@ async def test_data_sync_target_is_writer_passes_step_and_logs_reason(
     rows = await migration.log_rows(plan["id"])
 
     assert final["status"] == "SUCCEEDED"
-    assert _step_statuses(final) == ["PASSED"] * 5
-    assert final["steps"][3]["result"]["metrics"]["replicationLagSeconds"] == 0.0
-    assert "reason" not in final["steps"][3]["result"]["metrics"]
+    assert _step_statuses(final) == ["PASSED"] * 8
+    assert final["steps"][5]["result"]["metrics"]["replicationLagSeconds"] == 0.0
+    assert "reason" not in final["steps"][5]["result"]["metrics"]
     [line] = [row for row in rows if row.code == "DATA_SYNC_OK"]
-    assert line.step == 3
+    assert line.step == 5
     assert line.data == {"replicationLagSeconds": 0.0, "reason": "TARGET_IS_WRITER"}
     assert await migration.weights() == (0, 100)
     assert [row.code for row in rows] == SUCCESS_LOG_CODES
@@ -214,7 +214,7 @@ async def test_abort_during_counting_rolls_back_on_next_run(migration: Migration
     final = await migration.get_plan(plan["id"])
     codes = await migration.log_codes(plan["id"])
 
-    assert observing == (90, 10)
+    assert observing == (95, 5)
     assert counting["progress"]["step"] == 1
     assert rolled_back_at_once == "ROLLED_BACK"
     assert (first.status_code, second.status_code) == (202, 202)
@@ -229,7 +229,7 @@ async def test_abort_during_counting_rolls_back_on_next_run(migration: Migration
     assert codes.count("ABORT_REQUESTED") == 1
     assert codes[-2:] == ["ROLLBACK_STARTED", "ROLLBACK_APPLIED"]
     assert final["steps"][1]["result"]["failureCode"] == "ABORTED"
-    assert _step_statuses(final) == ["PASSED", "FAILED", "SKIPPED", "SKIPPED", "SKIPPED"]
+    assert _step_statuses(final) == ["PASSED", "FAILED"] + ["SKIPPED"] * 6
     assert await migration.weights() == (100, 0)
 
 
@@ -314,7 +314,7 @@ async def test_preflight_health_failure_fails_without_traffic_change(
         "NOT_NEEDED",
     )
     assert final["steps"][0]["result"]["metrics"]["healthStatus"] == "HTTP_ERROR"
-    assert _step_statuses(final) == ["FAILED"] + ["SKIPPED"] * 4
+    assert _step_statuses(final) == ["FAILED"] + ["SKIPPED"] * 7
     assert migration.traffic_keys() == []
     assert await migration.weights() == (100, 0)
     assert (await migration.log_codes(plan["id"]))[-1] == "PREFLIGHT_FAILED"
@@ -343,7 +343,7 @@ async def test_rollback_that_never_applies_fails_and_keeps_last_weights(
         "THRESHOLD_EXCEEDED",
         "FAILED",
     )
-    assert await migration.weights() == (50, 50)
+    assert await migration.weights() == (90, 10)
     assert row.rollback_attempts == harness.settings.migration_rollback_max_attempts == 3
     assert [key for key in migration.traffic_keys() if ":rollback:" in key] == [
         f"{plan['id']}:rollback:{attempt}" for attempt in range(3)
@@ -404,7 +404,7 @@ async def test_restarted_worker_resumes_with_same_key_without_duplicate_lines(
 
     assert (stuck.current_step, stuck.step_phase) == (2, "APPLY")
     assert stuck.traffic_requested_at is not None
-    assert stuck_weights == (90, 10)
+    assert stuck_weights == (95, 5)
     assert final["status"] == "SUCCEEDED"
     assert [key for key, _ in inner.applied].count(f"{plan['id']}:2") == 1
     assert migration.traffic_keys().count(f"{plan['id']}:2") == 2
@@ -419,10 +419,10 @@ async def test_running_plan_rolls_back_when_lease_is_lost_three_times(
     plan = await _approved(migration)
     worker = harness.worker()
     assert await worker.run_once()
-    # 5초면 10% 단계가 20건(5 rps)을 넘겨 50% 단계로 간다.
+    # 5초면 5% 단계가 10건을 넘기고 최소 4초도 지나 10% 단계로 간다.
     harness.clock.advance(5)
     assert await worker.run_once()
-    at_fifty = await migration.weights()
+    at_ten = await migration.weights()
     harness.clock.advance(5)
 
     await _lose_lease(migration)
@@ -430,7 +430,7 @@ async def test_running_plan_rolls_back_when_lease_is_lost_three_times(
     final = await migration.get_plan(plan["id"])
     job = await _job(migration, plan["id"])
 
-    assert at_fifty == (50, 50)
+    assert at_ten == (90, 10)
     assert (final["status"], final["errorCode"], final["rollbackStatus"]) == (
         "ROLLED_BACK",
         "WORKER_LOST",

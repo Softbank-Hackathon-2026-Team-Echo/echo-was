@@ -466,6 +466,7 @@ def get_migration_plan_service(
         max_wait_seconds_default=settings.migration_max_wait_seconds_default,
         expected_rps=settings.migration_expected_rps,
         step_overhead_seconds=settings.migration_step_overhead_seconds,
+        min_observe_seconds=settings.migration_min_observe_seconds,
         approval_ttl_seconds=settings.migration_plan_approval_ttl_seconds,
         security_gate=(
             SecurityGate(session, clock, tls_checker, settings.was_version)

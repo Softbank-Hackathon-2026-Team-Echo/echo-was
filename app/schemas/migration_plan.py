@@ -57,6 +57,7 @@ from app.services.migration_plan_support import (
     STEP_INDEX,
     STEP_KIND,
     STEP_MAX_WAIT_SECONDS,
+    STEP_MIN_OBSERVE_SECONDS,
     STEP_REQUIRED_REQUESTS,
     STEP_SOURCE_WEIGHT,
     STEP_TARGET_WEIGHT,
@@ -70,7 +71,7 @@ SIMULATE_REASON_NOT_SUPPORTED = "SIMULATE_REASON_NOT_SUPPORTED"
 ERRORS_5XX_ALIAS = "errors5xx"
 ALLOWED_ERRORS_5XX_ALIAS = "allowedErrors5xx"
 
-# simulate 이유마다 고를 수 있는 단계. 단계 4 는 출발 비율이 0이라 도착 미수신을 만들 수 없다.
+# 새 요청의 simulate 이유마다 고를 수 있는 단계.
 _SIMULATE_STEPS: dict[MigrationSimulateReason, frozenset[int]] = {
     MigrationSimulateReason.ERROR_RATE: frozenset(SHIFT_STEPS),
     MigrationSimulateReason.HEALTH: frozenset(SHIFT_STEPS),
@@ -104,9 +105,7 @@ class RollbackConditionsRequest(ApiRequestModel):
 class MigrationSimulateRequest(ApiRequestModel):
     """가짜 실행기 모드에서만 받는다. failAtStep 단계를 reason 대로 실패(또는 트래픽 적음)시킨다.
 
-    DATA_LAG 는 데이터 확인 단계(3)만, TARGET_NOT_RECEIVING 은 비율 단계 1·2만, DB_CUTOVER_* ·
-    DATA_INTEGRITY 는 DB 쓰기 전환 단계(5, includeCutover=true 계획만)만, 그 밖의 reason 은 비율
-    단계(1·2·4)만 고를 수 있다. LATENCY 는 받지 않는다(p95 는 판정에 쓰지 않는다).
+    단계별 허용 여부는 옛 번호 변환 뒤 바깥 요청에서 확인한다.
     """
 
     fail_at_step: int = Field(ge=1, le=LAST_STEP_INDEX)
@@ -119,23 +118,17 @@ class MigrationSimulateRequest(ApiRequestModel):
             raise PydanticCustomError("simulate_reason_removed", SIMULATE_REASON_NOT_SUPPORTED)
         return value
 
-    @model_validator(mode="after")
-    def _check_reason_matches_step(self) -> Self:
-        if self.fail_at_step not in _SIMULATE_STEPS[self.reason]:
-            raise PydanticCustomError("simulate_step_mismatch", SIMULATE_STEP_MISMATCH_REASON)
-        return self
-
 
 class CreateMigrationPlanRequest(ApiRequestModel):
     """이전 계획 만들기.
 
-    requiredRequests(비율 10·50·100% 단계 순 필요 건수 3개)·maxWaitSeconds(단계 최대 대기)를
-    빼면 설정 기본값(20·50·50건, 30초)이다.
+    requiredRequests 는 비율 단계 순서로 6개, 옛 요청의 3개는 각각 두 번씩 펼친다.
+    생략하면 설정 기본값(10·10·20·30·30·30건, 최대 대기 30초)이다.
     """
 
     target_environment_id: uuid.UUID
     required_requests: list[RequiredRequestsItem] | None = Field(
-        default=None, min_length=MIGRATION_SHIFT_STEP_COUNT, max_length=MIGRATION_SHIFT_STEP_COUNT
+        default=None, min_length=3, max_length=MIGRATION_SHIFT_STEP_COUNT
     )
     max_wait_seconds: int | None = Field(
         default=None, ge=MIGRATION_MIN_MAX_WAIT_SECONDS, le=MIGRATION_MAX_MAX_WAIT_SECONDS
@@ -147,12 +140,29 @@ class CreateMigrationPlanRequest(ApiRequestModel):
     # 비율 100% 뒤에 DB 쓰기 전환(인프라 컷오버 Job) 단계를 더한다(API 서버 17). 기본 false.
     include_cutover: bool = False
 
+    @field_validator("required_requests")
+    @classmethod
+    def _check_required_requests_length(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and len(value) not in (3, MIGRATION_SHIFT_STEP_COUNT):
+            raise ValueError("requiredRequests must contain 3 or 6 items")
+        return value
+
     @model_validator(mode="after")
-    def _check_cutover_simulate(self) -> Self:
-        if (
-            self.simulate is not None
-            and self.simulate.fail_at_step == DB_CUTOVER_STEP
-            and not self.include_cutover
+    def _normalize_and_check_simulate(self) -> Self:
+        if self.required_requests is not None:
+            if len(self.required_requests) == 3:
+                self.required_requests = [item for item in self.required_requests for _ in range(2)]
+                if self.simulate is not None:
+                    legacy_steps = {1: 2, 2: 4, 3: 5, 4: 7, 5: 8}
+                    step = legacy_steps.get(self.simulate.fail_at_step)
+                    if step is None:
+                        raise PydanticCustomError(
+                            "simulate_step_mismatch", SIMULATE_STEP_MISMATCH_REASON
+                        )
+                    self.simulate = self.simulate.model_copy(update={"fail_at_step": step})
+        if self.simulate is not None and (
+            self.simulate.fail_at_step not in _SIMULATE_STEPS[self.simulate.reason]
+            or (self.simulate.fail_at_step == DB_CUTOVER_STEP and not self.include_cutover)
         ):
             raise PydanticCustomError("simulate_step_mismatch", SIMULATE_STEP_MISMATCH_REASON)
         return self
@@ -253,7 +263,8 @@ class StepResultResponse(ApiModel):
 class MigrationStepResponse(ApiModel):
     """계획 값(index·kind·비율·필요 건수·최대 대기·예상 시간)과 실제 결과(result)를 나란히 싣는다.
 
-    requiredRequests·maxWaitSeconds 는 비율 단계만 값이 있다. 8-1 전에 만든 계획의
+    requiredRequests·minObserveSeconds 는 비율 단계만 값이 있다. 최소 관찰은 옛 계획이면 0이다.
+    maxWaitSeconds 는 비율 단계·DB 전환 단계에 값이 있다. 8-1 전에 만든 계획의
     requiredRequests 는 null 이다.
     """
 
@@ -262,6 +273,7 @@ class MigrationStepResponse(ApiModel):
     source_weight: int | None
     target_weight: int | None
     required_requests: int | None
+    min_observe_seconds: int | None
     max_wait_seconds: int | None
     expected_seconds: int
     result: StepResultResponse
@@ -530,6 +542,7 @@ def _step_response(
         source_weight=step[STEP_SOURCE_WEIGHT],
         target_weight=step[STEP_TARGET_WEIGHT],
         required_requests=step.get(STEP_REQUIRED_REQUESTS),
+        min_observe_seconds=(int(step.get(STEP_MIN_OBSERVE_SECONDS, 0)) if is_shift else None),
         max_wait_seconds=(
             max_wait_seconds
             if is_shift

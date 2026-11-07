@@ -23,7 +23,7 @@ from app.executors.fake import FakeMetricsProvider
 from app.schemas.migration_plan import MigrationProgressResponse
 from app.services.migration_log_messages import LOW_TRAFFIC_PASS_SUFFIX
 from tests.integration.deploy_harness import ScriptedHealthChecker
-from tests.integration.migration_support import Migration
+from tests.integration.migration_support import Migration, store_legacy_steps
 
 
 @dataclass
@@ -156,7 +156,7 @@ async def test_quiet_service_passes_at_max_wait_as_low_traffic(migration: Migrat
     assert final_step["metrics"]["errorRatePercent"] is None
     assert passed.data is not None and passed.data["lowTraffic"] is True
     assert passed.message.endswith(LOW_TRAFFIC_PASS_SUFFIX)
-    assert await migration.weights() == (50, 50)
+    assert await migration.weights() == (90, 10)
 
 
 # --- AC-8-1-5: 도착 미수신 ---
@@ -165,9 +165,9 @@ async def test_quiet_service_passes_at_max_wait_as_low_traffic(migration: Migrat
 @pytest.mark.parametrize(
     ("source", "target", "status", "error_code"),
     [
-        (180, 4, "ROLLED_BACK", "TARGET_NOT_RECEIVING"),
-        (180, 5, "RUNNING", None),
-        (179, 0, "RUNNING", None),
+        (190, 2, "ROLLED_BACK", "TARGET_NOT_RECEIVING"),
+        (190, 3, "RUNNING", None),
+        (189, 0, "RUNNING", None),
     ],
 )
 async def test_target_not_receiving_is_judged_at_max_wait_with_integer_formula(
@@ -198,7 +198,8 @@ async def test_target_not_receiving_is_judged_at_max_wait_with_integer_formula(
 
 
 async def test_counter_restart_keeps_counted_requests_and_continues(migration: Migration) -> None:
-    counting = await _start_counting(migration)
+    migration.harness.use_settings(migration_min_observe_seconds=0)
+    counting = await _start_counting(migration, requiredRequests=[20] * 6)
 
     await counting.tick(target=14)
     await counting.tick(target=3)
@@ -260,7 +261,7 @@ async def test_occasional_count_failures_keep_counting_and_pass(migration: Migra
     final = await migration.get_plan(plan["id"])
 
     assert final["steps"][1]["result"]["status"] == "PASSED"
-    assert final["steps"][1]["result"]["metrics"]["requestCount"] == 20
+    assert final["steps"][1]["result"]["metrics"]["requestCount"] == 10
     assert final["steps"][1]["result"]["metrics"]["lowTraffic"] is False
 
 
@@ -350,9 +351,11 @@ async def test_p95_is_recorded_for_reference_and_never_fails_a_step(
     windows = [until - since for _, since, until in harness.executors.metrics.calls]
 
     assert final["status"] == "SUCCEEDED"
-    assert [final["steps"][index]["result"]["metrics"]["p95Ms"] for index in (1, 2, 4)] == [p95] * 3
+    assert [
+        final["steps"][index]["result"]["metrics"]["p95Ms"] for index in (1, 2, 3, 4, 6, 7)
+    ] == [p95] * 6
     assert final["rollbackConditions"]["p95Advisory"] is True
-    assert windows == [timedelta(seconds=30)] * 3
+    assert windows == [timedelta(seconds=30)] * 6
 
 
 # --- AC-8-1-10: 진행 응답 ---
@@ -374,20 +377,20 @@ async def test_progress_is_shown_only_while_counting_a_shift_step(migration: Mig
     row = await migration.plan_row(plan["id"])
     listed = await harness.client.get(migration.plans_path)
     # 데이터 확인 단계(3)에서는 진행 숫자가 없다(같은 행을 단계 3 위치로 바꿔 본다).
-    row.current_step, row.step_phase = 3, MigrationStepPhase.JUDGE
+    row.current_step, row.step_phase = 5, MigrationStepPhase.JUDGE
     on_data_step = MigrationProgressResponse.from_plan(row)
     await harness.run_until_idle()
     finished = await migration.get_plan(plan["id"])
 
     assert pending["progress"] is None
     progress = first["progress"]
-    assert (progress["step"], progress["targetWeight"]) == (2, 50)
-    assert (progress["requiredRequests"], progress["allowedErrors5xx"]) == (50, 1)
+    assert (progress["step"], progress["targetWeight"]) == (2, 10)
+    assert (progress["requiredRequests"], progress["allowedErrors5xx"]) == (10, 1)
     assert (progress["requests"], progress["errors5xx"]) == (0, 0)
     started = datetime.fromisoformat(progress["startedAt"])
     assert datetime.fromisoformat(progress["deadlineAt"]) == started + timedelta(seconds=30)
-    assert second["progress"]["requests"] == 25
-    assert second["progress"]["sourceRequests"] == 25
+    assert second["progress"]["requests"] == 5
+    assert second["progress"]["sourceRequests"] == 45
     assert second["progress"]["updatedAt"] != progress["updatedAt"]
     assert on_data_step is None
     assert listed.status_code == 200
@@ -403,7 +406,7 @@ async def test_counting_resumes_from_stored_counts_after_lease_expires(
 ) -> None:
     harness = migration.harness
     harness.use_settings(worker_lease_seconds=3)
-    counting = await _start_counting(migration)
+    counting = await _start_counting(migration, requiredRequests=[20] * 6)
     await counting.tick(target=10)
 
     # 다른 일꾼이 집기만 하고 죽는다. 임대가 끝난 뒤 새 일꾼이 저장된 센 값(10)에서 이어 센다.
@@ -421,7 +424,7 @@ async def test_counting_resumes_from_stored_counts_after_lease_expires(
 
     assert final["status"] == "SUCCEEDED"
     assert final["steps"][1]["result"]["metrics"]["requestCount"] == 20
-    assert codes.count("JUDGE_PASSED") == 3
+    assert codes.count("JUDGE_PASSED") == 6
     assert "COUNTERS_RESET" not in codes
     assert job is not None and (job.status, job.lease_losses) == (JobStatus.DONE, 1)
 
@@ -487,14 +490,14 @@ async def test_simulated_error_rate_fails_on_first_read(migration: Migration) ->
 async def test_simulated_low_traffic_on_last_step_passes_and_succeeds(
     migration: Migration,
 ) -> None:
-    plan = await migration.create_plan(simulate={"failAtStep": 4, "reason": "LOW_TRAFFIC"})
+    plan = await migration.create_plan(simulate={"failAtStep": 7, "reason": "LOW_TRAFFIC"})
     await migration.approve(plan["id"])
 
     await migration.harness.run_until_idle()
     final = await migration.get_plan(plan["id"])
 
     assert final["status"] == "SUCCEEDED"
-    assert final["steps"][4]["result"]["metrics"]["lowTraffic"] is True
+    assert final["steps"][7]["result"]["metrics"]["lowTraffic"] is True
     assert final["steps"][1]["result"]["metrics"]["lowTraffic"] is False
 
 
@@ -526,7 +529,7 @@ async def test_legacy_plan_without_counts_restarts_counting_in_place(
 ) -> None:
     harness = migration.harness
     plan = await migration.create_plan()
-    stored_steps = (await migration.plan_row(plan["id"])).steps
+    stored_steps = await store_legacy_steps(migration, plan["id"], before_counting=True)
     await migration.approve(plan["id"])
     assert await harness.worker().run_once()
     # 옛 계획처럼 만든다: 센 값·필요 건수·최대 대기 키 없음, 지켜보기 5초.
