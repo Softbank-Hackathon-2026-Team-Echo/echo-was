@@ -153,6 +153,64 @@ class AgentRunRepository:
             {"result": merged, "updated_at": now},
         )
 
+    async def claim_commit(
+        self, run_id: uuid.UUID, now: datetime, owner: str, expected_owner: str | None
+    ) -> bool:
+        """행 잠금 아래 읽은 세대와 같을 때만 저장소 작업의 새 세대를 잡는다."""
+        merged = func.coalesce(AgentRun.result, literal({}, JSONB)).op("||", return_type=JSONB)(
+            literal(
+                {
+                    "commitState": "IN_PROGRESS",
+                    "commitClaimedAt": now.isoformat(),
+                    "commitOwner": owner,
+                },
+                JSONB,
+            )
+        )
+        owner_field = AgentRun.result["commitOwner"].astext
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [
+                AgentRun.status == AgentRunStatus.SUCCEEDED,
+                owner_field == expected_owner
+                if expected_owner is not None
+                else owner_field.is_(None),
+                ~func.coalesce(AgentRun.result, literal({}, JSONB)).has_key("redeployRequestId"),
+            ],
+            {"result": merged, "updated_at": now},
+        )
+
+    async def patch_owned_commit(
+        self,
+        run_id: uuid.UUID,
+        now: datetime,
+        owner: str,
+        fields: dict[str, Any],
+        *,
+        fail_code: str | None = None,
+    ) -> bool:
+        """현재 세대만 release/fail/publish/link한다. 끝난 연결을 덮지 않는다."""
+        merged = func.coalesce(AgentRun.result, literal({}, JSONB)).op("||", return_type=JSONB)(
+            literal(fields, JSONB)
+        )
+        values: dict[str, Any] = {"result": merged, "updated_at": now}
+        if fail_code is not None:
+            values.update(status=AgentRunStatus.FAILED, failure_code=fail_code)
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [
+                AgentRun.status == AgentRunStatus.SUCCEEDED,
+                AgentRun.result["commitOwner"].astext == owner,
+                AgentRun.result["commitState"].astext.in_(["IN_PROGRESS", "DONE"]),
+                ~func.coalesce(AgentRun.result, literal({}, JSONB)).has_key("redeployRequestId"),
+            ],
+            values,
+        )
+
     async def fail_after_success(
         self, run_id: uuid.UUID, now: datetime, failure_code: str, result: dict[str, Any]
     ) -> bool:
