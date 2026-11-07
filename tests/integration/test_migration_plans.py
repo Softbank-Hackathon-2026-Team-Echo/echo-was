@@ -100,12 +100,12 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
     ]
     assert [step["targetWeight"] for step in plan["steps"]] == [None, 5, 10, 25, 50, None, 75, 100]
     assert [step["sourceWeight"] for step in plan["steps"]] == [None, 95, 90, 75, 50, None, 25, 0]
-    # 예상 = 여유 2초 + max(최소 관찰 4초, 건수 충족 예상).
-    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 6, 6, 6, 6, 2, 6, 6]
-    assert plan["expectedSeconds"] == 40
+    # 예상 = 여유 2초 + max(최소 관찰 3초, 건수 충족 예상).
+    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 5, 5, 5, 5, 2, 5, 5]
+    assert plan["expectedSeconds"] == 34
     assert [step["requiredRequests"] for step in plan["steps"]] == [
         None,
-        10,
+        7,
         10,
         20,
         30,
@@ -149,8 +149,8 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
         assert metrics["healthStatus"] == "OK"
         # p95 는 참고 값(가짜 지표 120ms)으로만 남는다.
         assert metrics["p95Ms"] == 120.0
-    assert final["steps"][1]["result"]["metrics"]["requestCount"] == 10
-    assert final["steps"][1]["result"]["metrics"]["sourceRequestCount"] == 190
+    assert final["steps"][1]["result"]["metrics"]["requestCount"] == 7
+    assert final["steps"][1]["result"]["metrics"]["sourceRequestCount"] == 142
     assert final["steps"][5]["result"]["metrics"]["replicationLagSeconds"] == 0.3
     assert final["progress"] is None
     assert final["startedAt"] is not None and final["finishedAt"] is not None
@@ -180,11 +180,11 @@ async def test_migration_succeeds_step_by_step_and_logs_match_plan(migration: Mi
         assert judge_row.data["requestCount"] >= required
         assert judge_row.data["requiredRequests"] == required
         assert judge_row.data["lowTraffic"] is False
-    # 모든 비율 단계가 적용 후 최소 4초를 관찰했다.
+    # 모든 비율 단계가 적용 후 최소 3초를 관찰했다.
     assert [
         (judge_row.logged_at - weight_row.logged_at).total_seconds()
         for weight_row, judge_row in zip(applied, judged, strict=True)
-    ] == [4.0] * 6
+    ] == [3.0] * 6
     assert "COUNTERS_RESET" not in [row.code for row in rows]
     assert migration.traffic_keys() == [f"{plan['id']}:{i}" for i in (1, 2, 3, 4, 6, 7)]
 
@@ -256,9 +256,9 @@ async def test_create_uses_given_required_requests_and_max_wait(migration: Migra
     plan = await migration.create_plan(requiredRequests=[100, 100, 100], maxWaitSeconds=10)
     row = await migration.plan_row(plan["id"])
 
-    # 5·10%는 최대 대기 10초, 25%는 8초, 나머지는 최소 관찰 4초에 여유 2초를 더한다.
-    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 12, 12, 10, 6, 2, 6, 6]
-    assert plan["expectedSeconds"] == 56
+    # 5·10%는 최대 대기 10초, 25%는 8초, 50%는 4초, 나머지는 최소 관찰 3초에 여유 2초를 더한다.
+    assert [step["expectedSeconds"] for step in plan["steps"]] == [2, 12, 12, 10, 6, 2, 5, 5]
+    assert plan["expectedSeconds"] == 54
     assert [step["requiredRequests"] for step in plan["steps"]] == [
         None,
         100,
@@ -821,8 +821,8 @@ async def test_plan_and_logs_carry_stored_simulated_flag(migration: Migration) -
         (1, "PLAN_CREATED", None)
     ]
     assert page["items"][0]["data"] == {
-        "expectedSeconds": 40,
-        "requiredRequests": [10, 10, 20, 30, 30, 30],
+        "expectedSeconds": 34,
+        "requiredRequests": [7, 10, 20, 30, 30, 30],
         "maxWaitSeconds": 30,
         "mode": "PLANNED",
     }

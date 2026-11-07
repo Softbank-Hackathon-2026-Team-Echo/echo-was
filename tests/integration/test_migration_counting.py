@@ -165,14 +165,15 @@ async def test_quiet_service_passes_at_max_wait_as_low_traffic(migration: Migrat
 @pytest.mark.parametrize(
     ("source", "target", "status", "error_code"),
     [
-        (190, 2, "ROLLED_BACK", "TARGET_NOT_RECEIVING"),
-        (190, 3, "RUNNING", None),
-        (189, 0, "RUNNING", None),
+        (133, 1, "ROLLED_BACK", "TARGET_NOT_RECEIVING"),
+        (133, 2, "RUNNING", None),
+        (132, 0, "RUNNING", None),
     ],
 )
 async def test_target_not_receiving_is_judged_at_max_wait_with_integer_formula(
     migration: Migration, source: int, target: int, status: str, error_code: str | None
 ) -> None:
+    # 기본 7건 × 출발 95% / 도착 5% = 출발 133건, 그 직전은 132건이다.
     counting = await _start_counting(migration)
 
     await counting.tick(source=source, target=target)

@@ -209,7 +209,7 @@ class MigrationPlanService:
         db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
         db_cutover_timeout_seconds: int = 180,
         db_cutover_on_disaster: bool = False,
-        min_observe_seconds: int = 4,
+        min_observe_seconds: int = 3,
     ) -> None:
         self._session = session
         self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED

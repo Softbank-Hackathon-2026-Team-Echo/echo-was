@@ -91,7 +91,7 @@ async def test_entrypoint_counters_pass_a_shift_step_by_request_count(
     assert await harness.worker().run_once()
     started = await migration.plan_row(plan["id"])
     positions = []
-    for _ in range(4):
+    for _ in range(3):
         harness.clock.advance(1)
         assert await harness.worker().run_once()
         row = await migration.plan_row(plan["id"])
@@ -99,9 +99,9 @@ async def test_entrypoint_counters_pass_a_shift_step_by_request_count(
     final = await migration.get_plan(plan["id"])
     stored = await migration.plan_row(plan["id"])
 
-    # 단계 1(5%): 초당 5건으로 2초에 10건을 채우고 최소 관찰 4초에 다음 단계로 간다.
+    # 단계 1(5%): 초당 5건으로 2초에 필요 건수 7건을 넘기고 최소 관찰 3초에 다음 단계로 간다.
     assert (started.current_step, started.step_phase) == (1, "OBSERVE")
-    assert positions == [(1, "OBSERVE"), (1, "JUDGE"), (1, "JUDGE"), (2, "OBSERVE")]
+    assert positions == [(1, "OBSERVE"), (1, "JUDGE"), (2, "OBSERVE")]
     step = final["steps"][1]["result"]
     assert step["status"] == "PASSED"
     assert step["metrics"]["lowTraffic"] is False

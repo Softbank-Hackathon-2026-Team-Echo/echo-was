@@ -24,7 +24,7 @@ SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RESERVED_ORG_SLUGS = ("team-echo",)
 
 # 이전 계획 비율 단계(5·10·25·50·75·100%)마다 도착이 처리해야 할 요청 수와 단계 최대 대기 범위.
-DEFAULT_MIGRATION_REQUIRED_REQUESTS = (10, 10, 20, 30, 30, 30)
+DEFAULT_MIGRATION_REQUIRED_REQUESTS = (7, 10, 20, 30, 30, 30)
 MIGRATION_SHIFT_STEP_COUNT = 6
 MIGRATION_MIN_REQUIRED_REQUESTS = 1
 MIGRATION_MAX_REQUIRED_REQUESTS = 10000
@@ -269,7 +269,7 @@ class Settings(BaseSettings):
         default=30, ge=MIGRATION_MIN_MAX_WAIT_SECONDS, le=MIGRATION_MAX_MAX_WAIT_SECONDS
     )
     migration_expected_rps: int = Field(default=50, ge=1, le=10000)
-    migration_min_observe_seconds: int = Field(default=4, ge=0, le=60)
+    migration_min_observe_seconds: int = Field(default=3, ge=0, le=60)
     migration_count_poll_seconds: int = Field(default=1, ge=1, le=10)
     migration_counts_stale_seconds: int = Field(default=5, ge=1, le=60)
     migration_p95_reference_window_seconds: int = Field(default=30, ge=5, le=300)

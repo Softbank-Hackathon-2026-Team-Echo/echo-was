@@ -99,7 +99,7 @@ def build_steps(
     requests_per_second: int,
     overhead_seconds: int,
     *,
-    min_observe_seconds: int = 4,
+    min_observe_seconds: int = 3,
     db_cutover_timeout_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """새 계획의 8단계와 선택 DB 전환. 설정값을 각 비율 단계에 고정한다."""

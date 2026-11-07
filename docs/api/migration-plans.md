@@ -26,7 +26,7 @@
 ```json
 {
   "targetEnvironmentId": "e2…",
-  "requiredRequests": [10, 10, 20, 30, 30, 30],
+  "requiredRequests": [7, 10, 20, 30, 30, 30],
   "maxWaitSeconds": 30,
   "rollbackConditions": {"maxErrorRatePercent": 1.0, "maxP95Ms": 800, "maxReplicationLagSeconds": 1.0},
   "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"},
@@ -39,7 +39,7 @@
 | 칸 | 규칙 |
 |---|---|
 | `targetEnvironmentId` | 필수 uuid. 도착 환경 |
-| `requiredRequests` | 선택. 정수 6개(5·10·25·50·75·100% 순), 각 1~10000. 옛 요청 3개도 받는다(아래 호환 규칙). 빼면 `MIGRATION_REQUIRED_REQUESTS_DEFAULT`(`10,10,20,30,30,30`) |
+| `requiredRequests` | 선택. 정수 6개(5·10·25·50·75·100% 순), 각 1~10000. 옛 요청 3개도 받는다(아래 호환 규칙). 빼면 `MIGRATION_REQUIRED_REQUESTS_DEFAULT`(`7,10,20,30,30,30`) |
 | `maxWaitSeconds` | 선택. 5~300, 비율 단계마다 건수를 기다리는 최대 시간. 빼면 `MIGRATION_MAX_WAIT_SECONDS_DEFAULT`(30) |
 | `rollbackConditions` | 선택. `maxErrorRatePercent` 0~100(기본 1.0, 허용 5xx 계산에 쓴다), `maxP95Ms` 1~60000(기본 800, **참고용** — 판정에 쓰지 않는다), `maxReplicationLagSeconds` 0~600(기본 1.0). 헬스체크 실패는 늘 롤백 조건 |
 | `simulate` | `EXECUTOR_MODE=fake` 일 때만(아니면 422 `SIMULATE_NOT_ALLOWED`). 진입점·헬스체커 모드(`ENTRYPOINT_EXECUTOR_MODE`·`HEALTH_CHECKER_MODE`)는 보지 않는다 — 실제 진입점(`http`)에서도 받는다(아래 "`simulate`"). `failAtStep` 1~8, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
@@ -78,13 +78,13 @@
 | index | kind | 출발 / 도착 비율 | 필요 건수 | 최소 관찰 | 예상 시간(기본 50 rps) |
 |---|---|---|---|---|---|
 | 0 | `PREFLIGHT` | — | — | — | 2초 |
-| 1 | `SHIFT` | 95 / 5 | 10 | 4초 | 2 + 4 = 6초 |
-| 2 | `SHIFT` | 90 / 10 | 10 | 4초 | 2 + 4 = 6초 |
-| 3 | `SHIFT` | 75 / 25 | 20 | 4초 | 2 + 4 = 6초 |
-| 4 | `SHIFT` | 50 / 50 | 30 | 4초 | 2 + 4 = 6초 |
+| 1 | `SHIFT` | 95 / 5 | 7 | 3초 | 2 + 3 = 5초 |
+| 2 | `SHIFT` | 90 / 10 | 10 | 3초 | 2 + 3 = 5초 |
+| 3 | `SHIFT` | 75 / 25 | 20 | 3초 | 2 + 3 = 5초 |
+| 4 | `SHIFT` | 50 / 50 | 30 | 3초 | 2 + 3 = 5초 |
 | 5 | `DATA_SYNC_CHECK` | — | — | — | 2초 |
-| 6 | `SHIFT` | 25 / 75 | 30 | 4초 | 2 + 4 = 6초 |
-| 7 | `SHIFT` | 0 / 100 | 30 | 4초 | 2 + 4 = 6초 |
+| 6 | `SHIFT` | 25 / 75 | 30 | 3초 | 2 + 3 = 5초 |
+| 7 | `SHIFT` | 0 / 100 | 30 | 3초 | 2 + 3 = 5초 |
 | 8 | `DB_CUTOVER` | — | — | — | 2 + 30 = 32초(선택) |
 
 사전 확인은 도착 헬스와 이미지 일치를 확인하고, 데이터 확인은 출발 → 도착 복제 지연을 검사한다.
@@ -123,7 +123,7 @@
 - **로그 코드**: `DB_CUTOVER_JOB_CREATED` · `DB_CUTOVER_JOB_FINISHED` · `DB_CUTOVER_OK` · `DB_CUTOVER_FAILED`(원인 문장 붙음) · `DB_CUTOVER_MANUAL_REQUIRED`(자동으로 되돌리지 않음). data 에 Job 이름·종류·종료 코드·이유·결과 숫자.
 - **감사**: SYSTEM(`migration-worker`) `MIGRATION_DB_CUTOVER_STARTED`(Job 만듦) · `MIGRATION_DB_CUTOVER_FINISHED`(판정, 실패면 `errorCode`).
 
-비율 단계 예상 = `MIGRATION_STEP_OVERHEAD_SECONDS`(2) + max(`minObserveSeconds`, min(`maxWaitSeconds`, ceil(필요 건수 ÷ (`MIGRATION_EXPECTED_RPS` × 비율 ÷ 100)))). 계획 예상은 합이며 기본 **40초**, DB 쓰기 전환 포함 **72초**다. 여유 2초는 표시용으로 실제 대기를 추가하지 않는다. 가짜 시계와 기본 50 rps에서 여섯 비율 단계의 실제 관찰 합은 **24초**다(네트워크·일꾼 지연 제외). 비율 목록은 고정이며 단계별 사람 승인은 없다.
+비율 단계 예상 = `MIGRATION_STEP_OVERHEAD_SECONDS`(2) + max(`minObserveSeconds`, min(`maxWaitSeconds`, ceil(필요 건수 ÷ (`MIGRATION_EXPECTED_RPS` × 비율 ÷ 100)))). 기본 50 rps에서 `ceil(N*100/(50*w))`는 비율 순서대로 `3·2·2·2·1·1초`이므로 각 비율 단계는 `2 + max(3, min(30, 건수 충족 초)) = 5초`다. 계획 예상은 합이며 기본 **34초**(`2 + 6 × (2 + 3) + 2`), DB 쓰기 전환 포함 **66초**(`34 + 32`)다. 여유 2초는 표시용으로 실제 대기를 추가하지 않는다. 가짜 시계와 기본 50 rps에서 여섯 비율 단계의 실제 관찰 합은 **18초**다(네트워크·일꾼 지연 제외). 비율 목록은 고정이며 단계별 사람 승인은 없다.
 
 ## 승인 · 거절 · 취소
 
@@ -323,7 +323,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "mode": "PLANNED",
     "disasterId": null,
     "currentStep": 2,
-    "expectedSeconds": 40,
+    "expectedSeconds": 34,
     "createdBy": {
       "id": "u1…",
       "login": "dev-a"
@@ -383,22 +383,22 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "kind": "SHIFT",
         "sourceWeight": 95,
         "targetWeight": 5,
-        "requiredRequests": 10,
-        "minObserveSeconds": 4,
+        "requiredRequests": 7,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "PASSED",
           "startedAt": "2026-11-03T03:01:00Z",
-          "finishedAt": "2026-11-03T03:01:04Z",
+          "finishedAt": "2026-11-03T03:01:03Z",
           "metrics": {
             "healthStatus": "OK",
             "errorRatePercent": 0.0,
             "p95Ms": 120.0,
-            "requestCount": 10,
+            "requestCount": 7,
             "errors5xx": 0,
             "allowedErrors5xx": 1,
-            "sourceRequestCount": 190,
+            "sourceRequestCount": 142,
             "lowTraffic": false,
             "replicationLagSeconds": null
           },
@@ -412,12 +412,12 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "sourceWeight": 90,
         "targetWeight": 10,
         "requiredRequests": 10,
-        "minObserveSeconds": 4,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "RUNNING",
-          "startedAt": "2026-11-03T03:01:04Z",
+          "startedAt": "2026-11-03T03:01:03Z",
           "finishedAt": null,
           "metrics": null,
           "failureCode": null
@@ -430,9 +430,9 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "sourceWeight": 75,
         "targetWeight": 25,
         "requiredRequests": 20,
-        "minObserveSeconds": 4,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "PENDING",
           "startedAt": null,
@@ -448,9 +448,9 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "sourceWeight": 50,
         "targetWeight": 50,
         "requiredRequests": 30,
-        "minObserveSeconds": 4,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "PENDING",
           "startedAt": null,
@@ -484,9 +484,9 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "sourceWeight": 25,
         "targetWeight": 75,
         "requiredRequests": 30,
-        "minObserveSeconds": 4,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "PENDING",
           "startedAt": null,
@@ -502,9 +502,9 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
         "sourceWeight": 0,
         "targetWeight": 100,
         "requiredRequests": 30,
-        "minObserveSeconds": 4,
+        "minObserveSeconds": 3,
         "maxWaitSeconds": 30,
-        "expectedSeconds": 6,
+        "expectedSeconds": 5,
         "result": {
           "status": "PENDING",
           "startedAt": null,
@@ -523,9 +523,9 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
       "errors5xx": 0,
       "allowedErrors5xx": 1,
       "sourceRequests": 45,
-      "startedAt": "2026-11-03T03:01:04Z",
-      "deadlineAt": "2026-11-03T03:01:34Z",
-      "updatedAt": "2026-11-03T03:01:05Z"
+      "startedAt": "2026-11-03T03:01:03Z",
+      "deadlineAt": "2026-11-03T03:01:33Z",
+      "updatedAt": "2026-11-03T03:01:04Z"
     },
     "rejectedBy": null,
     "cancelledBy": null,
@@ -593,8 +593,8 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 | 환경변수 | 기본 | 뜻 |
 |---|---|---|
-| `MIGRATION_REQUIRED_REQUESTS_DEFAULT` | `10,10,20,30,30,30` | 비율 5·10·25·50·75·100% 순 필요 건수(각 1~10000) |
-| `MIGRATION_MIN_OBSERVE_SECONDS` | 4 | 비율 적용부터 최소 관찰 시간(0~60), 계획 생성 때 단계별 저장 |
+| `MIGRATION_REQUIRED_REQUESTS_DEFAULT` | `7,10,20,30,30,30` | 비율 5·10·25·50·75·100% 순 필요 건수(각 1~10000) |
+| `MIGRATION_MIN_OBSERVE_SECONDS` | 3 | 비율 적용부터 최소 관찰 시간(0~60), 계획 생성 때 단계별 저장 |
 | `MIGRATION_MAX_WAIT_SECONDS_DEFAULT` | 30 | 비율 단계 최대 대기(5~300) |
 | `MIGRATION_EXPECTED_RPS` | 50 | 예상 rps(1~10000). 예상 시간·가짜 카운터·`simulate` 에 쓴다 |
 | `MIGRATION_COUNT_POLL_SECONDS` | 1 | 카운터 읽기 주기(1~10) |

@@ -219,7 +219,7 @@ async def test_stored_legacy_steps_are_canonical_for_response_execution_and_roll
     assert await migration.weights() == ((100, 0) if fail else (0, 100))
 
 
-async def test_all_default_shift_steps_observe_four_seconds(migration: Migration) -> None:
+async def test_all_default_shift_steps_observe_three_seconds(migration: Migration) -> None:
     plan = await migration.create_plan()
     await migration.approve(plan["id"])
     await migration.harness.run_until_idle()
@@ -227,9 +227,9 @@ async def test_all_default_shift_steps_observe_four_seconds(migration: Migration
     assert final["status"] == "SUCCEEDED"
     assert (
         datetime.fromisoformat(final["finishedAt"]) - datetime.fromisoformat(final["startedAt"])
-    ).total_seconds() == 24
+    ).total_seconds() == 18
     for step in final["steps"]:
-        assert step["minObserveSeconds"] == (4 if step["kind"] == "SHIFT" else None)
+        assert step["minObserveSeconds"] == (3 if step["kind"] == "SHIFT" else None)
 
 
 async def test_legacy_cutover_failure_rolls_back_using_stored_step_five(
@@ -284,10 +284,10 @@ async def test_all_plan_modes_create_same_canary_sequence(
         )
         shifts = [step for step in plan["steps"] if step["kind"] == "SHIFT"]
         assert [step["targetWeight"] for step in shifts] == [5, 10, 25, 50, 75, 100]
-        assert [step["requiredRequests"] for step in shifts] == [10, 10, 20, 30, 30, 30]
-        assert [step["minObserveSeconds"] for step in shifts] == [4] * 6
-        assert [step["expectedSeconds"] for step in shifts] == [6] * 6
-        assert plan["expectedSeconds"] == (72 if cutover else 40)
+        assert [step["requiredRequests"] for step in shifts] == [7, 10, 20, 30, 30, 30]
+        assert [step["minObserveSeconds"] for step in shifts] == [3] * 6
+        assert [step["expectedSeconds"] for step in shifts] == [5] * 6
+        assert plan["expectedSeconds"] == (66 if cutover else 34)
     finally:
         await migration.author_client.aclose()
         await migration.approver_client.aclose()

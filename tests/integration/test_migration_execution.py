@@ -419,7 +419,7 @@ async def test_running_plan_rolls_back_when_lease_is_lost_three_times(
     plan = await _approved(migration)
     worker = harness.worker()
     assert await worker.run_once()
-    # 5초면 5% 단계가 10건을 넘기고 최소 4초도 지나 10% 단계로 간다.
+    # 5초면 5% 단계가 7건을 넘기고 최소 3초도 지나 10% 단계로 간다.
     harness.clock.advance(5)
     assert await worker.run_once()
     at_ten = await migration.weights()
