@@ -50,12 +50,12 @@
 | ID | 결정 | 출처 |
 |---|---|---|
 | D-1 | **기본 꺼짐.** 꺼져 있으면 게이트를 만들지 않아 판정·네트워크·로그 줄·증거 행이 없다(기존 시험 전부 그대로 통과). API·일꾼에 같은 값을 넣는다 | 보안 1 AD-4, #60 리뷰 ④ |
-| D-2 | **판정은 잠금 전·트랜잭션 밖**(TLS 시험이 네트워크라서), **기록은 잠금 안에서 지문이 같을 때.** 판정 뒤 바뀐 현재 배포·환경 설정은 지문이 잡는다(STALE 이 먼저) | 보안 3 §7, 잠금 규칙 |
+| D-2 | **승인 상태·필요한 DB 승격 동의·자기 승인 권한은 판정 전에 순서대로 확인해 먼저 거절한다**(TLS·증거 저장 없음). **판정은 잠금 전·트랜잭션 밖**(TLS 시험이 네트워크라서), **기록은 잠금 안에서 지문이 같을 때.** 상태·DB 승격 동의·자기 승인 권한은 판정 뒤 잠금 트랜잭션에서 다시 확인하며 만료·지문 검사도 유지한다. 판정 뒤 바뀐 현재 배포·환경 설정은 지문이 잡는다(STALE 이 먼저) | 보안 3 §7, 잠금 규칙 |
 | D-3 | 막힌 **승인**: 계획은 `PENDING_APPROVAL` 그대로, `SECURITY_GATE_BLOCKED` 줄을 남기고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`(`details` = `{field: 통제 ID, reason: 사유 코드}`). 고친 뒤 다시 승인할 수 있다. 막힌 **시작**: 트래픽을 바꾸지 않고 `FAILED(SECURITY_GATE_BLOCKED)`, `rollbackStatus = NOT_NEEDED`, 줄 순서 `SECURITY_GATE_BLOCKED → FAILED` | 보안 1 §6 |
 | D-4 | 판정 직전에 **C-IMG-3**(출발·도착 현재 배포 digest, WAS 상태)과 **C-TLS-1**(대표 주소 + 도착 환경 주소)을 새로 확인해 `findings`(`sourceRef = migration-plan:{id}`)에 남긴다. 이 두 통제는 **방금 만든 증거만** 쓴다(일시적인 TLS 시간 초과가 2분 동안 다시 막지 않게) | 보안 1 §5.1 실행 직전 |
 | D-5 | TLS 주소 규칙: 공개 도메인 아래 이름만, 443 만, DNS 로 받은 IP 를 확인한 뒤 **그 IP 로 접속**(인증서는 이름으로 검증). 모두 공인 → 시험, 모두 사설 → 접속 안 함 NA, 루프백·링크 로컬·예약·섞임 → 접속 안 함 UNKNOWN, 도메인 밖 → DNS 도 안 찾고 UNKNOWN, DNS 실패 → UNKNOWN. 주소 하나의 확인 전체에 5초(통제 시간 예산) | 11/4 결정, 보안 1 AD-5 |
 | D-6 | 기한부 예외는 **승인됐고 철회되지 않은 것만** 읽는다(만료된 지 7일 안의 것도 읽어 "예외 만료" 사유를 붙인다). 요청·승인은 `users` FK 라 사람(USER)이다 | #60 리뷰 ① |
-| D-7 | C-AI-1 증거 = 그 서비스·도착 환경의 **24시간 안에 성공한 가장 늦은 AI 사전 점검**(증거 ID = 실행 ID). 가짜 실행은 규칙표가 버린다(`EVIDENCE_SIMULATED`) | 규칙표, 계약 v1 |
+| D-7 | C-AI-1 증거 = **동일 조직·서비스·출발·도착 환경**에서 **24시간 미만에 성공한 실제 AI 사전 점검 중 최신 실행**(증거 ID = 실행 ID). 더 최신의 모의 실행이 실제 실행을 가리지 않는다. 실제 실행이 없을 때만 같은 범위의 최신 모의 실행으로 `PRECHECK_MISSING`·`EVIDENCE_SIMULATED` 차단 사유를 유지한다. 출발 환경이 없거나 범위 불일치·만료·실패·다른 실행 종류는 제외한다. PLANNED·EMERGENCY에 같은 규칙을 쓴다. digest/config 추가 바인딩은 별도 설계 | 규칙표, 계약 v1 |
 | D-8 | 판정 범위 WAS 버전 = 설정 `WAS_VERSION`. 비면 C-IAM-2·C-AUD-1 은 증거도 예외도 맞지 않아 확인 불가다 | 규칙표 범위 규칙 |
 | D-9 | 판정 기록 = 로그 줄 data: `policyVersion`·`phase`·`blocking[{controlId, reasons}]`·`findingIds`·`exceptionIds`(값·원문 없음) | 보안 1 AD-3, C-AUD-1 |
 | AD-1 | 정책 버전은 지문에 넣지 않는다(§3.3). 사전 승인(#30)에서 다시 본다 | AI-default |
@@ -83,10 +83,17 @@
 | AC-4 | 승인 뒤 예외를 철회하면 시작이 `FAILED(SECURITY_GATE_BLOCKED)`, 트래픽 호출 없음 | `test_start_with_revoked_exception_fails_plan_without_traffic_change` |
 | AC-5 | 승인 안 된 예외는 안 쓰고, 만료된 예외는 "예외 만료" 사유 | `test_approve_with_unapproved_or_expired_exception_is_blocked` |
 | AC-6 | 가짜 AI 사전 점검은 C-AI-1 을 채우지 않는다 | `test_approve_with_simulated_or_old_precheck_is_blocked_on_ai_1` |
+| AC-13 | 실제 성공 뒤 모의 성공이 와도 최신 실제 실행을 승인·시작에서 사용(PLANNED·EMERGENCY). 실제 실행이 만료됐으면 모의 실행으로 통과하지 않음 | `test_later_simulation_does_not_hide_real_precheck_at_approval_and_start`, `test_latest_real_precheck_is_selected`, `test_expired_real_does_not_override_fresh_simulated_diagnostic` |
+| AC-14 | 조직·서비스·출발·도착 불일치, 출발 누락, 다른 종류·실패, 24시간 경계 및 만료는 C-AI-1을 채우지 않음 | `test_precheck_outside_scope_or_validity_does_not_satisfy_gate` |
 | AC-7 | TLS 주소 규칙(D-5) | `test_approve_with_private_target_host_uses_main_host_only`, `test_approve_with_suspicious_or_failing_host_is_blocked_on_tls_1`, `test_classify_addresses_*`, `test_is_public_host_name_*`, `test_public_host_checker_*`, `test_probe_with_address_connects_to_that_ip_and_verifies_host_name` |
 | AC-8 | 일시적인 TLS 실패 뒤 다시 승인하면 새 시험 결과로 통과 | `test_approve_after_transient_tls_failure_uses_fresh_probe` |
 | AC-9 | 리비전 왕복, 막힌 계획이 있으면 되돌리기가 분명히 실패 | `test_security_gate_revision_downgrade_narrows_check_and_upgrade_restores`, `test_security_gate_revision_downgrade_with_blocked_plans_fails_clearly` |
 | AC-10 | 로컬 `upgrade → downgrade -1 → upgrade → alembic check` | 수동(PR에 결과) |
+
+| AC-11 | 승인 불가 상태·허용되지 않은 자기 승인·다른 조직 요청은 TLS 호출과 새 증거 없이 기존 403/409/404. 자기 승인 거부 감사 유지 | `test_rejected_approval_does_not_probe_or_record_findings`, `test_cross_organization_approval_does_not_evaluate_gate` |
+| AC-12 | 자기 승인 허용 시 게이트 유지. 판정 도중 취소·자기 승인 권한 철회는 다시 거절. 동시 승인도 할 일 하나만 생성 | `test_allowed_self_approval_still_evaluates_gate`, `test_approval_rechecks_state_and_permission_after_gate`, `test_concurrent_approvals_enqueue_one_job` |
+
+| AC-15 | #106의 승격 동의 누락 422가 자기 승인 거부 403보다 먼저이며 TLS·증거 저장 없음. 동의 후 권한이 허용된 요청만 게이트 실행 | `test_missing_promote_ack_rejects_before_gate_with_existing_error_order` |
 
 ## 7. 리스크
 

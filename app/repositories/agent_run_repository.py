@@ -44,18 +44,27 @@ class AgentRunRepository:
         service_id: uuid.UUID,
         target_environment_id: uuid.UUID,
         finished_since: datetime,
+        *,
+        organization_id: uuid.UUID,
+        source_environment_id: uuid.UUID,
     ) -> AgentRun | None:
-        """그 서비스·도착 환경의 AI 사전 점검 중 finished_since 뒤에 성공으로 끝난 가장 늦은 것."""
+        """같은 조직·서비스·출발·도착의 유효한 성공 사전 점검 중 최신 실제 실행을 우선한다.
+
+        실제 실행이 없으면 최신 모의 실행을 반환해 EVIDENCE_SIMULATED 차단 사유를 유지한다.
+        모의 실행을 통과 증거로 쓰지는 않는다.
+        """
         stmt = (
             select(AgentRun)
             .where(
+                AgentRun.organization_id == organization_id,
                 AgentRun.service_id == service_id,
+                AgentRun.source_environment_id == source_environment_id,
                 AgentRun.target_environment_id == target_environment_id,
                 AgentRun.kind == AgentRunKind.PRECHECK,
                 AgentRun.status == AgentRunStatus.SUCCEEDED,
                 AgentRun.finished_at > finished_since,
             )
-            .order_by(AgentRun.finished_at.desc(), AgentRun.id)
+            .order_by(AgentRun.simulated.asc(), AgentRun.finished_at.desc(), AgentRun.id)
             .limit(1)
         )
         return (await self._session.scalars(stmt)).first()
