@@ -1,8 +1,8 @@
 # 보안 매트릭스·증거·이전 전후 비교 API (보안·거버넌스 4·5-2, 계약 4-7)
 
-조직의 환경마다 **권한·암호화·감사 기록·정책** 4칸의 보안 상태와 그 근거(통제·사유·증거)를 돌려준다. 판정은 공통 보안 규칙표(`app/services/security_rules.py`, 정책 버전 `POLICY_VERSION`)가 하고, 이 API는 읽기만 한다.
+조직의 환경마다 **권한·암호화·감사 기록·정책** 4칸의 보안 상태와 그 근거(통제·사유·증거)를 돌려준다. 판정은 공통 보안 규칙표(`app/services/security_rules.py`, 정책 버전 `POLICY_VERSION`)가 하고, 조회 API는 읽기만 한다. 쓰기는 [사람 점검 기록](#post-apiv1orgsorgidsecuritymanual-reviews) 하나다.
 
-- 권한: 뷰어 이상(에이전트 토큰 가능). 다른 조직은 404 `ORGANIZATION_NOT_FOUND`.
+- 권한: 조회는 뷰어 이상(에이전트 토큰 가능), 사람 점검 기록은 개발자 이상 사람. 다른 조직은 404 `ORGANIZATION_NOT_FOUND`.
 - 비밀값 원문은 응답에 없다(검사 원문을 증거로 바꿀 때 이미 버렸다).
 - 결과 값: `PASS` · `WARN` · `FAIL` · `UNKNOWN`(확인 못 함: 증거 없음·만료·범위 다름) · `NA`(그 환경에 해당 없음). **확인하지 못한 것은 PASS가 아니다.**
 
@@ -133,6 +133,38 @@
 C-IMG-1 은 빌드 검사(`TRIVY_IMAGE`)와 CVE 감시(`CVE_WATCH`, 배포된 이미지 의존성에 새로 나온 HIGH·CRITICAL 권고) 증거를 함께 받는다. 범위는 이미지 digest 라 같은 digest 의 두 출처 중 나쁜 값이 칸 값이다.
 
 - AI 결과(`origin: AI`)는 PASS가 없고, 사람이 `ESCALATED`로 확인해야 차단 사유가 된다.
+
+## POST `/api/v1/orgs/{orgId}/security/manual-reviews`
+
+사람 점검 기록. 수집기가 없는 통제(C-IAM-1 실행 신원 범위·C-TLS-2 내부 구간 암호화 등)를 **사람이 실제로 점검한 뒤** 결과를 근거 링크와 함께 증거 한 건으로 남긴다. 저장한 증거는 매트릭스·Compare·이전 게이트가 다른 증거와 똑같이 쓴다(범위·출처·정책 버전·유효기간·worst-of 규칙 그대로).
+
+- 권한: **개발자 이상 사람**(뷰어 403 `ROLE_FORBIDDEN`, 에이전트 토큰 403 `AGENT_READ_ONLY`). 쿠키 요청은 다른 쓰기와 같은 Origin 검사(403 `ORIGIN_NOT_ALLOWED`). 다른 조직은 404 `ORGANIZATION_NOT_FOUND`. 점검자(`reviewerUserId`)는 부른 사람이고 요청으로 받지 않는다.
+- 받는 통제: 규칙표 출처에 사람 점검(`MANUAL_REVIEW`)이 있는 것만 — 지금 C-TLS-2 · C-NET-1 · C-NET-2 · C-IAM-1 · C-SEC-1 · C-CI-1. 그 밖은 422 `details=[{field: "controlId", reason: "MANUAL_REVIEW_NOT_ALLOWED"}]`(범위 칸은 보지 않는다).
+
+```json
+{
+  "controlId": "C-IAM-1",
+  "environmentId": "…",
+  "result": "PASS",
+  "summary": "실행 서비스 계정 IAM 정책 확인: 앱 네임스페이스 밖 권한 없음",
+  "evidenceUrl": "https://github.com/…/issues/23"
+}
+```
+
+| 칸 | 규칙 |
+|---|---|
+| `controlId` | 위 통제 중 하나(필수) |
+| `environmentId` · `serviceId` | 그 통제가 정한 범위 칸만, 모두 채운다(기한부 예외와 같은 규칙). C-TLS-2·C-NET-1·C-NET-2·C-IAM-1 = `environmentId`, C-SEC-1 = `serviceId` + `environmentId`, C-CI-1 = 없음(조직 전체). 빠지면 `REQUIRED_FOR_CONTROL`, 더 주면 `NOT_ALLOWED_FOR_CONTROL`. 이 조직의 살아 있는 환경·서비스가 아니면 404 `ENVIRONMENT_NOT_FOUND`·`SERVICE_NOT_FOUND` |
+| `result` | `PASS`·`WARN`·`FAIL`(필수). `UNKNOWN`·`NA` 는 422 `MANUAL_REVIEW_RESULT_INVALID` |
+| `summary` | 점검 내용 요약(필수, 앞뒤 공백 제거 뒤 1~1000자) |
+| `evidenceUrl` | 근거 링크(필수, `https://` 주소, 최대 2000자). 아니면 422 `EVIDENCE_URL_INVALID` |
+
+- **증거 조작 방지**: 자기 요청이라도 `summary`·`evidenceUrl` 이 없거나 비면 422 `VALIDATION_ERROR` 이고 아무것도 남지 않는다. 모르는 칸(`reviewerUserId`·`expiresAt` 등)도 422.
+- 응답 201 = 만든 증거 한 건([증거 목록](#get-apiv1orgsorgidsecurityfindings) 항목과 같은 모양): `source = MANUAL_REVIEW`, `origin = HUMAN`, `mode = REAL`, `reason = MANUAL_REVIEW_RECORDED`, `basisUrl = evidenceUrl`, `reviewerUserId`, `collectedAt` = 서버 지금, `expiresAt` = `collectedAt` + 규칙표 `max_age`(사람 점검 통제는 모두 **7일**), `policyVersion` = 지금 규칙표 버전. 요약은 근거 줄 하나 `items[0] = {itemId: "MANUAL_REVIEW_SUMMARY", target: <summary>, reason: "MANUAL_REVIEW_RECORDED"}`(`totalItems = 1`)로 담는다 — 증거 표에 칸을 더하지 않아 마이그레이션이 없다.
+- 덮어쓰지 않는다. 다시 점검하면 새 증거이고, 같은 범위에 여러 건이면 규칙표대로 **가장 나쁜 값**이 쓰인다(앞서 FAIL 이면 새 PASS 로 가려지지 않는다, 그 FAIL 이 만료될 때까지). 지우는 API 는 없다.
+- 칸 값: 선택 통제의 UNKNOWN 은 칸 순서(FAIL > 필수 UNKNOWN > WARN > 선택 UNKNOWN > PASS)에서 PASS 보다 나빠 칸 전체를 UNKNOWN 으로 만든다. 그 칸의 필수 통제가 모두 PASS 일 때 사람 점검 PASS 를 넣으면 칸이 PASS 가 된다(예: `iam` = C-IAM-2 PASS + C-IAM-1 사람 점검 PASS). WARN·FAIL 을 넣으면 칸도 WARN·FAIL 이다. 선택 통제라 게이트(`gateStatus`)는 바뀌지 않는다. 7일 뒤 만료되면 다시 UNKNOWN(`EVIDENCE_MISSING`)이다.
+- 감사 줄: 같은 트랜잭션에 `SECURITY_MANUAL_REVIEW_RECORDED`(USER, 대상 `finding`, 이름표 = 통제 ID, `details = {result, expiresAt, environmentId?, serviceId?}` — 요약 원문은 증거 행에만, [audit-logs.md](audit-logs.md)).
+- 이 API 는 기록만 한다. 실제 점검(클라우드 콘솔·클러스터 설정 확인)은 사람이 먼저 하고, 확인하지 않은 PASS 를 넣지 않는다.
 
 ## 다음 (같은 이슈)
 

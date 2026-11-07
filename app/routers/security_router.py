@@ -1,10 +1,14 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
-from app.auth.guards import ViewerAccess
-from app.dependencies import get_security_compare_service, get_security_matrix_service
+from app.auth.guards import HumanDeveloperAccess, ViewerAccess
+from app.dependencies import (
+    get_security_compare_service,
+    get_security_manual_review_service,
+    get_security_matrix_service,
+)
 from app.enums import SecurityControlId
 from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, Page
 from app.schemas.security import (
@@ -12,14 +16,20 @@ from app.schemas.security import (
     SecurityFindingResponse,
     SecurityMatrixResponse,
 )
+from app.schemas.security_manual_review import RecordManualReviewRequest
 from app.services.security_compare_service import SecurityCompareService
+from app.services.security_manual_review_service import SecurityManualReviewService
 from app.services.security_matrix_service import FINDING_IDS_LIMIT, SecurityMatrixService
 
-# 보안 매트릭스·증거 조회(보안·거버넌스 4, 계약 4-7). 읽기만이라 뷰어(에이전트 가능).
+# 보안 매트릭스·증거 조회(보안·거버넌스 4, 계약 4-7). 읽기는 뷰어(에이전트 가능).
+# 사람 점검 기록은 개발자 이상 사람만(에이전트는 증거를 만들 수 없다).
 router = APIRouter(prefix="/api/v1/orgs/{org_id}/security", tags=["security"])
 
 Service = Annotated[SecurityMatrixService, Depends(get_security_matrix_service)]
 CompareService = Annotated[SecurityCompareService, Depends(get_security_compare_service)]
+ManualReviewService = Annotated[
+    SecurityManualReviewService, Depends(get_security_manual_review_service)
+]
 
 
 @router.get("/matrix", response_model=ApiResponse[SecurityMatrixResponse])
@@ -75,3 +85,20 @@ async def search_security_findings(
             size=size,
         )
     )
+
+
+@router.post(
+    "/manual-reviews",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[SecurityFindingResponse],
+)
+async def record_security_manual_review(
+    access: HumanDeveloperAccess,
+    request: RecordManualReviewRequest,
+    service: ManualReviewService,
+) -> ApiResponse[SecurityFindingResponse]:
+    """사람 점검 기록(규칙표 출처에 사람 점검이 있는 통제만). 응답은 만든 증거 한 건이다."""
+    finding = await service.record_review(
+        access.organization_id, access.user.id, request.to_command()
+    )
+    return ApiResponse(data=SecurityFindingResponse.from_model(finding))
