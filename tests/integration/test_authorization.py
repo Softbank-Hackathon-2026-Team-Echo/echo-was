@@ -165,6 +165,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/security/exceptions", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/approve", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/revoke", D, human_only=True),
+    # 사람 점검 기록(C-IAM-1·C-TLS-2 등)은 개발자 이상 사람(에이전트는 증거를 만들 수 없다).
+    _org("POST", "/security/manual-reviews", D, human_only=True),
     # CVE 감시(SPEC sec-6-cve-watch): 조회·주입·진단 요청은 개발자 이상 사람.
     _org("POST", "/security/cve-watch:check", D, human_only=True),
     _org("POST", "/security/cve-watch:inject", D, human_only=True),

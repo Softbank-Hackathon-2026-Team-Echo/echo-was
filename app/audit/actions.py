@@ -38,6 +38,8 @@ class AuditAction(StrEnum):
     SECURITY_EXCEPTION_REQUESTED = "SECURITY_EXCEPTION_REQUESTED"
     SECURITY_EXCEPTION_APPROVED = "SECURITY_EXCEPTION_APPROVED"
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
+    # 사람 점검 기록(C-IAM-1·C-TLS-2 등 사람 점검을 받는 통제의 증거 한 건).
+    SECURITY_MANUAL_REVIEW_RECORDED = "SECURITY_MANUAL_REVIEW_RECORDED"
     CVE_WATCH_CHECKED = "CVE_WATCH_CHECKED"
     CVE_WATCH_INJECTED = "CVE_WATCH_INJECTED"
     CVE_DIAGNOSIS_REQUESTED = "CVE_DIAGNOSIS_REQUESTED"
@@ -146,6 +148,7 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("POST", f"{_ORG}/security/exceptions/{{exception_id}}/revoke"): (
         AuditAction.SECURITY_EXCEPTION_REVOKED
     ),
+    ("POST", f"{_ORG}/security/manual-reviews"): AuditAction.SECURITY_MANUAL_REVIEW_RECORDED,
     ("POST", f"{_ORG}/security/cve-watch:check"): AuditAction.CVE_WATCH_CHECKED,
     ("POST", f"{_ORG}/security/cve-watch:inject"): AuditAction.CVE_WATCH_INJECTED,
     # 이슈 #98(CHANGE_PROPOSAL) 병합 전에는 501 이라 성공 줄이 없다(SPEC sec-6-cve-watch 2-d).

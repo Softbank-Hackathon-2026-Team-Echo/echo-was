@@ -144,12 +144,12 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 40
+    assert len(WRITE_ROUTE_ACTIONS) == 41
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 40개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
-# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개) ---
+# --- AC-2: 쓰기 41개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개 + 사람 점검 1개) ---
 
 
 @dataclass
@@ -625,6 +625,32 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "C-DB-1",
     )
 
+    # 사람 점검 기록: 증거 한 건(대상 finding, 이름표 = 통제 ID). 요약 원문은 증거 행에만.
+    reviewed = await migration.author_client.post(
+        org_path(team_id, "/security/manual-reviews"),
+        json={
+            "controlId": "C-TLS-2",
+            "environmentId": str(migration.gcp.id),
+            "result": "PASS",
+            "summary": "서비스 메시 mTLS STRICT 확인",
+            "evidenceUrl": "https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-infra/issues/23",
+        },
+    )
+    await ledger.expect_one(
+        reviewed,
+        AuditAction.SECURITY_MANUAL_REVIEW_RECORDED,
+        migration.author.user,
+        team_id,
+        "finding",
+        _data(reviewed)["id"],
+        "C-TLS-2",
+        {
+            "result": "PASS",
+            "environmentId": str(migration.gcp.id),
+            "expiresAt": (harness.clock.now() + timedelta(days=7)).isoformat(),
+        },
+    )
+
     # CVE 감시(보안 6): 즉시 조회·가짜 권고 주입은 조직 대상 줄 하나. 의존성 목록이 없어 피드는
     # 부르지 않는다. 진단 요청(#98 전 501)은 성공 줄이 없어 아래 seen 비교에서 뺀다.
     harness.use_settings(cve_watch_enabled=True)
@@ -829,7 +855,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 40개 가운데 39개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 41개 가운데 40개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
     # 환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)

@@ -65,6 +65,7 @@ from app.services.precheck_service import PrecheckService
 from app.services.security_compare_service import SecurityCompareService
 from app.services.security_exception_service import SecurityExceptionService
 from app.services.security_gate import SecurityGate, build_public_tls_checker
+from app.services.security_manual_review_service import SecurityManualReviewService
 from app.services.security_matrix_service import SecurityMatrixService
 from app.services.service_metrics import ServiceMetricsService, service_metrics_cache
 from app.services.service_service import ServiceService
@@ -437,6 +438,13 @@ def get_security_exception_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> SecurityExceptionService:
     return SecurityExceptionService(session, clock)
+
+
+def get_security_manual_review_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> SecurityManualReviewService:
+    return SecurityManualReviewService(session, clock)
 
 
 def get_public_tls_checker(
