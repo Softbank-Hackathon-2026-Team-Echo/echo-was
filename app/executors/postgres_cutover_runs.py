@@ -29,6 +29,7 @@ from app.executors.base import (
     CutoverRunTarget,
     CutoverRunUnavailable,
 )
+from app.executors.db_pair_receipt import decode_pair_receipt
 from app.executors.postgres_data_sync import (
     ReplicationEndpoint,
     find_replication_endpoint,
@@ -159,4 +160,6 @@ def _cutover_run(row: Mapping[str, Any]) -> CutoverRun:
         duplicate_rows=row["duplicate_rows"],
         mode=row["mode"] if "mode" in keys else None,
         rpo_estimate_ms=row["rpo_estimate_ms"] if "rpo_estimate_ms" in keys else None,
+        # 내부 어댑터 경계만 예약한다. 두 SELECT와 생산자 저장 계약은 아직 미연결이다.
+        pair_receipt=decode_pair_receipt(row["pair_receipt"]) if "pair_receipt" in keys else None,
     )
