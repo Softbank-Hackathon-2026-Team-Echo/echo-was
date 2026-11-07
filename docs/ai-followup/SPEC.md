@@ -8,4 +8,6 @@ TDD는 작은 상태 투영 → callback marker → HTTP/PG 순서로 RED/GREEN 
 
 DB 선택: 기존 agent_runs.result JSONB 및 patch_result를 재사용한다. 새 timestamp/skip marker 키만 추가하고 컬럼·index·revision·backfill은 추가하지 않는다. 현재 Alembic head 9d7fe177bcaf 단일. 다른 DB receipt/pair 열차와 migration 접점 0. schemaVersion 1은 응답 계약 버전이며 state revision 보장이 아니다.
 
-원장 중복: 기존 echo-was#98(실패 진단·승인 후 재배포)은 닫힌 최초 연동이고 echo-was#88(반영 실행 상세 조회)은 기존 담당 Saccharine1211을 보존한다. 이번 후속 읽기 상태의 별도 열린 이슈가 있는지 최신 검색 후 등록한다. 형래/도영의 검토는 아직 합의되지 않은 초안이다.
+원장 중복: 기존 echo-was#98(실패 진단·승인 후 재배포)은 닫힌 최초 연동이고 echo-was#88(반영 실행 상세 조회)은 기존 담당 Saccharine1211을 보존한다. 이번 원장은 echo-was#130(후속 읽기 상태)이며 기존 OPEN/Project4 In Progress/담당 Saccharine1211을 유지한다. 재생성하지 않는다. 형래/도영의 검토는 아직 합의되지 않은 초안이다.
+
+중단 인수: 기존 9 tracked+6 untracked의 원형은 0a522cbb90f68c37699746d0fe468101270ee688에 보존했다. 최신 main 045bd9bf8814b1e4b85609a24e4f3619a921de07을 일반 merge한 구현 검증 head는 7393fba2efc2c4d42d25f6559c365f6f48c1cd72이다. 도현의 미병합 #121(요청 journal 재생)은 흡수하지 않았다. 새 main의 이미지 게이트·enum은 그대로 보존했다. 후속 읽기 상태의 제품 변경은 최초 인수본과 동일하다. 실PG 전체 기준선 2881 PASS/후보 2913 PASS, 실패·건너뜀 0. 상세 근거는 VERIFICATION.md를 따른다.
