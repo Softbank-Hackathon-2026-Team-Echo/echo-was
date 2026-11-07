@@ -50,6 +50,9 @@ class AuditAction(StrEnum):
     DISASTER_ENDED = "DISASTER_ENDED"
     DISASTER_EVACUATION_REQUESTED = "DISASTER_EVACUATION_REQUESTED"
     DISASTER_FEED_INJECTED = "DISASTER_FEED_INJECTED"
+    # 시연 조직 스냅샷(details.snapshot 이 그 기록 자체다)·복귀.
+    DEMO_SNAPSHOT = "DEMO_SNAPSHOT"
+    DEMO_RESTORE = "DEMO_RESTORE"
     # --- 서버(SYSTEM): 끝 상태 ---
     DEPLOY_FINISHED = "DEPLOY_FINISHED"
     DEPLOY_SECURITY_CHECKED = "DEPLOY_SECURITY_CHECKED"
@@ -169,6 +172,8 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
         AuditAction.DISASTER_EVACUATION_REQUESTED
     ),
     ("POST", f"{_ORG}/disasters/feed:inject"): AuditAction.DISASTER_FEED_INJECTED,
+    ("POST", f"{_ORG}/demo/snapshot"): AuditAction.DEMO_SNAPSHOT,
+    ("POST", f"{_ORG}/demo/restore"): AuditAction.DEMO_RESTORE,
 }
 
 _RUNNER = "/api/v1/runner/runs"

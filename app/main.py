@@ -25,6 +25,7 @@ from app.routers import (
     auth_router,
     cost_router,
     cve_watch_router,
+    demo_snapshot_router,
     deploy_request_router,
     disaster_router,
     environment_kind_router,
@@ -97,6 +98,7 @@ app.include_router(security_exception_router.router)
 app.include_router(precheck_router.router)
 app.include_router(ai_residency_router.router)
 app.include_router(runner_router.router)
+app.include_router(demo_snapshot_router.router)
 
 
 @app.get("/healthz", status_code=status.HTTP_204_NO_CONTENT)

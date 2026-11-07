@@ -801,3 +801,15 @@ class NotImplementedYetError(AppError):
 
     code = "NOT_IMPLEMENTED"
     status_code = 501
+
+
+class DemoSnapshotNotFoundError(NotFoundError):
+    """이 조직에 시연 스냅샷이 아직 없다."""
+
+    code = "DEMO_SNAPSHOT_NOT_FOUND"
+
+
+class DemoStateNotCleanError(ConflictError):
+    """시연 스냅샷은 깨끗한 상태에서만 딴다. details 에 막은 이유(reason)·대상 id(value)."""
+
+    code = "DEMO_STATE_NOT_CLEAN"

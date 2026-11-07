@@ -189,6 +189,10 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/disasters/{disaster_id}/evacuate", D, human_only=True),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
+    # 시연 조직 스냅샷·복귀는 어드민만(만들기·복귀는 사람만).
+    _org("POST", "/demo/snapshot", A, human_only=True),
+    _org("GET", "/demo/snapshot", A),
+    _org("POST", "/demo/restore", A, human_only=True),
     # 러너 경로는 러너·실행 토큰만 받는다(사람 쿠키·에이전트 토큰은 403).
     ("POST", "/api/v1/runner/runs:claim", RUNNER_ONLY),
     ("POST", "/api/v1/runner/runs/{run_id}/heartbeat", RUNNER_ONLY),
