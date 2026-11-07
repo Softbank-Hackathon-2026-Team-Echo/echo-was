@@ -65,6 +65,9 @@ from app.executors.base import (
     HealthOk,
     HealthProbeResult,
     InvalidLogCursor,
+    JournalReplayed,
+    JournalReplayRequest,
+    JournalReplayResult,
     LogChunk,
     LogLine,
     MainRoute,
@@ -720,3 +723,25 @@ class FakeDbCutoverExecutor:
                 )
             )
         return DbCutoverJobUnknown("FAKE_JOB_UNKNOWN")
+
+
+class FakeJournalReplayer:
+    """가짜 요청 기록 재생. 기록이 없으므로 기본은 보낸 것 0건이다(숫자를 지어내지 않는다).
+
+    시험은 result 로 결과(JournalReplayed·JournalReplayUnavailable)를 바꾸고 requests 로 받은 요청을
+    확인한다.
+    """
+
+    def __init__(self, result: JournalReplayResult | None = None) -> None:
+        self.result: JournalReplayResult = result or JournalReplayed(
+            sent=0, created=0, existed=0, failed=0, skipped=0, duration_ms=0
+        )
+        self.requests: list[JournalReplayRequest] = []
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def replay(self, request: JournalReplayRequest) -> JournalReplayResult:
+        self.requests.append(request)
+        return self.result

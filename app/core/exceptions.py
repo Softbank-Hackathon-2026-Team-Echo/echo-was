@@ -416,6 +416,26 @@ class DbCutoverDisabledError(ConflictError):
     code = "DB_CUTOVER_DISABLED"
 
 
+class JournalReplayDisabledError(ConflictError):
+    """요청 기록 재생 실행기가 꺼져 있다(JOURNAL_REPLAY_MODE=disabled)."""
+
+    code = "JOURNAL_REPLAY_DISABLED"
+
+
+class ReplayNotAvailableError(ConflictError):
+    """이 계획은 재생 대상이 아니다: DB 쓰기 전환이 승격(PROMOTE)으로 통과하지 않았거나,
+    같은 서비스에 그 뒤 계획이 있다. 이유는 fields 의 reason 이다.
+    """
+
+    code = "REPLAY_NOT_AVAILABLE"
+
+
+class JournalUnavailableError(ExternalError):
+    """진입점 요청 기록을 읽지 못했다(토큰·거절·닿지 못함). 아무것도 보내지 않았다."""
+
+    code = "JOURNAL_UNAVAILABLE"
+
+
 class SourceNotSingleError(ConflictError):
     """서비스 중 연결이 정확히 하나(비율 100)가 아니다(없음·여럿·이전 중간 비율)."""
 

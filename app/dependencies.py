@@ -457,6 +457,7 @@ def get_migration_plan_service(
     settings: Annotated[Settings, Depends(get_settings)],
     clock: Annotated[Clock, Depends(get_clock)],
     tls_checker: Annotated[PublicHostTlsChecker | None, Depends(get_public_tls_checker)],
+    executors: Annotated[ExecutorSet | None, Depends(get_executor_set)],
 ) -> MigrationPlanService:
     return MigrationPlanService(
         session=session,
@@ -475,6 +476,8 @@ def get_migration_plan_service(
         db_cutover_mode=settings.db_cutover_executor_mode,
         db_cutover_timeout_seconds=settings.migration_db_cutover_timeout_seconds,
         db_cutover_on_disaster=settings.migration_db_cutover_on_disaster,
+        journal_replayer=executors.journal_replayer if executors is not None else None,
+        journal_replay_margin_seconds=settings.journal_replay_margin_seconds,
     )
 
 

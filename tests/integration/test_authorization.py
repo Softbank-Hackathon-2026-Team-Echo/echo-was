@@ -143,6 +143,8 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/migration-plans/{plan_id}/reject", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/cancel", D, human_only=True),
     _org("POST", "/migration-plans/{plan_id}/abort", D, human_only=True),
+    # API 서버 21: 요청 기록 재생(개발자 이상 사람)
+    _org("POST", "/migration-plans/{plan_id}/replay", D, human_only=True),
     # API 서버 10: 앱 환경 변수(목록은 뷰어·에이전트, 넣기는 개발자 사람, 삭제는 어드민 사람)
     _org("GET", "/services/{service_id}/environments/{environment_id}/variables", V),
     _org(

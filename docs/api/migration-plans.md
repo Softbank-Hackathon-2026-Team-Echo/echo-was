@@ -16,6 +16,7 @@
 | `POST /migration-plans/{planId}/reject` | 200 `MigrationPlanDetail`(`REJECTED`) | 403 `SELF_APPROVAL_FORBIDDEN`, 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/cancel` | 200 `MigrationPlanDetail`(`CANCELLED`) | 409 `PLAN_NOT_PENDING`·`PLAN_EXPIRED` | 개발자(사람) |
 | `POST /migration-plans/{planId}/abort` | 202 `MigrationPlanDetail`(멱등) | 409 `PLAN_NOT_RUNNING` | 개발자(사람) |
+| `POST /migration-plans/{planId}/replay` (API 서버 21) | 200 `MigrationPlanDetail`(`steps[i].cutover.replay` 갱신, 다시 불러도 안전) | 409 `JOURNAL_REPLAY_DISABLED`·`REPLAY_NOT_AVAILABLE`, 502 `JOURNAL_UNAVAILABLE` | 개발자(사람) |
 | `GET /migration-plans/{planId}/logs?cursor&limit` | 200 `MigrationLogPage` | 404, 422(cursor·limit) | 뷰어·에이전트 |
 | `PATCH /settings` `{allowSelfApproval}` | 200 `Organization` | 403 `ROLE_FORBIDDEN` | 어드민(사람) — [organizations.md](organizations.md) |
 
@@ -103,7 +104,7 @@
 - **중단·일꾼 상실**: Job 을 요청한 뒤에는 Job 이 끝나 판정할 때까지 되돌리지 않는다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난다). 판정이 통과면 중단 요청이 있어도 `SUCCEEDED` 다.
 - **응답**: `steps[5].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
 - **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 3)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.
-- **단계 결과 cutover 추가 칸**: `startUncertain`(생성 응답 유실) · `startConfirmed`(같은 이름 조회로 다시 찾음) · `pollErrors`(상태 조회 연속 실패 수) · `writer`(종료 1 뒤 확인한 쓰기 담당 SOURCE·TARGET·UNKNOWN).
+- **단계 결과 cutover 추가 칸**: `startUncertain`(생성 응답 유실) · `startConfirmed`(같은 이름 조회로 다시 찾음) · `pollErrors`(상태 조회 연속 실패 수) · `writer`(종료 1 뒤 확인한 쓰기 담당 SOURCE·TARGET·UNKNOWN) · `replayAvailable`·`replay`(아래 "요청 기록 재생").
 - **로그 코드**: `DB_CUTOVER_JOB_CREATED` · `DB_CUTOVER_JOB_FINISHED` · `DB_CUTOVER_OK` · `DB_CUTOVER_FAILED`(원인 문장 붙음) · `DB_CUTOVER_MANUAL_REQUIRED`(자동으로 되돌리지 않음). data 에 Job 이름·종류·종료 코드·이유·결과 숫자.
 - **감사**: SYSTEM(`migration-worker`) `MIGRATION_DB_CUTOVER_STARTED`(Job 만듦) · `MIGRATION_DB_CUTOVER_FINISHED`(판정, 실패면 `errorCode`).
 
@@ -240,6 +241,18 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 `APPROVED`·`RUNNING` 에서만(아니면 409 `PLAN_NOT_RUNNING`). `abortRequestedAt`·`abortedBy` 를 적고 그 계획의 할 일을 지금으로 당긴다 → 202. 다시 중단해도 202(기록은 그대로). 일꾼이 다음 실행 맨 앞에서 보고 `RUNNING` 이면 롤백(`ABORTED`), `APPROVED` 면 트래픽을 바꾸지 않고 `CANCELLED` 로 끝낸다. 열린 할 일이 없으면(옛 일꾼이 할 일을 닫아 버린 경우 등) `APPROVED` 는 그 자리에서 `CANCELLED`, `RUNNING` 은 할 일을 새로 넣는다.
 
+### 요청 기록 재생 `POST /migration-plans/{planId}/replay` (API 서버 21)
+
+DB 쓰기 전환이 **승격**(결과 행 `mode = PROMOTE`: 원본 A 에 닿지 못해 B 를 올림)으로 끝나면 A 에만 들어가고 B 로 복제되지 않은 쓰기가 있을 수 있다. 고정 진입점이 쓰기 요청을 15분 기록해 두므로(echo-infra 인프라 12.4 journal), 이 API 가 그 기록을 도착 환경에 다시 보내 살린다. 화면은 버튼 하나다(본문 없음).
+
+- **받는 계획**: `steps[i].cutover.replayAvailable = true`(DB 쓰기 전환 단계 `PASSED` + 결과 행 `mode = PROMOTE`)이고, 같은 서비스에 그 뒤 만든 계획이 없고, 도착 연결이 살아 있을 때. 아니면 409 `REPLAY_NOT_AVAILABLE`, `details = [{field: "planId", reason}]`, reason = `NO_DB_CUTOVER`·`NOT_PROMOTED`·`SUPERSEDED`·`TARGET_GONE`. 실행기가 꺼져 있으면(`JOURNAL_REPLAY_MODE=disabled`, 기본) 409 `JOURNAL_REPLAY_DISABLED`.
+- **보내는 것**: 진입점 기록 중 Host = 서비스 대표 주소인 쓰기(POST·PUT·PATCH·DELETE)를 받은 순서대로, 도착 연결의 환경별 주소(`https://{환경별 주소}{path}`)에 같은 메서드·본문·Content-Type, `Idempotency-Key` = 기록의 요청 키로 보낸다. 시작점 = 결과 행 `pausedAt − rpoEstimateMs − JOURNAL_REPLAY_MARGIN_SECONDS`(B 가 A 에서 마지막으로 받은 시각보다 여유만큼 앞). 앱이 멱등이라(같은 키 → 200) 이미 B 에 있는 쓰기는 건너뛰고 빠진 것만 201 로 들어간다. 멱등 키 없음·본문 잘림은 보내지 않는다(`skipped`).
+- **쓰기를 막지 않는다**: 진입점 hold 없이 보낸다. 승격 뒤 새 쓰기가 먼저 들어갔으면 재생된 쓰기는 그 뒤 순서가 된다(데이터는 잃지 않는다). 승격 직후 자동 재생(hold → 승격 → 재생 → release)은 후속이다.
+- **결과**: `steps[i].cutover.replay = {status(DONE·PARTIAL), sent, created, existed, failed, skipped, durationMs, since, replayedAt, attempts}` 에 마지막 결과를 덮어쓴다. 계획 상태는 바뀌지 않는다. `failed > 0`(PARTIAL)이면 다시 눌러도 안전하다(들어간 것은 `existed` 로 센다).
+- **기록을 읽지 못함**(토큰 없음·거절·닿지 못함): 502 `JOURNAL_UNAVAILABLE`(+`reason` 실행기 코드), 아무것도 보내지도 적지도 않는다.
+- **로그·감사**: `JOURNAL_REPLAYED`(INFO) 또는 `JOURNAL_REPLAY_PARTIAL`(WARN), step = DB 쓰기 전환 단계, data = 숫자·`since`. 감사 USER `MIGRATION_JOURNAL_REPLAYED`(details = 같은 숫자 + `attempts`).
+- **한계**: 주 진입점(a)만 기록한다(b·c 로 넘어간 동안의 쓰기는 없다). 기록 보관 15분. 진입점 기록 필터(`journal.enabled`)가 켜져 있어야 기록이 있다(echo-infra 몫). 멱등이 아닌 앱은 같은 요청이 두 번 들어갈 수 있다.
+
 ### 실행 중 겹침
 
 계획이 `APPROVED`·`RUNNING`·`ROLLING_BACK` 이면 그 서비스의 배포 요청·되돌리기·서비스 삭제 접수와 연결을 새로 만드는 환경 변수 넣기([variables.md](variables.md))는 409 `MIGRATION_IN_PROGRESS`(`details = [{field: "planId", reason: "MIGRATION_IN_PROGRESS", value}]`)다. 일꾼이 만드는 예비 따라가기는 막지 않는다(실행 중에는 생기지 않는다).
@@ -374,6 +387,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` | WARN · ERROR | — | `attempt`(·`maxAttempts`) |
 | `FAILED` | ERROR | — | (일꾼 상실·내부 오류·보안 게이트. 문장 = 원인 코드 문장) |
 | `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | INFO · WARN | — | `policyVersion`, `phase`(`EXECUTION`), `blocking[{controlId, reasons}]`, `findingIds`, `exceptionIds`. 게이트를 켰을 때만. 승인 때 막히면 계획 상태는 그대로이고 이 줄만 남는다 |
+| `JOURNAL_REPLAYED` · `JOURNAL_REPLAY_PARTIAL` | INFO · WARN | DB 쓰기 전환 단계 | `sent`, `created`, `existed`, `failed`, `skipped`, `durationMs`, `since`. 끝난 계획에 사람이 재생을 누를 때마다 한 줄(API 서버 21) |
 
 성공한 계획의 줄 순서(게이트를 켜면 `APPROVED`·`STARTED` 앞에 `SECURITY_GATE_PASSED` 가 하나씩 더 있다): `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK, WEIGHT_APPLIED(1), JUDGE_PASSED(1), WEIGHT_APPLIED(2), JUDGE_PASSED(2), DATA_SYNC_OK(3), WEIGHT_APPLIED(4), JUDGE_PASSED(4), SUCCEEDED`(카운터가 재시작하면 그 단계 판정 줄 앞에 `COUNTERS_RESET`).
 
@@ -396,6 +410,8 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | 지문 다름 · 만료 | 409 | `PLAN_STALE`(+달라진 항목) · `PLAN_EXPIRED` |
 | 보안 게이트가 승인을 막음(게이트를 켰을 때) | 409 | `SECURITY_GATE_BLOCKED`(+통제 ID·사유 코드) |
 | 실행 중 그 서비스의 배포 요청·되돌리기·삭제·새 연결을 만드는 변수 넣기 | 409 | `MIGRATION_IN_PROGRESS`(+`planId`) |
+| 요청 기록 재생 실행기 꺼짐 · 재생 대상 아님 | 409 | `JOURNAL_REPLAY_DISABLED` · `REPLAY_NOT_AVAILABLE`(+`NO_DB_CUTOVER`·`NOT_PROMOTED`·`SUPERSEDED`·`TARGET_GONE`) |
+| 진입점 요청 기록을 읽지 못함 | 502 | `JOURNAL_UNAVAILABLE` |
 
 ## 설정
 
@@ -420,6 +436,10 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `DB_CUTOVER_NAMESPACE` | `echo-ops` | Job 네임스페이스 |
 | `DB_CUTOVER_KUBE_API_URL` · `DB_CUTOVER_SERVICE_ACCOUNT_DIR` | `https://kubernetes.default.svc` · `/var/run/secrets/kubernetes.io/serviceaccount` | 같은 클러스터 창구와 파드 SA 토큰·CA |
 | `MIGRATION_DB_CUTOVER_TIMEOUT_SECONDS` | 180 | Job 기다림 상한(10~1800). Job `activeDeadlineSeconds`(120)+유예(30)보다 길게 |
+| `JOURNAL_REPLAY_MODE` | `disabled` | 요청 기록 재생 실행기(`disabled`·`fake`·`http`, API 서버 21). `disabled` 면 재생 API 409 |
+| `JOURNAL_BASE_URL` · `JOURNAL_TOKEN_REF` | (없음) | `http` 일 때 필수. 진입점 journal 관리 API 내부 주소(예 `http://10.60.0.6:8082`, VPC 내부 방화벽으로 열림) · 토큰 비밀 참조(`env:ECHO_SECRET_JOURNAL_TOKEN`, Secret Manager `echo-dev-entry-journal-token`) |
+| `JOURNAL_REQUEST_TIMEOUT_SECONDS` | 5 | journal 읽기·재생 요청 하나의 제한 시간 |
+| `JOURNAL_REPLAY_MARGIN_SECONDS` | 30 | 재생 시작점을 결과 행 시각보다 앞당기는 여유(0~900). 겹친 쓰기는 멱등으로 건너뛴다 |
 | `MIGRATION_DB_CUTOVER_POLL_SECONDS` | 3 | Job 상태 확인 주기(1~60) |
 | `MIGRATION_DB_CUTOVER_ON_DISASTER` | `false` | 재난 긴급 이전 계획에도 이 단계를 넣는가 |
 

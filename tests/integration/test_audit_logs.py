@@ -8,7 +8,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -19,16 +19,23 @@ from app.audit.actions import RUNNER_ROUTE_ACTIONS, WRITE_ROUTE_ACTIONS, AuditAc
 from app.audit.recorder import AuditRecorder
 from app.clients.app_secret_store import FakeAppSecretStore
 from app.clients.github_user import GithubUser
+from app.core.config import DbCutoverExecutorMode
 from app.enums import (
     ActorType,
     AuditResult,
+    CutoverKind,
     DeployRequestStatus,
     JobKind,
     JobStatus,
     OrganizationRole,
 )
-from app.executors.base import HealthHttpError
-from app.executors.fake import FakeBuildExecutor, FakeTeardownExecutor
+from app.executors.base import CutoverRun, HealthHttpError, JournalReplayed
+from app.executors.fake import (
+    FakeBuildExecutor,
+    FakeDbCutoverExecutor,
+    FakeJournalReplayer,
+    FakeTeardownExecutor,
+)
 from app.main import app
 from app.models import AuditLog, Environment, Job, Service, User
 from app.services.service_variable_service import app_secret_name
@@ -144,12 +151,30 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 40
+    assert len(WRITE_ROUTE_ACTIONS) == 41
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
 # --- AC-2: 쓰기 40개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
 # + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개) ---
+
+
+def _promote_run(paused_at: datetime) -> CutoverRun:
+    """승격(원본에 닿지 못함)으로 끝난 컷오버 결과 행(요청 기록 재생 대상)."""
+    return CutoverRun(
+        kind=CutoverKind.CUTOVER,
+        paused_at=paused_at,
+        resumed_at=paused_at + timedelta(seconds=2),
+        write_pause_ms=2000,
+        drain_ms=None,
+        catchup_ms=None,
+        switch_ms=None,
+        rows_total=10,
+        missing_rows=0,
+        duplicate_rows=0,
+        mode="PROMOTE",
+        rpo_estimate_ms=1000,
+    )
 
 
 @dataclass
@@ -829,7 +854,41 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 40개 가운데 39개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 요청 기록 재생(API 서버 21): 승격(PROMOTE)으로 끝난 DB 쓰기 전환 계획에 재생 버튼.
+    harness.use_settings(db_cutover_executor_mode=DbCutoverExecutorMode.FAKE)
+    harness.replace_executors(
+        db_cutover=FakeDbCutoverExecutor(harness.clock, 0, run=_promote_run(harness.clock.now())),
+        journal_replayer=FakeJournalReplayer(
+            JournalReplayed(sent=2, created=2, existed=0, failed=0, skipped=0, duration_ms=7)
+        ),
+    )
+    promoted = await migration.create_plan(includeCutover=True)
+    await migration.approve(promoted["id"])
+    await harness.run_until_idle()
+    await ledger.skip()
+    replayed = await migration.act(promoted["id"], "replay")
+    replay = _data(replayed)["steps"][5]["cutover"]["replay"]
+    await ledger.expect_one(
+        replayed,
+        AuditAction.MIGRATION_JOURNAL_REPLAYED,
+        migration.approver.user,
+        team_id,
+        "migration_plan",
+        promoted["id"],
+        label,
+        {
+            "sent": 2,
+            "created": 2,
+            "existed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "durationMs": 7,
+            "since": datetime.fromisoformat(replay["since"]).isoformat(),
+            "attempts": 1,
+        },
+    )
+
+    # 41개 가운데 40개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
     # 환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)

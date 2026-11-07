@@ -34,6 +34,7 @@ from app.models import MigrationPlan, User
 from app.models.migration_plan import LAST_STEP_INDEX
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.services.migration_counting import StepCounting
+from app.services.migration_db_cutover import is_replayable_cutover
 from app.services.migration_log_messages import MIGRATION_ERROR_MESSAGES
 from app.services.migration_plan_service import MigrationLogPageView, MigrationPlanView
 from app.services.migration_plan_support import (
@@ -214,6 +215,26 @@ class StepCutoverRunResponse(ApiModel):
     rpo_estimate_ms: int | None
 
 
+class StepCutoverReplayResponse(ApiModel):
+    """요청 기록 재생(API 서버 21)의 마지막 결과. 재생할 때마다 덮어쓴다.
+
+    status = DONE(실패 0)·PARTIAL(실패 있음, 다시 시도해도 안전), created = 빠졌던 쓰기가 새로
+    들어감(201), existed = 이미 있음(200), skipped = 멱등 키 없음·본문 잘림 등으로 보내지 않음,
+    since = 재생 시작점, attempts = 지금까지 누른 횟수.
+    """
+
+    status: str
+    sent: int
+    created: int
+    existed: int
+    failed: int
+    skipped: int
+    duration_ms: int
+    since: datetime
+    replayed_at: datetime
+    attempts: int
+
+
 class StepCutoverResponse(ApiModel):
     """DB 쓰기 전환 단계(API 서버 17)의 Job 과 결과. 그 밖의 단계는 null.
 
@@ -240,6 +261,10 @@ class StepCutoverResponse(ApiModel):
     poll_errors: int | None = None
     writer: str | None = None
     run: StepCutoverRunResponse | None = None
+    # 요청 기록 재생 버튼을 보일까: 단계 통과 + 결과 행 mode = PROMOTE(원본에 닿지 못해 승격).
+    # 같은 서비스에 그 뒤 계획이 있으면 재생 API 가 409 REPLAY_NOT_AVAILABLE(SUPERSEDED)이다.
+    replay_available: bool = False
+    replay: StepCutoverReplayResponse | None = None
 
 
 class StepResultResponse(ApiModel):
@@ -545,7 +570,13 @@ def _step_response(
             metrics=StepMetricsResponse.model_validate(metrics) if metrics else None,
             failure_code=result.get(RESULT_FAILURE_CODE),
         ),
-        cutover=StepCutoverResponse.model_validate(cutover) if cutover else None,
+        cutover=(
+            StepCutoverResponse.model_validate(
+                {**cutover, "replayAvailable": is_replayable_cutover(result)}
+            )
+            if cutover
+            else None
+        ),
     )
 
 

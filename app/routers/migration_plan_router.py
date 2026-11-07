@@ -17,7 +17,7 @@ from app.schemas.response import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ApiResponse, 
 from app.services.migration_plan_result import MigrationPlanResultService
 from app.services.migration_plan_service import CreateMigrationPlanCommand, MigrationPlanService
 
-# 조회·로그는 뷰어(에이전트 가능). 만들기·승인·거절·취소·중단은 개발자 이상 사람
+# 조회·로그는 뷰어(에이전트 가능). 만들기·승인·거절·취소·중단·요청 기록 재생은 개발자 이상 사람
 # (에이전트는 승인할 수 없다).
 router = APIRouter(prefix="/api/v1/orgs/{org_id}", tags=["migration-plan"])
 
@@ -156,6 +156,22 @@ async def abort_migration_plan(
 ) -> ApiResponse[MigrationPlanDetailResponse]:
     """중단을 받는다(멱등). 출발 100% 로 되돌리는 것은 일꾼이 한다."""
     view = await migration_plans.abort_plan(access.organization_id, plan_id, access.user.id)
+    return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))
+
+
+@router.post(
+    "/migration-plans/{plan_id}/replay",
+    response_model=ApiResponse[MigrationPlanDetailResponse],
+)
+async def replay_migration_journal(
+    access: HumanDeveloperAccess, plan_id: uuid.UUID, migration_plans: MigrationPlans
+) -> ApiResponse[MigrationPlanDetailResponse]:
+    """승격한 DB 쓰기 전환 뒤 진입점 요청 기록을 도착 환경에 다시 보낸다(API 서버 21).
+
+    상세의 `steps[i].cutover.replayAvailable` 이 true 인 계획만 받는다(아니면 409
+    REPLAY_NOT_AVAILABLE). 결과는 `steps[i].cutover.replay` 다. 다시 눌러도 안전하다.
+    """
+    view = await migration_plans.replay_journal(access.organization_id, plan_id, access.user.id)
     return ApiResponse(data=MigrationPlanDetailResponse.from_view(view))
 
 

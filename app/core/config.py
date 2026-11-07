@@ -91,6 +91,18 @@ class DbCutoverExecutorMode(StrEnum):
     KUBERNETES = "kubernetes"
 
 
+class JournalReplayMode(StrEnum):
+    """요청 기록 재생(API 서버 21) 실행기.
+
+    disabled(기본)면 재생 API 가 409 다. http 면 고정 진입점의 요청 기록 관리 API(echo-infra
+    인프라 12.4 journal, :8082)에서 기록을 읽어 도착 환경에 다시 보낸다.
+    """
+
+    DISABLED = "disabled"
+    FAKE = "fake"
+    HTTP = "http"
+
+
 class SourceClientMode(StrEnum):
     FAKE = "fake"
     GITHUB = "github"
@@ -178,6 +190,16 @@ class Settings(BaseSettings):
     migration_db_cutover_poll_seconds: int = Field(default=3, ge=1, le=60)
     # 재난 트리거가 만드는 긴급 이전 계획에도 DB 쓰기 전환(ALLOW_PROMOTE=true)을 넣는가.
     migration_db_cutover_on_disaster: bool = False
+    # 요청 기록 재생(API 서버 21). http 면 진입점 journal 관리 API(내부 주소,
+    # 예 http://10.60.0.6:8082)에서 기록을 읽는다.
+    # 토큰은 값이 아니라 비밀 참조(env:ECHO_SECRET_...)다.
+    # 재생 시작점은 결과 행의 「B 가 A 에서 마지막으로 받은 시각」(paused_at − rpo_estimate_ms)에서
+    # margin 초를 더 뺀다.
+    journal_replay_mode: JournalReplayMode = JournalReplayMode.DISABLED
+    journal_base_url: str | None = None
+    journal_token_ref: str | None = None
+    journal_request_timeout_seconds: float = Field(default=5.0, gt=0)
+    journal_replay_margin_seconds: int = Field(default=30, ge=0, le=900)
 
     # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
     # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
@@ -510,6 +532,35 @@ class Settings(BaseSettings):
             raise ValueError(
                 "db_cutover_executor_mode kubernetes needs data_sync_checker_mode postgres and "
                 "cutover_runs_database to read cutover results"
+            )
+        return self
+
+    @field_validator("journal_base_url")
+    @classmethod
+    def _strip_journal_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().rstrip("/") or None
+
+    @field_validator("journal_token_ref")
+    @classmethod
+    def _check_journal_token_ref(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        try:
+            parse_secret_ref(value)
+        except InvalidSecretRefError:
+            raise ValueError("journal_token_ref must be a secret reference") from None
+        return value
+
+    @model_validator(mode="after")
+    def _check_journal_replay_settings(self) -> "Settings":
+        if self.journal_replay_mode is JournalReplayMode.HTTP and not (
+            self.journal_base_url and self.journal_token_ref
+        ):
+            raise ValueError(
+                "journal_base_url and journal_token_ref are required when "
+                "journal_replay_mode is http"
             )
         return self
 
