@@ -43,6 +43,10 @@ env:
   REGISTRY: asia-northeast3-docker.pkg.dev
   AR_REPO: asia-northeast3-docker.pkg.dev/team-echo-final/echo/app
   ECR_REPO: 706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo/app
+  # build-push-action 뒷정리(Post)의 빌드 기록 내보내기·올리기와 실행 화면 빌드 요약을 끈다(약 3~4초).
+  # 일꾼은 build-result·security-scan 산출물만 읽으므로 영향이 없다. 실행 화면의 Docker 빌드 요약만 사라진다.
+  DOCKER_BUILD_SUMMARY: false
+  DOCKER_BUILD_RECORD_UPLOAD: false
 
 jobs:
   build:
@@ -115,6 +119,9 @@ jobs:
           password: ${{ steps.gcp-auth.outputs.access_token }}
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          # 끝날 때 빌더를 지우지 않는다(약 7초). GitHub 제공 러너는 실행이 끝나면 통째로 버려진다.
+          cleanup: false
 
       - name: build
         id: build
