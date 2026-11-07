@@ -649,3 +649,23 @@ def test_summarize_cell_ignores_not_applicable() -> None:
         [cell_decision(C.AUD_2, R.NA, mode=None), cell_decision(C.AUD_1, R.PASS)],
     )
     assert summary.result == R.PASS
+
+
+@pytest.mark.parametrize("control", [C.IMG_1, C.AI_1, C.CFG_1])
+def test_timed_out_control_ignores_pass_evidence_and_keeps_mandatory_policy(
+    control: SecurityControlId,
+) -> None:
+    decision = evaluate_security(
+        TARGET,
+        EXEC,
+        passing_findings(),
+        [],
+        NOW,
+        timed_out_controls=frozenset({control}),
+    )
+    result = decision.get_control(control)
+    assert result.result == R.UNKNOWN
+    assert result.reasons == (SecurityReasonCode.CONTROL_TIMEOUT,)
+    assert result.finding_ids == ()
+    assert result.is_blocking == get_rule(control).is_mandatory
+    assert all(item.result == R.PASS for item in decision.controls if item.control_id != control)

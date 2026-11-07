@@ -8,7 +8,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
-from app.enums import SecurityFindingMode
+from app.enums import SecurityControlId, SecurityFindingMode, SecurityFindingSource
 from app.models import Finding
 
 # 커서에서 한 번에 가져올 ORM 행 수. 판정 결과 전체를 자르는 상한이 아니다.
@@ -25,7 +25,12 @@ class FindingRepository:
         self._session.add(finding)
 
     async def search_unexpired_by_organization(
-        self, organization_id: uuid.UUID, now: datetime
+        self,
+        organization_id: uuid.UUID,
+        now: datetime,
+        *,
+        control_id: SecurityControlId | None = None,
+        excluded_sources: Sequence[SecurityFindingSource] = (),
     ) -> list[Finding]:
         """판정용 만료 전 실제 증거 전체. 원문 상세 없이 판정 필드만 최신순으로 읽는다.
 
@@ -65,6 +70,10 @@ class FindingRepository:
             .order_by(Finding.collected_at.desc(), Finding.id)
             .execution_options(yield_per=FINDING_FETCH_BATCH_SIZE)
         )
+        if control_id is not None:
+            stmt = stmt.where(Finding.control_id == control_id)
+        if excluded_sources:
+            stmt = stmt.where(Finding.source.not_in(excluded_sources))
         rows = await self._session.stream_scalars(stmt)
         try:
             return [finding async for finding in rows]
