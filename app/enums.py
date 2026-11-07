@@ -724,6 +724,7 @@ class SecurityReasonCode(StrEnum):
     """통제 판정 사유(기계 판독용). 게이트가 막으면 이 값을 통제 ID 와 함께 돌려준다."""
 
     CONTROL_FAILED = "CONTROL_FAILED"
+    CONTROL_TIMEOUT = "CONTROL_TIMEOUT"
     CONTROL_WARNING = "CONTROL_WARNING"
     # 수집기가 확인하지 못했다고 적은 증거(시간 초과·권한 부족 등).
     EVIDENCE_UNKNOWN = "EVIDENCE_UNKNOWN"

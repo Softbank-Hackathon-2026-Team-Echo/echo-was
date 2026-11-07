@@ -136,9 +136,11 @@
 - 판정 전 짧은 읽기 트랜잭션에서 조직 범위·`PENDING_APPROVAL`·필요한 DB 승격 동의·자기 승인 권한을 순서대로 확인한다. 거절되면 TLS 호출·새 증거 저장 없이 기존 404/409/422/403을 반환한다(자기 승인 거부 감사는 유지). 통과한 요청만 트랜잭션 밖에서 판정하고, 이후 잠금 안에서 상태·DB 승격 동의·자기 승인 권한·만료·지문을 다시 확인한다.
 - **필수 통제 하나라도 FAIL·UNKNOWN 이고 유효한 기한부 예외가 없으면 막는다.** 승인은 409 `SECURITY_GATE_BLOCKED`(계획은 승인 대기 그대로라 고친 뒤 다시 승인할 수 있다), 일꾼 시작은 트래픽을 바꾸지 않고 `FAILED`(`SECURITY_GATE_BLOCKED`, `rollbackStatus = NOT_NEEDED`).
 - `details` 한 칸 = 막은 통제 하나의 사유 하나: `{field: 통제 ID, reason: 사유 코드}`. 예: `{"field": "C-AI-1", "reason": "PRECHECK_MISSING"}`, `{"field": "C-DB-1", "reason": "EVIDENCE_MISSING"}`.
-- 판정 직전에 두 가지를 새로 확인해 증거(`findings`, `sourceRef = migration-plan:{planId}`)로 남긴다. 이 두 통제는 방금 확인한 증거만 쓴다.
+- 판정 직전에 세 가지를 새로 확인해 증거(`findings`, `sourceRef = migration-plan:{planId}`)로 남긴다. IMG-3/TLS-1과 SEC-1의 WAS_STATE는 방금 확인한 증거만 쓴다.
   - **C-IMG-3** 출발·도착 현재 배포의 digest 가 같은가(WAS 상태).
   - **C-TLS-1** 대표 주소·도착 환경 주소의 TLS 접속 시험(5초). Echo 가 만든 공개 도메인 아래 주소만, 443 만, DNS 로 받은 IP 를 확인한 뒤 그 IP 로 접속한다. 사설 대역만 나오면 접속하지 않고 NA, 루프백·링크 로컬·예약 대역이나 공인·사설이 섞이면 접속하지 않고 UNKNOWN.
+  - **C-SEC-1** 출발 변수 키가 도착에도 있는가(값은 읽지 않음). 저장된 사람 점검 근거도 함께 판정한다.
+- 통제별 읽기·검사 예산(IMG-1/3·SEC-1·AI-1 각 1초, TLS 전체 5초)을 넘으면 해당 통제 UNKNOWN·`CONTROL_TIMEOUT`으로 차단한다(유효 예외는 기존 WARN). 일부 결과·옛 PASS를 재사용하지 않는다. `data.timedOutControlIds`에 예외 적용 여부와 무관하게 시간 초과 ID를 남긴다. 공통 조회·기록까지 포함한 API 전체 시간 제한은 아니며 상세 범위는 [보안 API](security.md#이전-승인실행-시작의-시간-예산)를 따른다.
 - 그 밖의 증거: 조직의 유효한 증거(빌드 검사·사람 점검 기록 등), 승인됐고 철회되지 않은 기한부 예외, 동일 조직·서비스·출발·도착 환경에서 24시간 미만에 성공한 실제 AI 사전 점검 중 최신 실행(C-AI-1). 더 최신의 모의 실행은 실제 결과를 가리지 않는다. 실제 결과가 없으면 같은 범위의 모의 결과는 `PRECHECK_MISSING`·`EVIDENCE_SIMULATED` 차단 사유에만 사용한다. 출발 누락·범위 불일치·만료·실패·다른 종류의 실행은 제외하며 EMERGENCY도 같은 기준이다.
 - 판정은 로그 줄 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 의 `data` 에 정책 버전·판정 시점·막은 통제와 사유·쓴 증거 ID·예외 ID 로 남는다.
 - 판정을 만든 뒤 바뀐 상태(현재 배포·환경 설정)는 지문이 잡는다(승인·시작 모두 잠금 안에서 지문을 먼저 비교한다).
@@ -373,7 +375,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `ROLLBACK_APPLIED` | INFO | — | `sourceWeight: 100`, `targetWeight: 0` |
 | `ROLLBACK_APPLY_FAILED` · `ROLLBACK_FAILED` | WARN · ERROR | — | `attempt`(·`maxAttempts`) |
 | `FAILED` | ERROR | — | (일꾼 상실·내부 오류·보안 게이트. 문장 = 원인 코드 문장) |
-| `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | INFO · WARN | — | `policyVersion`, `phase`(`EXECUTION`), `blocking[{controlId, reasons}]`, `findingIds`, `exceptionIds`. 게이트를 켰을 때만. 승인 때 막히면 계획 상태는 그대로이고 이 줄만 남는다 |
+| `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | INFO · WARN | — | `policyVersion`, `phase`(`EXECUTION`), `blocking[{controlId, reasons}]`, `findingIds`, `exceptionIds`, `timedOutControlIds`(예산 초과 통제, 없으면 []). 게이트를 켰을 때만. 승인 때 막히면 계획 상태는 그대로이고 이 줄만 남는다 |
 
 성공한 계획의 줄 순서(게이트를 켜면 `APPROVED`·`STARTED` 앞에 `SECURITY_GATE_PASSED` 가 하나씩 더 있다): `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK, WEIGHT_APPLIED(1), JUDGE_PASSED(1), WEIGHT_APPLIED(2), JUDGE_PASSED(2), DATA_SYNC_OK(3), WEIGHT_APPLIED(4), JUDGE_PASSED(4), SUCCEEDED`(카운터가 재시작하면 그 단계 판정 줄 앞에 `COUNTERS_RESET`).
 
