@@ -26,13 +26,41 @@ class FindingRepository:
     async def search_unexpired_by_organization(
         self, organization_id: uuid.UUID, now: datetime, limit: int = FINDING_SEARCH_LIMIT
     ) -> list[Finding]:
+        """판정(매트릭스·게이트·증거 판정 조회)에 넣을 만료 전 실제 증거. 최신순.
+
+        - SIMULATED 증거는 상한(LIMIT)을 세기 전에 뺀다. 판정은 어차피 쓰지 않으므로(규칙의
+          EVIDENCE_SIMULATED), 가짜 증거가 많이 쌓여도 실제 증거를 상한 밖으로 밀어내지 못한다.
+        - 상한 안에서 (통제, 출처)마다 최신 것을 먼저 고른다(돌아가며 한 건씩). 한 통제·출처의
+          증거가 대량으로 쌓여도 다른 통제·출처의 최신 증거가 빠지지 않는다.
+        """
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=(Finding.control_id, Finding.source),
+                order_by=(Finding.collected_at.desc(), Finding.id),
+            )
+            .label("rank")
+        )
+        ranked = (
+            select(Finding.id.label("finding_id"), rank)
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.expires_at > now,
+                Finding.mode != SecurityFindingMode.SIMULATED,
+            )
+            .subquery()
+        )
         stmt = (
             select(Finding)
-            .where(Finding.organization_id == organization_id, Finding.expires_at > now)
-            .order_by(Finding.collected_at.desc(), Finding.id)
+            .join(ranked, ranked.c.finding_id == Finding.id)
+            .order_by(ranked.c.rank, Finding.collected_at.desc(), Finding.id)
             .limit(limit)
         )
-        return list((await self._session.scalars(stmt)).all())
+        models = list((await self._session.scalars(stmt)).all())
+        # 돌려주는 순서는 예전과 같은 최신순이다.
+        models.sort(key=lambda model: model.id)
+        models.sort(key=lambda model: model.collected_at, reverse=True)
+        return models
 
     async def search_recent_for_precheck(
         self,

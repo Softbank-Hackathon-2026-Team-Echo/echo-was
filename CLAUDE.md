@@ -34,6 +34,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회·이전 전후 비교 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건·`blocksMigration`)를 바꾸거나 쓸 때 |
+| [docs/api/cve-watch.md](docs/api/cve-watch.md) | CVE 감시(OSV 피드 → 서비스 의존성 목록 → C-IMG-1 `CVE_WATCH` 증거·`remediation`, 즉시 조회·가짜 권고 주입·진단 연결 501)를 바꾸거나 쓸 때 |
 | [docs/api/costs.md](docs/api/costs.md) | 클라우드 비용 API(ESTIMATE·BILLING 구분·계산·제외 항목·데이터 파일·청구 갱신·단가 출처)를 바꾸거나 쓸 때 |
 | [docs/api/metrics.md](docs/api/metrics.md) | 서비스 대시보드 지표 API(진입점 Prometheus PromQL·`metricsStatus`·에러 버짓 공식·복제 지연·5초 캐시·basic auth 설정)를 바꾸거나 쓸 때 |
 | [docs/api/prechecks.md](docs/api/prechecks.md) · [docs/agent-runner.md](docs/agent-runner.md) | AI 사전 점검 사람 쪽 API(만들기 거절 순서·입력 사본·`simulated`·`aiReviewed`·반영 실행 상세·이벤트 조회)와 러너 쪽 계약(토큰·임대·이벤트·`RunResult`·감사)을 바꾸거나 쓸 때 |
@@ -66,6 +67,7 @@ app/
 │                     #   migration_plan_log(이전 실행 로그 기록기) · migration_log_messages · migration_guard(실행 중 접수 거절)
 │                     #   AuditLogService(감사 로그 조회)
 │                     #   DisasterService(재난 미리보기·만들기·종료, 피해 서비스 긴급 계획 트리거) · disaster_rules(반경·거리·분류·도착 고르기, 순수 계산)
+│                     #   live_disaster_feed(실제 지진 피드 USGS 주기 조회·시연 주입·상태, 기본 꺼짐, API 서버 18) · live_disaster_feed_rules(피드 읽기·중복 제거·조직 기준 판정, 순수 계산)
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1·C-SEC-1(출발·도착 앱 환경 변수 키) 확인, 기본 꺼짐, 보안 5)
@@ -195,7 +197,7 @@ tests/                # 단위 테스트 · adapter_contract.py·executor_contra
 - **계획 종류 `mode` 는 만들 때 한 번 판정해 저장한다**(API 서버 8-3, `decide_plan_mode`). 서비스 행을 잠근 트랜잭션 안에서 가장 늦게 끝난 `SUCCEEDED` 계획(`find_last_succeeded_for_service`)을 거꾸로 하면 `FAILBACK`(그 계획이 `FAILBACK` 이면 `PLANNED`). 응답 때 다시 계산하지 않고, 요청으로 받지 않는다(422). `EMERGENCY` 는 재난 트리거만 만든다(`create_plan` 의 `disaster` 인자).
 - **재난 트리거는 서비스마다 `create_plan`·`approve_plan` 을 그대로 부른다**(API 서버 9, `DisasterService`). 둘이 각자 트랜잭션을 열므로 열린 트랜잭션 없이 부르고, 실패의 롤백이 세션 객체를 전부 만료시키므로 서비스 사이에 ORM 객체를 들고 있지 않는다(값만 넘긴다). 한 서비스의 실패는 그 서비스의 결과만 바꾼다. 일꾼은 바뀌지 않는다. 도착이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 409 `DISASTER_ACTIVE`(만들기만, 승인은 다시 보지 않는다). 재난 행의 환경 id 목록은 만든 순간 스냅숏이다.
 - **비율 단계 판정은 "도착이 요청 N건을 5xx 허용 안에서 처리했나"**(API 서버 8-1, `migration_counting`). `OBSERVE` 한 번 실행 = 카운터(`MetricsProvider.read_counts`, 트랜잭션 밖) 한 번 읽기, 센 값은 `step_results[i].counting` 에 조건부 UPDATE 로 적고 진행 갱신은 로그 줄을 남기지 않는다. 세기를 끝내면 `judgeReason` 을 같은 트랜잭션에 적고 `JUDGE` 는 저장값으로만 판정한다(카운터 재읽기 금지). p95 는 판정에 쓰지 않는다(참고 값만). API 에 `observeSeconds` 는 없고 DB `observe_seconds` 칸 = 최대 대기다.
-- **보안 게이트는 `SECURITY_GATE_ENABLED` 일 때만 주입한다**(보안 5, `SecurityGate`, API 는 `get_public_tls_checker`, 일꾼은 `Worker(tls_checker=)`). 승인은 상태·자기 승인 권한을 먼저 확인해 승인 불가 요청의 TLS·증거 저장을 막고, 판정 뒤 잠금 안에서 다시 확인한다. 승인·일꾼 시작 모두 **잠금 전·트랜잭션 밖에서 판정**(TLS 시험은 네트워크)하고, 잠금 안에서 지문이 같을 때 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 줄을 남긴다. 막힌 승인은 계획을 그대로 두고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`, 막힌 시작은 `FAILED(SECURITY_GATE_BLOCKED)`(트래픽 그대로). TLS 시험은 `PublicHostTlsChecker` 로만 한다(공개 도메인 주소·443·확인한 공인 IP). 기한부 예외는 승인·미철회만 읽는다.
+- **보안 게이트는 `SECURITY_GATE_ENABLED` 일 때만 주입한다**(보안 5, `SecurityGate`, API 는 `get_public_tls_checker`, 일꾼은 `Worker(tls_checker=)`). 승인은 상태·필요한 DB 승격 동의·자기 승인 권한을 순서대로 확인해 승인 불가 요청의 TLS·증거 저장을 막고, 판정 뒤 잠금 안에서 다시 확인한다. 승인·일꾼 시작 모두 **잠금 전·트랜잭션 밖에서 판정**(TLS 시험은 네트워크)하고, 잠금 안에서 지문이 같을 때 `SECURITY_GATE_PASSED`·`SECURITY_GATE_BLOCKED` 줄을 남긴다. 막힌 승인은 계획을 그대로 두고 커밋한 뒤 409 `SECURITY_GATE_BLOCKED`, 막힌 시작은 `FAILED(SECURITY_GATE_BLOCKED)`(트래픽 그대로). TLS 시험은 `PublicHostTlsChecker` 로만 한다(공개 도메인 주소·443·확인한 공인 IP). 기한부 예외는 승인·미철회만 읽는다.
 
 ### 감사 로그 (자주 어기는 것)
 - **새 쓰기 경로에는 이름과 기록이 함께 간다.** `app/audit/actions.py` 의 `WRITE_ROUTE_ACTIONS` 에 이름을 더하고(빠지면 `test_every_write_route_has_an_action_name` 실패), 서비스의 변경 블록 **성공 분기**에서 `AuditRecorder.record` 를 부른다(`session.add` 만 한다). 아무것도 바뀌지 않은 멱등 성공과 409 분기에는 줄을 쓰지 않는다.

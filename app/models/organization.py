@@ -1,10 +1,13 @@
 import uuid
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
+    Integer,
+    Numeric,
     String,
     UniqueConstraint,
     text,
@@ -25,6 +28,11 @@ ORGANIZATION_SLUG_MAX_LENGTH = 39
 ORGANIZATION_NAME_MAX_LENGTH = 100
 ROLE_MAX_LENGTH = 16
 ROLE_VALUES = ", ".join(f"'{role.value}'" for role in OrganizationRole)
+# API 서버 18: 실제 지진 피드로 재난을 만들 조직 기준(규모 이상 ∧ 환경이 반경 안).
+LIVE_FEED_DEFAULT_MIN_MAGNITUDE = Decimal("6.0")
+LIVE_FEED_DEFAULT_RADIUS_KM = 300
+LIVE_FEED_MIN_MAGNITUDE_RANGE = (0, 10)
+LIVE_FEED_RADIUS_KM_RANGE = (1, 2000)
 
 
 class Organization(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -34,12 +42,24 @@ class Organization(UuidPrimaryKeyMixin, TimestampMixin, Base):
     personal 은 처음 로그인할 때 자동으로 만든 개인 조직이다.
     allow_self_approval 은 이전 계획을 만든 사람이 스스로 승인·거절할 수 있는지다(기본 막음,
     어드민만 바꾼다).
+    live_feed_min_magnitude·live_feed_radius_km 은 실제 지진 피드 기준이다(API 서버 18, 기본
+    M6.0·300km).
     """
 
     __tablename__ = "organizations"
     __table_args__ = (
         CheckConstraint(f"slug ~ '{ORGANIZATION_SLUG_PATTERN}'", name="slug_format"),
         CheckConstraint("char_length(name) >= 1", name="name_not_empty"),
+        CheckConstraint(
+            "live_feed_min_magnitude BETWEEN "
+            f"{LIVE_FEED_MIN_MAGNITUDE_RANGE[0]} AND {LIVE_FEED_MIN_MAGNITUDE_RANGE[1]}",
+            name="live_feed_min_magnitude_range",
+        ),
+        CheckConstraint(
+            "live_feed_radius_km BETWEEN "
+            f"{LIVE_FEED_RADIUS_KM_RANGE[0]} AND {LIVE_FEED_RADIUS_KM_RANGE[1]}",
+            name="live_feed_radius_km_range",
+        ),
     )
 
     slug: Mapped[str] = mapped_column(
@@ -57,6 +77,20 @@ class Organization(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=False,
         server_default=text("false"),
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    live_feed_min_magnitude: Mapped[Decimal] = mapped_column(
+        Numeric(3, 1),
+        nullable=False,
+        default=LIVE_FEED_DEFAULT_MIN_MAGNITUDE,
+        server_default=text(str(LIVE_FEED_DEFAULT_MIN_MAGNITUDE)),
+        sort_order=APPENDED_COLUMN_SORT_ORDER,
+    )
+    live_feed_radius_km: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=LIVE_FEED_DEFAULT_RADIUS_KM,
+        server_default=text(str(LIVE_FEED_DEFAULT_RADIUS_KM)),
         sort_order=APPENDED_COLUMN_SORT_ORDER,
     )
 

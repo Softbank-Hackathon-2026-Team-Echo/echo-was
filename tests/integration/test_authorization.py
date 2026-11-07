@@ -165,6 +165,10 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("POST", "/security/exceptions", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/approve", D, human_only=True),
     _org("POST", "/security/exceptions/{exception_id}/revoke", D, human_only=True),
+    # CVE 감시(SPEC sec-6-cve-watch): 조회·주입·진단 요청은 개발자 이상 사람.
+    _org("POST", "/security/cve-watch:check", D, human_only=True),
+    _org("POST", "/security/cve-watch:inject", D, human_only=True),
+    _org("POST", "/security/findings/{finding_id}/diagnosis", D, human_only=True),
     # --- AI 러너 레인 A: 사전 점검(조회는 뷰어·에이전트, 만들기·취소는 개발자 이상 사람) ---
     _org("GET", "/prechecks/{precheck_id}", V),
     _org("GET", "/prechecks/{precheck_id}/logs", V),
@@ -180,6 +184,9 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/disasters/{disaster_id}", V),
     _org("POST", "/disasters", D, human_only=True),
     _org("POST", "/disasters/{disaster_id}/end", D, human_only=True),
+    _org("GET", "/disasters/feed", V),
+    _org("POST", "/disasters/feed:inject", D, human_only=True),
+    _org("POST", "/disasters/{disaster_id}/evacuate", D, human_only=True),
     # 자기 승인 스위치는 어드민(사람)만 바꾼다.
     _org("PATCH", "/settings", A, human_only=True),
     # 러너 경로는 러너·실행 토큰만 받는다(사람 쿠키·에이전트 토큰은 403).

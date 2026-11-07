@@ -79,6 +79,18 @@ class DataSyncCheckerMode(StrEnum):
     POSTGRES = "postgres"
 
 
+class DbCutoverExecutorMode(StrEnum):
+    """DB 쓰기 전환 단계(API 서버 17) 실행기.
+
+    disabled(기본)면 계획 만들기의 includeCutover=true 를 409 로 거절한다. kubernetes 면 같은
+    클러스터(서울 GKE)의 echo-ops 네임스페이스에 인프라 컷오버 Job 을 만든다.
+    """
+
+    DISABLED = "disabled"
+    FAKE = "fake"
+    KUBERNETES = "kubernetes"
+
+
 class SourceClientMode(StrEnum):
     FAKE = "fake"
     GITHUB = "github"
@@ -150,6 +162,22 @@ class Settings(BaseSettings):
     cutover_runs_database: str = "app"
     cutover_results_not_before: AwareDatetime | None = None
     cutover_result_cache_seconds: int = Field(default=5, ge=1)
+    # DB 쓰기 전환 단계(API 서버 17). kubernetes 면 image 는 echo-infra deploy/values.env 의
+    # CUTOVER_IMAGE(@sha256 digest, VAP 가 고정)와 글자까지 같아야 한다. 결과 행은 위 cutover_runs_*
+    # 연결로 계획 id 로 읽으므로 data_sync_checker_mode = postgres 가 필요하다.
+    db_cutover_executor_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED
+    db_cutover_namespace: str = "echo-ops"
+    db_cutover_job_image: str | None = None
+    db_cutover_kube_api_url: str = "https://kubernetes.default.svc"
+    db_cutover_service_account_dir: str = "/var/run/secrets/kubernetes.io/serviceaccount"
+    db_cutover_kube_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Job 을 만든 뒤 끝날 때까지 기다리는 상한(초).
+    # Job 의 activeDeadlineSeconds(120) + 종료 유예(30) 보다 길게 둔다.
+    # 넘으면 DB_CUTOVER_TIMEOUT(자동으로 되돌리지 않음).
+    migration_db_cutover_timeout_seconds: int = Field(default=180, ge=10, le=1800)
+    migration_db_cutover_poll_seconds: int = Field(default=3, ge=1, le=60)
+    # 재난 트리거가 만드는 긴급 이전 계획에도 DB 쓰기 전환(ALLOW_PROMOTE=true)을 넣는가.
+    migration_db_cutover_on_disaster: bool = False
 
     # 실제 빌드·배포·내리기 실행기(executor_mode = real, API 서버 3-2).
     # aws 환경이 config.roleArn 을 비워 두면 이 역할을 넘겨받는다.
@@ -254,6 +282,9 @@ class Settings(BaseSettings):
     # 게이트가 켜진 일꾼이 공개 경로 TLS 를 주기로 시험해 C-TLS-1 준비 증거(유효 1시간)를
     # 남기는 간격. 증거가 비지 않게 유효기간보다 짧아야 한다(최대 50분).
     security_tls_probe_interval_seconds: int = Field(default=1800, ge=60, le=3000)
+    # 게이트가 켜진 일꾼이 C-IAM-2·C-AUD-1 자기 시험(보안 5-3)을 도는 간격. 증거 유효기간(24시간)
+    # 안에 세 번 이상 돌도록 최대 8시간.
+    security_platform_self_test_interval_seconds: int = Field(default=21600, ge=300, le=28800)
     # 켜면 패치 승인이 반영 실행(APPLY_PATCH)을 만든다. 러너가 그 실행을 가져가는 길이 생기기 전에는
     # 켜지 않는다(실행이 QUEUED 로 마감까지 머물고 그동안 그 서비스의 새 사전 점검이 409 다).
     patch_apply_enabled: bool = False
@@ -272,8 +303,36 @@ class Settings(BaseSettings):
     # (SPEC api-19). App 에 contents·pull_requests 쓰기 권한이 있어야 한다. 꺼지면 #98 동작 그대로
     # (원래 실패 커밋을 다시 배포). 가짜 반영(simulated)은 켜져 있어도 GitHub 를 부르지 않는다.
     ai_apply_commit_enabled: bool = False
+    # CVE 감시(SPEC sec-6-cve-watch). 켜면 일꾼이 cve_watch_interval_seconds 마다 서비스 의존성을
+    # OSV 로 조회해 새 HIGH·CRITICAL 취약점을 C-IMG-1 증거(source CVE_WATCH)로 남기고, 즉시 조회
+    # API(`POST /security/cve-watch:check`)도 열린다. 끄면 둘 다 없다(조회 API 409).
+    cve_watch_enabled: bool = False
+    cve_watch_interval_seconds: int = Field(default=21600, ge=300, le=86400)
+    # 가짜 권고 주입 API(`POST /security/cve-watch:inject`, simulated 증거 — 판정에 쓰지 않음).
+    cve_watch_simulate_enabled: bool = True
+    cve_watch_osv_url: str = "https://api.osv.dev"
+    cve_watch_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    # 한 번에 상세를 받는 취약점 수 상한. 넘는 것은 미처리 목록에 남겨 다음 조회 때 먼저 본다.
+    cve_watch_max_advisories: int = Field(default=200, ge=1, le=2000)
     # 판정 범위의 WAS 버전(C-IAM-2·C-AUD-1 의 증거·예외와 맞춘다). 비면 그 통제는 확인 불가다.
     was_version: str | None = Field(default=None, min_length=1, max_length=64)
+
+    # 실제 재난 피드(API 서버 18). 켜면 일꾼이 interval 마다 USGS 지진 피드(GeoJSON, 인증 없음)를
+    # 읽어 조직 기준(규모·반경)에 맞는 지진으로 재난(source = LIVE_FEED)을 만든다. 기본은 꺼짐이고,
+    # 꺼져 있으면 일꾼이 피드를 부르지 않는다. 시연 주입(POST /disasters/feed:inject)은 스위치와
+    # 상관없다.
+    live_disaster_feed_enabled: bool = False
+    live_disaster_feed_url: str = Field(
+        default="https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
+        min_length=1,
+    )
+    live_disaster_feed_interval_seconds: int = Field(default=60, ge=30, le=3600)
+    live_disaster_feed_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # 피드 응답 본문 상한(바이트). 넘으면 읽기를 멈추고 그 주기를 버린다(FEED_TOO_LARGE).
+    # all_hour 피드는 보통 수십 KB 다.
+    live_disaster_feed_max_bytes: int = Field(
+        default=5 * 1024 * 1024, ge=64 * 1024, le=50 * 1024 * 1024
+    )
 
     @field_validator("public_base_domain")
     @classmethod
@@ -435,6 +494,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "entrypoint_base_url and entrypoint_token_ref are required when "
                 "entrypoint_executor_mode is http"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_db_cutover_settings(self) -> "Settings":
+        if self.db_cutover_executor_mode is not DbCutoverExecutorMode.KUBERNETES:
+            return self
+        if not self.db_cutover_job_image or "@sha256:" not in self.db_cutover_job_image:
+            raise ValueError(
+                "db_cutover_job_image must be an image digest (…@sha256:…) when "
+                "db_cutover_executor_mode is kubernetes"
+            )
+        if not self.cutover_results_enabled:
+            raise ValueError(
+                "db_cutover_executor_mode kubernetes needs data_sync_checker_mode postgres and "
+                "cutover_runs_database to read cutover results"
             )
         return self
 

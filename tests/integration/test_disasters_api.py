@@ -163,6 +163,7 @@ async def test_create_returns_same_classification_as_preview_and_disaster_shape(
         "createdBy": {"id": str(tokyo.author.user.id), "login": "dev-a"},
         "endedBy": None,
         "endedAt": None,
+        "feedEvent": None,
     }
     assert plan["serviceId"] == tokyo.service_id
 

@@ -6,8 +6,9 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from app.enums import AuditResult, JobKind, MigrationPlanStatus
-from app.models import AuditLog, Finding, Job
+from app.core.config import DbCutoverExecutorMode
+from app.enums import AuditResult, JobKind, MigrationPlanMode, MigrationPlanStatus
+from app.models import AuditLog, Finding, Job, MigrationPlan
 from app.services.security_gate import SecurityGate
 from app.services.security_rules import SecurityDecision
 from tests.integration.auth_support import create_member, create_organization, make_client, org_path
@@ -161,3 +162,43 @@ async def test_concurrent_approvals_enqueue_one_job(migration: Migration) -> Non
         )
     assert jobs == 1
     assert (await migration.log_codes(plan["id"])).count("APPROVED") == 1
+
+
+@pytest.mark.parametrize("self_approval", [False, True])
+async def test_missing_promote_ack_rejects_before_gate_with_existing_error_order(
+    migration: Migration, self_approval: bool
+) -> None:
+    migration.harness.use_settings(db_cutover_executor_mode=DbCutoverExecutorMode.FAKE)
+    fakes = await prepare_passing_gate(migration)
+    plan = await migration.create_plan(includeCutover=True)
+    async with migration.harness.session_factory() as session, session.begin():
+        row = await session.get_one(MigrationPlan, uuid.UUID(plan["id"]))
+        row.mode = MigrationPlanMode.EMERGENCY
+        row.steps = [
+            {**step, "allowPromote": True} if step["kind"] == "DB_CUTOVER" else step
+            for step in row.steps
+        ]
+    client = migration.author_client if self_approval else migration.approver_client
+    before = await _finding_count(migration)
+
+    response = await client.post(migration.plan_path(plan["id"], "/approve"))
+
+    # #106의 기존 순서: 승격 동의 누락 422가 자기 승인 거부 403보다 먼저다.
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "PROMOTE_ACK_REQUIRED"
+    assert fakes.probe.calls == []
+    assert await _finding_count(migration) == before
+    assert await migration.plan_job(plan["id"]) is None
+
+    consented = await client.post(
+        migration.plan_path(plan["id"], "/approve"), json={"acknowledgePromote": True}
+    )
+    if self_approval:
+        assert consented.status_code == 403, consented.text
+        assert consented.json()["code"] == "SELF_APPROVAL_FORBIDDEN"
+        assert fakes.probe.calls == []
+        assert await _finding_count(migration) == before
+    else:
+        assert consented.status_code == 202, consented.text
+        assert len(fakes.probe.calls) == 2
+        assert await migration.plan_job(plan["id"]) is not None

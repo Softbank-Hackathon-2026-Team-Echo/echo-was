@@ -76,6 +76,8 @@ TABLES = (
     "service_environment_variables",
     # --- 보안·거버넌스 2: 보안 증거 ---
     "findings",
+    # --- 보안 6: CVE 감시 의존성 목록 ---
+    "service_dependency_snapshots",
     # --- 보안·AI 기반 스키마: 기한부 예외·AI 실행 ---
     "security_exceptions",
     "agent_patch_approvals",
@@ -86,6 +88,8 @@ TABLES = (
     "migration_plan_logs",
     "migration_plans",
     "disasters",
+    # --- API 서버 18: 실제 재난 피드 상태 ---
+    "disaster_feed_states",
     # --- API 서버 4: 배포 작업 로그 ---
     "deploy_request_logs",
     "deploy_requests",

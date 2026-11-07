@@ -400,6 +400,22 @@ class MigrationPlanOpenError(ConflictError):
         super().__init__("service already has an open migration plan", details=details)
 
 
+class PromoteAckRequiredError(InvalidInputError):
+    """재난 긴급 이전 + DB 쓰기 전환 계획은 승격(되돌릴 수 없음)에 동의해야 승인할 수 있다.
+
+    승인 본문 `{"acknowledgePromote": true}` 가 없으면 422.
+    계획 상세의 promoteWarning 이 그 내용이다.
+    """
+
+    code = "PROMOTE_ACK_REQUIRED"
+
+
+class DbCutoverDisabledError(ConflictError):
+    """includeCutover=true 인데 DB 쓰기 전환 실행기가 꺼져 있다(실행기 disabled)."""
+
+    code = "DB_CUTOVER_DISABLED"
+
+
 class SourceNotSingleError(ConflictError):
     """서비스 중 연결이 정확히 하나(비율 100)가 아니다(없음·여럿·이전 중간 비율)."""
 
@@ -751,3 +767,37 @@ class PatchStaleError(ConflictError):
 
     def __init__(self, field: str, reason: str) -> None:
         super().__init__("patch is stale", details=[ErrorField(field=field, reason=reason)])
+
+
+# --- CVE 감시(SPEC sec-6-cve-watch) ---
+
+
+class CveWatchDisabledError(ConflictError):
+    """CVE 감시 스위치(CVE_WATCH_ENABLED)가 꺼져 즉시 조회를 하지 않는다."""
+
+    code = "CVE_WATCH_DISABLED"
+
+
+class CveWatchSimulateNotAllowedError(ConflictError):
+    """가짜 권고 주입 스위치(CVE_WATCH_SIMULATE_ENABLED)가 꺼져 있다."""
+
+    code = "CVE_WATCH_SIMULATE_DISABLED"
+
+
+class FindingNotFoundError(NotFoundError):
+    """보안 증거가 없다. 다른 조직 것도 같다."""
+
+    code = "FINDING_NOT_FOUND"
+
+
+class RemediationNotAvailableError(ConflictError):
+    """증거에 고칠 방법(remediation)이 없거나 고칠 버전이 없다."""
+
+    code = "REMEDIATION_NOT_AVAILABLE"
+
+
+class NotImplementedYetError(AppError):
+    """계약만 정한 경로. 이어 줄 기능(예: 이슈 #98 CHANGE_PROPOSAL)이 병합되기 전이다."""
+
+    code = "NOT_IMPLEMENTED"
+    status_code = 501

@@ -32,8 +32,11 @@ STEP_DEFINITIONS: tuple[tuple[MigrationStepKind, int | None], ...] = (
     (MigrationStepKind.DATA_SYNC_CHECK, None),
     (MigrationStepKind.SHIFT, 100),
 )
-LAST_STEP = len(STEP_DEFINITIONS) - 1
 DATA_SYNC_STEP = 3
+# DB 쓰기 전환 단계(API 서버 17). includeCutover 계획만, 모든 종류에서 비율 100% 뒤 마지막(5)이다.
+DB_CUTOVER_STEP = len(STEP_DEFINITIONS)
+# Job 시작·기다림의 예상 초(쓰기 정지 실측 17초 안팎 + Job 파드 시작). 표시용이다.
+DB_CUTOVER_EXPECTED_SECONDS = 30
 # 비율 단계 번호(10·50·100% 순). 필요 건수 목록(requiredRequests)의 순서와 같다.
 SHIFT_STEPS = tuple(
     index for index, (kind, _) in enumerate(STEP_DEFINITIONS) if kind is MigrationStepKind.SHIFT
@@ -63,6 +66,8 @@ RESULT_FAILURE_CODE = "failureCode"
 # 비율 단계의 건수 세기 상태(migration_counting.StepCounting)와 세기를 끝낸 이유.
 RESULT_COUNTING = "counting"
 RESULT_JUDGE_REASON = "judgeReason"
+# DB 쓰기 전환 단계 결과(API 서버 17): Job·종료 코드·결과 행 숫자(아래 CUTOVER_* 키).
+RESULT_CUTOVER = "cutover"
 CONDITION_MAX_ERROR_RATE = "maxErrorRatePercent"
 CONDITION_MAX_P95_MS = "maxP95Ms"
 CONDITION_MAX_REPLICATION_LAG = "maxReplicationLagSeconds"
@@ -89,10 +94,13 @@ def build_steps(
     max_wait_seconds: int,
     requests_per_second: int,
     overhead_seconds: int,
+    *,
+    db_cutover_timeout_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """고정 5단계. 단계 예상 = 여유 + (비율 단계면 건수를 채울 예상 초, 최대 대기 이하).
 
-    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다.
+    required_requests 는 비율 단계(10·50·100%) 순서의 필요 건수 3개다. db_cutover_timeout_seconds 를
+    주면 맨 뒤에 DB 쓰기 전환 단계(5)를 더한다(그 단계의 maxWaitSeconds = Job 기다림 상한).
     """
     required_by_step = dict(zip(SHIFT_STEPS, required_requests, strict=True))
     steps: list[dict[str, Any]] = []
@@ -116,7 +124,67 @@ def build_steps(
                 STEP_EXPECTED_SECONDS: overhead_seconds + shift_seconds,
             }
         )
+    if db_cutover_timeout_seconds is not None:
+        steps.append(
+            {
+                STEP_INDEX: DB_CUTOVER_STEP,
+                STEP_KIND: MigrationStepKind.DB_CUTOVER.value,
+                STEP_TARGET_WEIGHT: None,
+                STEP_SOURCE_WEIGHT: None,
+                STEP_REQUIRED_REQUESTS: None,
+                STEP_MAX_WAIT_SECONDS: db_cutover_timeout_seconds,
+                STEP_OBSERVE_SECONDS: None,
+                STEP_EXPECTED_SECONDS: overhead_seconds + DB_CUTOVER_EXPECTED_SECONDS,
+            }
+        )
     return steps
+
+
+def last_step(steps: Sequence[dict[str, Any]]) -> int:
+    """마지막 단계 번호(5단계 계획 4, DB 쓰기 전환을 더한 계획 5)."""
+    return len(steps) - 1
+
+
+def has_db_cutover(steps: Sequence[dict[str, Any]]) -> bool:
+    return any(step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value for step in steps)
+
+
+PROMOTE_WARNING = (
+    "Emergency migration with a database cutover: if the source database cannot be reached, the "
+    "cutover job promotes the target database to writer. Promotion cannot be undone "
+    "automatically: writes not yet replicated may be lost (see the cutover rpoEstimateMs), the "
+    "source may still be running if it is only unreachable, and moving back needs a manual "
+    "resync. Approve with acknowledgePromote: true."
+)
+
+
+# DB 쓰기 전환 단계 정의에 만들 때 적는 표시: 재난 긴급 이전으로 만들어 승격(ALLOW_PROMOTE)을
+# 허용하는 단계다. 승인 때 동의(acknowledgePromote)를 받고, 실행 때 이 표시가 있어야만
+# 승격을 허용한다.
+STEP_ALLOW_PROMOTE = "allowPromote"
+
+
+def stamp_promote(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """DB 쓰기 전환 단계에 승격 허용 표시를 단다(재난 긴급 이전 계획을 만들 때만)."""
+    return [
+        {**step, STEP_ALLOW_PROMOTE: True}
+        if step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value
+        else dict(step)
+        for step in steps
+    ]
+
+
+def needs_promote_ack(steps: Sequence[dict[str, Any]]) -> bool:
+    """승격을 허용하는 DB 쓰기 전환 단계가 있다 = 승인 때 동의를 받는다."""
+    return any(
+        step[STEP_KIND] == MigrationStepKind.DB_CUTOVER.value and step.get(STEP_ALLOW_PROMOTE)
+        for step in steps
+    )
+
+
+def promote_warning(steps: Sequence[dict[str, Any]]) -> str | None:
+    """승격 동의가 필요한 계획이면 그 위험 고지 문장(응답 promoteWarning), 아니면 None."""
+    return PROMOTE_WARNING if needs_promote_ack(steps) else None
 
 
 def step_required_requests(

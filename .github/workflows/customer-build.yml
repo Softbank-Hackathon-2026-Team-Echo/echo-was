@@ -214,7 +214,10 @@ jobs:
           digest=$(jq -r '.image_digest' "$BUILD_RESULT")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build-result.json 의 image_digest 모양이 아니다"; exit 1; }
           # 로컬 Docker 에는 이미지가 없다(push 만 함). 위 docker login 의 자격으로 AR 에서 digest 로 받는다.
+          # --list-all-pkgs: 취약점이 없는 패키지까지 Packages[] 에 싣는다(CVE 감시 의존성 목록,
+          # SPEC sec-6-cve-watch). 판정(C-IMG-1)은 Vulnerabilities[] 만 읽어 결과가 같다.
           trivy image --image-src remote --scanners vuln,secret --format json --exit-code 0 \
+            --list-all-pkgs \
             --quiet --skip-version-check --timeout 5m --ignorefile "$RUNNER_TEMP/empty.ignore" \
             --output raw-trivy.json "${AR_REPO}@${digest}"
           jq 'if .Results then .Results |= map(if .Secrets then .Secrets |= map(del(.Match, .Code)) else . end) else . end' \
