@@ -2,6 +2,9 @@
 
 echo-infra 의 고정 진입점 VM 이 여는 가중치 API 를 부른다(계약: echo-infra
 `contracts/executor-credentials.md` §3).
+서비스 모드는 base URL 끝의 `/v1`으로 명시한다. 서비스 UUID + 저장된 대표 주소 + 환경 UUID를
+송신하며 전역 `/weights`로 fallback하지 않는다. 그 외 URL은 기존 단일 전역 legacy 계약이다.
+서비스별 구간 summary는 아직 미지원이며 누적 counters는 서비스 전용 cluster만 읽는다.
 
 - TrafficExecutor: `PUT /weights` 로 대표 주소 트래픽 비율을 적용한다.
 - MainRouteExecutor: 한 연결에 100, 나머지 0 으로 같은 API 를 부른다.
@@ -117,7 +120,12 @@ class EntrypointClient:
         timeout_seconds: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._service_scoped = base_url.rstrip("/").endswith("/v1")
+        self._base_url = (
+            base_url.rstrip("/").removesuffix("/v1")
+            if self._service_scoped
+            else base_url.rstrip("/")
+        )
         self._token_ref = token_ref
         self._secret_client = secret_client
         self._environment_map = dict(environment_map or {})
@@ -130,13 +138,74 @@ class EntrypointClient:
             target.environment_id, target.environment_kind, self._environment_map
         )
 
+    @property
+    def service_scoped(self) -> bool:
+        return self._service_scoped
+
+    async def service_request(
+        self, route: MainRoute, action: str, *, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """등록된 서비스+대표 host를 읽기/쓰기 모두에 묶는다. legacy 재시도는 없다."""
+        if not route.public_host:
+            raise EntrypointCallError("ENTRYPOINT_SCOPE_MISMATCH")
+        data = await self._request(
+            "GET" if body is None else "PUT",
+            f"/v1/services/{route.service_id}/{action}",
+            params={"publicHost": route.public_host},
+            json=body,
+        )
+        if (
+            not isinstance(data, dict)
+            or data.get("serviceId") != str(route.service_id)
+            or data.get("publicHost") != route.public_host
+        ):
+            raise EntrypointCallError("ENTRYPOINT_SCOPE_MISMATCH")
+        return data
+
+    async def apply_service_weights(
+        self, route: MainRoute, requested: Mapping[str, int]
+    ) -> str | None:
+        try:
+            current = await self.service_request(route, "weights")
+            weights = _as_weights(current.get("weights"))
+            revision = current.get("revision")
+            if type(revision) is not int or revision < 0:
+                return ENTRYPOINT_ERROR
+            if any(eid not in weights for eid in requested):
+                return ENTRYPOINT_ENV_UNMAPPED
+            weights = {eid: requested.get(eid, 0) for eid in weights}
+            updated = await self.service_request(
+                route,
+                "weights",
+                body={
+                    "publicHost": route.public_host,
+                    "expectedRevision": revision,
+                    "weights": weights,
+                },
+            )
+            if (
+                updated.get("weights") != weights
+                or type(updated.get("revision")) is not int
+                or updated["revision"] != revision + 1
+            ):
+                return ENTRYPOINT_ERROR
+        except EntrypointCallError as error:
+            return error.code
+        return None
+
     async def get_weights(self) -> dict[str, int]:
+        if self._service_scoped:
+            raise EntrypointCallError("ENTRYPOINT_SCOPE_REQUIRED")
         return _as_weights(await self._request("GET", "/weights"))
 
     async def put_weights(self, weights: Mapping[str, int]) -> dict[str, int]:
+        if self._service_scoped:
+            raise EntrypointCallError("ENTRYPOINT_SCOPE_REQUIRED")
         return _as_weights(await self._request("PUT", "/weights", json=dict(weights)))
 
     async def get_summary(self, window_seconds: int) -> dict[str, Any]:
+        if self._service_scoped:
+            raise EntrypointCallError("ENTRYPOINT_SERVICE_SUMMARY_UNSUPPORTED")
         data = await self._request("GET", "/summary", params={"window": f"{window_seconds}s"})
         if not isinstance(data, dict):
             raise EntrypointCallError(ENTRYPOINT_ERROR)
@@ -144,6 +213,8 @@ class EntrypointClient:
 
     async def get_counters(self) -> dict[str, Any]:
         """`GET /counters` 의 환경별 누적 카운터(`envs`). 형식이 다르면 ENTRYPOINT_ERROR."""
+        if self._service_scoped:
+            raise EntrypointCallError("ENTRYPOINT_SCOPE_REQUIRED")
         data = await self._request("GET", "/counters")
         if not isinstance(data, dict) or not isinstance(data.get("envs"), dict):
             raise EntrypointCallError(ENTRYPOINT_ERROR)
@@ -154,7 +225,7 @@ class EntrypointClient:
         method: str,
         path: str,
         *,
-        json: dict[str, int] | None = None,
+        json: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
     ) -> Any:
         try:
@@ -174,6 +245,23 @@ class EntrypointClient:
                 )
             except httpx.TransportError:
                 raise EntrypointCallError(ENTRYPOINT_UNREACHABLE) from None
+        if self._service_scoped and response.status_code in (404, 409):
+            try:
+                error_body = response.json()
+            except ValueError:
+                error_body = None
+            reason = error_body.get("error") if isinstance(error_body, dict) else None
+            codes = {
+                "SERVICE_NOT_REGISTERED": "ENTRYPOINT_SERVICE_NOT_REGISTERED",
+                "SERVICE_SCOPE_MISMATCH": "ENTRYPOINT_SCOPE_MISMATCH",
+                "REVISION_CONFLICT": "ENTRYPOINT_REVISION_CONFLICT",
+                "READ_ONLY_SECONDARY": "ENTRYPOINT_READ_ONLY_SECONDARY",
+            }
+            raise EntrypointCallError(
+                codes.get(reason, ENTRYPOINT_REJECTED)
+                if isinstance(reason, str)
+                else ENTRYPOINT_REJECTED
+            )
         if response.status_code == httpx.codes.UNAUTHORIZED:
             raise EntrypointCallError(ENTRYPOINT_UNAUTHORIZED)
         if response.status_code == httpx.codes.SERVICE_UNAVAILABLE:
@@ -254,15 +342,36 @@ class EntrypointTrafficExecutor:
         self, route: MainRoute, weights: tuple[WeightedTarget, ...], idempotency_key: str
     ) -> TrafficResult:
         check_weights_total(weights)
+        if any(
+            item.target.service_id != route.service_id
+            or (
+                self._client.service_scoped
+                and item.target.main_public_host
+                and item.target.main_public_host != route.public_host
+            )
+            for item in weights
+        ):
+            return TrafficFailed(code="ENTRYPOINT_SCOPE_MISMATCH")
+        idempotency_key = f"{route.service_id}:{route.public_host}:{idempotency_key}"
         existing = self._results.get(idempotency_key)
         if existing is not None:
             return existing
-        requested = _requested_weights(self._client, {item.target: item.weight for item in weights})
-        code = (
-            ENTRYPOINT_ENV_UNMAPPED
-            if requested is None
-            else await _apply_weights(self._client, requested)
-        )
+        if self._client.service_scoped:
+            requested = {str(item.target.environment_id): item.weight for item in weights}
+            code = (
+                ENTRYPOINT_ENV_UNMAPPED
+                if len(requested) != len(weights)
+                else await self._client.apply_service_weights(route, requested)
+            )
+        else:
+            requested_legacy = _requested_weights(
+                self._client, {item.target: item.weight for item in weights}
+            )
+            code = (
+                ENTRYPOINT_ENV_UNMAPPED
+                if requested_legacy is None
+                else await _apply_weights(self._client, requested_legacy)
+            )
         result: TrafficResult
         if code is None:
             result = TrafficApplied(applied_at=self._clock.now())
@@ -296,10 +405,21 @@ class EntrypointMainRouteExecutor:
     async def route_main(
         self, route: MainRoute, target: DeployTarget, idempotency_key: str
     ) -> RouteResult:
+        if target.service_id != route.service_id or (
+            self._client.service_scoped
+            and target.main_public_host
+            and target.main_public_host != route.public_host
+        ):
+            return RouteFailed(code="ENTRYPOINT_SCOPE_MISMATCH")
+        idempotency_key = f"{route.service_id}:{route.public_host}:{idempotency_key}"
         existing = self._results.get(idempotency_key)
         if existing is not None:
             return existing
-        code = await _apply_weights(self._client, {self._client.environment_name(target): 100})
+        code = (
+            await self._client.apply_service_weights(route, {str(target.environment_id): 100})
+            if self._client.service_scoped
+            else await _apply_weights(self._client, {self._client.environment_name(target): 100})
+        )
         result: RouteResult
         if code is None:
             result = RouteApplied(applied_at=self._clock.now())
@@ -370,9 +490,20 @@ class EntrypointMetricsProvider:
         값은 진입점(Envoy) 시작 이후 누적이라 재시작하면 줄 수 있다. 그대로 돌려주고 줄어든 것은
         일꾼이 카운터 재시작으로 처리한다. 출발·도착을 읽을 때마다 한 번씩 부른다.
         """
-        name = self._client.environment_name(target)
+        name = (
+            str(target.environment_id)
+            if self._client.service_scoped
+            else self._client.environment_name(target)
+        )
         try:
-            envs = (await self._client.get_counters())["envs"]
+            if self._client.service_scoped:
+                route = MainRoute(target.service_id, target.service_name, target.main_public_host)
+                data = await self._client.service_request(route, "counters")
+                envs = data.get("envs")
+                if not isinstance(envs, dict):
+                    raise EntrypointCallError(ENTRYPOINT_ERROR)
+            else:
+                envs = (await self._client.get_counters())["envs"]
         except EntrypointCallError as error:
             return _counts_unavailable(name, error.code)
         entry = envs.get(name)
