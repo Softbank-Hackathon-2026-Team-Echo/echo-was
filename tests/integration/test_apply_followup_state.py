@@ -177,3 +177,121 @@ async def test_http_observes_live_claim_then_receipt_without_advancing_callback(
     assert (await _detail(migration, parent_id))["patches"][0]["apply"]["followUp"]["redeploy"][
         "state"
     ] == "CREATED"
+
+
+@pytest.mark.parametrize(
+    ("result", "redeploy_state", "rejected"),
+    [
+        ({"redeployRequestId": "not-a-uuid"}, "UNKNOWN", None),
+        ({"repositoryFinishedAt": "0001-01-01T00:00:00+01:00"}, "PENDING", None),
+        ({"redeployRejectedCode": "EXTERNAL\nSECRET_TOKEN=example"}, "UNKNOWN", "UNKNOWN"),
+        ({"redeployRejectedCode": "raw response body"}, "UNKNOWN", "UNKNOWN"),
+        ({"redeployRejectedCode": 42}, "UNKNOWN", "UNKNOWN"),
+        ({"redeployRejectedCode": "MIGRATION_IN_PROGRESS"}, "REJECTED", "MIGRATION_IN_PROGRESS"),
+        (
+            {"redeployRequestId": None, "redeployRejectedCode": "INTERNAL_ERROR"},
+            "REJECTED",
+            "INTERNAL_ERROR",
+        ),
+    ],
+)
+async def test_corrupt_receipt_real_get_is_read_only(
+    migration: Migration, result: dict[str, Any], redeploy_state: str, rejected: str | None
+) -> None:
+    for payload in await _stored_result_gets(migration, result):
+        assert payload["redeployRequestId"] is None
+        assert payload["redeployRejectedCode"] == rejected
+        assert payload["followUp"]["redeploy"]["state"] == redeploy_state
+
+
+async def _stored_result_gets(migration: Migration, result: dict[str, Any]) -> list[dict[str, Any]]:
+    import copy
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+    from app.models import AgentRunEvent
+
+    _use_writer(FakeRepoCommitWriter(files={"Dockerfile": "FROM a\n"}))
+    _, _, apply, _ = await _runner_apply(migration)
+    run_id = uuid.UUID(apply["runId"])
+    # Synthetic legacy/corruption fixture, not a normal writer or runner input.
+    async with migration.harness.session_factory() as session, session.begin():
+        row = await session.get_one(AgentRun, run_id)
+        row.result = copy.deepcopy(result)
+        parent_id = row.parent_run_id
+    async with migration.harness.session_factory() as session:
+        row = await session.get_one(AgentRun, run_id)
+        before = (copy.deepcopy(row.result), row.updated_at, row.finished_at, row.status)
+        counts = [
+            await session.scalar(select(func.count()).select_from(model))
+            for model in (AgentRunEvent, Job, AuditLog)
+        ]
+    original = migration.author_client
+    payloads = []
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url=original.base_url,
+        headers=original.headers,
+        cookies=original.cookies,
+    ) as client:
+        for target in (parent_id, run_id):
+            response = await client.get(prechecks_path(migration, f"/{target}"))
+            assert response.status_code == 200, response.text
+            data = response.json()["data"]
+            payload = data["apply"] if target == run_id else data["patches"][0]["apply"]
+            payloads.append(payload)
+    async with migration.harness.session_factory() as session:
+        row = await session.get_one(AgentRun, run_id)
+        assert (row.result, row.updated_at, row.finished_at, row.status) == before
+        assert [
+            await session.scalar(select(func.count()).select_from(model))
+            for model in (AgentRunEvent, Job, AuditLog)
+        ] == counts
+    assert payloads[0]["followUp"] == payloads[1]["followUp"]
+    return payloads
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "normalized"),
+    [
+        ("0001-01-01T00:00:00+01:00", None),
+        ("9999-12-31T23:59:59-01:00", None),
+        ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z"),
+        ("0001-01-01T01:00:00+01:00", "0001-01-01T00:00:00Z"),
+        ("9999-12-31T22:59:59-01:00", "9999-12-31T23:59:59Z"),
+        ("9999-12-31T23:59:59Z", "9999-12-31T23:59:59Z"),
+        ("invalid", None),
+        ("2026-11-07T10:00:00", None),
+        ("2099-01-01T00:00:00Z", "2099-01-01T00:00:00Z"),
+        ("2026-11-07T19:00:00+09:00", "2026-11-07T10:00:00Z"),
+    ],
+)
+async def test_timestamp_extremes_real_get_keeps_unknown_claim(
+    migration: Migration, timestamp: str, normalized: str | None
+) -> None:
+    result = {
+        key: timestamp for key in ("commitClaimedAt", "repositoryFinishedAt", "redeployFinishedAt")
+    }
+    result["commitState"] = "IN_PROGRESS"
+    for payload in await _stored_result_gets(migration, result):
+        followup = payload["followUp"]
+        assert followup["repository"]["startedAt"] == normalized
+        assert followup["repository"]["finishedAt"] == normalized
+        assert followup["redeploy"]["finishedAt"] == normalized
+        assert followup["updatedAt"] == normalized
+        assert followup["repository"]["state"] == "UNKNOWN"
+        assert followup["repository"]["reasonCode"] == "CLAIM_UNCONFIRMED"
+        assert followup["deadlineAt"] is None
+
+
+async def test_conflicting_valid_id_and_rejection_real_get_stays_unknown(
+    migration: Migration,
+) -> None:
+    request_id = str(uuid.UUID(int=9))
+    for payload in await _stored_result_gets(
+        migration, {"redeployRequestId": request_id, "redeployRejectedCode": "INTERNAL_ERROR"}
+    ):
+        assert payload["redeployRequestId"] == request_id
+        assert payload["redeployRejectedCode"] == "INTERNAL_ERROR"
+        assert payload["followUp"]["redeploy"]["state"] == "UNKNOWN"

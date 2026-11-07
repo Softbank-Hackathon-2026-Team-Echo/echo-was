@@ -23,9 +23,20 @@ TEST_DATABASE_URL의 echo_test는 fixture nominal 이름이며 실제 접속 제
 
 로컬 HTTP 검증은 ASGI transport + 실제 PG이며 공개 네트워크의 운영 HTTP E2E가 아니다. Github writer/LLM/클라우드는 합성 대역이다. 실제 고객 저장소·GitHub App 쓰기·운영 변경·main 병합·배포는 실행하지 않았다. 자동복구 worker/스위치/임의 SLA·deadline·schema revision도 추가하지 않았다.
 
+## I-1/I-2 재보완 검증
+
+이전 독립 검수 대상 `d6c72a6796226167ac230747cc48077a355bba5d`는 ISSUES였으며 ③ 안전 base로 승인되지 않았다. 위의 이전 2913 PASS는 수정 head 검증으로 재사용하지 않는다.
+
+- 원본 INDEPENDENT-REVIEW·independent_probe.py/independent_verify.py와 관측 로그·hash는 보존한다. 원본의 GET500/CREATED 관측 assert를 GREEN으로 뒤집지 않았다. 같은 불법 UUID 및 UTC overflow 입력으로 별도 규범 회귀 RED를 먼저 기록하고 순수 파싱으로 GREEN을 확인했다.
+- I-1: 불법 UUID/null 연결, 유효 UUID CREATED, 유효 ID+거절 UNKNOWN. 부모·단독 serializer·승인 응답/실제 router ASGI를 확인한다.
+- I-2: 양끝 연도·offset/UTC overflow·invalid/naive·미래 claim 및 TTL 덧셈 overflow를 확인한다. 불명 시각 null/판정 UNKNOWN, 유효 시각과 deadlineAt=null 뜻을 보존한다.
+- 실PG 인증 GET은 부모/단독에 같은 저장값을 읽고 결과·updatedAt·finishedAt·status·AgentRunEvent/Job/AuditLog 불변을 새 세션으로 대조한다. 정상 writer가 만들었다는 증거가 아닌 synthetic fixture다. NUL은 메모리/ASGI serializer에서 검증하며 PostgreSQL JSONB에 저장 가능하다고 주장하지 않는다.
+- 별도 ASGI 승인 시험은 실제 router/serializer에 접근·저장·후속 callback 대역을 주입한다. 실PG 인증/권한 검증과 합산하지 않으며 GET이 callback을 호출하지 않음을 확인한다. 기존 정상 승인/권한/조직·callback 회귀는 관련/전체 실PG 시험으로 확인한다.
+- 프로젝트의 기존 Python3.13.16 venv와 frozen 의존성을 재사용한다. 실행별 원문·JUnit·RED/GREEN·최종 정확 head CI 결속·PR 본문 MATCH는 로컬 `server-state-build/review-fix/{RESULT.md,TEST.md,manifest.json}`에 남긴다. 로컬 성공/원본7 관측을 CI·운영·자동복구 완료로 부르지 않는다.
+
 ## ③ 착수 게이트
 
-부모가 PR 정확 최종 head를 독립 검수해 인계한 뒤 별도 작업으로 시작한다. source branch를 동시에 수정하지 않는다. base는 최종 PR head이며 위 구현 검증 head나 과거 출발 main으로 임의 후퇴하지 않는다.
+부모가 수정 PR 정확 최종 head를 독립 재검수 PASS로 확인해 인계한 뒤 별도 작업으로 시작한다. 그 전에는 ③ 코드 착수·안전 base 인수를 하지 않는다. source branch를 동시에 수정하지 않는다. base는 최종 PR head이며 위 구현 검증 head나 과거 출발 main으로 임의 후퇴하지 않는다.
 
 인터페이스: `DiagnosisService.redeploy_after_apply(apply_run_id: UUID) -> AgentRun | None`, 열린 transaction 없이 호출. `ApplyCommitService.prepare_redeploy_commit`과 기존 생성 배포의 job worker를 재사용하되 stale claim/REPO_WRITE_FAILED는 원격 읽기 정합성 확인 전 맹목 재송신 금지. terminal result 409는 재개 API가 아니다. INTERNAL_ERROR/null ID 멱등 종료도 이 작업에서 바꾸지 않는다.
 

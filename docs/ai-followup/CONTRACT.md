@@ -44,8 +44,15 @@ repository.startedAt은 기존 commitClaimedAt(현재 claim 시작); finishedAt�
 
 followUp 없거나 null인 구서버/구클라이언트는 기존 ID/거절/apply 실패를 먼저 쓴다. 실제 CHANGE_PROPOSAL 승인 apply에만 유한 GET을 지속하고, finishedAt만으로 종료하지 않는다. 클라이언트 대기 예산 종료는 '결과 확인 지연'이지 서버 실패가 아니다. 조회 재시도가 승인/재배포 POST를 반복하면 안 된다. 늦은 응답은 org/route/parent/patch/apply 연결 단위로 막고, 같은 대상의 GET을 직렬화/이전 요청 취소한다. schemaVersion은 계약 버전이지 상태 revision이 아니다. 별도 revision/열/마이그레이션을 강제로 더하지 않는다: 기존 JSONB 부분 갱신과 ID의 영속성으로 이 범위를 만족하며, monotonic ordering 보장은 이번 계약에 없다.
 
+## 불명 저장값의 읽기 경계 (I-1/I-2 보완)
+
+- `redeployRequestId`는 저장된 표준 `8-4-4-4-12` 16진수 UUID 문자열만 공유 순수 파서로 읽는다. 유효 ID만 CREATED이며 불법/빈/다른 형식·타입은 공개 연결 칸 null, 후속 UNKNOWN이다. 공백 제거·하이픈 보정·ID 발명·DB 원본 수정은 하지 않는다. 유효 ID와 거절 증거가 함께 있으면 연결 칸은 보존하되 UNKNOWN이다.
+- 공개 `redeployRejectedCode`와 후속 reason은 기존 접수 writer가 사용하는 `app.core.exceptions.AppError`의 정의된 고정 코드를 공유한다(INTERNAL_ERROR 포함). 기존 유효 코드의 REJECTED 뜻은 그대로다. 불명/개행/NUL/원시 본문·잘못된 타입은 공개 코드 UNKNOWN, 후속 UNKNOWN/STATE_UNAVAILABLE이며 원문은 복사하지 않는다. 거절 없음은 기존대로 null이다.
+- 시각은 ISO 파싱뿐 아니라 UTC 정규화의 표현 범위까지 확인한다. 불법·naive·UTC 범위 초과는 해당 시각 null이며 다른 유효 시각을 덮지 않는다. claim 시작/관측 시각·TTL 만료 연산을 안전하게 판정할 수 없거나 claim이 미래/기한 밖이면 UNKNOWN/CLAIM_UNCONFIRMED이다. 표현 가능한 미래 원시 시각은 관측값으로 유지하며 실제 현재 상태/단조 revision을 보장하지 않는다. 클램프·가짜 시각·임의 deadline은 만들지 않는다.
+- 이 방어는 검수의 synthetic legacy/오염 저장값에서 확인한 기존 GET500 조회 신뢰성 결함 보완이다. 정상 writer 생성이나 공개 runner 공격 가능성을 확인했다는 주장이 아니다. GET은 result·updatedAt·원래 종료 상태·Job·이벤트/사람 조회 감사 기록을 바꾸지 않는다. 승인 응답에도 같은 안전 직렬화를 쓴다. 승인 동작의 기존 권한·검사·callback을 바꾸거나 GET에서 호출하지 않는다.
+
 ## 기존 worker·③ 인계
 
 `DiagnosisService.redeploy_after_apply(apply_run_id: UUID) -> AgentRun | None` 인터페이스 유지. 열린 transaction 없이 호출. `ApplyCommitService.prepare_redeploy_commit`은 잠금 밖 GitHub/고정 branch-parent-tree 검증과 기존 claim을 그대로 쓴다. terminal 결과 재제출은 409이며 재개 인터페이스가 아니다. INTERNAL_ERROR/null ID 키는 자동 재개되지 않는다.
 
-기존 `app/worker/runner.py`·JobRepository·DeployRequestProcessor는 생성된 배포의 lease/저장단계 재개를 담당한다. ③은 새 outbox/배포 worker를 복제하지 말고 미연결 성공 apply의 bounded 재검색/권한·승인 재검사/기한·fencing/원격 읽기 reconciliation을 먼저 설계한다. REPO_WRITE_FAILED·stale claim은 맹목 재송신 금지. 이 PR은 자동복구 worker·활성 설정·새 유료자원·실제 GitHub App 쓰기·운영 배포 0이다. ③은 이 PR 정확 head에서 이어 시작하고 부모가 소유권을 넘긴 뒤 서비스 파일을 수정한다.
+기존 `app/worker/runner.py`·JobRepository·DeployRequestProcessor는 생성된 배포의 lease/저장단계 재개를 담당한다. ③은 새 outbox/배포 worker를 복제하지 말고 미연결 성공 apply의 bounded 재검색/권한·승인 재검사/기한·fencing/원격 읽기 reconciliation을 먼저 설계한다. REPO_WRITE_FAILED·stale claim은 맹목 재송신 금지. 이 PR은 자동복구 worker·활성 설정·새 유료자원·실제 GitHub App 쓰기·운영 배포 0이다. ③은 수정 PR 정확 최종 head의 독립 재검수 PASS와 부모의 명시적 base 인수·소유권 이전 뒤에만 코드 착수한다.

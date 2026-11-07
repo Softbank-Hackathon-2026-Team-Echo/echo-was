@@ -218,3 +218,283 @@ def test_followup_conflicting_repository_evidence_is_not_success() -> None:
     followup = _apply_response(run).model_dump(mode="json", by_alias=True)["followUp"]
     assert followup["repository"]["state"] == "UNKNOWN"
     assert followup["repository"]["reasonCode"] == "STATE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "not-a-uuid",
+        "",
+        17,
+        True,
+        [],
+        {},
+        " 00000000-0000-0000-0000-000000000009",
+        "00000000000000000000000000000009",
+    ],
+)
+def test_corrupt_redeploy_id_is_unknown_without_repair(token: object) -> None:
+    import copy
+
+    from app.schemas.precheck import PrecheckApplyRunResponse, PrecheckPatchResponse
+    from app.services.apply_followup import project_apply_followup
+    from app.services.precheck_service import PrecheckPatchView
+
+    run = make_run(result={"redeployRequestId": token})
+    before = copy.deepcopy(run.result)
+    assert project_apply_followup(run, now=NOW)["redeploy"]["state"] == "UNKNOWN"
+    stored = {
+        "id": "p1",
+        "patchHash": "a" * 64,
+        "files": [],
+        "diff": "",
+        "reason": "test",
+        "touchesProtectedFiles": False,
+        "checks": [],
+        "status": "PROPOSED",
+    }
+    approval = PrecheckPatchResponse.from_view(
+        PrecheckPatchView(stored=stored, approval=None, apply_run=run), now=NOW
+    )
+    responses = [
+        _apply_response(run, now=NOW),
+        PrecheckApplyRunResponse.from_run(run, now=NOW),
+        approval.apply,
+    ]
+    for response in responses:
+        payload = response.model_dump(mode="json", by_alias=True)
+        assert payload["redeployRequestId"] is None
+        assert payload["followUp"]["redeploy"] == {
+            "state": "UNKNOWN",
+            "reasonCode": "STATE_UNAVAILABLE",
+            "finishedAt": None,
+        }
+    assert run.result == before
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "normalized"),
+    [
+        ("0001-01-01T00:00:00+01:00", None),
+        ("9999-12-31T23:59:59-01:00", None),
+        ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z"),
+        ("0001-01-01T01:00:00+01:00", "0001-01-01T00:00:00Z"),
+        ("9999-12-31T22:59:59-01:00", "9999-12-31T23:59:59Z"),
+        ("9999-12-31T23:59:59Z", "9999-12-31T23:59:59Z"),
+        ("invalid", None),
+        ("2026-11-07T10:00:00", None),
+        ("2026-11-07T19:00:00+09:00", "2026-11-07T10:00:00Z"),
+    ],
+)
+def test_followup_timestamp_normalization_is_range_safe(
+    timestamp: str, normalized: str | None
+) -> None:
+    from app.schemas.precheck import PrecheckApplyRunResponse
+
+    result = {
+        key: timestamp for key in ("repositoryFinishedAt", "redeployFinishedAt", "commitClaimedAt")
+    }
+    result["commitState"] = "IN_PROGRESS"
+    run = make_run(result=result)
+    before = dict(run.result)
+    for response in (
+        _apply_response(run, now=NOW),
+        PrecheckApplyRunResponse.from_run(run, now=NOW),
+    ):
+        followup = response.model_dump(mode="json", by_alias=True)["followUp"]
+        assert followup["repository"]["startedAt"] == normalized
+        assert followup["repository"]["finishedAt"] == normalized
+        assert followup["redeploy"]["finishedAt"] == normalized
+        assert followup["updatedAt"] == normalized
+        assert followup["deadlineAt"] is None
+        assert followup["repository"]["state"] == (
+            "IN_PROGRESS" if timestamp == "2026-11-07T19:00:00+09:00" else "UNKNOWN"
+        )
+    assert run.result == before
+
+
+def test_claim_expiry_overflow_is_unknown_not_clamped() -> None:
+    observed = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+    run = make_run(result={"commitState": "IN_PROGRESS", "commitClaimedAt": observed.isoformat()})
+    followup = _apply_response(run, now=observed).model_dump(mode="json", by_alias=True)["followUp"]
+    assert followup["repository"]["state"] == "UNKNOWN"
+    assert followup["repository"]["reasonCode"] == "CLAIM_UNCONFIRMED"
+    assert followup["repository"]["startedAt"] == "9999-12-31T23:59:59Z"
+    assert followup["deadlineAt"] is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "EXTERNAL\nSECRET_TOKEN=example",
+        "REPO_X\x00secret",
+        "raw response body",
+        "SYNTHETIC_EXTERNAL_BODY",
+        "",
+        5,
+        [],
+        {},
+    ],
+)
+def test_corrupt_rejection_is_safe_in_all_serializers(code: object) -> None:
+    from app.schemas.precheck import PrecheckApplyRunResponse
+
+    run = make_run(result={"redeployRejectedCode": code})
+    for response in (
+        _apply_response(run, now=NOW),
+        PrecheckApplyRunResponse.from_run(run, now=NOW),
+    ):
+        payload = response.model_dump(mode="json", by_alias=True)
+        assert payload["redeployRejectedCode"] == "UNKNOWN"
+        assert payload["followUp"]["redeploy"]["state"] == "UNKNOWN"
+        assert payload["followUp"]["redeploy"]["reasonCode"] == "STATE_UNAVAILABLE"
+    assert run.result == {"redeployRejectedCode": code}
+
+
+def test_defined_rejection_codes_keep_existing_meaning() -> None:
+    from app.core import exceptions
+    from app.schemas.precheck import PrecheckApplyRunResponse
+
+    for cls in vars(exceptions).values():
+        if not isinstance(cls, type) or not issubclass(cls, exceptions.AppError):
+            continue
+        run = make_run(result={"redeployRequestId": None, "redeployRejectedCode": cls.code})
+        for response in (
+            _apply_response(run, now=NOW),
+            PrecheckApplyRunResponse.from_run(run, now=NOW),
+        ):
+            payload = response.model_dump(mode="json", by_alias=True)
+            assert payload["redeployRejectedCode"] == cls.code
+            assert payload["followUp"]["redeploy"]["state"] == "REJECTED"
+            assert payload["followUp"]["redeploy"]["reasonCode"] == cls.code
+
+
+@pytest.mark.parametrize(
+    ("result", "observed", "state", "request_id", "code"),
+    [
+        ({"redeployRequestId": "not-a-uuid"}, NOW, "UNKNOWN", None, None),
+        ({"repositoryFinishedAt": "0001-01-01T00:00:00+01:00"}, NOW, "PENDING", None, None),
+        ({"redeployRejectedCode": "REPO_X\x00secret"}, NOW, "UNKNOWN", None, "UNKNOWN"),
+        (
+            {"redeployRejectedCode": "EXTERNAL\nSECRET_TOKEN=example"},
+            NOW,
+            "UNKNOWN",
+            None,
+            "UNKNOWN",
+        ),
+        (
+            {"redeployRejectedCode": "MIGRATION_IN_PROGRESS"},
+            NOW,
+            "REJECTED",
+            None,
+            "MIGRATION_IN_PROGRESS",
+        ),
+        ({"redeployRequestId": str(uuid.UUID(int=9))}, NOW, "CREATED", str(uuid.UUID(int=9)), None),
+        (
+            {"redeployRequestId": str(uuid.UUID(int=9)), "redeployRejectedCode": "INTERNAL_ERROR"},
+            NOW,
+            "UNKNOWN",
+            str(uuid.UUID(int=9)),
+            "INTERNAL_ERROR",
+        ),
+        (
+            {"commitState": "IN_PROGRESS", "commitClaimedAt": "9999-12-31T23:59:59Z"},
+            datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+            "PENDING",
+            None,
+            None,
+        ),
+    ],
+)
+async def test_real_routes_safe_get_and_approval_serialization(
+    result: dict[str, object],
+    observed: datetime,
+    state: str,
+    request_id: str | None,
+    code: str | None,
+) -> None:
+    import copy
+    import typing
+    from types import SimpleNamespace
+
+    import httpx
+    from fastapi import FastAPI
+
+    from app.dependencies import (
+        get_clock,
+        get_diagnosis_service,
+        get_precheck_patch_service,
+        get_precheck_service,
+    )
+    from app.routers import precheck_router
+    from app.services.precheck_service import PrecheckPatchView
+
+    run = make_run(
+        result=result,
+        service_id=uuid.UUID(int=3),
+        requested_by_user_id=uuid.UUID(int=4),
+        created_at=NOW,
+        deadline_at=NOW + timedelta(hours=1),
+        input_hash="a" * 64,
+    )
+    before = copy.deepcopy(run.result)
+    patch = {
+        "id": "p1",
+        "patchHash": "a" * 64,
+        "files": [],
+        "diff": "",
+        "reason": "test",
+        "touchesProtectedFiles": False,
+        "checks": [],
+        "status": "PROPOSED",
+    }
+    calls = []
+
+    class Reads:
+        async def get_precheck(self, *args: object) -> object:
+            return SimpleNamespace(run=run, steps=[])
+
+    class Patches:
+        async def approve_patch(self, *args: object) -> PrecheckPatchView:
+            return PrecheckPatchView(stored=patch, approval=None, apply_run=run)
+
+    class Diagnoses:
+        async def redeploy_after_apply(self, *args: object) -> AgentRun:
+            calls.append("approval callback stub")
+            return run
+
+    app = FastAPI()
+    app.include_router(precheck_router.router)
+    app.dependency_overrides[get_precheck_service] = lambda: Reads()
+    app.dependency_overrides[get_precheck_patch_service] = lambda: Patches()
+    app.dependency_overrides[get_diagnosis_service] = lambda: Diagnoses()
+    app.dependency_overrides[get_clock] = lambda: SimpleNamespace(now=lambda: observed)
+    # Access/storage/callback are stubs here; real auth + PG GET is tested separately.
+    access = SimpleNamespace(
+        organization_id=uuid.UUID(int=9), user=SimpleNamespace(id=uuid.UUID(int=4))
+    )
+    for route in (precheck_router.get_precheck, precheck_router.approve_precheck_patch):
+        metadata = typing.get_args(typing.get_type_hints(route, include_extras=True)["access"])
+        dependency = next(item.dependency for item in metadata if hasattr(item, "dependency"))
+        app.dependency_overrides[dependency] = lambda: access
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://local"
+    ) as client:
+        path = f"/api/v1/orgs/{access.organization_id}/prechecks/{run.id}"
+        detail = await client.get(path)
+        assert detail.status_code == 200, detail.text
+        assert calls == []
+        approved = await client.post(
+            f"{path}/patches/p1/approve", json={"patchHash": "sha256:" + "a" * 64}
+        )
+        assert approved.status_code == 200, approved.text
+        for payload in (detail.json()["data"]["apply"], approved.json()["data"]["apply"]):
+            assert payload["redeployRequestId"] == request_id
+            assert payload["redeployRejectedCode"] == code
+            assert payload["followUp"]["redeploy"]["state"] == state
+            assert payload["followUp"]["deadlineAt"] is None
+            if "commitClaimedAt" in result:
+                assert payload["followUp"]["repository"]["state"] == "UNKNOWN"
+                assert payload["followUp"]["repository"]["reasonCode"] == "CLAIM_UNCONFIRMED"
+    assert run.result == before
+    assert calls == ["approval callback stub"]

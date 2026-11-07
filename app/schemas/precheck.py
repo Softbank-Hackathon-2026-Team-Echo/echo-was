@@ -32,7 +32,11 @@ from app.models import AgentPatchApproval, AgentRun, AgentRunEvent
 from app.schemas.ai_residency import AgentRunProcessingResponse
 from app.schemas.response import ApiModel, ApiRequestModel
 from app.schemas.runner import PATCH_HASH_PATTERN
-from app.services.apply_followup import project_apply_followup
+from app.services.apply_followup import (
+    parse_redeploy_rejected_code,
+    parse_redeploy_request_id,
+    project_apply_followup,
+)
 from app.services.precheck_service import PrecheckLogPage, PrecheckPatchView, PrecheckView
 from app.services.run_result import CHECK_PASSED, compute_patch_status, patch_origin
 
@@ -246,8 +250,8 @@ def _apply_response(
         branch=result.get("branch"),
         simulated=apply_run.simulated,
         pull_request_url=result.get("pullRequestUrl"),
-        redeploy_request_id=result.get("redeployRequestId"),
-        redeploy_rejected_code=result.get("redeployRejectedCode"),
+        redeploy_request_id=parse_redeploy_request_id(result.get("redeployRequestId")),
+        redeploy_rejected_code=parse_redeploy_rejected_code(result.get("redeployRejectedCode")),
         follow_up=ApplyFollowupResponse.model_validate(
             project_apply_followup(apply_run, now=now or datetime.now(UTC), parent_kind=parent_kind)
         ),
@@ -342,8 +346,8 @@ class PrecheckApplyRunResponse(ApiModel):
             branch=snapshot.get("branch"),
             applied_commit_sha=result.get("appliedCommitSha"),
             pull_request_url=result.get("pullRequestUrl"),
-            redeploy_request_id=result.get("redeployRequestId"),
-            redeploy_rejected_code=result.get("redeployRejectedCode"),
+            redeploy_request_id=parse_redeploy_request_id(result.get("redeployRequestId")),
+            redeploy_rejected_code=parse_redeploy_rejected_code(result.get("redeployRejectedCode")),
             follow_up=ApplyFollowupResponse.model_validate(
                 project_apply_followup(run, now=now or datetime.now(UTC))
             ),
