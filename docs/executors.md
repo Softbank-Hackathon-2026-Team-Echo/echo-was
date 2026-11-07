@@ -11,7 +11,7 @@
 | 실행기 | 메서드 | 결과 |
 |---|---|---|
 | `BuildExecutor` | `start(build, source_access, idempotency_key) -> external_ref` | |
-| | `poll(external_ref)` | `BuildRunning` · `BuildSucceeded(image_repository, image_digest)` · `BuildFailed(code)` |
+| | `poll(external_ref)` | `BuildRunning` · `BuildSucceeded(image_repository, image_digest)` · `BuildFailed(code, artifact=None)` |
 | | `read_logs(external_ref, cursor, limit)` | `LogChunk(lines, next_cursor, has_more)` · `InvalidLogCursor` (API 서버 4) |
 | `BuildSecurityScanReader` (실제 빌드 실행기만) | `read_security_scan(external_ref)` | `BuildSecurityScan` · `None`(없음·모양 틀림, 예외 없음) (보안·거버넌스 2·11) |
 | `DeployExecutor` | `apply(deployment, target, idempotency_key) -> external_ref` | |
@@ -68,6 +68,7 @@
 
 ### 배포 (`DeployExecutor`)
 
+- 실제 apply 전에는 DeploySecurityGate가 해당 Build의 C-IMG-1/2 증거와 적용할 digest를 검사한다(최초·예비·재사용·수동/AI 재배포·ROLLBACK 공통). FAIL/UNKNOWN은 유효한 예외가 없으면 SECURITY_GATE_BLOCKED. 이관 스위치와 독립이며 범위·복구 계약은 [sec-11-2-deploy-image-gate.md](../specs/sec-11-2-deploy-image-gate.md)를 따른다.
 - 입력: `DeploymentSpec(deployment_id, image_repository, image_digest, config_snapshot, env_values)`(`env_values` 는 아래 "앱 환경 변수"), `DeployTarget(service, service_environment, environment kind·이름·config·secret_ref, public_host(환경별), main_public_host(대표), container_port)`.
 - `apply` 는 그 연결(클러스터의 그 서비스)에 digest 이미지를 반영한다. `DeployApplied` 는 "클러스터가 새 버전을 받아들였다"이다. 사용자 트래픽 확인은 일꾼의 헬스체크가 환경별 퍼블릭 주소로 한다.
 - `poll` 의 `DeployFailed.diagnostics` 는 선택이다(컨테이너 실패를 판정한 실행기만 채운다). 처리기는 그 배포의 앱 환경 변수 값으로 `log_tail` 을 가린 **뒤에** 한 줄을 400자로 자르고(실행기는 줄을 자르지 않는다 — 먼저 자르면 잘린 값이 남는다) 배포 작업 로그(`CONTAINER_DIAGNOSTICS`·`CONTAINER_LOG`)에 쓰고 `FAILED` 문장에 원인 한 줄을 붙인다(API 서버 4-1). 가짜 실행기는 배포 실패 때 `crash_log_tail`(기본: `ValidationError: database_url` 로 끝나는 7줄)로 같은 모양을 낸다.
@@ -261,7 +262,9 @@ SPEC [specs/api-3-2-real-executors.md](../specs/api-3-2-real-executors.md). `EXE
   - `SourceAccess.read_token` 은 쓰지 않는다. 처리기는 비공개 저장소 접근 확인을 위해 지금처럼 `issue_read_token` 을 부른다.
 - `poll`: `GET …/actions/runs/{id}` — `queued|in_progress|waiting|pending|requested` → `BuildRunning`, `completed`+`success` → 아티팩트를 내려받아(302 로 넘겨받은 저장소 주소에는 우리 토큰을 싣지 않는다) `BuildSucceeded(ar_repository, image_digest)`, 그 밖 → `BuildFailed(BUILD_FAILED)`. 아티팩트가 없거나, zip·JSON 모양이 다르거나, digest 가 `^sha256:[0-9a-f]{64}$` 가 아니거나, 저장소에 tag(`:`)가 있거나, `build_id` 가 실행 이름의 키와 다르면 `BuildFailed` + 경고 `BUILD_RESULT_INVALID`.
 - `read_security_scan`(보안·거버넌스 2-3): 같은 실행의 `security-scan` 아티팩트를 `build-result` 와 같은 방법으로 받는다. `meta.json` 이 없거나 `schema_version` 이 1 이 아니거나 `build_id`·digest 모양이 틀리면 `None` + 경고 `SECURITY_SCAN_INVALID`, 아티팩트가 없으면 `None` + `SECURITY_SCAN_MISSING`. 아티팩트 zip 이 8MB(목록의 `size_in_bytes` 또는 받은 크기)를 넘으면 받지 않고 `None` + `SECURITY_SCAN_TOO_LARGE`. 보고서 파일은 없거나 JSON 이 아니거나 깨졌거나(zlib·EOF·지원하지 않는 압축·암호) 풀린 크기가 8MB 를 넘으면 그 칸만 `None`. 일시 오류·인증 실패도 `None`(예외 없음). `source_ref` = `github-actions:{빌드 저장소}/actions/runs/{run id}`.
-  - 배포 처리기가 빌드를 `SUCCEEDED` 로 바꾼 직후 한 번 부른다(`BuildSecurityScanCollector`, 재사용 빌드는 다시 부르지 않음). 원문의 `build_id`·digest 가 그 빌드와 다르면 버리고, 맞으면 C-IMG-1·C-IMG-2 증거 3건을 `findings` 에 남긴다. 보고서가 `None` 이면 그 증거는 UNKNOWN. 원문 읽기부터 정규화까지의 어떤 예외도 경고(예외 종류만) + 0건이고 배포는 계속한다. 반영과 수집 사이에 일꾼이 죽은 빌드는 다시 모으지 않는다.
+  - BuildSecurityScanCollector는 성공 직후 수집하고, 실패 실행도 검증된 BuildFailed.artifact가 있으면 증거만 남긴다(Build는 FAILED 유지). 실제 빌드의 build_id/digest뿐 아니라 저장소/커밋/원문 검사 시각을 대조한다. 설치·해당 검사 outcome과 도구 버전이 유효하지 않으면 보고서는 None → UNKNOWN이다.
+  - 새 findings.source_ref는 build:{build id}:{원래 source_ref}. 해당 빌드의 세 출처가 모두 있어야 배포 검사에 쓴다. 수집 실패는 0건이며 실제 apply 전 게이트가 누락을 차단한다. 성공 기록 뒤 수집 전 중단/과거 형식은 적용 전 재수집하되 원문 시각을 보존한다. 기존 UNKNOWN/FAIL을 재수집으로 없애지 않는다.
+  - 워크플로는 검사·meta·업로드에 always() 조건을 사용해 실패 때도 가능한 증거를 보존한다. 최종 digest가 없으면 실패 메타/소스 원문만 보존하고 이미지 PASS 증거로 쓰지 않는다.
 - `read_logs`: 실행의 잡 로그(`GET …/actions/jobs/{job}/logs`)를 잡 순서(시작 시각·id)·줄 순서로 잇는다. cursor = `"{잡 순번}:{줄 번호}"`(다음에 읽을 줄). 실행이 끝나기 전에는 빈 청크(`has_more=true`, 같은 cursor). `##[error]`·`##[warning]` 줄은 `ERROR`·`WARN`. Actions 가 이미 가린 값 위에 `mask_secrets` 를 한 번 더 거친다. 끝난 실행의 로그는 프로세스에 최근 32개 기억한다.
 
 ### 쿠버네티스 직접 반영 (`KubernetesDeployExecutor`)

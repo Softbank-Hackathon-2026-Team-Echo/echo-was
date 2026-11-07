@@ -136,6 +136,7 @@ def test_write_route_actions_are_unique_user_actions() -> None:
     assert not set(names) & {
         AuditAction.MEMBER_JOINED,
         AuditAction.DEPLOY_FINISHED,
+        AuditAction.DEPLOY_SECURITY_CHECKED,
         AuditAction.ROLLBACK_FINISHED,
         AuditAction.MIGRATION_FINISHED,
         AuditAction.SERVICE_DELETED,
