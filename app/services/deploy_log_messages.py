@@ -14,6 +14,9 @@ from app.enums import DeployLogCode, DeployLogStage, DeployRequestErrorCode, Log
 
 # 오류 코드별 고정 문장(배포 요청 응답 errorMessage·FAILED 로그 줄).
 ERROR_MESSAGES: dict[DeployRequestErrorCode, str] = {
+    DeployRequestErrorCode.SECURITY_GATE_BLOCKED: (
+        "Deployment blocked: required image security checks failed or could not be confirmed."
+    ),
     DeployRequestErrorCode.REPO_NOT_ACCESSIBLE: (
         "The repository was not found or the GitHub App is not installed on it."
     ),
@@ -57,6 +60,16 @@ _INFO, _WARN, _ERROR = LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR
 _S = DeployLogStage
 
 DEPLOY_LOG_ENTRIES: dict[DeployLogCode, DeployLogEntry] = {
+    DeployLogCode.SECURITY_CHECK_PASSED: DeployLogEntry(
+        _INFO,
+        _S.DEPLOYING,
+        "Image security checks allow deployment (approved exceptions may apply).",
+    ),
+    DeployLogCode.SECURITY_CHECK_BLOCKED: DeployLogEntry(
+        _ERROR,
+        _S.DEPLOYING,
+        "Image security checks block deployment. See the security audit details.",
+    ),
     DeployLogCode.REQUEST_ACCEPTED: DeployLogEntry(_INFO, _S.QUEUED, "Deploy request accepted."),
     DeployLogCode.STARTED: DeployLogEntry(_INFO, _S.BUILDING, "Deploy request started."),
     DeployLogCode.BUILD_ATTACHED: DeployLogEntry(

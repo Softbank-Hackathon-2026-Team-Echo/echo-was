@@ -52,6 +52,7 @@ from tests.integration.auth_support import (
 )
 from tests.integration.conftest import TABLES
 from tests.integration.deploy_harness import DeployHarness
+from tests.integration.deploy_security_support import install_scanned_executors
 from tests.integration.factories import secret_ref_for
 from tests.integration.rollback_support import deploy_and_finish, read_all_logs, rollback
 from tests.real_executor_fakes import (
@@ -932,7 +933,7 @@ class RealWorld:
 
 @pytest.fixture
 async def real_world(harness: DeployHarness) -> AsyncIterator[RealWorld]:
-    """실제 쿠버네티스 실행기 + 가짜 창구. 빌드·헬스·대표 주소는 가짜 그대로다."""
+    """실제 쿠버네티스 실행기 + 가짜 창구. 빌드는 유효 검사 증거를 가진 대역이다."""
     cloud = FakeCloud(harness.clock)  # type: ignore[arg-type]
     cluster = FakeCluster(harness.clock)  # type: ignore[arg-type]
     cluster.rolled_out = True
@@ -956,6 +957,7 @@ async def real_world(harness: DeployHarness) -> AsyncIterator[RealWorld]:
             sleep=RecordingSleep(),
         ),
     )
+    install_scanned_executors(harness)
     harness.replace_executors(deploy=executors.deploy)
     harness.use_settings(executor_mode=ExecutorMode.REAL)
     harness.host_suffixes.queue(SUFFIX)
@@ -1150,3 +1152,17 @@ async def test_other_organization_cannot_reach_variables(harness: DeployHarness)
 
     assert (response.status_code, response.json()["code"]) == (404, "SERVICE_NOT_FOUND")
     assert await _rows(harness) == []
+
+
+async def test_real_kubernetes_executor_is_not_called_when_scan_provenance_is_wrong(
+    harness: DeployHarness,
+    real_world: RealWorld,
+) -> None:
+    harness.executors.build.scan_changes = {"commit_sha": "0" * 40}
+    result = await deploy_and_finish(harness, real_world.service_id, real_world.environment.id)
+    assert result["errorCode"] == "SECURITY_GATE_BLOCKED"
+    assert [
+        request
+        for request in real_world.cluster.requests
+        if request.method in ("POST", "PUT", "PATCH", "DELETE")
+    ] == []
