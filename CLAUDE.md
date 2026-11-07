@@ -72,6 +72,7 @@ app/
 │                     #   ServiceVariableService(앱 환경 변수 API) · app_env_values(배포 기록 참조 → 실행기 값, 표대로 None·{}·값)
 │                     #   SecurityExceptionService(기한부 예외 요청·승인·철회·조회, 만든 시각은 앱 시계, 보안 3)
 │                     #   SecurityGate(보안 게이트: 이전 승인·일꾼 시작 때 실행 판정, 실행 직전 C-IMG-3·C-TLS-1·C-SEC-1(출발·도착 앱 환경 변수 키) 확인, 기본 꺼짐, 보안 5)
+│                     #     통제별 예산 초과는 읽기 롤백 뒤 CONTROL_TIMEOUT/UNKNOWN. 통제별 저장 증거 조회, TLS는 트랜잭션 밖.
 │                     #   PeriodicTlsProbe(게이트가 켜진 일꾼의 공개 경로 TLS 주기 시험 → C-TLS-1 준비 증거, 매트릭스용)
 │                     #   PrecheckService(AI 사전 점검 만들기·조회·이벤트·취소·입력 사본) · AgentRunService(러너: 가져가기·하트비트·이벤트·결과, 부를 때 만료)
 │                     #   run_result(러너 결과 정규화·패치 상태 재계산, 순수 계산)
