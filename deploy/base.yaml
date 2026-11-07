@@ -182,6 +182,13 @@ data:
   DATA_SYNC_SSL_MODE: require
   CUTOVER_RUNS_DATABASE: app
   CUTOVER_RESULTS_NOT_BEFORE: "2026-11-04T13:30:00Z"
+  # DB 쓰기 전환 단계(API 서버 17): includeCutover=true 계획이 같은 클러스터 echo-ops 에 컷오버 Job 을 만든다.
+  # 권한은 echo-infra replication/cutover-job Role echo-was-cutover-jobs, 결과 행은 위 DATA_SYNC_*·CUTOVER_RUNS_DATABASE 로 읽는다.
+  # 이미지는 echo-infra replication/cutover-job/deploy/values.env 의 CUTOVER_IMAGE 와 글자까지 같아야 VAP 를 통과한다.
+  # 재난 긴급 이전 자동 포함(MIGRATION_DB_CUTOVER_ON_DISASTER)은 넣지 않는다(리허설 뒤 별도 결정).
+  # 되돌리려면 이 두 줄을 지우고 재배포(기본 disabled, includeCutover=true 는 409). 이미 돌고 있는 Job 은 멈추지 않는다.
+  DB_CUTOVER_EXECUTOR_MODE: kubernetes
+  DB_CUTOVER_JOB_IMAGE: asia-northeast3-docker.pkg.dev/team-echo-final/echo/cutover@sha256:cb668942859261b6d98164b1de5938435241f372fb4273c4f440295b3e34f12b
   # 보안 게이트(보안·거버넌스 5, 지민 11/5 결정 D): 이전 승인·일꾼 실행 시작 때 필수 통제가 FAIL·UNKNOWN 이고
   # 유효한 기한부 예외가 없으면 409 SECURITY_GATE_BLOCKED. 되돌리려면 "false" PR(ConfigMap 만 바뀌니 병합 뒤 api·worker 재시작).
   SECURITY_GATE_ENABLED: "true"
