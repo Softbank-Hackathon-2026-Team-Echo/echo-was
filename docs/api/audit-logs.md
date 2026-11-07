@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 40개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개·실제 재난 피드 2개·CVE 감시 3개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 43개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개·실제 재난 피드 2개·CVE 감시 3개·사람 점검 기록 1개·시연 스냅샷·복귀 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -121,6 +121,7 @@
 | `SECURITY_EXCEPTION_REQUESTED` | `POST /security/exceptions` | `security_exception`(이름표 = 통제 ID) | `{expiresAt}`(사유 원문은 예외 행에만) |
 | `SECURITY_EXCEPTION_APPROVED` | `POST /security/exceptions/{id}/approve` | `security_exception` | `{}` |
 | `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |
+| `SECURITY_MANUAL_REVIEW_RECORDED` | `POST /security/manual-reviews` | `finding`(이름표 = 통제 ID) | `{result, expiresAt, environmentId?, serviceId?}`(범위 칸은 준 것만, 요약 원문·근거 링크는 증거 행에만) |
 | `PRECHECK_REQUESTED` | `POST /prechecks` | `agent_run`(이름표 = 서비스 이름) | `{serviceId, targetEnvironmentId}` |
 | `PRECHECK_CANCELLED` | `POST /prechecks/{id}/cancel` | `agent_run` | `{serviceId, targetEnvironmentId}` |
 | `AGENT_PATCH_APPROVED` | `POST /prechecks/{id}/patches/{patchId}/approve`(같은 승인을 다시 보낸 200 은 기록 안 함) | `agent_run`(부모 실행) | `{patchId, patchHash, applyRunId}`(`applyRunId` 는 null 가능, 사유 원문은 결정 행에만) |

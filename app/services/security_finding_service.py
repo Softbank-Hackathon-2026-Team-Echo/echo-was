@@ -7,6 +7,7 @@
 - 판정용 조회는 그 조직의 만료 전 증거만 돌려준다. 범위·출처·정책 버전 비교는 규칙표가 한다.
 """
 
+import ipaddress
 import logging
 import uuid
 from dataclasses import asdict
@@ -37,7 +38,9 @@ from app.services.security_rules import (
 
 logger = logging.getLogger(__name__)
 
-_MANUAL_REVIEW_RESULTS = frozenset({SecurityResult.PASS, SecurityResult.WARN, SecurityResult.FAIL})
+MANUAL_REVIEW_RESULTS = frozenset({SecurityResult.PASS, SecurityResult.WARN, SecurityResult.FAIL})
+# 사람 점검 요약을 담는 근거 줄의 itemId(칸을 따로 두지 않아 마이그레이션이 없다).
+MANUAL_REVIEW_SUMMARY_ITEM_ID = "MANUAL_REVIEW_SUMMARY"
 
 
 class SecurityFindingService:
@@ -83,28 +86,13 @@ class SecurityFindingService:
         collected_at: datetime,
     ) -> uuid.UUID:
         """사람 점검 기록 한 건. 그 통제가 사람 점검을 받지 않으면 거절한다."""
-        rule = get_rule(control_id)
-        if SecurityFindingSource.MANUAL_REVIEW not in rule.sources:
-            raise RequestFieldInvalidError("controlId", "MANUAL_REVIEW_NOT_ALLOWED")
-        if result not in _MANUAL_REVIEW_RESULTS:
-            raise RequestFieldInvalidError("result", "MANUAL_REVIEW_RESULT_INVALID")
-        if not _is_https_url(basis_url):
-            raise RequestFieldInvalidError("basisUrl", "BASIS_URL_INVALID")
-        finding = SecurityFinding(
-            finding_id=uuid.uuid4(),
+        normalized = build_manual_review(
             control_id=control_id,
             result=result,
-            mode=SecurityFindingMode.REAL,
-            source=SecurityFindingSource.MANUAL_REVIEW,
             scope=scope,
-            collected_at=collected_at,
-            expires_at=collected_at + rule.max_age,
-            policy_version=POLICY_VERSION,
             reviewer_user_id=reviewer_user_id,
             basis_url=basis_url,
-        )
-        normalized = NormalizedFinding(
-            finding, SecurityFindingReason.MANUAL_REVIEW_RECORDED, (), 0, None
+            collected_at=collected_at,
         )
         return await self.record(normalized)
 
@@ -114,6 +102,55 @@ class SecurityFindingService:
         async with self._session.begin():
             models = await self._findings.search_unexpired_by_organization(organization_id, now)
         return [to_security_finding(model) for model in models]
+
+
+def build_manual_review(
+    *,
+    control_id: SecurityControlId,
+    result: SecurityResult,
+    scope: SecurityScope,
+    reviewer_user_id: uuid.UUID,
+    basis_url: str,
+    collected_at: datetime,
+    summary: str | None = None,
+) -> NormalizedFinding:
+    """사람 점검 기록 한 건을 증거 형태로 만든다(저장 전, 순수 계산).
+
+    만료는 수집 시각 + 통제 유효기간(규칙표 `max_age`)이다. 요약은 근거 줄 하나
+    (`MANUAL_REVIEW_SUMMARY_ITEM_ID`, `target` = 요약)로 남긴다.
+    """
+    rule = get_rule(control_id)
+    if SecurityFindingSource.MANUAL_REVIEW not in rule.sources:
+        raise RequestFieldInvalidError("controlId", "MANUAL_REVIEW_NOT_ALLOWED")
+    if result not in MANUAL_REVIEW_RESULTS:
+        raise RequestFieldInvalidError("result", "MANUAL_REVIEW_RESULT_INVALID")
+    if not is_https_url(basis_url):
+        raise RequestFieldInvalidError("basisUrl", "BASIS_URL_INVALID")
+    finding = SecurityFinding(
+        finding_id=uuid.uuid4(),
+        control_id=control_id,
+        result=result,
+        mode=SecurityFindingMode.REAL,
+        source=SecurityFindingSource.MANUAL_REVIEW,
+        scope=scope,
+        collected_at=collected_at,
+        expires_at=collected_at + rule.max_age,
+        policy_version=POLICY_VERSION,
+        reviewer_user_id=reviewer_user_id,
+        basis_url=basis_url,
+    )
+    items: tuple[FindingItem, ...] = ()
+    if summary is not None:
+        items = (
+            FindingItem(
+                item_id=MANUAL_REVIEW_SUMMARY_ITEM_ID,
+                target=summary,
+                reason=SecurityFindingReason.MANUAL_REVIEW_RECORDED,
+            ),
+        )
+    return NormalizedFinding(
+        finding, SecurityFindingReason.MANUAL_REVIEW_RECORDED, items, len(items), None
+    )
 
 
 def to_finding_model(normalized: NormalizedFinding, source_ref: str | None = None) -> Finding:
@@ -176,6 +213,44 @@ def _item_json(item: FindingItem) -> dict[str, Any]:
     return {key: value for key, value in asdict(item).items() if value is not None}
 
 
-def _is_https_url(value: str) -> bool:
-    parts = urlsplit(value)
-    return parts.scheme == "https" and bool(parts.netloc)
+def is_https_url(value: str) -> bool:
+    """근거 링크로 쓸 수 있는 https 주소인가(구조만 본다, 링크를 가져오지 않는다).
+
+    - 공백·제어 문자가 하나라도 있으면 아니다(복사 실수, `https:// /review`).
+    - scheme 은 `https` 만. 호스트가 있어야 하고, 이름(글자·숫자·`-` 의 점 구분 낱말)
+      또는 대괄호 IPv6 주소여야 한다. 포트가 있으면 1~65535 정수여야 한다.
+    - 파싱 예외(`https://[`)는 삼키고 False — 부르는 쪽이 422 로 바꾼다.
+    """
+    if any(char.isspace() or not char.isprintable() for char in value):
+        return False
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not hostname:
+        return False
+    if port == 0:
+        return False
+    if parts.netloc.rpartition("@")[2].startswith("["):
+        return _is_ipv6(hostname)
+    return _is_host_name(hostname)
+
+
+def _is_ipv6(hostname: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(hostname), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
+def _is_host_name(hostname: str) -> bool:
+    labels = hostname.removesuffix(".").split(".")
+    return all(
+        0 < len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(char.isalnum() or char == "-" for char in label)
+        for label in labels
+    )

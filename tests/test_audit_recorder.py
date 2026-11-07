@@ -129,9 +129,10 @@ def test_write_route_actions_are_unique_user_actions() -> None:
     # API 서버 7 의 24개 + 기한부 예외(보안·거버넌스 3) 3개 + AI 사전 점검 4개 + 재난 2개
     # + 배포 실패 진단 1개(SPEC api-98)
     # + 변수 복사(이슈 #99) 1개 + CVE 감시(보안 6) 3개
-    # + 실제 재난 피드 대피 시작·시연 주입(API 서버 18) 2개 + 시연 스냅샷·복귀 2개
-    assert len(names) == 42
-    assert len(set(names)) == 42
+    # + 실제 재난 피드 대피 시작·시연 주입(API 서버 18) 2개
+    # + 사람 점검 기록(C-IAM-1·C-TLS-2 등) 1개 + 시연 스냅샷·복귀 2개
+    assert len(names) == 43
+    assert len(set(names)) == 43
     # 초대 적용·끝 상태·에이전트 읽기는 쓰기 경로의 이름이 아니다.
     assert not set(names) & {
         AuditAction.MEMBER_JOINED,

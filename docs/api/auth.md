@@ -106,6 +106,7 @@ API: state == 쿠키 값(상수 시간 비교, 10분 이내)?
 | `POST·GET /agent-tokens` · `DELETE /agent-tokens/{id}` | 개발자(사람만) | 403 |
 | `POST /services/{id}/migration-plans` · `POST /migration-plans/{id}/approve·reject·cancel·abort` (이전 계획 만들기·승인·거절·취소·중단, API 서버 8) | 개발자(사람만) | 403 |
 | `POST /security/exceptions` · `POST /security/exceptions/{id}/approve·revoke` (기한부 예외 요청·승인·철회, 보안 3) | 개발자(사람만) | 403 |
+| `POST /security/manual-reviews` (사람 점검 기록, C-IAM-1·C-TLS-2 등 사람 점검 통제) | 개발자(사람만) | 403 |
 | `POST /prechecks` · `POST /prechecks/{id}/cancel` (AI 사전 점검 만들기·취소) | 개발자(사람만) | 403 |
 | `DELETE /environments/{id}` · `DELETE /services/{id}` | 어드민 | 403 |
 | `PATCH /members/{userId}` · `POST·GET /invitations` · `DELETE /invitations/{id}` | 어드민(사람만) | 403 |
