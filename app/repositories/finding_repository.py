@@ -80,6 +80,62 @@ class FindingRepository:
         finally:
             await rows.close()
 
+    async def search_for_deploy(
+        self, organization_id: uuid.UUID, image_digest: str, now: datetime
+    ) -> list[Finding]:
+        """실제로 적용할 digest 의 이미지 통제만 끝까지 읽는다. 유효 FAIL 을 자르지 않는다."""
+        stmt = (
+            select(Finding)
+            .options(
+                load_only(
+                    Finding.id,
+                    Finding.organization_id,
+                    Finding.service_id,
+                    Finding.environment_id,
+                    Finding.image_digest,
+                    Finding.config_commit,
+                    Finding.was_version,
+                    Finding.control_id,
+                    Finding.result,
+                    Finding.mode,
+                    Finding.source,
+                    Finding.policy_version,
+                    Finding.reviewer_user_id,
+                    Finding.basis_url,
+                    Finding.confirmation,
+                    Finding.collected_at,
+                    Finding.expires_at,
+                    Finding.source_ref,
+                    raiseload=True,
+                )
+            )
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.image_digest == image_digest,
+                Finding.control_id.in_((SecurityControlId.IMG_1, SecurityControlId.IMG_2)),
+                Finding.expires_at > now,
+                Finding.mode != SecurityFindingMode.SIMULATED,
+            )
+            .execution_options(yield_per=FINDING_FETCH_BATCH_SIZE)
+        )
+        rows = await self._session.stream_scalars(stmt)
+        try:
+            return [finding async for finding in rows]
+        finally:
+            await rows.close()
+
+    async def has_build_scan(self, organization_id: uuid.UUID, build_prefix: str) -> bool:
+        # 수집은 세 보고서를 한 트랜잭션으로 저장한다. 만료된 원문도 다시 신선하게 만들지 않는다.
+        stmt = (
+            select(Finding.id)
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.source_ref.startswith(build_prefix),
+            )
+            .limit(1)
+        )
+        return await self._session.scalar(stmt) is not None
+
     async def search_recent_for_precheck(
         self,
         organization_id: uuid.UUID,

@@ -271,8 +271,6 @@ class GithubActionsBuildExecutor:
                 return BuildFailed()
             if run.get("status") != "completed":
                 return BuildRunning()
-            if run.get("conclusion") != "success":
-                return BuildFailed()
             result = await self._read_result(run_id)
         except TransientError as exc:
             _warn(exc.code, run_id)
@@ -284,6 +282,8 @@ class GithubActionsBuildExecutor:
         if result is None or run.get("display_title") != f"{RUN_NAME_PREFIX}{result[1]}":
             _warn(BUILD_RESULT_INVALID, run_id)
             return BuildFailed()
+        if run.get("conclusion") != "success":
+            return BuildFailed(artifact=result[0])
         return result[0]
 
     async def _get_run(self, run_id: int) -> dict[str, Any] | None:
@@ -624,8 +624,22 @@ def _parse_security_scan(archive: bytes, *, source_ref: str) -> BuildSecuritySca
         scanned_at=_parse_scanned_at(meta.get("scanned_at")),
         trivy_version=_tool_version(meta.get("trivy")),
         gitleaks_version=_tool_version(meta.get("gitleaks")),
-        trivy_report=trivy if isinstance(trivy, dict) else None,
-        gitleaks_report=gitleaks,
+        trivy_report=(
+            trivy if isinstance(trivy, dict) and _scan_succeeded(meta, "trivy") else None
+        ),
+        gitleaks_report=gitleaks if _scan_succeeded(meta, "gitleaks") else None,
+        repository=meta.get("repository") if isinstance(meta.get("repository"), str) else None,
+        commit_sha=meta.get("commit_sha") if isinstance(meta.get("commit_sha"), str) else None,
+    )
+
+
+def _scan_succeeded(meta: dict[str, Any], tool_name: str) -> bool:
+    tool = meta.get(tool_name)
+    return (
+        meta.get("tools_outcome") == "success"
+        and isinstance(tool, dict)
+        and tool.get("outcome") == "success"
+        and _tool_version(tool) is not None
     )
 
 

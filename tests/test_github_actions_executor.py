@@ -298,7 +298,10 @@ async def test_poll_failed_run_returns_build_failed() -> None:
     executor, external_ref, _ = await _started(actions, clock)
     actions.finish(next(iter(actions.runs.values())), success=False)
 
-    assert await executor.poll(external_ref) == BuildFailed(DeployRequestErrorCode.BUILD_FAILED)
+    assert await executor.poll(external_ref) == BuildFailed(
+        DeployRequestErrorCode.BUILD_FAILED,
+        artifact=BuildSucceeded(image_repository=AR_REPOSITORY, image_digest=DIGEST),
+    )
 
 
 @pytest.mark.parametrize(
@@ -589,3 +592,36 @@ async def test_read_logs_before_run_finishes_returns_empty_chunk_with_more() -> 
     chunk = await executor.read_logs(external_ref, "0:3", 10)
 
     assert (chunk.lines, chunk.next_cursor, chunk.has_more) == ((), "0:3", True)
+
+
+@pytest.mark.parametrize("tool", ["trivy", "gitleaks"])
+@pytest.mark.parametrize("outcome", ["failure", "cancelled", "skipped", None])
+async def test_partial_scan_report_is_not_accepted_when_step_did_not_succeed(
+    tool: str,
+    outcome: str | None,
+) -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(
+            build_id,
+            trivy=TRIVY_REPORT,
+            gitleaks=[],
+            meta={tool: {"version": "1.0.0", "outcome": outcome}},
+        )
+    )
+    scan = await executor.read_security_scan(external_ref)
+    assert scan is not None
+    assert (scan.trivy_report if tool == "trivy" else scan.gitleaks_report) is None
+
+
+async def test_failed_tool_install_discards_apparently_complete_reports() -> None:
+    executor, external_ref, _, _ = await _finished_with_scan(
+        lambda build_id: scan_zip(
+            build_id,
+            trivy=TRIVY_REPORT,
+            gitleaks=[],
+            meta={"tools_outcome": "failure"},
+        )
+    )
+    scan = await executor.read_security_scan(external_ref)
+    assert scan is not None
+    assert scan.trivy_report is None and scan.gitleaks_report is None

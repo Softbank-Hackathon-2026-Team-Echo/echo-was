@@ -58,11 +58,13 @@ stateDiagram-v2
 
 - **빌드**: 같은 서비스·저장소·커밋의 빌드가 있으면 다시 빌드하지 않는다(`build.reused = true`). 빌드 결과는 이미지 주소 + `sha256` digest 이고, 배포는 digest 로만 한다. 비공개 저장소는 빌드 직전에 GitHub App 설치 토큰(1시간)을 새로 받아 메모리로만 넘긴다. 제한 시간은 빌드 시작 기준 `BUILD_TIMEOUT_SECONDS`(900).
 - **배포**: 빌드가 성공하면 배포 기록(`deploymentId`)을 만들고 배포 실행기가 반영한다. 제한 시간은 `DEPLOYING` 시작 기준 `DEPLOY_TIMEOUT_SECONDS`(300).
+- **이미지 보안 판정**: 실제 실행기의 apply 직전 C-IMG-1·C-IMG-2와 해당 빌드/digest를 확인한다. 최초·예비·재사용·되돌리기·AI 재배포도 같다. 필수 FAIL/UNKNOWN은 유효한 기한부 예외가 없으면 FAILED / SECURITY_GATE_BLOCKED. SECURITY_GATE_ENABLED는 이관 설정이며 이 검사를 끄지 않는다. 상세 근거는 DEPLOY_SECURITY_CHECKED 감사 로그다([SPEC](../../specs/sec-11-2-deploy-image-gate.md)).
 - **헬스체크**: 일꾼이 실행될 때마다 **환경별 주소 + `healthCheckPath`** 를 한 번 GET 한다(요청 하나 5초, 리다이렉트 따르지 않음). 2xx 면 통과, 아니면 `HEALTH_CHECK_INTERVAL_SECONDS`(5) 뒤 다시 확인한다. `VERIFYING` 시작 + `healthCheckTimeoutSeconds`(접수 때 사본)를 넘기면 마지막 결과로 끝낸다: 2xx 가 아닌 응답이면 `HEALTH_CHECK_FAILED`, 연결 실패면 `PUBLIC_URL_UNREACHABLE`, 한 번도 확인하지 못했으면 `HEALTH_CHECK_TIMEOUT`. 대표 주소는 성공 처리 뒤에야 이 환경을 가리키므로 이 단계에서 확인하지 않는다.
 - **성공 처리**: 연결의 현재 배포를 새 배포 기록으로 바꾼다. 이 서비스에 서비스 중(`trafficWeight > 0`) 연결이 없으면 대표 주소 라우터가 이 연결로 주소를 보내고, "적용했다"고 답하면 `trafficWeight = 100` 이 된다(**서비스 중**). 이미 서비스 중인 연결이 있으면 이 연결은 **예비**(`trafficWeight = 0`)로 남는다. 트래픽 전환·이전은 API 서버 8 이 한다.
 - **예비 환경 함께 띄우기**(이슈 #99, SPEC [api-99-vars-copy-standby.md](../../specs/api-99-vars-copy-standby.md)): 접수 때 받은 `standbyEnvironmentIds` 는 요청의 설정 사본(`config_snapshot.standbyEnvironmentIds`)에만 적는다(표 칸 추가 없음, 배포 기록·따라가기 요청에는 옮기지 않아 되돌리기가 다시 띄우지 않는다). 수동 요청이 성공하고 이 연결이 **서비스 중**이면 같은 성공 처리 트랜잭션에서 환경마다: 이미 따라가는 예비 연결이면 아래 자동 따라가기가 한 번만 넣고, 연결이 없으면 배포 없는 연결을 만든 뒤(환경을 `FOR SHARE` 로 잡고 살아 있는지 다시 확인, 주소 규칙은 접수와 같다), 배포 없는 연결이면 그대로 `STANDBY_SYNC` 를 넣는다(같은 빌드·설정 사본, 앱 환경 변수는 **그 예비 연결의** 값 — 첫 배포 전에 넣은 변수가 있으면 그것). 따라가기가 성공하면 그 연결은 **예비**(`role = STANDBY`)다. 띄우지 못하면 그 환경만 원본 요청에 `STANDBY_SKIPPED`(WARN) 줄을 쓴다: 주 환경이 서비스 중이 아님(예비 환경에 직접 배포)·서비스 삭제 중·실행 중 이전 계획이 있음(하나도 띄우지 않음)·그 사이 환경 삭제·주소 충돌. **주 환경이 실패·취소되면 연결도 요청도 만들지 않는다.** 결과 요청 id 는 단건 응답 `standbyDeployRequestIds`(가칭)에 나온다.
 - **예비 자동 따라가기**: 서비스 중 연결의 수동 요청·되돌리기 요청이 성공하면, 현재 배포가 있는 예비 연결마다 `trigger = STANDBY_SYNC` 요청이 생긴다(`sourceRequestId` = 원본, 같은 커밋·같은 빌드 — 재빌드 없음, 설정 사본은 환경별 주소만 다름). 이 요청도 같은 겹침 규칙을 따라 예비 연결의 대기 요청을 밀어낸다. 예비 연결 요청의 성공·실패는 서비스 중 연결에 영향이 없고, 예비 요청은 다시 따라가기를 만들지 않는다. 서비스가 `DELETING` 이면 만들지 않는다. 예비 연결에 사용자가 다른 커밋을 직접 배포하는 것은 막지 않는다(그때는 서비스 상세에서 `OUT_OF_SYNC` 로 보인다).
-- **실패와 되돌리기**: 배포 기록이 생긴 뒤의 모든 실패(배포 실패·시간 초과, 헬스 실패 3종, 일꾼 상실)는 되돌리기를 불러 직전 버전을 유지하고 결과를 `revertStatus`(`SUCCEEDED`·`FAILED`)에 적는다. 되돌리기가 실패해도 `errorCode` 는 바꾸지 않는다. 연결의 현재 배포·비율은 그대로다.
+- **실패와 되돌리기**: 배포 기록이 생긴 뒤의 실패(배포 실패·시간 초과, 헬스 실패 3종, 일꾼 상실)는 되돌리기를 불러 직전 버전을 유지하고 결과를 `revertStatus`(`SUCCEEDED`·`FAILED`)에 적는다. 되돌리기가 실패해도 `errorCode` 는 바꾸지 않는다. 연결의 현재 배포·비율은 그대로다.
+- **보안 차단의 복구**: 첫 apply 요청 전에 차단되면 revertStatus = null이고 클러스터를 건드리지 않는다. 이미 apply 요청 기록이 있으면 적용됐을 가능성이 있어 기존 되돌리기를 수행한다.
 - **일꾼 복구**: 일꾼이 죽어도 임대(30초)가 끝나면 다른 일꾼이 같은 단계부터 이어 간다. 외부 작업은 멱등 키로 두 번 만들지 않는다([executors.md](../executors.md)). 같은 요청에서 임대를 3번 잃으면 `WORKER_LOST` 로 끝난다.
 
 ### 목록(이력) `GET /api/v1/orgs/{orgId}/services/{id}/deploy-requests`
@@ -143,13 +145,14 @@ stateDiagram-v2
 
 ### 배포 작업 로그 줄
 
-상태 전환과 **같은 트랜잭션**에서, 전환이 실제로 반영됐을 때만 한 줄씩 쓴다(일꾼이 다시 시작해도 줄이 겹치거나 빠지지 않는다). 문장은 코드별 고정 영어 문장이고 외부 응답 원문을 넣지 않는다. 요청당 500줄까지이며 500번째 자리에 `LOG_TRUNCATED` 를 쓰고 그 뒤 줄은 버린다(상태 진행은 계속).
+상태 전환 줄은 **같은 트랜잭션**에서, 전환이 실제로 반영됐을 때만 한 줄씩 쓴다(일꾼이 다시 시작해도 줄이 겹치거나 빠지지 않는다). 문장은 코드별 고정 영어 문장이고 외부 응답 원문을 넣지 않는다. 요청당 500줄까지이며 500번째 자리에 `LOG_TRUNCATED` 를 쓰고 그 뒤 줄은 버린다(상태 진행은 계속).
 
 | 코드 | 수준 | 단계(`stage`) | 언제 |
 |---|---|---|---|
 | `REQUEST_ACCEPTED` | INFO | QUEUED | 접수·되돌리기 접수·예비 따라가기 요청 생성 |
 | `STARTED` | INFO | BUILDING | `QUEUED → BUILDING` |
 | `BUILD_ATTACHED` · `BUILD_REUSED` | INFO | BUILDING | 새 빌드를 만들었다 · 있는 빌드를 쓴다(되돌리기·따라가기는 시작 직후) |
+| SECURITY_CHECK_PASSED · SECURITY_CHECK_BLOCKED | INFO · ERROR | DEPLOYING | 실제 apply 직전 판정마다 감사와 함께 기록(재시도 시 반복 가능) |
 | `DEPLOYMENT_CREATED` | INFO | DEPLOYING | 배포 기록 생성(`BUILDING → DEPLOYING`) |
 | `DEPLOY_REQUESTED` · `DEPLOY_APPLIED` | INFO | DEPLOYING | 배포 실행기 요청 · 반영(`DEPLOYING → VERIFYING`) |
 | `ENV_VARS_APPLIED` | INFO | DEPLOYING | 앱 환경 변수 적용. 키 개수·이름만(값 없음). 변수가 있을 때만 `DEPLOY_REQUESTED` 와 `DEPLOY_APPLIED` 사이에 온다 |
@@ -291,6 +294,7 @@ stateDiagram-v2
 | `REPO_NOT_ACCESSIBLE` | 빌드 | 빌드 직전 저장소에 접근하지 못함(App 설치가 사라짐 등) |
 | `REF_NOT_FOUND` | 접수 | 브랜치·커밋 없음(접수 응답 422 로만 나온다) |
 | `SOURCE_PROVIDER_UNAVAILABLE` | 빌드 | 빌드 직전 GitHub 한도 초과·5xx·시간 초과 |
+| SECURITY_GATE_BLOCKED | 배포 | C-IMG-1/2 FAIL·UNKNOWN(유효 예외 없음) 또는 Build와 적용 이미지 불일치. 접수 202, 일꾼이 FAILED로 종료 |
 | `BUILD_FAILED` | 빌드 | 빌드 실패(`simulate.failAt = BUILDING` 포함) |
 | `BUILD_TIMEOUT` | 빌드 | 빌드 시작 뒤 `BUILD_TIMEOUT_SECONDS` 초과. 같은 커밋 다음 요청은 새 빌드를 만든다 |
 | `DEPLOY_FAILED` | 배포 | 배포 실행기 실패(`simulate.failAt = DEPLOYING` 포함) |
