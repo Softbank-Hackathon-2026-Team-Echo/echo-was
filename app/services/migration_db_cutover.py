@@ -28,11 +28,11 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from app.enums import CutoverKind, MigrationErrorCode, MigrationPlanMode
+from app.enums import CutoverKind, MigrationErrorCode, MigrationPlanMode, MigrationStepStatus
 from app.executors.base import (
     CutoverRun,
     CutoverRunResult,
@@ -40,6 +40,7 @@ from app.executors.base import (
     CutoverRunUnavailable,
     DbCutoverJobKind,
     DbCutoverRequest,
+    JournalReplayed,
 )
 
 EXIT_DONE = 0
@@ -81,6 +82,12 @@ CUTOVER_WRITER = "writer"
 WRITER_SOURCE = "SOURCE"
 WRITER_TARGET = "TARGET"
 WRITER_UNKNOWN = "UNKNOWN"
+# 요청 기록 재생(API 서버 21)의 마지막 결과. 재생 버튼을 누를 때마다 덮어쓰고 attempts 를 센다.
+CUTOVER_REPLAY = "replay"
+# 결과 행 mode: promote.sh 가 원본(A)에 닿지 못해 B 를 승격했다(A 에만 들어간 쓰기가 있을 수 있다).
+RUN_MODE_PROMOTE = "PROMOTE"
+REPLAY_STATUS_DONE = "DONE"
+REPLAY_STATUS_PARTIAL = "PARTIAL"
 
 
 class CutoverRecovery(StrEnum):
@@ -239,6 +246,51 @@ def run_to_json(run: CutoverRun) -> dict[str, Any]:
         "duplicateRows": run.duplicate_rows,
         "mode": run.mode,
         "rpoEstimateMs": run.rpo_estimate_ms,
+    }
+
+
+def is_replayable_cutover(result: dict[str, Any]) -> bool:
+    """요청 기록 재생(API 서버 21)을 할 수 있는 DB 쓰기 전환 단계 결과인가.
+
+    단계가 통과했고 결과 행이 승격(mode = PROMOTE)일 때만이다. 정상 컷오버(NORMAL)는 원본에서
+    따라잡은 뒤 넘어가므로 잃은 쓰기가 없다.
+    """
+    cutover = result.get("cutover")
+    run = cutover.get(CUTOVER_RUN) if isinstance(cutover, dict) else None
+    return (
+        result.get("status") == MigrationStepStatus.PASSED.value
+        and isinstance(run, dict)
+        and run.get("mode") == RUN_MODE_PROMOTE
+    )
+
+
+def replay_since(cutover: dict[str, Any], margin_seconds: int) -> datetime:
+    """재생 시작점: B 가 A 에서 마지막으로 받은 시각(paused_at − rpo_estimate_ms) − 여유.
+
+    그 사이 겹친 쓰기는 앱이 멱등이라 200 으로 건너뛴다. 결과 행이 is_replayable_cutover 로 걸러진
+    뒤에만 부른다.
+    """
+    run = cutover[CUTOVER_RUN]
+    paused_at = datetime.fromisoformat(run["pausedAt"])
+    rpo_ms = int(run.get("rpoEstimateMs") or 0)
+    return paused_at - timedelta(milliseconds=max(rpo_ms, 0), seconds=margin_seconds)
+
+
+def replay_to_json(
+    replayed: JournalReplayed, since: datetime, replayed_at: datetime, attempts: int
+) -> dict[str, Any]:
+    """재생 결과 → 단계 결과 cutover.replay(응답 camelCase)."""
+    return {
+        "status": REPLAY_STATUS_DONE if replayed.failed == 0 else REPLAY_STATUS_PARTIAL,
+        "sent": replayed.sent,
+        "created": replayed.created,
+        "existed": replayed.existed,
+        "failed": replayed.failed,
+        "skipped": replayed.skipped,
+        "durationMs": replayed.duration_ms,
+        "since": since.isoformat(),
+        "replayedAt": replayed_at.isoformat(),
+        "attempts": attempts,
     }
 
 

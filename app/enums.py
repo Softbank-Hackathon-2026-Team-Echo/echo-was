@@ -576,6 +576,10 @@ class MigrationLogCode(StrEnum):
     # 재난 긴급 이전 + DB 쓰기 전환에서 원본 DB 에 닿지 못해 데이터 확인을 건너뛰었다(경고).
     # data.reason = EMERGENCY_SOURCE_UNREACHABLE. 승격은 승인 때 동의했다(acknowledgePromote).
     DATA_SYNC_SKIPPED = "DATA_SYNC_SKIPPED"
+    # 승격한 DB 쓰기 전환 뒤 사람이 요청 기록 재생을 눌렀다(API 서버 21). data 에 보냄·새로 들어감·
+    # 이미 있음·실패·보내지 않음 수와 시작점. 실패가 하나라도 있으면 JOURNAL_REPLAY_PARTIAL(WARN).
+    JOURNAL_REPLAYED = "JOURNAL_REPLAYED"
+    JOURNAL_REPLAY_PARTIAL = "JOURNAL_REPLAY_PARTIAL"
 
 
 # --- 보안 판정 (보안·거버넌스 3) ---

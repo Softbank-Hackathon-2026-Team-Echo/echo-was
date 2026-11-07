@@ -35,6 +35,7 @@ class AuditAction(StrEnum):
     MIGRATION_PLAN_REJECTED = "MIGRATION_PLAN_REJECTED"
     MIGRATION_PLAN_CANCELLED = "MIGRATION_PLAN_CANCELLED"
     MIGRATION_ABORT_REQUESTED = "MIGRATION_ABORT_REQUESTED"
+    MIGRATION_JOURNAL_REPLAYED = "MIGRATION_JOURNAL_REPLAYED"
     SECURITY_EXCEPTION_REQUESTED = "SECURITY_EXCEPTION_REQUESTED"
     SECURITY_EXCEPTION_APPROVED = "SECURITY_EXCEPTION_APPROVED"
     SECURITY_EXCEPTION_REVOKED = "SECURITY_EXCEPTION_REVOKED"
@@ -138,6 +139,7 @@ WRITE_ROUTE_ACTIONS: dict[tuple[str, str], AuditAction] = {
     ("POST", f"{_ORG}/migration-plans/{{plan_id}}/reject"): AuditAction.MIGRATION_PLAN_REJECTED,
     ("POST", f"{_ORG}/migration-plans/{{plan_id}}/cancel"): AuditAction.MIGRATION_PLAN_CANCELLED,
     ("POST", f"{_ORG}/migration-plans/{{plan_id}}/abort"): AuditAction.MIGRATION_ABORT_REQUESTED,
+    ("POST", f"{_ORG}/migration-plans/{{plan_id}}/replay"): AuditAction.MIGRATION_JOURNAL_REPLAYED,
     ("POST", f"{_ORG}/security/exceptions"): AuditAction.SECURITY_EXCEPTION_REQUESTED,
     ("POST", f"{_ORG}/security/exceptions/{{exception_id}}/approve"): (
         AuditAction.SECURITY_EXCEPTION_APPROVED

@@ -198,6 +198,15 @@ class MetricsProvider(Protocol):
 - 실제 `KubernetesDbCutoverExecutor`(`kubernetes`, `app/executors/kubernetes/cutover_job.py`): 파드 SA 토큰(호출마다 파일에서 읽음)으로 같은 클러스터 창구(`https://kubernetes.default.svc`)를 부른다. `POST /apis/batch/v1/namespaces/echo-ops/jobs` — 모양은 echo-infra `job.example.yaml`·VAP 그대로(SA `echo-cutover`, 컨테이너 1개, `DB_CUTOVER_JOB_IMAGE`, env `KIND`·`PLAN_ID`·`ALLOW_PROMOTE` 만). 409 면 기존 Job 의 `PLAN_ID`·`KIND` 가 같을 때만 같은 Job(아니면 `JOB_NAME_CONFLICT`). 401·403 `JOB_CREATE_UNAUTHORIZED`, 400·422(VAP 거부) `JOB_CREATE_REJECTED`, 5xx·429·연결 실패 `JOB_CREATE_UNREACHABLE`(retryable). 상태는 Job 조건 `Complete`(종료 0, 파드 로그 끝 200줄에서 `ALREADY_WRITER`·`ALREADY_DONE`·`승격 완료`→`PROMOTED`) / `Failed`(파드 `cutover` 컨테이너 종료 코드) / 404 사라짐 / 그 밖·닿지 못함 = 진행 중. 결과 행은 `PostgresCutoverRunReader.find_by_plan`(`WHERE plan_id = $1 AND kind = $2`).
 - 필요한 권한(echo-infra `echo-ops.yaml` Role `echo-was-cutover-jobs` → KSA `echo-was/echo-was`): jobs create·get, pods list, pods/log get.
 
+### 요청 기록 재생 (`JournalReplayer`, API 서버 21)
+
+- `replay(JournalReplayRequest(host, since, target_url))` → `JournalReplayed(sent, created, existed, failed, skipped, duration_ms)` · `JournalReplayUnavailable(code)`. 예외를 올리지 않는다. 상태를 바꾸는 외부 호출이지만 멱등 키 대신 **앱의 멱등**(기록마다 `Idempotency-Key`)에 기댄다: 같은 기록을 다시 보내면 앱이 200 으로 처음 결과를 돌려준다. 그래서 다시 불러도 안전하다.
+- 부르는 곳은 API 프로세스의 재생 버튼(`MigrationPlanService.replay_journal`, 트랜잭션 밖)뿐이다. 일꾼은 부르지 않는다.
+- 실제 구현 `HttpJournalReplayer`(`app/executors/journal.py`, `JOURNAL_REPLAY_MODE=http`): echo-infra 진입점 journal 관리 API `GET /entries?since=<UNIX 초>`(Bearer `JOURNAL_TOKEN_REF`)의 `entries[]` 중 `host` 가 요청 host(서비스 대표 주소, 소문자·포트 무시)와 같은 것만, 받은 순서대로 `target_url + path` 에 같은 메서드·본문·Content-Type + `Idempotency-Key: requestId` 로 보낸다(진입점을 다시 거치지 않는다). 201 = `created`, 200 = `existed`, 그 밖·보내지 못함 = `failed`. 쓰기 메서드가 아님·`/` 로 시작하지 않는 경로(`//host` 포함)·멱등 키 없음·본문 잘림(`truncated`)·base64 아님은 보내지 않는다(`skipped`). 토큰은 journal 에만 보내고 도착 앱에는 넘기지 않는다.
+- 실패 코드(아무것도 보내지 않음): `JOURNAL_TOKEN_MISSING`(비밀값 없음, journal 503) · `JOURNAL_UNAUTHORIZED`(401) · `JOURNAL_UNREACHABLE`(연결 실패·시간 초과) · `JOURNAL_ERROR`(그 밖의 응답·모양 다름) · `JOURNAL_REPLAY_DISABLED`(꺼짐 구현). 토큰·본문·응답 원문은 로그·코드에 넣지 않는다.
+- 진입점 쓰기 막기(hold)는 하지 않는다(승격 직후 자동 재생은 후속, echo-infra 12.5).
+- 가짜 `FakeJournalReplayer`: 기본은 0건(숫자를 지어내지 않는다). 시험은 `result` 로 결과를 바꾸고 `requests` 로 받은 요청을 본다. 기본 `DisabledJournalReplayer`.
+
 ### 내리기 (`TeardownExecutor`)
 
 - 서비스 삭제 때 연결 하나를 클러스터에서 내린다(실제 구현은 앱 네임스페이스 삭제). `TeardownRemoved` 면 일꾼이 연결을 소프트 삭제한다. 배포 기록은 남는다.

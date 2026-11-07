@@ -15,6 +15,10 @@ SECURITY_GATE_BLOCKED 를 올린다.
 
 재난 트리거(DisasterService)도 create_plan·approve_plan 을 그대로 부른다. DisasterTrigger 를 넘기면
 계획은 EMERGENCY 이고 disaster_id 가 채워진다(사람 API 요청으로는 넘길 수 없다).
+
+요청 기록 재생(replay_journal, API 서버 21)은 끝난 계획에 결과만 더한다: 조건을 확인하고 트랜잭션
+밖에서 실행기를 부른 뒤, 잠금 안에서 DB 쓰기 전환 단계 결과(cutover.replay)를 적는다. 상태는 바꾸지
+않는다.
 """
 
 import logging
@@ -39,6 +43,8 @@ from app.core.exceptions import (
     DisasterActiveError,
     EnvironmentUnhealthyError,
     ErrorField,
+    JournalReplayDisabledError,
+    JournalUnavailableError,
     MigrationPlanNotFoundError,
     MigrationPlanOpenError,
     OrganizationNotFoundError,
@@ -47,6 +53,7 @@ from app.core.exceptions import (
     PlanNotRunningError,
     PlanStaleError,
     PromoteAckRequiredError,
+    ReplayNotAvailableError,
     RequestFieldInvalidError,
     SecurityGateBlockedError,
     SelfApprovalForbiddenError,
@@ -65,7 +72,14 @@ from app.enums import (
     MigrationPlanMode,
     MigrationPlanStatus,
     MigrationSimulateReason,
+    MigrationStepKind,
     ServiceStatus,
+)
+from app.executors.base import (
+    DisabledJournalReplayer,
+    JournalReplayer,
+    JournalReplayRequest,
+    JournalReplayUnavailable,
 )
 from app.models import (
     Environment,
@@ -89,12 +103,21 @@ from app.repositories.service_environment_repository import ServiceEnvironmentRe
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.deploy_request_service import INVALID_CURSOR_REASON
+from app.services.deploy_support import public_url
 from app.services.integrity import violated_constraint_name
+from app.services.migration_db_cutover import (
+    CUTOVER_REPLAY,
+    REPLAY_STATUS_DONE,
+    is_replayable_cutover,
+    replay_since,
+    replay_to_json,
+)
 from app.services.migration_plan_log import MigrationPlanLogWriter
 from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
     CONDITION_MAX_P95_MS,
     CONDITION_MAX_REPLICATION_LAG,
+    RESULT_CUTOVER,
     SHIFT_STEPS,
     SIMULATE_FAIL_AT_STEP,
     SIMULATE_REASON,
@@ -108,6 +131,7 @@ from app.services.migration_plan_support import (
     single_source,
     skip_pending_steps,
     stamp_promote,
+    with_step_result,
 )
 from app.services.security_gate import SecurityGate, blocked_error, gate_log_data
 
@@ -119,6 +143,11 @@ VERSION_MISMATCH_REASON = "VERSION_MISMATCH"
 LAST_SYNC_FAILED_REASON = "LAST_SYNC_FAILED"
 CHANGED_REASON = "CHANGED"
 AUDIT_TRIGGER_DISASTER = "DISASTER"
+# 재생 대상이 아닌 이유(409 REPLAY_NOT_AVAILABLE 의 fields.reason).
+REPLAY_NO_DB_CUTOVER = "NO_DB_CUTOVER"
+REPLAY_NOT_PROMOTED = "NOT_PROMOTED"
+REPLAY_SUPERSEDED = "SUPERSEDED"
+REPLAY_TARGET_GONE = "TARGET_GONE"
 
 
 class _Outcome(StrEnum):
@@ -208,8 +237,12 @@ class MigrationPlanService:
         db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
         db_cutover_timeout_seconds: int = 180,
         db_cutover_on_disaster: bool = False,
+        journal_replayer: JournalReplayer | None = None,
+        journal_replay_margin_seconds: int = 30,
     ) -> None:
         self._session = session
+        self._journal_replayer = journal_replayer or DisabledJournalReplayer()
+        self._journal_replay_margin_seconds = journal_replay_margin_seconds
         self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
         self._db_cutover_timeout_seconds = db_cutover_timeout_seconds
         self._db_cutover_on_disaster = db_cutover_on_disaster
@@ -829,6 +862,101 @@ class MigrationPlanService:
         )
         await self._session.flush()
 
+    # --- 요청 기록 재생 ---
+
+    async def replay_journal(
+        self, organization_id: uuid.UUID, plan_id: uuid.UUID, actor_user_id: uuid.UUID
+    ) -> MigrationPlanView:
+        """승격한 DB 쓰기 전환 뒤 진입점 요청 기록을 도착 환경에 다시 보낸다(API 서버 21).
+
+        조건: DB 쓰기 전환 단계 통과 + 결과 행 mode = PROMOTE + 그 서비스의 마지막 계획 +
+        도착 연결이 살아 있음. 실행기는 트랜잭션 밖에서 부르고, 결과는 잠금 안에서 단계 결과
+        cutover.replay 에 덮어쓴다(attempts 를 센다). 진입점 쓰기를 막지 않는다. 앱이 멱등이라
+        다시 눌러도 이미 들어간 쓰기는 200 으로 건너뛴다. 기록을 읽지 못하면 아무것도 적지 않고
+        502 JOURNAL_UNAVAILABLE.
+        """
+        async with self._session.begin():
+            plan = await self._get_in_organization(organization_id, plan_id)
+            if not self._journal_replayer.enabled:
+                raise JournalReplayDisabledError("journal replay is disabled", plan_id=str(plan_id))
+            index = await self._check_replayable(plan)
+            service = await self._services.find_by_id(plan.service_id)
+            target = await self._connections.find_by_id(plan.target_service_environment_id)
+            if service is None or target is None or target.is_deleted:
+                raise _replay_not_available(plan, REPLAY_TARGET_GONE)
+            request = JournalReplayRequest(
+                host=service.public_host,
+                since=replay_since(
+                    plan.step_results[index][RESULT_CUTOVER], self._journal_replay_margin_seconds
+                ),
+                target_url=public_url(target.public_host),
+            )
+        result = await self._journal_replayer.replay(request)
+        if isinstance(result, JournalReplayUnavailable):
+            raise JournalUnavailableError(
+                "journal is unavailable", plan_id=str(plan_id), reason=result.code
+            )
+        now = self._clock.now()
+        async with self._session.begin():
+            locked = await self._lock(plan_id)
+            plan = locked.plan
+            index = await self._check_replayable(plan)
+            cutover = dict(plan.step_results[index][RESULT_CUTOVER])
+            previous = cutover.get(CUTOVER_REPLAY) or {}
+            replay = replay_to_json(
+                result, request.since, now, int(previous.get("attempts") or 0) + 1
+            )
+            cutover[CUTOVER_REPLAY] = replay
+            if await self._plans.transition(
+                plan.id,
+                MigrationPlanStatus(plan.status),
+                {
+                    "step_results": with_step_result(
+                        plan.step_results, index, **{RESULT_CUTOVER: cutover}
+                    ),
+                    "updated_at": now,
+                },
+            ):
+                log_data = {key: replay[key] for key in _REPLAY_LOG_KEYS}
+                await self._log.append(
+                    plan,
+                    MigrationLogCode.JOURNAL_REPLAYED
+                    if replay["status"] == REPLAY_STATUS_DONE
+                    else MigrationLogCode.JOURNAL_REPLAY_PARTIAL,
+                    now,
+                    step=index,
+                    data=log_data,
+                )
+                await self._record_audit(
+                    AuditAction.MIGRATION_JOURNAL_REPLAYED,
+                    plan,
+                    organization_id,
+                    actor_user_id,
+                    details=log_data | {"attempts": replay["attempts"]},
+                )
+            view = await self._reload_view(plan_id)
+        _log_plan("migration journal replayed", "replay_migration_journal", view.plan)
+        return view
+
+    async def _check_replayable(self, plan: MigrationPlan) -> int:
+        """재생할 DB 쓰기 전환 단계 번호. 대상이 아니면 409 REPLAY_NOT_AVAILABLE(fields.reason)."""
+        index = next(
+            (
+                number
+                for number, step in enumerate(plan.steps)
+                if step.get("kind") == MigrationStepKind.DB_CUTOVER.value
+            ),
+            None,
+        )
+        if index is None:
+            raise _replay_not_available(plan, REPLAY_NO_DB_CUTOVER)
+        if not is_replayable_cutover(plan.step_results[index]):
+            raise _replay_not_available(plan, REPLAY_NOT_PROMOTED)
+        # 그 뒤 계획(복귀 등)이 있으면 쓰기 담당·트래픽이 이미 다른 곳일 수 있다.
+        if await self._plans.find_next_created_at(plan.service_id, plan.created_at) is not None:
+            raise _replay_not_available(plan, REPLAY_SUPERSEDED)
+        return index
+
     # --- 공통 ---
 
     async def _lock(self, plan_id: uuid.UUID) -> _Locked:
@@ -1016,6 +1144,18 @@ def _raise_rejection(rejection: tuple[_Outcome, list[str]] | None) -> None:
     raise PlanStaleError(
         "service or environments changed after the plan was made",
         details=[ErrorField(field=name, reason=CHANGED_REASON) for name in changed],
+    )
+
+
+_REPLAY_LOG_KEYS = ("sent", "created", "existed", "failed", "skipped", "durationMs", "since")
+
+
+def _replay_not_available(plan: MigrationPlan, reason: str) -> ReplayNotAvailableError:
+    return ReplayNotAvailableError(
+        "migration plan has nothing to replay",
+        plan_id=str(plan.id),
+        reason=reason,
+        details=[ErrorField(field="planId", reason=reason)],
     )
 
 

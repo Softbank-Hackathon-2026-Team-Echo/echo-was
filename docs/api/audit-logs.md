@@ -118,6 +118,7 @@
 | `MIGRATION_PLAN_REJECTED` | `POST /migration-plans/{id}/reject` | `migration_plan` | `{}` |
 | `MIGRATION_PLAN_CANCELLED` | `POST /migration-plans/{id}/cancel` | `migration_plan` | `{}` |
 | `MIGRATION_ABORT_REQUESTED` | `POST /migration-plans/{id}/abort` | `migration_plan` | `{}` |
+| `MIGRATION_JOURNAL_REPLAYED` | `POST /migration-plans/{id}/replay`(API 서버 21, 결과를 적었을 때만. 409·502 는 줄 없음) | `migration_plan` | `{sent, created, existed, failed, skipped, durationMs, since, attempts}` |
 | `SECURITY_EXCEPTION_REQUESTED` | `POST /security/exceptions` | `security_exception`(이름표 = 통제 ID) | `{expiresAt}`(사유 원문은 예외 행에만) |
 | `SECURITY_EXCEPTION_APPROVED` | `POST /security/exceptions/{id}/approve` | `security_exception` | `{}` |
 | `SECURITY_EXCEPTION_REVOKED` | `POST /security/exceptions/{id}/revoke` | `security_exception` | `{}` |

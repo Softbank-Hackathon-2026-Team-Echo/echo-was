@@ -19,7 +19,7 @@ from app.clients.tls_probe import PublicHostTlsChecker
 from app.core.config import Settings
 from app.enums import ConnectionErrorCode, DeployRequestStatus, JobStatus
 from app.executors import ExecutorSet
-from app.executors.base import HealthOk, HealthProbeResult
+from app.executors.base import DisabledJournalReplayer, HealthOk, HealthProbeResult
 from app.executors.fake import (
     FakeBuildExecutor,
     FakeDataSyncChecker,
@@ -107,6 +107,8 @@ class FakeExecutors:
     metrics: FakeMetricsProvider
     data_sync: FakeDataSyncChecker
     db_cutover: FakeDbCutoverExecutor
+    # 요청 기록 재생(API 서버 21). 기본은 꺼짐(설정 기본값과 같다), 시험이 가짜로 바꿔 끼운다.
+    journal_replayer: Any = field(default_factory=DisabledJournalReplayer)
 
     def as_set(self) -> ExecutorSet:
         return ExecutorSet(
@@ -119,6 +121,7 @@ class FakeExecutors:
             metrics=self.metrics,
             data_sync=self.data_sync,
             db_cutover=self.db_cutover,
+            journal_replayer=self.journal_replayer,
         )
 
 

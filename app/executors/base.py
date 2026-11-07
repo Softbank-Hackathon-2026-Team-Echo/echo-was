@@ -10,6 +10,7 @@
   p95 참고용)를 읽는다(실제는 고정 진입점 Envoy 의 GET /counters·GET /summary).
 - DataSyncChecker: 출발 → 도착 데이터 복제 지연을 읽는다(실제는 인프라 7).
 - CutoverRunReader: 인프라 스크립트가 고객 DB 에 남긴 컷오버·롤백 결과를 읽는다(API 서버 16).
+- JournalReplayer: 진입점이 기록한 쓰기 요청을 승격된 도착 환경에 다시 보낸다(API 서버 21).
 
 모든 시작 호출은 우리가 먼저 정한 멱등 키를 받는다(빌드 = builds.id, 배포·되돌리기 =
 deployments.id, 대표 주소 = deployments.id, 내리기 = 연결 id + teardown_attempt, 트래픽 비율 =
@@ -492,6 +493,43 @@ type DbCutoverPollResult = DbCutoverRunning | DbCutoverFinished | DbCutoverLost
 type DbCutoverJobLookup = DbCutoverJobFound | DbCutoverJobAbsent | DbCutoverJobUnknown
 
 
+@dataclass(frozen=True, slots=True)
+class JournalReplayRequest:
+    """요청 기록 재생 한 번(API 서버 21).
+
+    host = 기록을 고를 Host(서비스 대표 주소, 진입점이 받은 그대로), since = 이 시각 이후 기록,
+    target_url = 다시 보낼 곳(도착 연결의 환경별 주소 `https://…`). 진입점을 다시 거치지 않는다.
+    """
+
+    host: str
+    since: datetime
+    target_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class JournalReplayed:
+    """다시 보낸 결과. created = 201(빠졌던 쓰기), existed = 200(이미 있음, 멱등 재응답),
+    failed = 그 밖의 응답·보내지 못함, skipped = 멱등 키 없음·본문 잘림·쓰기가 아닌 메서드.
+    """
+
+    sent: int
+    created: int
+    existed: int
+    failed: int
+    skipped: int
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class JournalReplayUnavailable:
+    """기록을 읽지 못했다(꺼짐·토큰 없음·거절·닿지 못함). 아무것도 보내지 않았다."""
+
+    code: str
+
+
+type JournalReplayResult = JournalReplayed | JournalReplayUnavailable
+
+
 def check_weights_total(weights: tuple[WeightedTarget, ...]) -> None:
     """비율 합계가 100 이 아니면 ValueError. 부르는 쪽의 버그라 실행기에 넘기지 않는다."""
     if sum(item.weight for item in weights) != TRAFFIC_WEIGHT_TOTAL or any(
@@ -771,6 +809,33 @@ class DisabledDbCutoverExecutor:
 
     async def find_job(self, request: DbCutoverRequest) -> DbCutoverJobLookup:
         return DbCutoverJobAbsent()
+
+
+class JournalReplayer(Protocol):
+    """요청 기록 재생(API 서버 21). 실제 구현은 진입점 journal 관리 API, 가짜는 fake."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    async def replay(self, request: JournalReplayRequest) -> JournalReplayResult:
+        """기록을 받은 순서대로 하나씩 다시 보낸다. 예외를 올리지 않는다.
+
+        다시 불러도 안전하다: 앱이 멱등이라 이미 들어간 쓰기는 200 으로 건너뛴다.
+        """
+        ...
+
+
+class DisabledJournalReplayer:
+    """기본 구현(JOURNAL_REPLAY_MODE=disabled). 재생 API 가 먼저 409 로 막으므로 부르지 않는다."""
+
+    DISABLED = "JOURNAL_REPLAY_DISABLED"
+
+    @property
+    def enabled(self) -> bool:
+        return False
+
+    async def replay(self, request: JournalReplayRequest) -> JournalReplayResult:
+        return JournalReplayUnavailable(self.DISABLED)
 
 
 class NoCutoverRuns:

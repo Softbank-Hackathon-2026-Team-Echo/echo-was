@@ -168,6 +168,16 @@ MIGRATION_LOG_ENTRIES: dict[MigrationLogCode, MigrationLogEntry] = {
         _WARN,
         "Traffic and the database were left as they are. A person must check the database writer.",
     ),
+    _C.JOURNAL_REPLAYED: MigrationLogEntry(
+        _INFO,
+        "Recorded writes were sent again to the promoted target. Writes it already had were "
+        "skipped.",
+    ),
+    _C.JOURNAL_REPLAY_PARTIAL: MigrationLogEntry(
+        _WARN,
+        "Some recorded writes could not be sent again to the promoted target. Replay can be "
+        "retried safely.",
+    ),
 }
 
 _WITH_CAUSE = frozenset(

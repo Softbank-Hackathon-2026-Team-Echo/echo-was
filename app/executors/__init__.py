@@ -17,6 +17,7 @@ from app.core.config import (
     EntrypointExecutorMode,
     ExecutorMode,
     HealthCheckerMode,
+    JournalReplayMode,
     Settings,
 )
 from app.core.secrets import parse_secret_ref
@@ -27,8 +28,10 @@ from app.executors.base import (
     DbCutoverExecutor,
     DeployExecutor,
     DisabledDbCutoverExecutor,
+    DisabledJournalReplayer,
     EnvironmentLookup,
     HealthChecker,
+    JournalReplayer,
     MainRouteExecutor,
     MetricsProvider,
     NoCutoverRuns,
@@ -48,6 +51,7 @@ from app.executors.fake import (
     FakeDbCutoverExecutor,
     FakeDeployExecutor,
     FakeHealthChecker,
+    FakeJournalReplayer,
     FakeMainRouteExecutor,
     FakeMetricsProvider,
     FakeTeardownExecutor,
@@ -56,6 +60,7 @@ from app.executors.fake import (
 from app.executors.github_actions import GithubActionsBuildExecutor
 from app.executors.google_metadata import GoogleMetadataClient
 from app.executors.http_health_checker import HttpHealthChecker
+from app.executors.journal import build_journal_replayer
 from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeHttpClients, KubeHttpFactory, default_kube_http_factory
 from app.executors.kubernetes.cutover_job import InClusterKubeClient, KubernetesDbCutoverExecutor
@@ -85,6 +90,8 @@ class ExecutorSet:
     cutover_runs: CutoverRunReader = field(default_factory=NoCutoverRuns)
     # DB 쓰기 전환 단계(API 서버 17, 일꾼만 쓴다). 기본은 꺼짐.
     db_cutover: DbCutoverExecutor = field(default_factory=DisabledDbCutoverExecutor)
+    # 요청 기록 재생(API 서버 21, API 프로세스의 재생 버튼만 쓴다). 기본은 꺼짐.
+    journal_replayer: JournalReplayer = field(default_factory=DisabledJournalReplayer)
     # 프로세스가 끝날 때 닫을 HTTP 클라이언트(실제 실행기만).
     closers: tuple[Closer, ...] = field(default=(), repr=False)
 
@@ -206,6 +213,11 @@ def build_executor_set(
         )
         db_cutover = kube_db_cutover
         closers = (*closers, kube_db_cutover.aclose)
+    journal_replayer: JournalReplayer = DisabledJournalReplayer()
+    if settings.journal_replay_mode is JournalReplayMode.FAKE:
+        journal_replayer = FakeJournalReplayer()
+    elif settings.journal_replay_mode is JournalReplayMode.HTTP:
+        journal_replayer = build_journal_replayer(settings, secrets)
     return ExecutorSet(
         build=build,
         deploy=deploy,
@@ -217,6 +229,7 @@ def build_executor_set(
         data_sync=data_sync,
         cutover_runs=cutover_runs,
         db_cutover=db_cutover,
+        journal_replayer=journal_replayer,
         closers=closers,
     )
 
