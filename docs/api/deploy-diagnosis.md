@@ -199,7 +199,7 @@ curl -X POST "$API/api/v1/orgs/$ORG/deploy-requests/$DR/diagnosis" -H "Cookie: �
 
 같은 반영 결과를 다시 받아도(재전송) 이미 기록된 커밋을 쓰고 GitHub 를 다시 부르지 않는다. 러너 결과와 재승인이 동시에 와도 반영 실행 행을 잠가 `commitState: IN_PROGRESS` 를 먼저 잡은 요청 하나만 GitHub 에 쓰고(잠금은 GitHub 호출 전에 푼다) 재배포까지 잇는다 — 다른 요청은 재배포 없이 200 으로 돌아가고, 커밋·PR 생성 1회·재배포 1개다. 결과 칸은 부분 갱신이라 먼저 기록된 `redeployRequestId` 를 지우지 않는다. 브랜치가 이미 있으면 그 head 의 부모가 실패 커밋이고 tree 가 승인 패치 적용 결과와 같을 때만 쓰고, 아니면 `REPO_BRANCH_CONFLICT`. PR 이 이미 있으면 그것을 쓴다.
 
-**켜기 전 필요한 것:** GitHub App `echoport-deploy` 에 Repository permissions `Contents: Read and write`, `Pull requests: Read and write` 추가 → 조직 설치 화면에서 새 권한 승인 → 설치 대상 저장소에 서비스 저장소(시연: `echo-demo-app`)가 들어 있는지 확인. 2026-11-07 기준 App 권한은 `contents: read`·`actions: write`·`members: read`·`metadata: read` 라 켜면 `REPO_WRITE_FORBIDDEN` 이다.
+**켜기 전 필요한 것:** GitHub App `echoport-deploy` 의 Repository permissions 가 `Contents: Read and write`, `Pull requests: Read and write` 이고 조직 설치에도 승인돼 있어야 한다. 2026-11-07 09:04 KST(11:13 KST 재확인) 읽기 조회에서 App 정의·조직 설치 모두 `contents: write`·`pull_requests: write` 다(그 전 03:39 KST SPEC 작성 때는 `contents: read` 였다). 켜기 직전에 이 권한을 다시 읽고, 설치 대상 저장소에 서비스 저장소(시연: `echo-demo-app`)가 들어 있는지 확인한다 — 설치 저장소 목록은 아직 확인하지 못했다. 자세한 것은 SPEC api-19 4절.
 
 ## C-AI-1 · 레지던시
 
