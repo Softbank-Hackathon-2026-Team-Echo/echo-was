@@ -208,6 +208,79 @@ async def test_real_router_catalog_failure_is_not_success_fixture(
     assert response.json()["code"] == "COST_CATALOG_INVALID"
 
 
+async def test_real_router_monthly_storage_half_cent(
+    cost_api: tuple[Service, Environment, Environment],
+) -> None:
+    from datetime import date
+    from decimal import Decimal
+
+    from app.enums import CostComponentKind
+    from app.services.cost_catalog import (
+        CloudPrice,
+        CostCatalog,
+        CostComponent,
+        EnvironmentInventory,
+    )
+
+    service, _, _ = cost_api
+    price = CloudPrice(
+        key="synthetic-storage",
+        unit_price_usd=Decimal("0.075"),
+        unit="GiB-month",
+        description="합성",
+        source="synthetic, not a price quote",
+        effective_date=date(2026, 11, 5),
+        checked_at=date(2026, 11, 5),
+        verified=False,
+    )
+    inventory = EnvironmentInventory(
+        key="synthetic",
+        name="fixture",
+        provider="aws",
+        region="ap-northeast-1",
+        note="합성",
+        match_kind="aws",
+        match_region="ap-northeast-1",
+        components=(
+            CostComponent(
+                name="disk",
+                kind=CostComponentKind.STORAGE,
+                price=price.key,
+                quantity=1,
+                unit_label="GiB",
+            ),
+        ),
+    )
+    catalog = CostCatalog(
+        prices={price.key: price}, environments=(inventory,), shared=(), billing=()
+    )
+    app.dependency_overrides[get_cost_catalog] = lambda: catalog
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/v1/orgs/{service.organization_id}/costs/recommendations",
+            params={"serviceId": str(service.id)},
+        )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["catalogEstimate"]["monthlyUsd"] == 0.08
+    assert data["catalogEstimate"]["inventories"][0]["monthlyUsd"] == 0.075
+    assert data["currency"] == "USD"
+    assert data["currentMonthlyUsd"] is None
+    assert data["freshness"] == "UNVERIFIED"
+    for alternative in data["alternatives"]:
+        assert alternative["status"] == "NEEDS_EVIDENCE"
+        assert alternative["isSafeRecommendation"] is False
+        for field in (
+            "currentMonthlyUsd",
+            "alternativeMonthlyUsd",
+            "netSavingsMonthlyUsd",
+            "oneTimeMigrationUsd",
+            "breakEvenMonths",
+            "recoverySeconds",
+        ):
+            assert alternative[field] is None
+
+
 async def test_real_guard_rejects_anonymous_before_service_query() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(

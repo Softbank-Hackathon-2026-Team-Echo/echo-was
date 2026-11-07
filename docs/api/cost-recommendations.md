@@ -62,7 +62,7 @@ Refs https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/128
 
 - hour: 수량 × 저장 단가 × 730.
 - GiB-month: 수량 × 저장 단가. 월 단가에 730을 다시 곱하지 않는다.
-- 기존 `estimate_inventory`의 반올림 전 exact_hourly 재사용, 월 총합에만 최종 반올림. hourlyUsd 표시값을 다시 합산하지 않는다.
+- 각 component의 원 단위로 월 금액을 직접 계산한 뒤 합산한다. GiB-month를 시간 단가로 나눴다가 다시 곱하지 않는다. inventory key 중복 제거 후 월 총합에만 최종 반올림하며 기존 시간·일 비용 API의 계산은 바꾸지 않는다.
 - 여러 환경이 같은 kind+region inventory에 매칭되면 inventory key별 한 번만 센다. 공용 inventory도 한 번만 포함한다. 다른 키가 실제로 같은 물리 자원인지 증명할 자료가 없으므로 전체 실원가로 승격하지 않는다.
 - inventories[]는 inventoryKey, 매칭 environmentIds, 반올림 전 monthlyUsd, 원래 note, components[]를 담는다.
 - components[]는 name/priceKey/quantity/unit/unitPriceUsd/priceUnit/priceSource/priceCheckedAt/priceEffectiveDate/priceVerified/formula를 담는다.

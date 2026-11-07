@@ -16,7 +16,7 @@ from app.repositories.environment_repository import EnvironmentRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
 from app.services.cost_catalog import BillingProvider, CostCatalog, SharedInventory
-from app.services.cost_service import BILLED_KINDS, estimate_inventory
+from app.services.cost_service import BILLED_KINDS
 from app.services.service_view import role_of
 
 HOURS_PER_MONTH = Decimal(730)
@@ -62,7 +62,16 @@ def estimate_catalog(
         InventoryEstimateView(
             inventory=inventory,
             environment_ids=tuple(environment_ids_by_key.get(key, ())),
-            exact_monthly_usd=estimate_inventory(catalog, inventory).exact_hourly * HOURS_PER_MONTH,
+            # 월 단가의 시간 환산 왕복은 반 센트 경계를 훼손하므로 원 단위에서 계산한다.
+            exact_monthly_usd=sum(
+                (
+                    component.quantity
+                    * catalog.prices[component.price].unit_price_usd
+                    * (HOURS_PER_MONTH if catalog.prices[component.price].unit == "hour" else 1)
+                    for component in inventory.components
+                ),
+                Decimal(0),
+            ),
         )
         for key, inventory in sorted(inventories_by_key.items())
     )
