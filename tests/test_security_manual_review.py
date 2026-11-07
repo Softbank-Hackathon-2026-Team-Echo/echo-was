@@ -3,6 +3,8 @@
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from app.enums import (
     SecurityCheckPhase,
     SecurityControlId,
@@ -11,7 +13,7 @@ from app.enums import (
     SecurityMatrixCell,
     SecurityResult,
 )
-from app.services.security_finding_service import build_manual_review
+from app.services.security_finding_service import build_manual_review, is_https_url
 from app.services.security_manual_review_service import manual_review_controls
 from app.services.security_rules import (
     POLICY_VERSION,
@@ -30,17 +32,47 @@ ENVIRONMENT = uuid.uuid4()
 WAS_VERSION = "2026.11.08"
 
 
-def test_manual_review_controls_are_rule_controls_with_manual_source() -> None:
+def test_manual_review_controls_are_optional_rule_controls_with_manual_source() -> None:
     assert set(manual_review_controls()) == {
         _C.TLS_2,
         _C.NET_1,
         _C.NET_2,
         _C.IAM_1,
-        _C.SEC_1,
         _C.CI_1,
     }
     for control_id in manual_review_controls():
         assert SecurityFindingSource.MANUAL_REVIEW in get_rule(control_id).sources
+        assert not get_rule(control_id).is_mandatory
+    # C-SEC-1 은 규칙표 출처에 사람 점검이 있는 필수 통제다 — API 는 받지 않는다.
+    assert SecurityFindingSource.MANUAL_REVIEW in get_rule(_C.SEC_1).sources
+    assert get_rule(_C.SEC_1).is_mandatory
+    assert _C.SEC_1 not in manual_review_controls()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://example.com/review", True),
+        ("https://wiki.example.com:8443/r?a=1#b", True),
+        ("https://[2001:db8::1]:443/review", True),
+        ("https://user@example.com./review", True),
+        ("https://[", False),
+        ("https://example.com:bad/review", False),
+        ("https:// /review", False),
+        ("https://example.com:0/review", False),
+        ("https://example.com:65536/review", False),
+        ("https://[not-ipv6]/review", False),
+        ("https://exa mple.com/review", False),
+        ("https://example.com/re view", False),
+        ("https://-bad-.example.com/", False),
+        ("https://a..b/", False),
+        ("https://:443/review", False),
+        ("http://example.com/review", False),
+        ("not a url", False),
+    ],
+)
+def test_is_https_url_checks_structure_without_raising(value: str, expected: bool) -> None:
+    assert is_https_url(value) is expected
 
 
 def _iam_cell(findings: list[SecurityFinding]) -> SecurityResult:

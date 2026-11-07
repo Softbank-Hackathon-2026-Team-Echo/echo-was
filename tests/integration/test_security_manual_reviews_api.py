@@ -415,3 +415,68 @@ async def test_record_manual_review_rejects_environment_for_organization_wide_co
     response = await _post(harness.client, harness, _body(environment, _C.CI_1))
 
     assert _details(response) == {("environmentId", "NOT_ALLOWED_FOR_CONTROL")}
+
+
+# --- 교차 검수 반영: 잘못된 근거 주소는 422(500·201 아님), 필수 통제는 받지 않는다 ---
+
+
+async def _count_manual_review_audits(harness: DeployHarness) -> int:
+    async with harness.session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.action == AuditAction.SECURITY_MANUAL_REVIEW_RECORDED)
+        )
+    return int(count or 0)
+
+
+@pytest.mark.parametrize(
+    "evidence_url",
+    ["https://[", "https://example.com:bad/review", "https:// /review"],
+    ids=["unparsable-ipv6-bracket", "non-integer-port", "blank-host"],
+)
+async def test_record_manual_review_rejects_malformed_evidence_url_with_422(
+    harness: DeployHarness, evidence_url: str
+) -> None:
+    environment = await harness.add_environment("gcp-seoul")
+
+    response = await _post(harness.client, harness, _body(environment, evidenceUrl=evidence_url))
+
+    assert _error(response) == (422, "VALIDATION_ERROR")
+    assert _details(response) == {("evidenceUrl", "EVIDENCE_URL_INVALID")}
+    assert await _count_manual_findings(harness) == 0
+    assert await _count_manual_review_audits(harness) == 0
+
+
+async def test_record_manual_review_accepts_well_formed_evidence_url_with_port(
+    harness: DeployHarness,
+) -> None:
+    environment = await harness.add_environment("gcp-seoul")
+    evidence_url = "https://wiki.example.com:8443/reviews/iam-1?env=gcp-seoul#summary"
+
+    response = await _post(harness.client, harness, _body(environment, evidenceUrl=evidence_url))
+
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["basisUrl"] == evidence_url
+    assert await _count_manual_findings(harness) == 1
+    assert await _count_manual_review_audits(harness) == 1
+
+
+@pytest.mark.parametrize("result", [SecurityResult.FAIL, SecurityResult.PASS])
+async def test_record_manual_review_rejects_mandatory_control_sec_1(
+    harness: DeployHarness, result: SecurityResult
+) -> None:
+    """C-SEC-1 은 사람 점검 출처가 있어도 필수 통제라 받지 않는다(FAIL 이면 게이트가 막힌다)."""
+    environment = await harness.add_environment("aws-seoul")
+    service = await harness.create_service()
+
+    response = await _post(
+        harness.client,
+        harness,
+        _body(environment, _C.SEC_1, serviceId=service["id"], result=result.value),
+    )
+
+    assert _error(response) == (422, "VALIDATION_ERROR")
+    assert _details(response) == {("controlId", "MANUAL_REVIEW_NOT_ALLOWED")}
+    assert await _count_manual_findings(harness) == 0
+    assert await _count_manual_review_audits(harness) == 0

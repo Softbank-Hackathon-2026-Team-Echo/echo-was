@@ -97,7 +97,7 @@ async def record_security_manual_review(
     request: RecordManualReviewRequest,
     service: ManualReviewService,
 ) -> ApiResponse[SecurityFindingResponse]:
-    """사람 점검 기록(규칙표 출처에 사람 점검이 있는 통제만). 응답은 만든 증거 한 건이다."""
+    """사람 점검 기록(규칙표 출처에 사람 점검이 있는 선택 통제만). 응답은 만든 증거 한 건이다."""
     finding = await service.record_review(
         access.organization_id, access.user.id, request.to_command()
     )

@@ -7,6 +7,7 @@
 - 판정용 조회는 그 조직의 만료 전 증거만 돌려준다. 범위·출처·정책 버전 비교는 규칙표가 한다.
 """
 
+import ipaddress
 import logging
 import uuid
 from dataclasses import asdict
@@ -213,5 +214,43 @@ def _item_json(item: FindingItem) -> dict[str, Any]:
 
 
 def is_https_url(value: str) -> bool:
-    parts = urlsplit(value)
-    return parts.scheme == "https" and bool(parts.netloc)
+    """근거 링크로 쓸 수 있는 https 주소인가(구조만 본다, 링크를 가져오지 않는다).
+
+    - 공백·제어 문자가 하나라도 있으면 아니다(복사 실수, `https:// /review`).
+    - scheme 은 `https` 만. 호스트가 있어야 하고, 이름(글자·숫자·`-` 의 점 구분 낱말)
+      또는 대괄호 IPv6 주소여야 한다. 포트가 있으면 1~65535 정수여야 한다.
+    - 파싱 예외(`https://[`)는 삼키고 False — 부르는 쪽이 422 로 바꾼다.
+    """
+    if any(char.isspace() or not char.isprintable() for char in value):
+        return False
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not hostname:
+        return False
+    if port == 0:
+        return False
+    if parts.netloc.rpartition("@")[2].startswith("["):
+        return _is_ipv6(hostname)
+    return _is_host_name(hostname)
+
+
+def _is_ipv6(hostname: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(hostname), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
+def _is_host_name(hostname: str) -> bool:
+    labels = hostname.removesuffix(".").split(".")
+    return all(
+        0 < len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(char.isalnum() or char == "-" for char in label)
+        for label in labels
+    )

@@ -2,9 +2,11 @@
 
 수집기가 없는 선택 통제를 사람이 실제로 점검한 뒤 결과를 근거 링크와 함께 남긴다. 규칙
 - 개발자 이상 사람만 부른다(검사기가 막는다, 에이전트 불가). 점검자는 부른 사람이다.
-- 통제는 규칙표 출처에 사람 점검(`MANUAL_REVIEW`)이 있는 것만(아니면 422
-  `MANUAL_REVIEW_NOT_ALLOWED`). 결과는 PASS·WARN·FAIL 만.
-- 근거 링크(https)와 요약은 반드시 있어야 한다(없으면 422). 자기 요청이라도 같다.
+- 통제는 규칙표 출처에 사람 점검(`MANUAL_REVIEW`)이 있는 **선택 통제**만(아니면 422
+  `MANUAL_REVIEW_NOT_ALLOWED`). 필수 통제 C-SEC-1 은 출처에 사람 점검이 있어도 받지 않는다
+  (FAIL 한 건이 게이트를 BLOCKED 로 바꾼다). 결과는 PASS·WARN·FAIL 만.
+- 근거 링크(https, 호스트·포트가 맞는 주소)와 요약은 반드시 있어야 한다(없거나 틀리면 422).
+  자기 요청이라도 같다.
 - 범위 칸은 그 통제가 정한 것만, 모두 채운다(규칙표 `scope_keys`, 기한부 예외와 같은 규칙).
   정한 칸이 없는 통제는 조직 전체다. 서비스·환경은 이 조직의 살아 있는 것이어야 한다(404).
 - 만료는 앱 시계의 지금 + 규칙표 `max_age`(사람 점검 통제는 7일).
@@ -69,7 +71,13 @@ class RecordManualReviewCommand:
 
 
 def manual_review_controls() -> tuple[SecurityControlId, ...]:
-    """사람 점검 API 로 기록할 수 있는 통제(규칙표 출처에 MANUAL_REVIEW 가 있고 범위가 맞는 것)."""
+    """사람 점검 API 로 기록할 수 있는 통제.
+
+    규칙표 출처에 MANUAL_REVIEW 가 있고, 범위가 맞고, **선택 통제**인 것. 필수 통제
+    (C-SEC-1 등)는 규칙표가 사람 점검 출처를 받더라도 이 API 로는 받지 않는다 — 필수
+    통제에 FAIL 을 남기면 그 칸의 게이트가 PASS→BLOCKED 로 바뀌어, 시연·운영 중 잘못 넣은
+    한 건이 이전을 막고 지우는 API 도 없기 때문이다.
+    """
     return tuple(
         control_id for control_id in SecurityControlId if _accepts_manual_review(control_id)
     )
@@ -77,8 +85,10 @@ def manual_review_controls() -> tuple[SecurityControlId, ...]:
 
 def _accepts_manual_review(control_id: SecurityControlId) -> bool:
     rule = get_rule(control_id)
-    return SecurityFindingSource.MANUAL_REVIEW in rule.sources and rule.scope_keys <= set(
-        MANUAL_REVIEW_SCOPE_FIELDS
+    return (
+        SecurityFindingSource.MANUAL_REVIEW in rule.sources
+        and not rule.is_mandatory
+        and rule.scope_keys <= set(MANUAL_REVIEW_SCOPE_FIELDS)
     )
 
 
