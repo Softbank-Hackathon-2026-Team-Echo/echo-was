@@ -34,14 +34,20 @@
 
 `REPO_WRITE_FORBIDDEN`(토큰 요청 403·422 = App 권한 없음 또는 설치 대상 아님, 쓰기 호출 403·404) · `REPO_APP_NOT_INSTALLED` · `REPO_FILE_NOT_FOUND` · `REPO_FILE_NOT_TEXT` · `REPO_PATCH_CONFLICT` · `REPO_WRITE_FAILED`(5xx·전송 오류) · `REPO_WRITE_UNAVAILABLE`(App 미설정·개인키 없음) · `REPO_PATH_REJECTED`(D-13) · `REPO_BRANCH_CONFLICT`(D-14)
 
-## 4. GitHub App 권한 (2026-11-07 읽기 확인)
+## 4. GitHub App 권한
 
-`GET /apps/echoport-deploy`·`GET /orgs/Softbank-Hackathon-2026-Team-Echo/installations`: 권한 `actions: write`, `contents: read`, `members: read`, `metadata: read`, 설치 `repository_selection: selected`. **contents·pull_requests 쓰기가 없어 지금 켜면 `REPO_WRITE_FORBIDDEN`** 이다. 켜기 전 사람이 할 일(이 PR 은 바꾸지 않는다):
+**현재 (2026-11-07 09:04 KST 확인, 같은 날 11:13 KST 재확인 — 읽기 API만, 권한 변경 없음):** `GET /apps/echoport-deploy`(App 정의)와 `GET /orgs/Softbank-Hackathon-2026-Team-Echo/installations`(조직 설치 `177714197`)가 둘 다 `actions: write`, `contents: write`, `members: read`, `metadata: read`, `pull_requests: write`, 설치 `repository_selection: selected` 를 돌려준다. 이 SPEC 이 요구하는 contents·pull_requests 쓰기 권한(D-4)은 App 정의와 조직 설치 모두에 있다.
 
-1. GitHub → 조직 Settings → Developer settings → GitHub Apps → `echoport-deploy` → Permissions & events → Repository permissions: **Contents = Read and write**, **Pull requests = Read and write** → Save
-2. 조직 Settings → GitHub Apps → `echoport-deploy` Configure → 새 권한 요청 승인(Review request → Accept)
-3. 같은 화면 Repository access 에 서비스 저장소(시연: `echo-demo-app`)가 들어 있는지 확인
-4. 그 뒤 `deploy/base.yaml` 에 `AI_APPLY_COMMIT_ENABLED: "true"` 를 넣는 별도 PR
+- 권한이 바뀐 시각은 App `updated_at` 2026-11-07 08:58 KST, 설치 `updated_at` 09:01 KST 로 미루어 본 것이다. 누가 바꿨는지는 확인하지 않았다.
+- 권한이 있다는 것이 실제 쓰기 성공을 뜻하지는 않는다. 아직 실제 GitHub 쓰기 호출은 한 번도 하지 않았다(6절).
+
+**이력 (2026-11-07 03:39 KST, 이 SPEC 을 처음 쓸 때의 기록 — 지금 상태가 아님):** 당시 읽기 결과는 `actions: write`, `contents: read`, `members: read`, `metadata: read` 였고, 「contents·pull_requests 쓰기가 없어 지금 켜면 `REPO_WRITE_FORBIDDEN`」으로 적었다. 위 「현재」로 대체한다.
+
+**스위치를 켜기 전 확인할 것** (이 문서 PR 은 권한·스위치를 바꾸지 않는다):
+
+1. 켜기 직전에 위 두 API 를 다시 읽어 contents·pull_requests 가 그대로 `write` 인지 본다. `read` 로 돌아가 있으면 먼저 조직 Settings → Developer settings → GitHub Apps → `echoport-deploy` → Permissions & events 에서 **Contents·Pull requests = Read and write** 로 바꾸고, 설치 화면에서 새 권한 요청을 승인한다.
+2. 설치 Repository access 에 서비스 저장소(시연: `echo-demo-app`)가 들어 있는지 본다. 설치 저장소 목록 API 는 설치 토큰이 필요해 사람 계정으로는 404 라 **아직 확인하지 못했다**. 빠져 있으면 `REPO_WRITE_FORBIDDEN`(설치 대상 아님) 또는 `REPO_APP_NOT_INSTALLED` 가 난다.
+3. 그 뒤 `deploy/base.yaml` 에 `AI_APPLY_COMMIT_ENABLED: "true"` 를 넣는 별도 PR 을 병합한다(지금 `deploy/base.yaml` 에는 이 줄이 없어 꺼져 있다).
 
 ## 5. 시험
 
@@ -52,4 +58,4 @@
 
 ## 6. 미검증
 
-실제 GitHub 쓰기(App 권한이 없어 운영·로컬 모두 실제 호출 안 함), 실제 러너와의 왕복, 재배포가 고친 커밋으로 빌드되는 실제 배포.
+실제 GitHub 쓰기(운영·로컬 모두 실제 호출 안 함 — 2026-11-07 03:39 KST 작성 때는 App 권한이 없어서였고, 같은 날 09:01 KST 무렵 권한은 쓰기로 바뀌었지만 실제 호출은 아직 없다), 설치 대상 저장소 목록(4절 2번), 실제 러너와의 왕복, 재배포가 고친 커밋으로 빌드되는 실제 배포.
