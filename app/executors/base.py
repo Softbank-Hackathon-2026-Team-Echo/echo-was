@@ -34,6 +34,7 @@ from typing import Any, Protocol, runtime_checkable
 from app.adapters.base import EnvironmentConfig
 from app.core.secrets import SecretValue
 from app.enums import CutoverKind, DeployRequestErrorCode, LogLevel, TeardownErrorCode
+from app.schemas.migration_capability import MigrationPairSnapshot
 
 # --- 넘기는 값 ---
 
@@ -381,6 +382,7 @@ class CutoverRun:
     # 계획 id 로 찾을 때만 읽는다(인프라 12.1 칸). NORMAL·PROMOTE, 승격 때 잃었을 수 있는 범위(ms).
     mode: str | None = None
     rpo_estimate_ms: int | None = None
+    pair_receipt: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -419,6 +421,7 @@ class DbCutoverRequest:
     allow_promote: bool
     target: CutoverRunTarget
     result_kind: CutoverKind
+    pair_snapshot: MigrationPairSnapshot | None = None
 
 
 @dataclass(frozen=True)

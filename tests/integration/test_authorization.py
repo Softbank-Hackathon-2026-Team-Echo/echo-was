@@ -119,6 +119,7 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     _org("GET", "/services", V),
     _org("GET", "/services/{service_id}", V),
     _org("GET", "/services/{service_id}/metrics", V),
+    _org("GET", "/services/{service_id}/migration-capabilities", V),
     _org("GET", "/services/{service_id}/deploy-requests", V),
     _org("GET", "/deploy-requests/{deploy_request_id}", V),
     _org("GET", "/deploy-requests/{deploy_request_id}/logs", V),

@@ -30,6 +30,7 @@ from app.routers import (
     environment_kind_router,
     environment_router,
     invitation_router,
+    migration_capability_router,
     migration_plan_router,
     organization_router,
     precheck_router,
@@ -87,6 +88,7 @@ app.include_router(service_metrics_router.router)
 app.include_router(service_variable_router.router)
 app.include_router(service_variable_router.service_router)
 app.include_router(deploy_request_router.router)
+app.include_router(migration_capability_router.router)
 app.include_router(migration_plan_router.router)
 app.include_router(disaster_router.router)
 app.include_router(audit_log_router.router)

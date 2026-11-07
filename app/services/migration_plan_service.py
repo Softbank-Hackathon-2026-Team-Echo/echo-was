@@ -90,6 +90,8 @@ from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.deploy_request_service import INVALID_CURSOR_REASON
 from app.services.integrity import violated_constraint_name
+from app.services.migration_pair_plan_guard import PAIR_FINGERPRINT_KEY, MigrationPairPlanGuard
+from app.services.migration_pair_registry import MigrationPairRegistry, blocked
 from app.services.migration_plan_log import MigrationPlanLogWriter
 from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
@@ -208,7 +210,11 @@ class MigrationPlanService:
         db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
         db_cutover_timeout_seconds: int = 180,
         db_cutover_on_disaster: bool = False,
+        pair_registry: MigrationPairRegistry | None = None,
     ) -> None:
+        self._pair_guard = (
+            MigrationPairPlanGuard(pair_registry) if pair_registry is not None else None
+        )
         self._session = session
         self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
         self._db_cutover_timeout_seconds = db_cutover_timeout_seconds
@@ -324,6 +330,12 @@ class MigrationPlanService:
             plan.fingerprint = await read_fingerprint(
                 self._session, service, connections, source.id, target.id
             )
+            if self._pair_guard is not None:
+                snapshot = self._pair_guard.snapshot(service, source, target, plan, now)
+                plan.fingerprint = {
+                    **plan.fingerprint,
+                    PAIR_FINGERPRINT_KEY: snapshot.model_dump(mode="json"),
+                }
             await self._insert(plan)
             if disaster is not None:
                 await self._log.append(
@@ -511,6 +523,18 @@ class MigrationPlanService:
             )
         raise TargetNotReadyError("target environment runs a different image", details=details)
 
+    async def _check_pair_binding(self, organization_id: uuid.UUID, plan: MigrationPlan) -> None:
+        if self._pair_guard is None:
+            if PAIR_FINGERPRINT_KEY in plan.fingerprint:
+                raise blocked("DB_PAIR_GUARD_DISABLED")
+            return
+        service = await self._services.get_live_by_id(organization_id, plan.service_id)
+        source = await self._connections.find_by_id(plan.source_service_environment_id)
+        target = await self._connections.find_by_id(plan.target_service_environment_id)
+        if source is None or target is None:
+            raise blocked("DB_BINDING_UNREGISTERED")
+        self._pair_guard.check(service, source, target, plan, self._clock.now())
+
     # --- 조회 ---
 
     async def search_plans(
@@ -583,6 +607,10 @@ class MigrationPlanService:
                 raise OrganizationNotFoundError
             if plan.created_by_user_id == actor_user_id and not organization.allow_self_approval:
                 raise SelfApprovalForbiddenError
+            await self._check_pair_binding(organization_id, plan)
+            if self._pair_guard is not None:
+                # gate는 worker에도 연결됐지만 이미지/VAP/엔진 계약은 아직 없다.
+                raise blocked("DB_PAIR_WORKER_NOT_READY")
         decision = (
             await self._security_gate.evaluate_plan(plan_id)
             if self._security_gate is not None
@@ -608,6 +636,7 @@ class MigrationPlanService:
             is_self = plan.created_by_user_id == actor_user_id
             if is_self and not organization.allow_self_approval:
                 raise SelfApprovalForbiddenError
+            await self._check_pair_binding(organization_id, plan)
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
             else:

@@ -57,6 +57,8 @@ from app.services.environment_service import EnvironmentService
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.invitation_service import InvitationService
 from app.services.live_disaster_feed import LiveDisasterFeedService
+from app.services.migration_capability_service import MigrationCapabilityService
+from app.services.migration_pair_registry import MigrationPairRegistry
 from app.services.migration_plan_result import MigrationPlanResultService, cutover_result_cache
 from app.services.migration_plan_service import MigrationPlanService
 from app.services.organization_service import OrganizationService
@@ -452,6 +454,19 @@ def get_audit_log_service(
     return AuditLogService(session=session)
 
 
+def get_migration_capability_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> MigrationCapabilityService:
+    return MigrationCapabilityService(
+        session,
+        MigrationPairRegistry.from_config(settings.migration_pair_registry),
+        clock,
+        guard_enabled=settings.migration_pair_guard_enabled,
+    )
+
+
 def get_migration_plan_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -475,6 +490,11 @@ def get_migration_plan_service(
         db_cutover_mode=settings.db_cutover_executor_mode,
         db_cutover_timeout_seconds=settings.migration_db_cutover_timeout_seconds,
         db_cutover_on_disaster=settings.migration_db_cutover_on_disaster,
+        pair_registry=(
+            MigrationPairRegistry.from_config(settings.migration_pair_registry)
+            if settings.migration_pair_guard_enabled
+            else None
+        ),
     )
 
 
