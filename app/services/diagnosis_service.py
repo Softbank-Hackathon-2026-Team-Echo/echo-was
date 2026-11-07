@@ -76,6 +76,7 @@ from app.services.container_diagnostics import (
 )
 from app.services.deploy_request_service import CreateDeployCommand, DeployRequestService
 from app.services.integrity import violated_constraint_name
+from app.services.job_lease import LeaseLostError
 from app.services.precheck_service import (
     PrecheckView,
     compute_input_hash,
@@ -243,6 +244,9 @@ class DiagnosisService:
 
         접수 거절(AppError, 예: 이전 중 409·서비스 삭제 중)은 savepoint 로 접수 쓰기만 되돌리고
         그 코드를 redeployRejectedCode 로 남긴다 — 반영 결과·승인 응답은 성공 그대로다.
+
+        저장소 쓰기 소유권을 잃은 늦은 요청(LeaseLostError)은 재배포 연결만 건너뛰고 경고 로그를
+        남긴 뒤 지금의 반영 실행을 돌려준다(새 owner 의 칸은 건드리지 않는다).
         """
         # 재배포 커밋(SPEC api-19): AI_APPLY_COMMIT_ENABLED 가 켜져 있으면 행 잠금 트랜잭션 밖에서
         # (GitHub 호출) 서비스 저장소에 커밋·PR 을 만들고 그 커밋을 쓴다. 실패면 재배포 없음.
@@ -253,7 +257,22 @@ class DiagnosisService:
         commit_owner: str | None = None
         skip_reason: str | None = "COMMIT_DISABLED"
         if self._apply_commit is not None:
-            committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
+            try:
+                committed = await self._apply_commit.prepare_redeploy_commit(apply_run_id)
+            except LeaseLostError:
+                # 저장소 쓰기 소유권을 잃은 늦은 요청(claim TTL 경과 뒤 다른 요청이 넘겨받음).
+                # 반영 결과는 이미 커밋됐다. 행은 새 owner 것이므로 이 요청은 아무 칸도 쓰지
+                # 않고 재배포 연결만 건너뛴다(새 owner 가 잇는다). 응답은 결과 저장 성공 그대로다.
+                logger.warning(
+                    "diagnosis redeploy skipped: repository commit ownership lost",
+                    extra={
+                        "action": "redeploy_after_apply",
+                        "apply_run_id": str(apply_run_id),
+                        "reason": "COMMIT_OWNERSHIP_LOST",
+                    },
+                )
+                async with self._session.begin():
+                    return await self._runs.find_by_id(apply_run_id)
             if committed.stopped or committed.pending:
                 return committed.run
             repo_commit_sha = committed.ref
