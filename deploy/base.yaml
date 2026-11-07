@@ -186,7 +186,8 @@ data:
   CUTOVER_RESULTS_NOT_BEFORE: "2026-11-04T13:30:00Z"
   # DB 컷오버 Job 이미지(echo-infra replication/cutover-job, VAP 가 이 digest 만 허용). 864e1e7 = B 가 고객 클러스터에 있어도 붙는 진입점
   # + 풀 계층(echo-infra#114, PgBouncer-DB 분리) 스크립트 — 표지판이 없거나 옛 PgBouncer 가 있으면 옛 방식 그대로. 실행기 모드(DB_CUTOVER_EXECUTOR_MODE)는 chore/db-cutover-enable PR 이 켠다.
-  DB_CUTOVER_JOB_IMAGE: asia-northeast3-docker.pkg.dev/team-echo-final/echo/cutover@sha256:51fc69142586a62b4524c182973b454188eb7fa7592ac0f354963f1cca7b1be6
+  # fe9f025(11/8, echo-infra#133) = 쓰기 정지 창 단축(창 안 kubectl 호출 줄이기 · 단계별 시각 로그). echo-infra deploy/values.env 의 CUTOVER_IMAGE 와 같다.
+  DB_CUTOVER_JOB_IMAGE: asia-northeast3-docker.pkg.dev/team-echo-final/echo/cutover@sha256:445e86f18206448ff8f9b6d9660fa621b4037bec8e956fe93d4f37ab2d1d850c
   # 보안 게이트(보안·거버넌스 5, 지민 11/5 결정 D): 이전 승인·일꾼 실행 시작 때 필수 통제가 FAIL·UNKNOWN 이고
   # 유효한 기한부 예외가 없으면 409 SECURITY_GATE_BLOCKED. 되돌리려면 "false" PR(ConfigMap 만 바뀌니 병합 뒤 api·worker 재시작).
   SECURITY_GATE_ENABLED: "true"
