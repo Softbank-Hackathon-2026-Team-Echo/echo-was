@@ -28,7 +28,7 @@
 - 의존성에 `httpx`만 있고 쿠버네티스·AWS·Google SDK는 없다.
 
 ### 2.2 인프라 (직접 조회)
-- EKS `echo-dev-eks`(도쿄, 1.35): 공개 엔드포인트 `0.0.0.0/0`. 역할 `arn:aws:iam::706878591119:role/echo-dev-executor` 존재, Access Entry `AmazonEKSClusterAdminPolicy`(cluster). 신뢰 = 관제탑 GSA의 Google ID 토큰(`accounts.google.com:sub`). IngressClass `alb`(LBC 설치), 고객 앱 없음.
+- EKS `echo-dev-eks`(도쿄, 1.35): 공개 엔드포인트 `0.0.0.0/0`. 역할 `arn:aws:iam::<ACCOUNT_ID>:role/echo-dev-executor` 존재, Access Entry `AmazonEKSClusterAdminPolicy`(cluster). 신뢰 = 관제탑 GSA의 Google ID 토큰(`accounts.google.com:sub`). IngressClass `alb`(LBC 설치), 고객 앱 없음.
 - GKE `echo-dev-gke`(서울 **존** `asia-northeast3-a`): 관제탑 GSA `echo-dev-echo-was@team-echo-final.iam.gserviceaccount.com`에 `roles/container.developer`. 공유 인그레스 컨트롤러 없음. Gateway API 꺼짐. 일꾼이 이 클러스터 `echo-was` 네임스페이스에서 돈다(Workload Identity).
 - Artifact Registry `echo` 저장소 IAM: `echo-dev-ci-build`(writer)뿐 — 관제탑 GSA 읽기 권한 없음.
 - 온프레: AWS 서울 EC2 `i-051fe56358de1235a` + k3s v1.36 + Cloudflare 터널 `echo-onprem-demo`(id `c446e0fe-…`, 모든 주소 → Traefik), 들어오는 포트 0.
@@ -219,7 +219,7 @@
 | `BUILD_GITHUB_REPOSITORY` | `Softbank-Hackathon-2026-Team-Echo/echo-was` | 빌드 워크플로 저장소 |
 | `BUILD_GITHUB_WORKFLOW` | `customer-build.yml` | |
 | `BUILD_GITHUB_REF` | `main` | |
-| `IMAGE_REGISTRY_MIRRORS` | 빈 목록 | `asia-northeast3-docker.pkg.dev/team-echo-final/echo=706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo` |
+| `IMAGE_REGISTRY_MIRRORS` | 빈 목록 | `asia-northeast3-docker.pkg.dev/team-echo-final/echo=<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/echo` |
 | `CLOUDFLARE_API_TOKEN_REF`, `CLOUDFLARE_ZONE_ID` | 없음 | 5.7 |
 | `ONPREM_PULL_CHECK_SECONDS` / `ONPREM_PULL_MIN_REMAINING_SECONDS` | 300 / 1800 | 5.8 |
 | `DEPLOY_IMAGE_PULL_GRACE_SECONDS` | 30 | 5.4 |

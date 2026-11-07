@@ -133,6 +133,7 @@
 
 켜면 **승인 때와 일꾼 시작 때** 같은 판정(규칙표 `evaluate_security`, 실행 시점 `EXECUTION`)을 한다. 사람 승인과 앞으로의 사전 승인 자동 DR 이 같은 판정을 쓴다. 꺼져 있으면 판정·네트워크·로그 줄이 모두 없다. 근거: [specs/sec-5-migration-gate.md](../../specs/sec-5-migration-gate.md).
 
+- 판정 전 짧은 읽기 트랜잭션에서 조직 범위·`PENDING_APPROVAL`·필요한 DB 승격 동의·자기 승인 권한을 순서대로 확인한다. 거절되면 TLS 호출·새 증거 저장 없이 기존 404/409/422/403을 반환한다(자기 승인 거부 감사는 유지). 통과한 요청만 트랜잭션 밖에서 판정하고, 이후 잠금 안에서 상태·DB 승격 동의·자기 승인 권한·만료·지문을 다시 확인한다.
 - **필수 통제 하나라도 FAIL·UNKNOWN 이고 유효한 기한부 예외가 없으면 막는다.** 승인은 409 `SECURITY_GATE_BLOCKED`(계획은 승인 대기 그대로라 고친 뒤 다시 승인할 수 있다), 일꾼 시작은 트래픽을 바꾸지 않고 `FAILED`(`SECURITY_GATE_BLOCKED`, `rollbackStatus = NOT_NEEDED`).
 - `details` 한 칸 = 막은 통제 하나의 사유 하나: `{field: 통제 ID, reason: 사유 코드}`. 예: `{"field": "C-AI-1", "reason": "PRECHECK_MISSING"}`, `{"field": "C-DB-1", "reason": "EVIDENCE_MISSING"}`.
 - 판정 직전에 두 가지를 새로 확인해 증거(`findings`, `sourceRef = migration-plan:{planId}`)로 남긴다. 이 두 통제는 방금 확인한 증거만 쓴다.
