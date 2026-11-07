@@ -19,7 +19,7 @@ from app.enums import SecurityControlId
 from app.models import Base
 from tests.integration.conftest import PROJECT_ROOT, run_alembic
 from tests.integration.deploy_harness import DeployHarness
-from tests.integration.migration_support import Migration
+from tests.integration.migration_support import Migration, store_legacy_steps
 from tests.integration.rollback_support import create_rollback_fixture
 from tests.integration.security_gate_support import (
     add_exception,
@@ -362,7 +362,7 @@ EXPECTED_CONSTRAINTS = {
         "CHECK (((approved_by_user_id IS NULL) = (approved_at IS NULL)))"
     ),
     ("migration_plans", "ck_migration_plans_current_step_range"): (
-        "CHECK (((current_step >= 0) AND (current_step <= 5)))"
+        "CHECK (((current_step >= 0) AND (current_step <= 8)))"
     ),
     ("migration_plans", "ck_migration_plans_error_code_consistency"): (
         "CHECK ((((status)::text = ANY ((ARRAY['ROLLING_BACK'::character varying, "
@@ -470,7 +470,7 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("migration_plan_logs", "ck_migration_plan_logs_seq_positive"): ("CHECK ((seq >= 1))"),
     ("migration_plan_logs", "ck_migration_plan_logs_step_range"): (
-        "CHECK (((step >= 0) AND (step <= 5)))"
+        "CHECK (((step >= 0) AND (step <= 8)))"
     ),
     ("migration_plan_logs", "fk_migration_plan_logs_migration_plan_id_migration_plans"): (
         "FOREIGN KEY (migration_plan_id) REFERENCES migration_plans(id) ON DELETE RESTRICT"
@@ -1193,7 +1193,8 @@ DB_CUTOVER_STEP_REVISION = "7c2e5a9d4b18"
 # CVE 감시(보안 6)의 의존성 목록 표·findings 칸. DB 쓰기 전환 단계 위에 잇는다. 지금 head.
 BEFORE_CVE_WATCH = DB_CUTOVER_STEP_REVISION
 CVE_WATCH_REVISION = "9d7fe177bcaf"
-HEAD_REVISION = CVE_WATCH_REVISION
+CANARY_STEPS_REVISION = "1d5d0b3b9598"
+HEAD_REVISION = CANARY_STEPS_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}
@@ -1838,6 +1839,7 @@ async def test_db_cutover_step_revision_round_trip_and_blocks_downgrade_with_ste
         await transaction.rollback()
     migration.harness.use_settings(db_cutover_executor_mode="fake")
     plan = await migration.create_plan(includeCutover=True)
+    await store_legacy_steps(migration, plan["id"])
     await migration.approve(plan["id"])
     await migration.harness.run_until_idle()
     stored = await migration.plan_row(plan["id"])
@@ -2087,6 +2089,8 @@ def test_service_variables_revision_is_single_head_after_security_ai_schema() ->
 
     # 감사 로그 확장(API 서버 7)이 이 리비전을 잇는다.
     assert scripts.get_heads() == [HEAD_REVISION]
+    canary = scripts.get_revision(CANARY_STEPS_REVISION)
+    assert canary is not None and canary.down_revision == CVE_WATCH_REVISION
     db_cutover = scripts.get_revision(DB_CUTOVER_STEP_REVISION)
     assert db_cutover is not None and db_cutover.down_revision == BEFORE_DB_CUTOVER_STEP
     live_feed = scripts.get_revision(LIVE_DISASTER_FEED_REVISION)

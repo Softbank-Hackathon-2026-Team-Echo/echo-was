@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 
 from app.enums import JobKind, OrganizationRole
 from app.models import Environment, Job, MigrationPlan, MigrationPlanLog, ServiceEnvironment
+from app.services.migration_plan_support import initial_step_results
 from tests.integration.auth_support import Member, create_member, make_client, org_path
 from tests.integration.deploy_harness import DeployHarness
 from tests.integration.rollback_support import deploy_and_finish
@@ -161,3 +162,26 @@ async def serving_and_standby(harness: DeployHarness) -> Migration:
         aws=aws,
         gcp=gcp,
     )
+
+
+async def store_legacy_steps(
+    migration: Migration, plan_id: str, *, before_counting: bool = False
+) -> list[dict[str, Any]]:
+    """API-24 이전 저장 계획을 재현한다. 새 단계 상수에 의존하지 않는다."""
+    async with migration.harness.session_factory() as session, session.begin():
+        plan = await session.get_one(MigrationPlan, uuid.UUID(plan_id))
+        selected = (0, 2, 4, 5, 7, 8) if len(plan.steps) == 9 else (0, 2, 4, 5, 7)
+        steps = [dict(plan.steps[i], index=index) for index, i in enumerate(selected)]
+        for step in steps:
+            step.pop("minObserveSeconds", None)
+            if step["kind"] == "SHIFT":
+                required = {10: 20, 50: 50, 100: 50}[step["targetWeight"]]
+                step["requiredRequests"] = required
+                step["expectedSeconds"] = 2 + {10: 4, 50: 2, 100: 1}[step["targetWeight"]]
+                if before_counting:
+                    step.pop("requiredRequests")
+                    step.pop("maxWaitSeconds", None)
+        plan.steps = steps
+        plan.step_results = initial_step_results(steps)
+        plan.expected_seconds = sum(step["expectedSeconds"] for step in steps)
+        return steps

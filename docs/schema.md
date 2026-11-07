@@ -305,13 +305,13 @@ erDiagram
 | `service_id` | uuid | N | FK `services.id`, 인덱스 `(service_id, created_at)`, **부분 unique** `uq_migration_plans_service_id_open`(`WHERE status IN ('PENDING_APPROVAL','APPROVED','RUNNING','ROLLING_BACK')`) | 서비스당 끝나지 않은 계획은 하나 |
 | `source_service_environment_id`·`target_service_environment_id` | uuid | N | FK `service_environments.id`, `target <> source` | 출발(지금 100%)·도착(같은 이미지의 예비) 연결 |
 | `status` | varchar(16) | N | 11개 값 CHECK | ④-5 |
-| `steps` | jsonb | N | 배열 | 고정 5단계 `[{index, kind, sourceWeight, targetWeight, requiredRequests, maxWaitSeconds, observeSeconds, expectedSeconds}]`. 만든 뒤 바꾸지 않는다. `observeSeconds` 는 롤링 배포 중 옛 파드용으로 `maxWaitSeconds` 와 같은 값을 적는다(응답에 없음, 8-1 전 계획은 `requiredRequests`·`maxWaitSeconds` 가 없다) |
+| `steps` | jsonb | N | 배열 | 8단계(선택 DB 전환 포함 9단계) `[{index, kind, sourceWeight, targetWeight, requiredRequests, minObserveSeconds, maxWaitSeconds, observeSeconds, expectedSeconds}]`. 만든 뒤 바꾸지 않는다. `observeSeconds` 는 롤링 배포 중 옛 파드용으로 `maxWaitSeconds` 와 같은 값을 적는다(응답에 없음, 8-1 전 계획은 `requiredRequests`·`maxWaitSeconds` 가 없다) |
 | `step_results` | jsonb | N | 배열 | 같은 길이 `[{index, status, startedAt, finishedAt, metrics, failureCode, counting?, judgeReason?}]`. 바꿀 때 통째로 다시 넣는다. 비율 단계의 `counting` 은 건수 세기 상태(`requiredRequests`·`allowedErrors5xx`·`startedAt`·`updatedAt`, 출발·도착마다 `baseline`·`last`·`carried`·`lastReadAt`), `judgeReason` 은 세기를 끝낸 이유(`COUNT_REACHED`·`LOW_TRAFFIC`) |
 | `rollback_conditions` | jsonb | N | 객체 | `{maxErrorRatePercent, maxP95Ms, maxReplicationLagSeconds}` |
 | `observe_seconds`·`expected_seconds` | int | N | 1~600 · `>= 0` | 비율 단계 최대 대기(API `maxWaitSeconds`, 8-1 전 계획은 지켜보기 시간) · 계획 전체 예상 시간 |
 | `fingerprint` | jsonb | N | 객체 | 만든 순간의 상태(서비스 상태·연결 값·출발/도착 환경의 config·secret_ref **해시**와 접속 상태·열린 배포 요청). 승인·일꾼 시작 때 다시 계산해 다르면 `STALE` |
 | `simulate`·`simulated` | jsonb NULL · bool | | 객체 | 가짜 실패 지정 `{failAtStep, reason}` · 가짜 실행기로 만든 계획 |
-| `current_step`·`step_phase`·`phase_started_at`·`observe_until` | smallint · varchar(8) NULL · timestamptz NULL | | 0~4 · `APPLY`·`OBSERVE`·`JUDGE` | 일꾼이 어디까지 했는지 |
+| `current_step`·`step_phase`·`phase_started_at`·`observe_until` | smallint · varchar(8) NULL · timestamptz NULL | | 0~8 · `APPLY`·`OBSERVE`·`JUDGE` | 일꾼이 어디까지 했는지 |
 | `traffic_requested_at`·`rollback_requested_at`·`rollback_attempts` | timestamptz NULL · smallint | | `>= 0` | 트래픽 실행기 "요청함 시각"(멱등 키로 다시 부를 근거)·롤백 시도 횟수 |
 | `error_code`·`rollback_status` | varchar NULL | | 값 CHECK, `(ROLLING_BACK·ROLLED_BACK·FAILED) ⇔ error_code` | 원인 코드 · `SUCCEEDED`·`FAILED`·`NOT_NEEDED` |
 | `created_by_user_id`(N)·`approved_by_user_id`·`rejected_by_user_id`·`cancelled_by_user_id`·`aborted_by_user_id` | uuid | | FK `users.id`, `approved_by ⇔ approved_at` | 사람 칸 |
@@ -327,7 +327,7 @@ erDiagram
 |---|---|---|---|---|
 | `migration_plan_id` | uuid | N | FK `migration_plans.id` | |
 | `seq` | int | N | `>= 1`, unique(`migration_plan_id`, `seq`) | 계획마다 1부터 빈틈없이(서비스 행 잠금 안에서 `max + 1`) |
-| `step` | smallint | Y | 0~4 | 계획 단계 번호. 계획 전체 줄(만들기·승인 등)은 NULL |
+| `step` | smallint | Y | 0~8 | 계획 단계 번호. 계획 전체 줄(만들기·승인 등)은 NULL |
 | `logged_at`·`level`·`code`·`message` | | N | `level` CHECK, `code` 는 값 CHECK 없음(`MigrationLogCode`) | 주입 시계 · 코드별 고정 문장 |
 | `data` | jsonb | Y | 객체 | 비율·지표 숫자(낡은 계획이면 `changed` 항목 이름)만 |
 | `simulated` | bool | N | | 그 계획의 `simulated` |
@@ -597,7 +597,7 @@ stateDiagram-v2
     APPROVED --> STALE : 일꾼 시작 때 지문 다름
     APPROVED --> CANCELLED : 시작 전 중단
     APPROVED --> FAILED : 일꾼 상실(WORKER_LOST) · 보안 게이트 막음(SECURITY_GATE_BLOCKED)
-    RUNNING --> SUCCEEDED : 단계 4 판정 통과
+    RUNNING --> SUCCEEDED : 마지막 단계 판정 통과
     RUNNING --> FAILED : 단계 0 사전 확인 실패(rollbackStatus NOT_NEEDED)
     RUNNING --> ROLLING_BACK : 판정 실패·판단 불가·적용 실패·중단·일꾼 상실
     ROLLING_BACK --> ROLLED_BACK : 출발 100% 적용
@@ -647,7 +647,7 @@ stateDiagram-v2
 | 현재 배포는 복합 FK `(current_deployment_id, id) → deployments(id, service_environment_id)` | "연결 A 의 현재 배포가 연결 B 의 배포" 같은 앱 실수를 **DB 가 거부**한다 | 단일 FK + 앱 검사: 버그 하나로 환경 카드가 다른 클라우드의 버전을 보여 줄 수 있다 |
 | 순환 FK 는 표를 다 만든 뒤 추가(`use_alter`), ORM 관계는 읽기 전용 | 두 표가 서로 가리켜 생성·삭제 순서가 꼬이는 문제와, 복합 FK 에 들어 있는 PK(`id`)를 ORM 이 덮어쓰는 문제를 피한다 | |
 | `traffic_weight` 는 "마지막으로 적용한 값" + `traffic_applied_at` | 실제 분배는 앞단 프록시(Envoy)가 한다. DB 값과 실제 비율이 다를 수 있음을 칸 이름·시각으로 드러낸다(사전 부검 P2). 실제 비율은 측정(F17)으로 본다 | DB 가 실제 비율이라고 가정: 프록시 적용 실패 때 화면이 거짓말을 한다 |
-| 비율 합계 100% 는 DB 가 검사하지 않음 | 전환 중에는 연결 행을 하나씩 바꾸므로 잠깐 합계가 맞지 않는다. 이전 엔진(API 서버 8)이 맞춘다 | 트리거로 합계 검사: 단계적 전환(10→50→100%)을 막는다 |
+| 비율 합계 100% 는 DB 가 검사하지 않음 | 전환 중에는 연결 행을 하나씩 바꾸므로 잠깐 합계가 맞지 않는다. 이전 엔진(API 서버 8)이 맞춘다 | 트리거로 합계 검사: 단계적 전환(5→10→25→50→75→100%)을 막는다 |
 | 이미지는 `image_digest` 로만 | 같은 digest 를 여러 환경에 올리면 "같은 버전"이 보장된다. tag 는 바뀔 수 있어 두지 않는다 | |
 | 빌드는 별도 표(API 서버 3) | 빌드 1 : 배포 N. 한 번 만든 이미지를 여러 환경에 올린다. 같은 서비스·저장소·커밋은 다시 빌드하지 않는다(부분 unique) | 배포 행에 빌드 칸: 같은 빌드를 환경마다 반복 기록 |
 | 배포 요청(`deploy_requests`)과 배포 기록(`deployments`)을 나눔 | 요청은 "원터치 한 번"(빌드·대기·취소·실패 이유 포함), 배포 기록은 "연결에 이미지를 올린 것"이다. 빌드 실패·취소 요청은 배포 기록을 만들지 않는다. `deployments` 표와 상태 값은 그대로 둔다 | 배포 표에 요청 칸 추가: 기존 계약(`DeploymentStatus`)이 바뀐다 |
@@ -659,7 +659,7 @@ stateDiagram-v2
 | 배포 작업 로그는 DB, 빌드·실행 로그는 실행기 즉석 조회 | 작업 로그는 상태 전환과 같은 트랜잭션이라 겹침·누락이 없다. 실행 로그는 끝없이 늘어 DB 에 담지 않고, 실제 실행기로 바꿀 때 구현만 바꾼다 | 모든 로그 저장: 표가 끝없이 커진다 |
 | 상태 값은 `varchar` + CHECK | 값 추가가 `ALTER TYPE` 보다 쉽고 되돌리기도 쉽다 | PostgreSQL ENUM |
 | 이름은 Kubernetes 이름 규칙 | 서비스·환경 이름을 클러스터 리소스 이름으로 그대로 쓴다 | |
-| 이전 계획은 단계·결과를 JSONB 두 칸(`steps` 고정 + `step_results` 같은 길이)으로(API 서버 8) | 단계 5개가 고정이라 "계획 / 실제"를 한 행에서 나란히 보여 준다. 진행 위치(`current_step`·`step_phase`·요청함 시각)는 칸으로 두어 조건부 UPDATE 로 바꾼다 | 단계 표 따로: 고정 5단계에 조인·잠금이 늘어난다 |
+| 이전 계획은 단계·결과를 JSONB 두 칸(`steps` 고정 + `step_results` 같은 길이)으로(API 서버 8) | 저장된 단계 목록을 기준으로 "계획 / 실제"를 한 행에서 나란히 보여 준다. 진행 위치(`current_step`·`step_phase`·요청함 시각)는 칸으로 두어 조건부 UPDATE 로 바꾼다 | 단계 표 따로: 고정 단계에 조인·잠금이 늘어난다 |
 | 낡은 계획은 지문 비교로 거부(API 서버 8) | 만든 순간의 연결 값·열린 요청·환경 설정 해시를 저장하고 승인·일꾼 시작 때 다시 계산한다(API 4 `BASE_CHANGED` 와 같은 생각). 비밀값·설정 값 자체는 넣지 않는다. 접속 재확인 시각은 빼서 재확인만으로 낡지 않게 한다 | `updated_at` 비교: 상관없는 칸 변경에도 낡는다 |
 | 고객 앱 주소 = 이름 + 무작위 8자, 도메인 바로 아래 한 단계(`host_suffix`) | 지운 서비스와 같은 이름의 새 서비스가 옛 주소를 잇지 못한다(하위 도메인 탈취 방지). `*.도메인` 와일드카드 하나로 DNS·인증서를 덮는다. 주소 유일성을 suffix 가 맡으니 서비스 이름은 조직 안에서만 유일하면 된다 | `{서비스}.{도메인}`·`{서비스}.{환경}.{도메인}`: 이름이 Echo 전체에서 유일해야 하고, 지운 이름을 남이 다시 쓰면 옛 주소를 이어받으며, 두 단계 주소는 환경마다 와일드카드가 따로 필요하다 |
 
