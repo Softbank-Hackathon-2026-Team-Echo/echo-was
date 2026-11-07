@@ -1,6 +1,7 @@
 """컷오버 결과 읽기 단위 시험(API 서버 16). 접속은 가짜 connect 로 바꿔 네트워크를 쓰지 않는다."""
 
 import asyncio
+import json
 import ssl
 import uuid
 from collections.abc import Mapping
@@ -30,6 +31,7 @@ from app.executors.postgres_cutover_runs import (
     CUTOVER_RUN_BY_PLAN_QUERY,
     CUTOVER_RUNS_QUERY,
     PostgresCutoverRunReader,
+    _cutover_run,
 )
 from app.executors.postgres_data_sync import ReplicationEndpoint
 from app.main import app
@@ -569,3 +571,238 @@ async def test_find_by_plan_errors_become_unavailable_and_missing_is_not_found()
 
     assert isinstance(missing, CutoverRunNotFound)
     assert broken == CutoverRunUnavailable(CUTOVER_RESULT_UNREACHABLE)
+
+
+# pair_receipt 는 주입 row 의 내부 어댑터 경계다. 저장 컬럼·SELECT 계약이 아니다.
+def _pair_receipt() -> dict[str, str]:
+    return {
+        "planId": "00000000-0000-0000-0000-000000000065",
+        "sourceDbId": "aws-a-app",
+        "targetDbId": "gcp-b-app",
+        "contractVersion": "db-pair/v1",
+        "registrySha256": "a" * 64,
+        "writerDbId": "gcp-b-app",
+    }
+
+
+@pytest.mark.parametrize("by_plan", [True, False])
+@pytest.mark.parametrize("as_json", [False, True])
+async def test_reader_pair_receipt_mapping_preserves_observation(
+    by_plan: bool, as_json: bool
+) -> None:
+    receipt = _pair_receipt()
+    payload = json.dumps(receipt) if as_json else receipt
+    connector = _Connector(_row(pair_receipt=payload, mode="PROMOTE", rpo_estimate_ms=850))
+    reader = _reader(connector)
+
+    result = (
+        await reader.find_by_plan(TARGET, CutoverKind.CUTOVER, uuid.UUID(receipt["planId"]))
+        if by_plan
+        else await reader.find_first(TARGET, CutoverKind.CUTOVER, SINCE, UNTIL)
+    )
+
+    assert isinstance(result, CutoverRun)
+    assert result.pair_receipt == receipt
+    assert result.pair_receipt is not receipt
+    assert (result.mode, result.rpo_estimate_ms) == ("PROMOTE", 850)
+    assert (result.write_pause_ms, result.rows_total) == (5817, 168)
+    assert connector.connection.closed
+    assert not connector.connection.terminated
+
+
+@pytest.mark.parametrize("field", tuple(_pair_receipt()))
+@pytest.mark.parametrize("value", [None, True, 1, 1.5, [], {}, b"bytes", "", " ", "\n"])
+def test_cutover_run_pair_receipt_rejects_invalid_field(field: str, value: object) -> None:
+    receipt = {**_pair_receipt(), field: value}
+
+    result = _cutover_run(_row(pair_receipt=receipt, mode="PROMOTE", rpo_estimate_ms=850))
+
+    assert result.pair_receipt is None
+    assert (result.mode, result.rpo_estimate_ms) == ("PROMOTE", 850)
+    assert receipt[field] == value
+
+
+@pytest.mark.parametrize("field", tuple(_pair_receipt()))
+def test_cutover_run_pair_receipt_rejects_missing_field(field: str) -> None:
+    receipt = _pair_receipt()
+    del receipt[field]
+
+    result = _cutover_run(_row(pair_receipt=receipt))
+
+    assert result.pair_receipt is None
+    assert field not in receipt
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"planId": "not-a-uuid"},
+        {"planId": "00000000000000000000000000000065"},
+        {"planId": " 00000000-0000-0000-0000-000000000065"},
+        {"planId": "00000000-0000-0000-0000-0000000000AB"},
+        {"sourceDbId": "aws_a_app"},
+        {"targetDbId": "gcp-b-app\n"},
+        {"writerDbId": "GCP-B-APP"},
+        {"sourceDbId": "a" * 64},
+        {"contractVersion": "db-pair/v0"},
+        {"contractVersion": "db-pair/v1 "},
+        {"registrySha256": "a" * 63},
+        {"registrySha256": "G" * 64},
+        {"registrySha256": "A" * 64},
+        {"registrySha256": "sha256:" + "a" * 64},
+        {"registrySha256": "a" * 64 + "\n"},
+        {"command": "echo injected"},
+        {"source_db_id": "aws-a-app"},
+    ],
+)
+def test_cutover_run_pair_receipt_rejects_contamination(changes: dict[str, object]) -> None:
+    receipt = {**_pair_receipt(), **changes}
+
+    result = _cutover_run(_row(pair_receipt=receipt, mode="NORMAL", rpo_estimate_ms=0))
+
+    assert result.pair_receipt is None
+    assert (result.mode, result.rpo_estimate_ms) == ("NORMAL", 0)
+    assert receipt == {**_pair_receipt(), **changes}
+
+
+@pytest.mark.parametrize("payload", [None, False, 0, 1.5, [], {}, b"{}"])
+def test_cutover_run_pair_receipt_invalid_envelope_keeps_legacy(payload: object) -> None:
+    result = _cutover_run(_row(pair_receipt=payload))
+
+    assert result.pair_receipt is None
+    assert (result.mode, result.rpo_estimate_ms) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"mode": None, "rpo_estimate_ms": None},
+        {"mode": "NORMAL", "rpo_estimate_ms": 0},
+        {"mode": "PROMOTE", "rpo_estimate_ms": 850},
+    ],
+)
+@pytest.mark.parametrize("receipt_row", [{}, {"pair_receipt": None}])
+def test_cutover_run_pair_receipt_absent_or_null_preserves_legacy(
+    metadata: dict[str, object], receipt_row: dict[str, object]
+) -> None:
+    result = _cutover_run(_row(**metadata, **receipt_row))
+
+    assert result.pair_receipt is None
+    assert (result.mode, result.rpo_estimate_ms) == (
+        metadata.get("mode"),
+        metadata.get("rpo_estimate_ms"),
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        "{broken",
+        "null",
+        "[]",
+        "true",
+        "1",
+        '"text"',
+        json.dumps(json.dumps(_pair_receipt())),
+        json.dumps(_pair_receipt()) + " trailing",
+        json.dumps({**_pair_receipt(), "planId": 101}),
+        json.dumps({**_pair_receipt(), "writerDbId": None}),
+        json.dumps({**_pair_receipt(), "registrySha256": {"value": "a" * 64}}),
+        json.dumps({**_pair_receipt(), "command": "injected"}),
+        "[" * 1100 + "0" + "]" * 1100,
+    ],
+)
+def test_cutover_run_pair_receipt_malformed_json_is_not_evidence(payload: str) -> None:
+    result = _cutover_run(_row(pair_receipt=payload, mode="PROMOTE", rpo_estimate_ms=850))
+
+    assert result.pair_receipt is None
+    assert (result.mode, result.rpo_estimate_ms) == ("PROMOTE", 850)
+
+
+@pytest.mark.parametrize("field", tuple(_pair_receipt()))
+@pytest.mark.parametrize("duplicate_first", [True, False])
+def test_cutover_run_pair_receipt_duplicate_json_key_is_rejected(
+    field: str, duplicate_first: bool
+) -> None:
+    original = json.dumps(_pair_receipt())[1:-1]
+    duplicate = json.dumps(field) + ': "contaminated"'
+    payload = (
+        "{"
+        + (duplicate + ", " + original if duplicate_first else original + ", " + duplicate)
+        + "}"
+    )
+
+    assert _cutover_run(_row(pair_receipt=payload)).pair_receipt is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"planId": "00000000-0000-0000-0000-000000000099"},
+        {"sourceDbId": "other-source"},
+        {"targetDbId": "other-target"},
+        {"registrySha256": "b" * 64},
+        {"writerDbId": "aws-a-app"},
+    ],
+)
+def test_cutover_run_pair_receipt_leaves_pair_equality_to_judge(
+    changes: dict[str, str],
+) -> None:
+    from app.services.migration_db_cutover import CutoverRecovery, judge_db_cutover
+    from app.services.migration_pair_registry import MigrationPairRegistry
+    from tests.test_migration_pairs import NOW, context, registry_data
+
+    snapshot = MigrationPairRegistry.from_config(registry_data()).snapshot(
+        context(), "dbCutover", NOW
+    )
+    receipt = {**_pair_receipt(), "registrySha256": snapshot.registry_sha256, **changes}
+    result = _cutover_run(_row(pair_receipt=json.dumps(receipt)))
+
+    # 형식만 맞는 다른 쌍도 보정 없이 보존한다. JUDGE만 계획과 일치를 판정한다.
+    assert result.pair_receipt == receipt
+    verdict = judge_db_cutover(
+        exit_code=0,
+        reason="ALREADY_WRITER",
+        finished=True,
+        lost=False,
+        timed_out=False,
+        run_result=result,
+        plan_id=uuid.UUID(_pair_receipt()["planId"]),
+        pair_snapshot=snapshot,
+        pair_receipt=result.pair_receipt,
+    )
+    assert verdict.passed is (not changes)
+    if changes:
+        assert verdict.recovery is CutoverRecovery.MANUAL
+        assert verdict.reason == "DB_PAIR_RESULT_MISMATCH"
+
+
+@pytest.mark.parametrize("payload", [None, {}, "{broken", {"writerDbId": "gcp-b-app"}])
+def test_cutover_run_pair_receipt_invalid_cannot_satisfy_bound_judge(payload: object) -> None:
+    from app.services.migration_db_cutover import CutoverRecovery, judge_db_cutover
+    from app.services.migration_pair_registry import MigrationPairRegistry
+    from tests.test_migration_pairs import NOW, context, registry_data
+
+    snapshot = MigrationPairRegistry.from_config(registry_data()).snapshot(
+        context(), "dbCutover", NOW
+    )
+    result = _cutover_run(_row(pair_receipt=payload))
+    verdict = judge_db_cutover(
+        exit_code=0,
+        reason="ALREADY_WRITER",
+        finished=True,
+        lost=False,
+        timed_out=False,
+        run_result=result,
+        plan_id=uuid.UUID(_pair_receipt()["planId"]),
+        pair_snapshot=snapshot,
+        pair_receipt=result.pair_receipt,
+    )
+
+    assert result.pair_receipt is None
+    assert not verdict.passed
+    assert verdict.recovery is CutoverRecovery.MANUAL
+    assert verdict.reason == "DB_PAIR_RESULT_MISMATCH"
