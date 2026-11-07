@@ -466,6 +466,8 @@ async def test_diagnosis_is_not_precheck_evidence_or_residency(migration: Migrat
             uuid.UUID(migration.service_id),
             migration.aws.id,
             datetime(2000, 1, 1, tzinfo=UTC),
+            organization_id=harness.organization.id,
+            source_environment_id=migration.gcp.id,
         )
     residency = await migration.author_client.get(
         org_path(harness.organization.id, "/ai/residency"), params={"days": 30}

@@ -15,8 +15,8 @@
 판정을 실행 로그 줄(`gate_log_data`)로 남기고, 막혔으면 승인은 409, 실행 시작은 FAILED 로 끝낸다.
 계획을 만든 뒤 바뀐 상태(현재 배포·환경 설정)는 지문이 잡는다.
 
-- C-AI-1 의 증거는 성공으로 끝난 AI 사전 점검 실행(증거 ID = 실행 ID)이다. 가짜 실행이면 쓰지
-  않는다(규칙표가 가짜 증거를 버린다).
+- C-AI-1 은 같은 조직·서비스·출발·도착의 24시간 안에 성공한 실제 사전 점검 중 최신 실행을
+  쓴다(증거 ID = 실행 ID). 실제 실행이 없을 때 모의 실행은 차단 사유 설명에만 쓴다.
 - 게이트 설정이 꺼져 있으면 이 모듈을 만들지 않는다(판정·기록·네트워크 없음).
 """
 
@@ -241,8 +241,10 @@ class SecurityGate:
                     service.id,
                     target.environment_id,
                     now - get_rule(SecurityControlId.AI_1).max_age,
+                    organization_id=service.organization_id,
+                    source_environment_id=source.environment_id,
                 )
-                if target is not None
+                if source is not None and target is not None
                 else None
             )
             findings = [to_security_finding(model) for model in finding_models]
