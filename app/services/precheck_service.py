@@ -348,11 +348,14 @@ class PrecheckService:
         self, environment: Environment, connection: ServiceEnvironment | None
     ) -> dict[str, Any]:
         image_digest = None
+        image_ref = None
         variable_keys: list[str] = []
         if connection is not None:
             if connection.current_deployment_id is not None:
                 deployment = await self._deployments.find_by_id(connection.current_deployment_id)
                 image_digest = deployment.image_digest if deployment is not None else None
+                if deployment is not None:
+                    image_ref = f"{deployment.image_repository}@{deployment.image_digest}"
             variables = await self._variables.search_live_by_connection(connection.id)
             variable_keys = sorted(variable.key for variable in variables)
         return {
@@ -360,6 +363,7 @@ class PrecheckService:
             "kind": environment.kind,
             "config": _snapshot_config(environment),
             "imageDigest": image_digest,
+            "imageRef": image_ref,
             "variableKeys": variable_keys,
         }
 

@@ -638,8 +638,9 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("agent_runs", "ck_agent_runs_deadline_after_created"): "CHECK ((deadline_at > created_at))",
     ("agent_runs", "ck_agent_runs_diagnosis_has_deploy_request"): (
-        "CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((deploy_request_id IS NOT NULL) "
-        "AND (target_environment_id IS NOT NULL))))"
+        "CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((target_environment_id IS NOT NULL) "
+        "AND (((deploy_request_id IS NOT NULL) AND (finding_id IS NULL)) OR "
+        "((deploy_request_id IS NULL) AND (finding_id IS NOT NULL))))))"
     ),
     ("agent_runs", "ck_agent_runs_failure_code_only_when_failed"): (
         "CHECK (((failure_code IS NULL) OR ((status)::text = ANY "
@@ -685,6 +686,9 @@ EXPECTED_CONSTRAINTS = {
     ),
     ("agent_runs", "fk_agent_runs_claimed_by_runner_id_agent_runners"): (
         "FOREIGN KEY (claimed_by_runner_id) REFERENCES agent_runners(id) ON DELETE RESTRICT"
+    ),
+    ("agent_runs", "fk_agent_runs_finding_id_findings"): (
+        "FOREIGN KEY (finding_id) REFERENCES findings(id) ON DELETE RESTRICT"
     ),
     ("agent_runs", "fk_agent_runs_deploy_request_id_deploy_requests"): (
         "FOREIGN KEY (deploy_request_id) REFERENCES deploy_requests(id) ON DELETE RESTRICT"
@@ -1193,7 +1197,8 @@ DB_CUTOVER_STEP_REVISION = "7c2e5a9d4b18"
 # CVE 감시(보안 6)의 의존성 목록 표·findings 칸. DB 쓰기 전환 단계 위에 잇는다. 지금 head.
 BEFORE_CVE_WATCH = DB_CUTOVER_STEP_REVISION
 CVE_WATCH_REVISION = "9d7fe177bcaf"
-HEAD_REVISION = CVE_WATCH_REVISION
+CVE_DIAGNOSIS_REVISION = "c7e27ab13001"
+HEAD_REVISION = CVE_DIAGNOSIS_REVISION
 MODE_CHECK = "ck_migration_plans_mode_valid"
 ERROR_CODE_CHECK = "ck_migration_plans_error_code_valid"
 MIGRATION_PLAN_TABLES = {"migration_plans", "migration_plan_logs"}

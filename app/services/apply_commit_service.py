@@ -32,6 +32,7 @@ from app.clients.repo_commit_writer import (
     RepoCommitWriter,
 )
 from app.core.clock import Clock
+from app.core.exceptions import PatchStaleError
 from app.core.log_masking import mask_secrets
 from app.core.repo_url import InvalidRepoUrlError, parse_repo_url
 from app.enums import AgentRunKind, AgentRunStatus, RefType
@@ -105,7 +106,7 @@ def commit_message(context: CommitContext) -> str:
         f"승인: {context.approver}",
         f"진단 실행: {context.diagnosis_run_id}",
         f"반영 실행: {context.apply_run_id}",
-        f"실패 배포: {context.deploy_request_id} (커밋 {context.source_commit_sha[:12]})",
+        f"대상 배포: {context.deploy_request_id} (커밋 {context.source_commit_sha[:12]})",
         f"패치: {context.patch_id} {context.patch_hash}",
         "",
         "EchoPort 샌드박스에서 이미지 빌드·Trivy·healthz 를 통과한 패치입니다.",
@@ -132,7 +133,7 @@ def pull_request_body(context: CommitContext) -> str:
         f"| 승인 | {context.approver} |",
         f"| 진단 실행 | `{context.diagnosis_run_id}` |",
         f"| 반영 실행 | `{context.apply_run_id}` |",
-        f"| 실패 배포 | `{context.deploy_request_id}` (커밋 `{context.source_commit_sha[:12]}`) |",
+        f"| 대상 배포 | `{context.deploy_request_id}` (커밋 `{context.source_commit_sha[:12]}`) |",
         f"| 패치 | `{context.patch_id}` `{context.patch_hash}` |",
     ]
     return mask_secrets("\n".join(rows))
@@ -222,9 +223,23 @@ class ApplyCommitService:
             if _claim_is_live(result, now):
                 return CommitOutcome(run=apply_run, pending=True)
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
-            if parent is None or parent.deploy_request_id is None:
+            if parent is None:
                 return CommitOutcome()
-            failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
+            from app.services.cve_diagnosis_service import current_cve_request
+
+            try:
+                failed = await current_cve_request(self._session, parent)
+            except PatchStaleError:
+                await self._runs.patch_result(
+                    apply_run_id,
+                    now,
+                    {
+                        REDEPLOY_REQUEST_ID_KEY: None,
+                        "redeployRejectedCode": "CVE_TARGET_CHANGED",
+                        COMMIT_STATE_KEY: COMMIT_FAILED,
+                    },
+                )
+                return CommitOutcome(run=apply_run, stopped=True)
             if failed is None:
                 return CommitOutcome()
             await self._runs.patch_result(

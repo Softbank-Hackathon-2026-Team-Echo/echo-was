@@ -238,6 +238,8 @@ class PrecheckDiagnosisResponse(ApiModel):
     deploy_request_id: uuid.UUID | None
     environment_id: uuid.UUID | None
     source_commit_sha: str | None
+    finding_id: uuid.UUID | None = None
+    synthetic_advisory: bool = False
 
     @classmethod
     def from_run(cls, run: AgentRun) -> Self:
@@ -257,7 +259,10 @@ class PrecheckDiagnosisResponse(ApiModel):
             ],
             deploy_request_id=run.deploy_request_id,
             environment_id=run.target_environment_id,
-            source_commit_sha=deploy_request.get("commitSha"),
+            source_commit_sha=run.input_snapshot.get("sourceCommitSha")
+            or deploy_request.get("commitSha"),
+            finding_id=run.finding_id,
+            synthetic_advisory=bool((run.input_snapshot.get("finding") or {}).get("synthetic")),
         )
 
 

@@ -333,6 +333,7 @@ async def test_input_snapshot_has_no_secrets_and_stable_hash(migration: Migratio
             "kind",
             "config",
             "imageDigest",
+            "imageRef",
             "variableKeys",
         }
         assert snapshot[side]["config"]["clusterName"]

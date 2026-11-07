@@ -105,10 +105,11 @@ CREATE TABLE public.agent_runs (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     processing jsonb,
     deploy_request_id uuid,
+    finding_id uuid,
     CONSTRAINT ck_agent_runs_apply_patch_has_parent CHECK ((((kind)::text <> 'APPLY_PATCH'::text) OR (parent_run_id IS NOT NULL))),
     CONSTRAINT ck_agent_runs_claim_consistency CHECK ((((status)::text <> ALL ((ARRAY['CLAIMED'::character varying, 'RUNNING'::character varying])::text[])) OR ((claimed_by_runner_id IS NOT NULL) AND (run_token_hash IS NOT NULL) AND (lease_until IS NOT NULL)))),
     CONSTRAINT ck_agent_runs_deadline_after_created CHECK ((deadline_at > created_at)),
-    CONSTRAINT ck_agent_runs_diagnosis_has_deploy_request CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((deploy_request_id IS NOT NULL) AND (target_environment_id IS NOT NULL)))),
+    CONSTRAINT ck_agent_runs_diagnosis_has_deploy_request CHECK ((((kind)::text <> 'CHANGE_PROPOSAL'::text) OR ((target_environment_id IS NOT NULL) AND (((deploy_request_id IS NOT NULL) AND (finding_id IS NULL)) OR ((deploy_request_id IS NULL) AND (finding_id IS NOT NULL)))))),
     CONSTRAINT ck_agent_runs_failure_code_only_when_failed CHECK (((failure_code IS NULL) OR ((status)::text = ANY ((ARRAY['FAILED'::character varying, 'TIMED_OUT'::character varying])::text[])))),
     CONSTRAINT ck_agent_runs_finished_consistency CHECK ((((status)::text = ANY ((ARRAY['SUCCEEDED'::character varying, 'FAILED'::character varying, 'TIMED_OUT'::character varying, 'CANCELLED'::character varying])::text[])) = (finished_at IS NOT NULL))),
     CONSTRAINT ck_agent_runs_input_hash_format CHECK (((input_hash)::text ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -890,6 +891,9 @@ ALTER TABLE ONLY public.agent_runs
 
 ALTER TABLE ONLY public.agent_runs
     ADD CONSTRAINT fk_agent_runs_deploy_request_id_deploy_requests FOREIGN KEY (deploy_request_id) REFERENCES public.deploy_requests(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.agent_runs
+    ADD CONSTRAINT fk_agent_runs_finding_id_findings FOREIGN KEY (finding_id) REFERENCES public.findings(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.agent_runs
     ADD CONSTRAINT fk_agent_runs_organization_id_organizations FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;

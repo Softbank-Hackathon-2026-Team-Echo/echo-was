@@ -180,6 +180,8 @@ def normalize_diagnosis_result(payload: Mapping[str, Any]) -> NormalizedRunResul
 def normalize_run_result(payload: Mapping[str, Any]) -> NormalizedRunResult:
     """검사를 통과한 RunResult(camelCase JSON 값)를 저장할 값으로 바꾼다."""
     result: dict[str, Any] = {key: payload[key] for key in _PASSTHROUGH_KEYS}
+    if payload.get("sbom") is not None:
+        result["sbom"] = payload["sbom"]
     result["findings"] = [_with_confirmation(item) for item in payload["findings"]]
     result["patches"] = [_with_recalculated_status(item) for item in payload["patches"]]
     result["blockedAttempts"] = [

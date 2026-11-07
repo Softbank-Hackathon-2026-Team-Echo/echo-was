@@ -190,6 +190,23 @@ class AgentRunService:
             run = await self._runs.lock_next_queued(now, kinds)
             if run is None:
                 return None
+            from app.core.exceptions import PatchStaleError
+            from app.services.cve_diagnosis_service import check_cve_target
+
+            try:
+                await check_cve_target(self._session, run)
+            except PatchStaleError:
+                await self._runs.fail_queued_cve(run.id, now)
+                record_run_finished(
+                    self._audit,
+                    run,
+                    actor=AuditActor.system(AuditComponent.AI_RUNNER),
+                    status=AgentRunStatus.FAILED,
+                    simulated=False,
+                    ai_reviewed=False,
+                    failure_code="CVE_TARGET_CHANGED",
+                )
+                return None
             token = new_run_token()
             is_claimed = await self._runs.claim(
                 run.id,
@@ -256,6 +273,25 @@ class AgentRunService:
             run = await self._runs.find_by_id(run_id)
             if run is None or run.status not in OPEN_STATUSES:
                 raise ResultAlreadySubmittedError(str(run_id))
+            if run.input_snapshot.get("trigger") == "CVE_WATCH":
+                for patch in normalized.result.get("patches", []):
+                    required = {
+                        "UV_LOCK",
+                        "DOCKER_BUILD",
+                        "TARGET_VERSION",
+                        "TRIVY",
+                        "ADVISORY",
+                        "HEALTHZ",
+                    }
+                    passed = {
+                        check["name"] for check in patch["checks"] if check["result"] == "PASS"
+                    }
+                    if (
+                        not set(patch["files"]) <= {"pyproject.toml", "uv.lock"}
+                        or not required <= passed
+                        or normalized.simulated
+                    ):
+                        raise ResultInvalidError([ErrorField("patches", "CVE_PATCH_NOT_VERIFIED")])
             is_finished = await self._finish_or_expire(
                 run,
                 now,
@@ -271,6 +307,9 @@ class AgentRunService:
             )
             if is_finished:
                 self._record_finished(run, normalized)
+                from app.services.runner_sbom import store_runner_sbom
+
+                store_runner_sbom(self._session, run, normalized, now)
         if not is_finished:
             raise RunNotActiveError(str(run_id))
         logger.info(

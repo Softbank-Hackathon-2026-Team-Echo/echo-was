@@ -36,11 +36,6 @@ from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
 from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.osv import Advisory, AdvisoryFeed, AdvisoryMatch, canonical_advisory_id
 from app.core.clock import Clock
-from app.core.exceptions import (
-    FindingNotFoundError,
-    NotImplementedYetError,
-    RemediationNotAvailableError,
-)
 from app.enums import (
     DependencySnapshotSource,
     RemediationKind,
@@ -69,7 +64,6 @@ SIMULATED_SOURCE_REF_PREFIX = "cve-watch:simulated:"
 AUDIT_FINDING_IDS_LIMIT = 20
 # 조직마다 살아 있는(만료 전) 가짜 CVE 증거 상한. 넘으면 이번 주입이 쓰지 않은 오래된 것부터 지운다.
 SIMULATED_ACTIVE_LIMIT = 20
-DIAGNOSIS_ISSUE_URL = "https://github.com/Softbank-Hackathon-2026-Team-Echo/echo-was/issues/98"
 
 
 @dataclass(frozen=True)
@@ -250,29 +244,6 @@ class CveWatchService:
         )
         await self._audit(organization_id, view, actor_user_id, advisory=advisory)
         return view
-
-    async def request_diagnosis(self, organization_id: uuid.UUID, finding_id: uuid.UUID) -> None:
-        """증거의 고칠 방법으로 AI 진단 실행(CHANGE_PROPOSAL)을 만든다 — 지금은 계약만(501).
-
-        이슈 #98(SPEC api-98)의 CHANGE_PROPOSAL 은 실패한 배포 요청(deploy_request_id)이
-        있어야 한다.
-        CVE 증거에서 시작하려면 agent_runs 에 finding_id 를 더하는 후속이 필요하다(SPEC 2-d).
-        """
-        async with self._session.begin():
-            finding = await self._repository.find_finding(organization_id, finding_id)
-        if finding is None:
-            raise FindingNotFoundError("finding not found", finding_id=str(finding_id))
-        remediation = finding.remediation or {}
-        if remediation.get("kind") != RemediationKind.DEPENDENCY_BUMP or not remediation.get(
-            "toVersion"
-        ):
-            raise RemediationNotAvailableError(
-                "finding has no dependency bump remediation", finding_id=str(finding_id)
-            )
-        raise NotImplementedYetError(
-            "diagnosis run for CVE findings waits for CHANGE_PROPOSAL (issue #98)",
-            issue=DIAGNOSIS_ISSUE_URL,
-        )
 
     # --- 내부 ---
 

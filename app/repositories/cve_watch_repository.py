@@ -2,11 +2,11 @@ import uuid
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import SecurityControlId, SecurityFindingMode, SecurityFindingSource
-from app.models import Finding, ServiceDependencySnapshot
+from app.models import AgentRun, Finding, ServiceDependencySnapshot
 
 
 class CveWatchRepository:
@@ -103,6 +103,7 @@ class CveWatchRepository:
                 Finding.organization_id == organization_id,
                 Finding.source == SecurityFindingSource.CVE_WATCH,
                 Finding.mode == SecurityFindingMode.SIMULATED,
+                ~exists(select(AgentRun.id).where(AgentRun.finding_id == Finding.id)),
                 Finding.expires_at > now,
             )
             .order_by(Finding.collected_at.desc(), Finding.created_at.desc(), Finding.id.desc())

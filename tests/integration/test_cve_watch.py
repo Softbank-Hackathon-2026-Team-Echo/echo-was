@@ -430,10 +430,14 @@ async def test_viewer_cannot_check_or_inject(migration: Migration) -> None:
 # --- AC-4 진단 연결(인터페이스만, #98 병합 전 501) ---
 
 
-async def test_diagnosis_interface_checks_finding_then_answers_not_implemented(
+async def test_diagnosis_creates_real_run_for_current_deployment(
     migration: Migration,
 ) -> None:
     harness = migration.harness
+    harness.use_settings(
+        cve_remediation_enabled=True,
+        cve_remediation_demo_service_ids=(uuid.UUID(migration.service_id),),
+    )
     digest = await _seed(migration)
     body: dict[str, Any] = {
         "advisory": {"ecosystem": "PyPI", "package": "starlette", "introduced": "0", "fixed": None}
@@ -466,9 +470,14 @@ async def test_diagnosis_interface_checks_finding_then_answers_not_implemented(
     for response in (without_remediation, without_fix):
         assert response.status_code == 409
         assert response.json()["code"] == "REMEDIATION_NOT_AVAILABLE"
-    assert pending.status_code == 501, pending.text
-    assert pending.json()["code"] == "NOT_IMPLEMENTED"
-    assert await _audit(migration, AuditAction.CVE_DIAGNOSIS_REQUESTED) == []
+    assert pending.status_code == 201, pending.text
+    data = pending.json()["data"]
+    assert data["kind"] == "CHANGE_PROPOSAL" and data["simulated"] is False
+    assert data["diagnosis"]["findingId"] == fixable_id
+    assert data["diagnosis"]["deployRequestId"] is None
+    assert data["diagnosis"]["syntheticAdvisory"] is True
+    assert (await diagnose(fixable_id)).json()["data"]["id"] == data["id"]
+    assert len(await _audit(migration, AuditAction.CVE_DIAGNOSIS_REQUESTED)) == 1
 
 
 # --- AC-5 빌드 보안 검사 → 의존성 목록 ---

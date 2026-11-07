@@ -1,15 +1,17 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Response
 
 from app.auth.guards import HumanDeveloperAccess
 from app.clients.osv import AdvisoryFeed
 from app.core.config import Settings, get_settings
 from app.core.exceptions import CveWatchDisabledError, CveWatchSimulateNotAllowedError
-from app.dependencies import get_advisory_feed, get_cve_watch_service
+from app.dependencies import get_advisory_feed, get_cve_diagnosis_service, get_cve_watch_service
 from app.schemas.cve_watch import CveWatchInjectRequest, CveWatchRunResponse
+from app.schemas.precheck import PrecheckDetailResponse
 from app.schemas.response import ApiResponse
+from app.services.cve_diagnosis_service import CveDiagnosisService
 from app.services.cve_watch_service import CveWatchService
 
 # CVE 감시(SPEC sec-6-cve-watch). 조회·주입·진단 요청은 개발자 이상 사람만(에이전트 토큰 불가).
@@ -51,12 +53,22 @@ async def inject_cve_advisory(
     return ApiResponse(data=CveWatchRunResponse.from_view(view))
 
 
-@router.post("/findings/{finding_id}/diagnosis", status_code=201)
+@router.post(
+    "/findings/{finding_id}/diagnosis",
+    status_code=201,
+    response_model=ApiResponse[PrecheckDetailResponse],
+)
 async def request_finding_diagnosis(
-    access: HumanDeveloperAccess, finding_id: uuid.UUID, service: CveWatch
-) -> None:
-    """증거의 고칠 방법(DEPENDENCY_BUMP)으로 AI 진단 실행을 만든다.
-
-    이슈 #98(CHANGE_PROPOSAL) 병합 전이라 지금은 404·409 검사 뒤 501 `NOT_IMPLEMENTED` 다.
-    """
-    await service.request_diagnosis(access.organization_id, finding_id)
+    access: HumanDeveloperAccess,
+    finding_id: uuid.UUID,
+    response: Response,
+    settings: CurrentSettings,
+    service: Annotated[CveDiagnosisService, Depends(get_cve_diagnosis_service)],
+) -> ApiResponse[PrecheckDetailResponse]:
+    if not settings.cve_remediation_enabled:
+        raise CveWatchDisabledError("CVE remediation is disabled")
+    view, created = await service.create_diagnosis(
+        access.organization_id, finding_id, access.user.id
+    )
+    response.status_code = 201 if created else 200
+    return ApiResponse(data=PrecheckDetailResponse.from_view(view))

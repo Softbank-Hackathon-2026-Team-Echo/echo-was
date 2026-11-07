@@ -91,7 +91,9 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint(
             f"kind <> '{AgentRunKind.CHANGE_PROPOSAL.value}' OR "
-            "(deploy_request_id IS NOT NULL AND target_environment_id IS NOT NULL)",
+            "(target_environment_id IS NOT NULL AND "
+            "((deploy_request_id IS NOT NULL AND finding_id IS NULL) OR "
+            "(deploy_request_id IS NULL AND finding_id IS NOT NULL)))",
             name="diagnosis_has_deploy_request",
         ),
         CheckConstraint("deadline_at > created_at", name="deadline_after_created"),
@@ -125,6 +127,12 @@ class AgentRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             unique=True,
             postgresql_where=text(f"kind = '{AgentRunKind.CHANGE_PROPOSAL.value}'"),
         ),
+    )
+
+    finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("findings.id", ondelete="RESTRICT"),
+        nullable=True,
+        sort_order=APPENDED_COLUMN_SORT_ORDER + 2,
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(

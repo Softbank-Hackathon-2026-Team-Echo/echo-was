@@ -43,6 +43,7 @@ from app.services.audit_log_service import AuditLogService
 from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
 from app.services.cost_service import CostService
+from app.services.cve_diagnosis_service import CveDiagnosisService
 from app.services.cve_watch_service import CveWatchService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
@@ -654,3 +655,11 @@ def get_cve_watch_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> CveWatchService:
     return CveWatchService(session, clock)
+
+
+def get_cve_diagnosis_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CveDiagnosisService:
+    return CveDiagnosisService(session, clock, settings.cve_remediation_demo_service_ids)

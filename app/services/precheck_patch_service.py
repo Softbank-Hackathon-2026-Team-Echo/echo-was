@@ -142,6 +142,9 @@ class PrecheckPatchService:
             if approval is None:
                 _check_not_stale(run, stored, patch_hash, now)
                 if is_approval:
+                    from app.services.cve_diagnosis_service import check_cve_target
+
+                    await check_cve_target(self._session, run)
                     await self._check_self_approval(run, actor_user_id)
                     await self._check_no_open_run(run, now)
                 approval, is_new = await self._insert_decision(
@@ -335,6 +338,25 @@ def _build_apply_run(
             "environmentId": str(run.target_environment_id),
             "sourceCommitSha": deploy_request.get("commitSha"),
         }
+    if run.input_snapshot.get("trigger") == "CVE_WATCH":
+        snapshot.update(
+            {
+                key: run.input_snapshot[key]
+                for key in (
+                    "trigger",
+                    "finding",
+                    "remediation",
+                    "service",
+                    "environment",
+                    "imageDigest",
+                    "imageRef",
+                    "sourceCommitSha",
+                    "currentDeployment",
+                )
+            }
+        )
+        snapshot["repo"] = run.input_snapshot["service"]["repo"]
+        snapshot["diagnosis"] = {"sourceCommitSha": run.input_snapshot["sourceCommitSha"]}
     masked: dict[str, Any] = mask_secrets_in_json(snapshot)
     apply_run = AgentRun(
         id=apply_run_id,

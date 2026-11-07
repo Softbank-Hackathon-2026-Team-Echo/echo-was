@@ -895,6 +895,7 @@ class DiagnosisCategory(StrEnum):
     BUILD = "BUILD"
     RUNTIME = "RUNTIME"
     PLATFORM = "PLATFORM"
+    DEPENDENCY = "DEPENDENCY"
 
 
 class DiagnosisEvidenceSource(StrEnum):
@@ -903,6 +904,7 @@ class DiagnosisEvidenceSource(StrEnum):
     LOG = "LOG"
     FILE = "FILE"
     CONFIG = "CONFIG"
+    ADVISORY = "ADVISORY"
 
 
 class AgentRunFailureCode(StrEnum):

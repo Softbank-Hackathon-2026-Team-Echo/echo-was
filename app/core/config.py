@@ -1,4 +1,5 @@
 import re
+import uuid
 from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Literal
@@ -307,6 +308,8 @@ class Settings(BaseSettings):
     # OSV 로 조회해 새 HIGH·CRITICAL 취약점을 C-IMG-1 증거(source CVE_WATCH)로 남기고, 즉시 조회
     # API(`POST /security/cve-watch:check`)도 열린다. 끄면 둘 다 없다(조회 API 409).
     cve_watch_enabled: bool = False
+    cve_remediation_enabled: bool = False
+    cve_remediation_demo_service_ids: tuple[uuid.UUID, ...] = ()
     cve_watch_interval_seconds: int = Field(default=21600, ge=300, le=86400)
     # 가짜 권고 주입 API(`POST /security/cve-watch:inject`, simulated 증거 — 판정에 쓰지 않음).
     cve_watch_simulate_enabled: bool = True

@@ -32,6 +32,7 @@ from app.core.exceptions import (
     AppError,
     DeployNotFailedError,
     DeployRequestNotFoundError,
+    PatchStaleError,
     PrecheckInProgressError,
     ServiceDeletingError,
     SimulateNotAllowedError,
@@ -274,11 +275,34 @@ class DiagnosisService:
             if REDEPLOY_REQUEST_ID_KEY in (apply_run.result or {}):
                 return await self._runs.find_by_id(apply_run_id)
             parent = await self._runs.find_by_id(apply_run.parent_run_id)
-            if parent is None or parent.deploy_request_id is None:
+            if parent is None:
                 return None
-            failed = await self._deploy_requests.find_by_id(parent.deploy_request_id)
+            from app.services.cve_diagnosis_service import current_cve_request
+
+            try:
+                failed = await current_cve_request(self._session, parent)
+            except PatchStaleError:
+                await self._runs.patch_result(
+                    apply_run_id,
+                    self._clock.now(),
+                    {
+                        REDEPLOY_REQUEST_ID_KEY: None,
+                        REDEPLOY_REJECTED_CODE_KEY: "CVE_TARGET_CHANGED",
+                    },
+                )
+                return await self._runs.find_by_id(apply_run_id)
             if failed is None:
                 return None
+            if parent.finding_id is not None and repo_commit_sha is None:
+                await self._runs.patch_result(
+                    apply_run_id,
+                    self._clock.now(),
+                    {
+                        REDEPLOY_REQUEST_ID_KEY: None,
+                        REDEPLOY_REJECTED_CODE_KEY: "REPO_WRITE_UNAVAILABLE",
+                    },
+                )
+                return await self._runs.find_by_id(apply_run_id)
             # savepoint 를 되돌리면 그 안에서 바꾼 객체가 만료될 수 있으므로 필요한 값을 먼저 뺀다.
             organization_id = apply_run.organization_id
             actor_user_id = apply_run.requested_by_user_id

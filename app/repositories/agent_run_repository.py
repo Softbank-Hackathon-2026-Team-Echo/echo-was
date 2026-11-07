@@ -328,6 +328,20 @@ class AgentRunRepository:
             },
         )
 
+    async def fail_queued_cve(self, run_id: uuid.UUID, now: datetime) -> bool:
+        return await update_where(
+            self._session,
+            AgentRun,
+            run_id,
+            [AgentRun.status == AgentRunStatus.QUEUED],
+            {
+                "status": AgentRunStatus.FAILED,
+                "failure_code": "CVE_TARGET_CHANGED",
+                "finished_at": now,
+                "updated_at": now,
+            },
+        )
+
     async def finish(self, run_id: uuid.UUID, now: datetime, values: dict[str, Any]) -> bool:
         """러너의 결과를 적는다. 임대·마감이 남아 있을 때만."""
         return await update_where(

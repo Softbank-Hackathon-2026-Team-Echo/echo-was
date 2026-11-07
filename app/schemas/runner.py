@@ -449,6 +449,16 @@ class RunResultRequest(ApiRequestModel):
         list[RunBlockedAttemptRequest], Field(max_length=MAX_BLOCKED_ATTEMPTS)
     ] = []
     diagnosis: RunDiagnosisRequest | None = None
+    sbom: dict[str, Any] | None = None
+
+    @field_validator("sbom")
+    @classmethod
+    def _check_sbom(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            from app.services.runner_sbom import validate_sbom
+
+            validate_sbom(value)
+        return value
 
     @model_validator(mode="after")
     def _check_failure_code_and_patch_ids(self) -> Self:
