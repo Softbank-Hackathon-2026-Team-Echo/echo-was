@@ -1,25 +1,12 @@
-"""보안 게이트(보안·거버넌스 5): 이전 승인 때와 일꾼 실행 시작 때 같은 판정을 한다.
+"""이전 승인·실행 시작의 보안 게이트.
 
-판정 한 번의 순서. 네트워크(TLS 접속 시험)는 트랜잭션 밖에서 한다.
-1. 짧은 읽기 트랜잭션: 계획·서비스·조직·출발/도착 연결·두 현재 배포, 조직의 유효한 증거,
-   기한부 예외(승인됐고 철회되지 않은 것), 24시간 안의 AI 사전 점검.
-2. 트랜잭션 밖: 실행 직전 증거를 만든다.
-   - C-IMG-3: 두 현재 배포의 digest 비교(WAS 상태).
-   - C-SEC-1: 출발 연결의 앱 환경 변수 키가 도착 연결에 모두 있는가(WAS 상태, 키만. 1번에서 읽음).
-   - C-TLS-1: 대표 주소·도착 환경 주소 TLS 접속 시험(Echo 가 만든 공개 주소만, 통제 시간 예산 안).
-3. 새 증거를 findings 에 남기고(짧은 쓰기 트랜잭션) 규칙표로 실행(EXECUTION) 판정을 한다.
-   C-IMG-3·C-TLS-1·C-SEC-1(WAS 상태) 은 방금 만든 증거만 쓴다(이전 판정의 결과가 남아 다시 막지
-   않게). C-SEC-1 의 사람 점검 기록은 저장된 것을 그대로 쓴다.
-
-이 모듈은 계획 상태를 바꾸지 않는다. 부르는 쪽(승인·일꾼 시작)이 서비스를 잠근 트랜잭션 안에서
-판정을 실행 로그 줄(`gate_log_data`)로 남기고, 막혔으면 승인은 409, 실행 시작은 FAILED 로 끝낸다.
-계획을 만든 뒤 바뀐 상태(현재 배포·환경 설정)는 지문이 잡는다.
-
-- C-AI-1 은 같은 조직·서비스·출발·도착의 24시간 안에 성공한 실제 사전 점검 중 최신 실행을
-  쓴다(증거 ID = 실행 ID). 실제 실행이 없을 때 모의 실행은 차단 사유 설명에만 쓴다.
-- 게이트 설정이 꺼져 있으면 이 모듈을 만들지 않는다(판정·기록·네트워크 없음).
+공통 계획/연결/예외는 값으로 읽고, 통제별 읽기·실행 검사를 독립 트랜잭션으로 수행한다.
+규칙표에 실행 예산이 있는 통제는 조회·변환·검사 전체에 적용한다. 초과 시 해당 읽기를
+취소·롤백하고 CONTROL_TIMEOUT/UNKNOWN으로 판정한다. 일부 결과·옛 PASS는 재사용하지 않는다.
+TLS 네트워크는 DB 트랜잭션 밖에서 실행한다. 새 증거 저장·계획 상태 변경은 별도 경계다.
 """
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +25,7 @@ from app.enums import (
     SecurityControlId,
     SecurityFindingMode,
     SecurityFindingSource,
+    SecurityReasonCode,
     SecurityResult,
 )
 from app.models import AgentRun
@@ -55,6 +43,7 @@ from app.repositories.service_repository import ServiceRepository
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import SecurityFindingService, to_security_finding
 from app.services.security_normalizers import (
+    NormalizedFinding,
     normalize_image_match,
     normalize_secret_delivery,
     normalize_tls_probes,
@@ -62,6 +51,7 @@ from app.services.security_normalizers import (
 from app.services.security_rules import (
     EXCEPTION_MAX_DURATION,
     POLICY_VERSION,
+    RULES,
     SecurityDecision,
     SecurityException,
     SecurityFinding,
@@ -69,6 +59,7 @@ from app.services.security_rules import (
     SecurityTarget,
     evaluate_security,
     get_rule,
+    is_evaluated_in,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,23 +95,37 @@ def build_public_tls_checker(settings: Settings) -> PublicHostTlsChecker | None:
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """판정에 필요한 값(읽기 트랜잭션에서 한 번에 읽은 것)."""
+    """취소·롤백으로 ORM이 만료되어도 쓸 수 있는 계획 값."""
 
     plan_id: uuid.UUID
     plan_mode: MigrationPlanMode
     organization_id: uuid.UUID
     allow_self_approval: bool
     service_id: uuid.UUID
+    source_connection_id: uuid.UUID | None
+    target_connection_id: uuid.UUID | None
+    source_environment_id: uuid.UUID | None
     target_environment_id: uuid.UUID | None
     target_environment_kind: str
-    source_digest: str | None
-    target_digest: str | None
-    # 출발·도착 연결의 살아 있는 앱 환경 변수 키(값 없음).
-    source_secret_keys: frozenset[str]
-    target_secret_keys: frozenset[str]
+    source_deployment_id: uuid.UUID | None
+    target_deployment_id: uuid.UUID | None
     hosts: tuple[str, ...]
-    findings: list[SecurityFinding] = field(default_factory=list)
     exceptions: list[SecurityException] = field(default_factory=list)
+
+    @property
+    def target_scope(self) -> SecurityScope:
+        return SecurityScope(
+            self.organization_id,
+            service_id=self.service_id,
+            environment_id=self.target_environment_id,
+        )
+
+
+@dataclass(frozen=True)
+class _ControlCheck:
+    findings: list[SecurityFinding] = field(default_factory=list)
+    fresh: list[NormalizedFinding] = field(default_factory=list)
+    target_digest: str | None = None
 
 
 class SecurityGate:
@@ -138,37 +143,41 @@ class SecurityGate:
         self._findings = SecurityFindingService(session)
 
     async def evaluate_plan(self, plan_id: uuid.UUID) -> SecurityDecision:
-        """계획 하나의 실행 판정. 열린 트랜잭션 밖에서 부른다(안에서 트랜잭션을 연다)."""
+        """계획 하나의 실행 판정. 열린 트랜잭션 밖에서 부른다."""
         snapshot = await self._read_snapshot(plan_id)
-        probes = await self._tls_checker.check_hosts(snapshot.hosts)
-        now = self._clock.now()
-        image_match = normalize_image_match(
-            snapshot.source_digest,
-            snapshot.target_digest,
-            scope=SecurityScope(snapshot.organization_id, service_id=snapshot.service_id),
-            collected_at=now,
-        )
-        target_scope = SecurityScope(
-            snapshot.organization_id,
-            service_id=snapshot.service_id,
-            environment_id=snapshot.target_environment_id,
-        )
-        tls = normalize_tls_probes(probes, scope=target_scope, collected_at=now)
-        secret_delivery = normalize_secret_delivery(
-            snapshot.source_secret_keys,
-            snapshot.target_secret_keys,
-            scope=target_scope,
-            collected_at=now,
-        )
-        await self._findings.record_all(
-            [image_match, tls, secret_delivery], source_ref=f"migration-plan:{plan_id}"
-        )
+        findings: list[SecurityFinding] = []
+        fresh: list[NormalizedFinding] = []
+        timed_out: set[SecurityControlId] = set()
+        target_digest: str | None = None
+
+        # 이미지 범위에 필요한 digest를 먼저 읽는다. 같은 세션의 DB 작업은 병렬로 돌리지 않는다.
+        controls = [
+            SecurityControlId.IMG_3,
+            *(
+                rule.control_id
+                for rule in RULES
+                if rule.control_id != SecurityControlId.IMG_3
+                and is_evaluated_in(rule, SecurityCheckPhase.EXECUTION)
+            ),
+        ]
+        for control in controls:
+            check = await self._check_with_budget(control, snapshot)
+            if check is None:
+                timed_out.add(control)
+                continue
+            findings.extend(check.findings)
+            fresh.extend(check.fresh)
+            findings.extend(item.finding for item in check.fresh)
+            if control == SecurityControlId.IMG_3:
+                target_digest = check.target_digest
+
+        await self._findings.record_all(fresh, source_ref=f"migration-plan:{plan_id}")
         target = SecurityTarget(
             scope=SecurityScope(
                 snapshot.organization_id,
                 service_id=snapshot.service_id,
                 environment_id=snapshot.target_environment_id,
-                image_digest=snapshot.target_digest,
+                image_digest=target_digest,
                 was_version=self._was_version,
             ),
             environment_kind=snapshot.target_environment_kind,
@@ -177,15 +186,11 @@ class SecurityGate:
         decision = evaluate_security(
             target,
             SecurityCheckPhase.EXECUTION,
-            [
-                *(f for f in snapshot.findings if not is_rechecked(f)),
-                image_match.finding,
-                tls.finding,
-                secret_delivery.finding,
-            ],
+            findings,
             snapshot.exceptions,
-            now,
+            self._clock.now(),
             plan_mode=snapshot.plan_mode,
+            timed_out_controls=frozenset(timed_out),
         )
         logger.info(
             "security gate evaluated",
@@ -195,9 +200,127 @@ class SecurityGate:
                 "is_blocked": decision.is_blocked,
                 "policy_version": decision.policy_version,
                 "blocking_control_ids": [r.control_id.value for r in decision.blocking_reasons],
+                "timed_out_control_ids": sorted(control.value for control in timed_out),
             },
         )
         return decision
+
+    async def _check_with_budget(
+        self, control: SecurityControlId, snapshot: _Snapshot
+    ) -> _ControlCheck | None:
+        budget = get_rule(control).time_budget
+        if budget is None:
+            return await self._check_control(control, snapshot)
+        deadline = asyncio.timeout(budget.total_seconds())
+        try:
+            async with deadline:
+                result = await self._check_control(control, snapshot)
+            # 동기 변환 때문에 취소 콜백이 늦어져도 예산을 넘긴 결과는 채택하지 않는다.
+            ends_at = deadline.when()
+            if ends_at is not None and asyncio.get_running_loop().time() >= ends_at:
+                return None
+            return result
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            return None
+
+    async def _check_control(
+        self, control: SecurityControlId, snapshot: _Snapshot
+    ) -> _ControlCheck:
+        if control == SecurityControlId.TLS_1:
+            probes = await self._tls_checker.check_hosts(snapshot.hosts)
+            return _ControlCheck(
+                fresh=[
+                    normalize_tls_probes(
+                        probes, scope=snapshot.target_scope, collected_at=self._clock.now()
+                    )
+                ]
+            )
+
+        # 타임아웃은 이 블록 바깥에서 처리하여 취소된 DB 트랜잭션을 먼저 롤백한다.
+        async with self._session.begin():
+            now = self._clock.now()
+            if control == SecurityControlId.IMG_3:
+                deployments = DeploymentRepository(self._session)
+                source = (
+                    await deployments.find_by_id(snapshot.source_deployment_id)
+                    if snapshot.source_deployment_id is not None
+                    else None
+                )
+                target = (
+                    await deployments.find_by_id(snapshot.target_deployment_id)
+                    if snapshot.target_deployment_id is not None
+                    else None
+                )
+                target_digest = target.image_digest if target is not None else None
+                return _ControlCheck(
+                    fresh=[
+                        normalize_image_match(
+                            source.image_digest if source is not None else None,
+                            target_digest,
+                            scope=SecurityScope(
+                                snapshot.organization_id, service_id=snapshot.service_id
+                            ),
+                            collected_at=now,
+                        )
+                    ],
+                    target_digest=target_digest,
+                )
+
+            # 다시 계산할 옛 상태 증거는 읽지 않는다. 상한으로 유효 FAIL을 버리지 않는다.
+            models = await FindingRepository(self._session).search_unexpired_by_organization(
+                snapshot.organization_id,
+                now,
+                control_id=control,
+                excluded_sources=(
+                    (SecurityFindingSource.WAS_STATE,) if control == SecurityControlId.SEC_1 else ()
+                ),
+            )
+            findings = [to_security_finding(model) for model in models]
+            if control == SecurityControlId.SEC_1:
+                keys = await ServiceEnvironmentVariableRepository(
+                    self._session
+                ).search_live_keys_by_connections(
+                    connection_id
+                    for connection_id in (
+                        snapshot.source_connection_id,
+                        snapshot.target_connection_id,
+                    )
+                    if connection_id is not None
+                )
+                return _ControlCheck(
+                    findings=findings,
+                    fresh=[
+                        normalize_secret_delivery(
+                            keys.get(snapshot.source_connection_id, frozenset())
+                            if snapshot.source_connection_id is not None
+                            else frozenset(),
+                            keys.get(snapshot.target_connection_id, frozenset())
+                            if snapshot.target_connection_id is not None
+                            else frozenset(),
+                            scope=snapshot.target_scope,
+                            collected_at=now,
+                        )
+                    ],
+                )
+            if (
+                control == SecurityControlId.AI_1
+                and snapshot.source_environment_id is not None
+                and snapshot.target_environment_id is not None
+            ):
+                precheck = await AgentRunRepository(self._session).find_latest_succeeded_precheck(
+                    snapshot.service_id,
+                    snapshot.target_environment_id,
+                    now - get_rule(control).max_age,
+                    organization_id=snapshot.organization_id,
+                    source_environment_id=snapshot.source_environment_id,
+                )
+                if precheck is not None and precheck.finished_at is not None:
+                    findings.append(
+                        _precheck_finding(precheck, precheck.finished_at, snapshot.organization_id)
+                    )
+            return _ControlCheck(findings=findings)
 
     async def _read_snapshot(self, plan_id: uuid.UUID) -> _Snapshot:
         async with self._session.begin():
@@ -213,45 +336,11 @@ class SecurityGate:
             connections = ServiceEnvironmentRepository(self._session)
             source = await connections.find_by_id(plan.source_service_environment_id)
             target = await connections.find_by_id(plan.target_service_environment_id)
-            deployments = DeploymentRepository(self._session)
-            source_deployment = (
-                await deployments.find_by_id(source.current_deployment_id)
-                if source is not None and source.current_deployment_id is not None
-                else None
-            )
-            target_deployment = (
-                await deployments.find_by_id(target.current_deployment_id)
-                if target is not None and target.current_deployment_id is not None
-                else None
-            )
-            secret_keys = await ServiceEnvironmentVariableRepository(
-                self._session
-            ).search_live_keys_by_connections(
-                connection.id for connection in (source, target) if connection is not None
-            )
-            now = self._clock.now()
-            finding_models = await FindingRepository(
-                self._session
-            ).search_unexpired_by_organization(service.organization_id, now)
             exception_models = await SecurityExceptionRepository(
                 self._session
-            ).search_for_judgement(service.organization_id, now - EXCEPTION_MAX_DURATION)
-            precheck = (
-                await AgentRunRepository(self._session).find_latest_succeeded_precheck(
-                    service.id,
-                    target.environment_id,
-                    now - get_rule(SecurityControlId.AI_1).max_age,
-                    organization_id=service.organization_id,
-                    source_environment_id=source.environment_id,
-                )
-                if source is not None and target is not None
-                else None
+            ).search_for_judgement(
+                service.organization_id, self._clock.now() - EXCEPTION_MAX_DURATION
             )
-            findings = [to_security_finding(model) for model in finding_models]
-            if precheck is not None and precheck.finished_at is not None:
-                findings.append(
-                    _precheck_finding(precheck, precheck.finished_at, service.organization_id)
-                )
             return _Snapshot(
                 plan_id=plan.id,
                 plan_mode=MigrationPlanMode(plan.mode),
@@ -262,20 +351,16 @@ class SecurityGate:
                 service_id=service.id,
                 target_environment_id=target.environment_id if target is not None else None,
                 target_environment_kind=target.environment.kind if target is not None else "",
-                source_digest=source_deployment.image_digest if source_deployment else None,
-                target_digest=target_deployment.image_digest if target_deployment else None,
-                source_secret_keys=(
-                    secret_keys.get(source.id, frozenset()) if source is not None else frozenset()
-                ),
-                target_secret_keys=(
-                    secret_keys.get(target.id, frozenset()) if target is not None else frozenset()
-                ),
+                source_connection_id=source.id if source is not None else None,
+                target_connection_id=target.id if target is not None else None,
+                source_environment_id=source.environment_id if source is not None else None,
+                source_deployment_id=source.current_deployment_id if source is not None else None,
+                target_deployment_id=target.current_deployment_id if target is not None else None,
                 hosts=tuple(
                     host
                     for host in (service.public_host, target.public_host if target else None)
                     if host
                 ),
-                findings=findings,
                 exceptions=[to_security_exception(model) for model in exception_models],
             )
 
@@ -324,6 +409,11 @@ def gate_log_data(decision: SecurityDecision) -> dict[str, Any]:
         ],
         LOG_FINDING_IDS: [str(finding_id) for finding_id in decision.finding_ids],
         LOG_EXCEPTION_IDS: [str(exception_id) for exception_id in decision.exception_ids],
+        "timedOutControlIds": [
+            control.control_id.value
+            for control in decision.controls
+            if SecurityReasonCode.CONTROL_TIMEOUT in control.reasons
+        ],
     }
 
 

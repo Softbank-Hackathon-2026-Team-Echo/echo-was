@@ -489,10 +489,20 @@ def evaluate_security(
     exceptions: Sequence[SecurityException],
     now: datetime,
     plan_mode: MigrationPlanMode | None = None,
+    *,
+    timed_out_controls: frozenset[SecurityControlId] = frozenset(),
 ) -> SecurityDecision:
     """그 시점에 보는 모든 통제를 판정한다. 필수 통제 하나라도 막히면 `is_blocked`."""
     controls = tuple(
-        evaluate_control(rule, target, phase, findings, exceptions, now)
+        evaluate_control(
+            rule,
+            target,
+            phase,
+            findings,
+            exceptions,
+            now,
+            timed_out=rule.control_id in timed_out_controls,
+        )
         for rule in RULES
         if is_evaluated_in(rule, phase)
     )
@@ -506,6 +516,8 @@ def evaluate_control(
     findings: Sequence[SecurityFinding],
     exceptions: Sequence[SecurityException],
     now: datetime,
+    *,
+    timed_out: bool = False,
 ) -> SecurityControlDecision:
     if target.environment_kind in rule.not_applicable_kinds:
         return SecurityControlDecision(
@@ -527,7 +539,8 @@ def evaluate_control(
     rule_findings: list[SecurityFinding] = []
     ai_findings: list[SecurityFinding] = []
     rejections: list[SecurityReasonCode] = []
-    for finding in findings:
+    # 예산을 넘긴 검사는 일부 결과·과거 PASS·AI 결과를 재사용하지 않는다.
+    for finding in () if timed_out else findings:
         if finding.control_id != rule.control_id:
             continue
         rejection = _find_rejection(rule, target, finding, max_age, now)
@@ -539,7 +552,10 @@ def evaluate_control(
             rule_findings.append(finding)
 
     reasons: list[SecurityReasonCode] = []
-    if rule_findings:
+    if timed_out:
+        rule_result = SecurityResult.UNKNOWN
+        reasons.append(SecurityReasonCode.CONTROL_TIMEOUT)
+    elif rule_findings:
         rule_result = _worst(finding.result for finding in rule_findings)
         if rule_result in _RESULT_REASON:
             reasons.append(_RESULT_REASON[rule_result])
