@@ -12,6 +12,7 @@
 - [x] appTraffic/dbCutover/disasterPromote/failback·신선도·구체 차단사유 구분. API 실행 준비는 false.
 - [x] 실제 create_plan의 snapshot 저장, approve_plan의 재검사·NOT_READY 거절. OFF로 내린 bound 계획도 거절.
 - [x] 실제 worker 시작·RUNNING 재개·DB Job 직전 재검사. 유효/변경/다른 tenant/writer 불일치/stale/누락/OFF를 외부 송신 전에 차단.
+- [x] 저장된 bound ROLLING_BACK 재개도 복구 요청·대상 생성·lease extend 전에 pair 재검사. 무효/NOT_READY는 FAILED / SKIPPED로 사람 확인 종료. snapshot 없는 OFF legacy 롤백 보존. 실제 역방향 writer 복구 허가는 아니며 실엔진 rollback 정책·인수는 별도 미검증이다.
 - [x] 명시쌍 Job 요청·manifest·재부착의 지문 보존을 정적 fixture로 확인. 실제 Kubernetes 시작은 NOT_READY 거절.
 - [x] 실제 worker JUDGE의 쌍 대조. ALREADY_WRITER도 receipt 없으면 성공 금지. 정합성 검사 유지.
 - [x] DB 없는 선택 시험이 실제 실행됨을 JUnit으로 확인. 전체 회귀·ruff·format·mypy와 기준선 비교는 PR/RESULT의 실제 수를 기준으로 한다.

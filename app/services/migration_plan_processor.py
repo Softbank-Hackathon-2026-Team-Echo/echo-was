@@ -1550,6 +1550,15 @@ class MigrationPlanProcessor:
 
     async def _roll_back(self, plan: MigrationPlan) -> JobOutcome | None:
         """출발 100%·도착 0% 를 한 번 시도한다. 실패하면 poll 간격 뒤 다시, 최대 횟수면 FAILED."""
+        if self._pair_guard_required(plan):
+            async with self._session.begin():
+                locked = await self._lock()
+                plan = locked.plan
+                if plan.status != MigrationPlanStatus.ROLLING_BACK:
+                    return None
+                # 단계1의 NOT_READY 차단이다. 향후 역방향 writer·복구 계약을 대신하지 않는다.
+                if not await self._check_pair_execution(locked):
+                    return self._closed()
         max_attempts = self._settings.migration_rollback_max_attempts
         attempt = plan.rollback_attempts
         if attempt >= max_attempts:
@@ -1681,7 +1690,10 @@ class MigrationPlanProcessor:
             if status is MigrationPlanStatus.APPROVED
             else MigrationRollbackStatus.FAILED
         )
-        if pair_reason is not None and status is MigrationPlanStatus.RUNNING:
+        if pair_reason is not None and status in (
+            MigrationPlanStatus.RUNNING,
+            MigrationPlanStatus.ROLLING_BACK,
+        ):
             rollback_status = MigrationRollbackStatus.SKIPPED
         if await self._plans.transition(
             plan.id,

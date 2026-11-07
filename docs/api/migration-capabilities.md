@@ -9,7 +9,9 @@
 
 ON이면 생성 때 snapshot을 고정하고 승인·worker 시작·RUNNING 재개(아직 Job을 요청하지 않은 상태)·DB Job 요청 직전에 조직/서비스/환경/배포·등록표 해시·writer·증거 신선도를 재검사한다. 유효한 쌍도 현 이미지·VAP·엔진의 명시 DB쌍 계약이 없으므로 승인 및 실행은 `DB_PAIR_WORKER_NOT_READY`로 차단한다. API의 `executionReady`는 항상 false다. 이것을 true로 바꾸는 운영 설정은 없다.
 
-worker 차단은 외부 TLS 시험·트래픽 변경·Job 송신보다 먼저 실행한다. 시작 전이면 FAILED, rollbackStatus=NOT_NEEDED. RUNNING 상태의 방어 차단이면 FAILED, rollbackStatus=SKIPPED이며 자동 트래픽/DB 롤백을 하지 않는다. 기존 errorCode `DB_CUTOVER_UNKNOWN`, 실행 로그 `FAILED.data.migrationPairReason`에 구체 사유를 남기고 기존 종료 감사 경로를 사용한다. 이미 요청했을 수 있는 Job은 기존 OBSERVE/JUDGE로 추적하며 쌍 증거 없는 결과를 성공으로 인정하지 않는다.
+worker 차단은 외부 TLS 시험·트래픽 변경·Job 송신보다 먼저 실행한다. 시작 전이면 FAILED, rollbackStatus=NOT_NEEDED. RUNNING 또는 저장된 bound ROLLING_BACK 상태의 방어 차단이면 FAILED, rollbackStatus=SKIPPED이며 사람 확인이 필요하다. ROLLING_BACK 재개도 잠금 안에서 pair 정책을 먼저 검사하고 무효/NOT_READY이면 복구 요청 시각·재시도/포기 전이·대상 생성·lease extend·트래픽/DB 호출 전에 종료한다. OFF만으로 저장된 snapshot 검사를 없애지 않으며 snapshot 없는 OFF legacy 롤백은 유지한다. 자동 트래픽/DB 롤백을 하지 않는다. 기존 errorCode `DB_CUTOVER_UNKNOWN`, 실행 로그 `FAILED.data.migrationPairReason`에 구체 사유를 남기고 기존 종료 감사 경로를 사용한다. 이미 요청했을 수 있는 Job은 기존 OBSERVE/JUDGE로 추적하며 쌍 증거 없는 결과를 성공으로 인정하지 않는다.
+
+이 ROLLING_BACK 검사는 executionReady=false인 1단계 안전 차단이며 실제 역방향 복구 허가가 아니다. writer가 이미 바뀐 상태를 원래 source writer라고 가정해 100/0으로 고정 복구하지 않는다. 향후 실행 준비를 열기 전에는 현재 writer·원래/역방향 DB쌍·진행 중 Job·receipt·fencing·트래픽 목적지를 다루는 별도 rollback 계약과 실엔진 검증이 필요하다. 현재 정상 API 승인 경로에서 bound ROLLING_BACK에 도달한다는 증거는 없으며 DB Job 우회를 수정했다는 뜻도 아니다.
 
 ## 조회 API
 
