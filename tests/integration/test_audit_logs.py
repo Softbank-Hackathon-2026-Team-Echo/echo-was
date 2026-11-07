@@ -144,12 +144,13 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 41
+    assert len(WRITE_ROUTE_ACTIONS) == 43
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 41개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
-# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개 + 사람 점검 1개) ---
+# --- AC-2: 쓰기 43개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개 + 사람 점검 1개
+# + 시연 스냅샷·복귀 2개) ---
 
 
 @dataclass
@@ -213,6 +214,43 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
     client = harness.client
     ledger = _Ledger(harness)
     await ledger.skip()
+
+    # 시연 스냅샷·복귀(깨끗한 처음 상태에서). 스냅샷 줄의 details 는 스냅샷 자체다. 복귀는 기존
+    # 함수가 자기 줄(계획 취소)을 쓰고, 조치가 있었으니 마지막에 DEMO_RESTORE 한 줄을 더한다.
+    snapshot = await client.post(org_path(team_id, "/demo/snapshot"))
+    assert snapshot.status_code == 201, snapshot.text
+    (snapshot_row,) = await ledger._new_user_rows()
+    assert (snapshot_row.action, str(snapshot_row.id)) == (
+        AuditAction.DEMO_SNAPSHOT,
+        _data(snapshot)["id"],
+    )
+    assert (snapshot_row.target_type, snapshot_row.target_id, snapshot_row.target_label) == (
+        "organization",
+        team_id,
+        harness.organization.name,
+    )
+    assert snapshot_row.route == ROUTE_BY_ACTION[AuditAction.DEMO_SNAPSHOT]
+    assert list(snapshot_row.details) == ["snapshot"]
+    ledger.seen.add(AuditAction.DEMO_SNAPSHOT)
+    demo_plan = await migration.create_plan()
+    await ledger.skip()
+    restored = await client.post(org_path(team_id, "/demo/restore"))
+    assert restored.status_code == 200, restored.text
+    restore_rows = await ledger._new_user_rows()
+    assert [row.action for row in restore_rows] == [
+        AuditAction.MIGRATION_PLAN_CANCELLED,
+        AuditAction.DEMO_RESTORE,
+    ]
+    assert str(restore_rows[0].target_id) == demo_plan["id"]
+    restore_row = restore_rows[1]
+    assert (restore_row.actor_user_id, restore_row.target_id) == (admin.user.id, team_id)
+    assert restore_row.route == ROUTE_BY_ACTION[AuditAction.DEMO_RESTORE]
+    assert restore_row.details["snapshotId"] == _data(snapshot)["id"]
+    assert restore_row.details["changedItems"] == 1
+    assert restore_row.details["steps"]["MIGRATION_PLANS"] == "DONE"
+    ledger.seen.add(AuditAction.DEMO_RESTORE)
+    # 아무것도 바뀌지 않은 두 번째 복귀는 줄을 쓰지 않는다.
+    await ledger.expect_none(await client.post(org_path(team_id, "/demo/restore")))
 
     # 조직
     created = await client.post("/api/v1/orgs", json={"slug": "acme-co", "name": "Acme"})
@@ -855,7 +893,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 41개 가운데 40개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 43개 가운데 42개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
     # 환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)

@@ -78,7 +78,7 @@
 
 | 경우 | 행위자 | 트랜잭션 | 결과 |
 |---|---|---|---|
-| 조직 안 쓰기 41개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개·실제 재난 피드 2개·CVE 감시 3개·사람 점검 기록 1개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
+| 조직 안 쓰기 43개 경로(기한부 예외 3개·AI 사전 점검 4개·재난 2개·변수 복사 1개·배포 실패 진단 1개·실제 재난 피드 2개·CVE 감시 3개·사람 점검 기록 1개·시연 스냅샷·복귀 2개 포함) + 초대 적용 | `USER` | 그 작업과 같은 트랜잭션 | `SUCCEEDED` |
 | 배포 요청·이전 계획·서비스 삭제의 끝 | `SYSTEM` | 끝 상태를 저장하는 같은 트랜잭션 | 끝 상태가 `SUCCEEDED` 면 `SUCCEEDED`, 그 밖은 `FAILED` |
 | AI 실행 가져가기·결과 제출·시간 초과 | `SYSTEM`(`ai-runner`) | 그 상태 변경과 같은 트랜잭션 | 가져가기 `SUCCEEDED`, 결과는 실행 상태대로, 시간 초과 `FAILED` |
 | 403 거부 | `USER`·`AGENT` | 요청과 따로 커밋 | `DENIED` |
@@ -131,6 +131,8 @@
 | `DISASTER_ENDED` | `POST /disasters/{id}/end` | `disaster` | `{}` |
 | `DISASTER_EVACUATION_REQUESTED` | `POST /disasters/{id}/evacuate`(API 서버 18) | `disaster` | `{source, plans: [{serviceId, planId, outcome, reason}]}` |
 | `DISASTER_FEED_INJECTED` | `POST /disasters/feed:inject`(API 서버 18) | 만든 `disaster` 또는 `organization`(못 만들었을 때) | `{feedEventId, magnitude, epicenter, matched, reason}` |
+| `DEMO_SNAPSHOT` | `POST /demo/snapshot`(이 줄이 스냅샷 저장 그 자체, [demo-snapshot.md](demo-snapshot.md)) | `organization` | `{snapshot}` |
+| `DEMO_RESTORE` | `POST /demo/restore`(dryRun 이 아니고 조치가 있었을 때만. 기존 함수의 줄이 앞에 따로 남는다) | `organization` | `{snapshotId, restored, callAgain, steps, changedItems}` |
 | `DISASTER_DECLARED`(SYSTEM `live-disaster-feed`) | 실제 지진 피드·시연 주입이 재난을 만듦 | `disaster` | `{source, feedEventId, magnitude, place, radiusKm, minMagnitude, nearestDistanceKm, affectedEnvironmentIds, evacuation}` |
 | `AGENT_RUN_CLAIMED` | `POST /api/v1/runner/runs:claim` 이 실행을 줌(SYSTEM `ai-runner`) | `agent_run` | `{runnerName, kind}` |
 | `AGENT_RUN_FINISHED` | `POST /api/v1/runner/runs/{id}/result`(SYSTEM `ai-runner`) | `agent_run` | `{kind, status, failureCode?, simulated, aiReviewed, processing?}`(`processing` 은 레지던시 기록이 있을 때만). 반영 실행(`APPLY_PATCH`)이면 `aiReviewed: false` + `appliedCommitSha`(실패면 null) |

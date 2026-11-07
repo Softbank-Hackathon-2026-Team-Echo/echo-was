@@ -32,6 +32,7 @@ Team Echo 멀티 클라우드 관리 플랫폼의 **관리 평면 API 서버**�
 | [docs/api/security-exceptions.md](docs/api/security-exceptions.md) | 기한부 예외 API(통제별 범위 칸·7일 상한·자기 승인·상태)를 바꾸거나 쓸 때 |
 | [docs/api/migration-plans.md](docs/api/migration-plans.md) | 이전 계획(만들기 거절 순서·승인·자기 승인·지문·단계 실행·롤백·중단·실행 로그)을 바꾸거나 쓸 때 |
 | [docs/api/disasters.md](docs/api/disasters.md) | 재난(미리보기·트리거 흐름·도착 고르기·`plans[]`·복귀 차단·감사)을 바꾸거나 쓸 때 |
+| [docs/api/demo-snapshot.md](docs/api/demo-snapshot.md) | 시연 조직 스냅샷·복귀(깨끗한 상태 조건·복귀 단계 순서·수동 필요 항목·멱등·감사)를 바꾸거나 쓸 때 |
 | [docs/api/audit-logs.md](docs/api/audit-logs.md) | 감사 로그(조회 질의·응답·행동 이름표·결과 규칙·`component`·기록하지 않는 것)를 바꾸거나 쓸 때 |
 | [docs/api/security.md](docs/api/security.md) | 보안 매트릭스·증거 조회·이전 전후 비교 API(칸 계산·서비스 단위 통제·UNKNOWN·증거 목록 조건·`blocksMigration`)를 바꾸거나 쓸 때 |
 | [docs/api/cve-watch.md](docs/api/cve-watch.md) | CVE 감시(OSV 피드 → 서비스 의존성 목록 → C-IMG-1 `CVE_WATCH` 증거·`remediation`, 즉시 조회·가짜 권고 주입·진단 연결 501)를 바꾸거나 쓸 때 |

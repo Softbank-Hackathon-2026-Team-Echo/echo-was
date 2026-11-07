@@ -44,6 +44,7 @@ from app.services.auth_service import AuthService
 from app.services.cost_catalog import CostCatalog, get_cost_catalog
 from app.services.cost_service import CostService
 from app.services.cve_watch_service import CveWatchService
+from app.services.demo_snapshot_service import DemoSnapshotService
 from app.services.deploy_request_service import DeployRequestService
 from app.services.deploy_support import HostSuffixGenerator, generate_host_suffix
 from app.services.diagnosis_service import DiagnosisService
@@ -663,3 +664,24 @@ def get_cve_watch_service(
     clock: Annotated[Clock, Depends(get_clock)],
 ) -> CveWatchService:
     return CveWatchService(session, clock)
+
+
+def get_demo_snapshot_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    migration_plans: Annotated[MigrationPlanService, Depends(get_migration_plan_service)],
+    disasters: Annotated[DisasterService, Depends(get_disaster_service)],
+    deploy_requests: Annotated[DeployRequestService, Depends(get_deploy_request_service)],
+    prechecks: Annotated[PrecheckService, Depends(get_precheck_service)],
+    patches: Annotated[PrecheckPatchService, Depends(get_precheck_patch_service)],
+) -> DemoSnapshotService:
+    """시연 스냅샷·복귀. 되돌리기는 각 기존 서비스(같은 요청 세션)를 그대로 부른다."""
+    return DemoSnapshotService(
+        session,
+        clock,
+        migration_plans=migration_plans,
+        disasters=disasters,
+        deploy_requests=deploy_requests,
+        prechecks=prechecks,
+        patches=patches,
+    )
