@@ -176,12 +176,17 @@ data:
   # <환경 종류>=<출발로 쓸 때 붙을 주소>/<그 환경이 도착일 때의 구독 이름>. A(도쿄)→B(서울) 구독은 B 의 echo_sub, 역방향은 A 의 echo_sub_rev.
   # 매핑이 없는 환경(온프레 등)이 낀 이전은 데이터 확인에서 실패한다. 되돌리려면 fake.
   DATA_SYNC_CHECKER_MODE: postgres
-  DATA_SYNC_DATABASES: aws=echo-dev-pg-a-cb5bc23aab2d0c23.elb.ap-northeast-1.amazonaws.com:5432/echo_sub_rev,gcp=echo-pg.echo-data.svc.cluster.local:5432/echo_sub
+  # gcp(B, 서울 DB)는 고객 클러스터 echo-dev-customer-gke 로 옮겼다(인프라 16 2단계, echo-infra#94) → 관제탑에서는 클러스터 안
+  # DNS 대신 새 B 의 내부 LB(echo-data/echo-pg-internal, 출발지 = 관제탑 파드·노드 대역만)로 읽는다.
+  DATA_SYNC_DATABASES: aws=echo-dev-pg-a-cb5bc23aab2d0c23.elb.ap-northeast-1.amazonaws.com:5432/echo_sub_rev,gcp=10.63.0.15:5432/echo_sub
   DATA_SYNC_USER: echo_monitor
   DATA_SYNC_PASSWORD_REF: env:ECHO_SECRET_DATA_SYNC_PASSWORD
   DATA_SYNC_SSL_MODE: require
   CUTOVER_RUNS_DATABASE: app
   CUTOVER_RESULTS_NOT_BEFORE: "2026-11-04T13:30:00Z"
+  # DB 컷오버 Job 이미지(echo-infra replication/cutover-job, VAP 가 이 digest 만 허용). b13142d = B 가 다른 GKE 클러스터
+  # (고객 클러스터)에 있어도 붙는 진입점. 실행기 모드(DB_CUTOVER_EXECUTOR_MODE)는 chore/db-cutover-enable PR 이 켠다.
+  DB_CUTOVER_JOB_IMAGE: asia-northeast3-docker.pkg.dev/team-echo-final/echo/cutover@sha256:b4729702990c129871f074c4885594f7a28db1e2cb187299e1a7eecfdd9c86e6
   # 보안 게이트(보안·거버넌스 5, 지민 11/5 결정 D): 이전 승인·일꾼 실행 시작 때 필수 통제가 FAIL·UNKNOWN 이고
   # 유효한 기한부 예외가 없으면 409 SECURITY_GATE_BLOCKED. 되돌리려면 "false" PR(ConfigMap 만 바뀌니 병합 뒤 api·worker 재시작).
   SECURITY_GATE_ENABLED: "true"
