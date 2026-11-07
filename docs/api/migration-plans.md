@@ -1,6 +1,6 @@
-# 이전 계획 API — 만들기 · 승인 · 실행 (API 서버 8 · 8-1 · 보안 5 게이트)
+# 이전 계획 API — 만들기 · 승인 · 실행 (API 서버 8 · 8-1 · 24 · 보안 5 게이트)
 
-서비스 중인 앱의 트래픽을 지금 환경(**출발**, 비율 100%)에서 같은 이미지가 올라간 예비 환경(**도착**)으로 옮긴다. 계획을 만들고, 다른 개발자가 **승인하면 바로 실행**되고, 일꾼이 단계마다 비율을 바꾼 뒤 **도착이 요청 N건을 5xx 허용 안에서 처리했는지 세어** 자동으로 다음 단계로 간다. 실패·판단 불가·중단이면 출발 100% 로 되돌린다. 근거: SPEC [specs/api-8-migration-plans.md](../../specs/api-8-migration-plans.md), 판정 방식은 [specs/api-8-1-request-count-judgement.md](../../specs/api-8-1-request-count-judgement.md)(다르면 8-1 이 우선).
+서비스 중인 앱의 트래픽을 지금 환경(**출발**, 비율 100%)에서 같은 이미지가 올라간 예비 환경(**도착**)으로 옮긴다. 계획을 만들고, 다른 개발자가 **승인하면 바로 실행**되고, 일꾼이 단계마다 비율을 바꾼 뒤 **도착이 요청 N건을 5xx 허용 안에서 처리했는지 세어** 자동으로 다음 단계로 간다. 실패·판단 불가·중단이면 출발 100% 로 되돌린다. 근거: SPEC [specs/api-8-migration-plans.md](../../specs/api-8-migration-plans.md), 판정 방식은 [specs/api-8-1-request-count-judgement.md](../../specs/api-8-1-request-count-judgement.md)(다르면 8-1 이 우선). 단계 구성·최소 관찰·하위 호환은 [API-24 SPEC](../../specs/api-24-canary-steps.md)이 우선한다.
 
 - 경로는 `/api/v1/orgs/{orgId}` 아래, 공통 봉투 `ApiResponse`, camelCase, 모든 응답 칸은 항상 있고 값이 없으면 null([environments.md](environments.md#공통-규칙)).
 - 트래픽 나눠 보내기·요청 카운터·지표·데이터 복제 확인은 실행기 틀 + **가짜**(`simulated: true`)다. 실제 연결은 고정 진입점(Envoy, `GET /counters`·`GET /summary`)·인프라 7(복제)이 실행기만 바꿔 붙인다([executors.md](../executors.md)). 실제 연결 전 운영은 비율 칸만 바뀐다.
@@ -26,7 +26,7 @@
 ```json
 {
   "targetEnvironmentId": "e2…",
-  "requiredRequests": [20, 50, 50],
+  "requiredRequests": [7, 10, 20, 30, 30, 30],
   "maxWaitSeconds": 30,
   "rollbackConditions": {"maxErrorRatePercent": 1.0, "maxP95Ms": 800, "maxReplicationLagSeconds": 1.0},
   "simulate": {"failAtStep": 2, "reason": "ERROR_RATE"},
@@ -34,15 +34,15 @@
 }
 ```
 
-`includeCutover`(기본 `false`, API 서버 17): `true` 면 비율 100% 뒤에 DB 쓰기 전환 단계(`DB_CUTOVER`, index 5)를 더해 6단계로 만든다. 서버의 `DB_CUTOVER_EXECUTOR_MODE` 가 `disabled`(기본)면 409 `DB_CUTOVER_DISABLED`. 빼거나 `false` 면 지금과 같은 5단계이고 이미 만든 계획은 저장된 단계 그대로다. 재난 트리거 계획은 `MIGRATION_DB_CUTOVER_ON_DISASTER=true`(기본 false)이고 실행기가 켜져 있을 때만 이 단계를 넣는다.
+`includeCutover`(기본 `false`, API 서버 17): `true` 면 비율 100% 뒤에 DB 쓰기 전환 단계(`DB_CUTOVER`, index 8)를 더해 9단계로 만든다. 서버의 `DB_CUTOVER_EXECUTOR_MODE` 가 `disabled`(기본)면 409 `DB_CUTOVER_DISABLED`. 빼거나 `false` 면 지금과 같은 8단계이고 이미 만든 계획은 저장된 단계 그대로다. 재난 트리거 계획은 `MIGRATION_DB_CUTOVER_ON_DISASTER=true`(기본 false)이고 실행기가 켜져 있을 때만 이 단계를 넣는다.
 
 | 칸 | 규칙 |
 |---|---|
 | `targetEnvironmentId` | 필수 uuid. 도착 환경 |
-| `requiredRequests` | 선택. 정수 3개(비율 10%·50%·100% 단계 순), 각 1~10000. 빼면 `MIGRATION_REQUIRED_REQUESTS_DEFAULT`(`20,50,50`) |
+| `requiredRequests` | 선택. 정수 6개(5·10·25·50·75·100% 순), 각 1~10000. 옛 요청 3개도 받는다(아래 호환 규칙). 빼면 `MIGRATION_REQUIRED_REQUESTS_DEFAULT`(`7,10,20,30,30,30`) |
 | `maxWaitSeconds` | 선택. 5~300, 비율 단계마다 건수를 기다리는 최대 시간. 빼면 `MIGRATION_MAX_WAIT_SECONDS_DEFAULT`(30) |
 | `rollbackConditions` | 선택. `maxErrorRatePercent` 0~100(기본 1.0, 허용 5xx 계산에 쓴다), `maxP95Ms` 1~60000(기본 800, **참고용** — 판정에 쓰지 않는다), `maxReplicationLagSeconds` 0~600(기본 1.0). 헬스체크 실패는 늘 롤백 조건 |
-| `simulate` | `EXECUTOR_MODE=fake` 일 때만(아니면 422 `SIMULATE_NOT_ALLOWED`). 진입점·헬스체커 모드(`ENTRYPOINT_EXECUTOR_MODE`·`HEALTH_CHECKER_MODE`)는 보지 않는다 — 실제 진입점(`http`)에서도 받는다(아래 "`simulate`"). `failAtStep` 1~4, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
+| `simulate` | `EXECUTOR_MODE=fake` 일 때만(아니면 422 `SIMULATE_NOT_ALLOWED`). 진입점·헬스체커 모드(`ENTRYPOINT_EXECUTOR_MODE`·`HEALTH_CHECKER_MODE`)는 보지 않는다 — 실제 진입점(`http`)에서도 받는다(아래 "`simulate`"). `failAtStep` 1~8, `reason` 아래 표. 이유와 단계가 맞지 않으면 422 `VALIDATION_ERROR`(`reason = SIMULATE_REASON_STEP_MISMATCH`), `LATENCY` 는 422(`reason = SIMULATE_REASON_NOT_SUPPORTED`) |
 
 8-1 에서 `observeSeconds` 를 뺐다. 보내면 422 `VALIDATION_ERROR`(모르는 칸). 계획 종류 `mode` 도 요청 칸이 아니다(서버가 정한다). 보내면 422 `VALIDATION_ERROR`(`details[0].field = "mode"`, 모르는 칸 — `observeSeconds` 와 같은 규칙)이고 계획은 만들어지지 않는다.
 
@@ -75,14 +75,30 @@
 
 ### 단계와 예상 시간 (고정)
 
-| index | kind | 출발 / 도착 비율 | 하는 일 | 예상 시간(기본) |
-|---|---|---|---|---|
-| 0 | `PREFLIGHT` | — | 도착 환경별 주소 헬스체크 1번 + 도착 이미지가 출발과 같은가 | 2 |
-| 1 | `SHIFT` | 90 / 10 | 비율 적용 → 도착 요청 20건 세기(최대 30초) → 헬스체크 | 2 + 4 |
-| 2 | `SHIFT` | 50 / 50 | 같음(50건) | 2 + 2 |
-| 3 | `DATA_SYNC_CHECK` | — | 출발 → 도착 복제 지연 ≤ `maxReplicationLagSeconds` | 2 |
-| 4 | `SHIFT` | 0 / 100 | 같음(50건). 통과하면 `SUCCEEDED`(5단계 계획) | 2 + 1 |
-| 5 | `DB_CUTOVER` | — | `includeCutover=true` 계획만. 컷오버 Job 을 만들고 끝날 때까지 기다려(상한 = 이 단계 `maxWaitSeconds` = `MIGRATION_DB_CUTOVER_TIMEOUT_SECONDS`) 이 계획 id 의 결과 행으로 판정. 통과하면 `SUCCEEDED` | 2 + 30 |
+| index | kind | 출발 / 도착 비율 | 필요 건수 | 최소 관찰 | 예상 시간(기본 50 rps) |
+|---|---|---|---|---|---|
+| 0 | `PREFLIGHT` | — | — | — | 2초 |
+| 1 | `SHIFT` | 95 / 5 | 7 | 3초 | 2 + 3 = 5초 |
+| 2 | `SHIFT` | 90 / 10 | 10 | 3초 | 2 + 3 = 5초 |
+| 3 | `SHIFT` | 75 / 25 | 20 | 3초 | 2 + 3 = 5초 |
+| 4 | `SHIFT` | 50 / 50 | 30 | 3초 | 2 + 3 = 5초 |
+| 5 | `DATA_SYNC_CHECK` | — | — | — | 2초 |
+| 6 | `SHIFT` | 25 / 75 | 30 | 3초 | 2 + 3 = 5초 |
+| 7 | `SHIFT` | 0 / 100 | 30 | 3초 | 2 + 3 = 5초 |
+| 8 | `DB_CUTOVER` | — | — | — | 2 + 30 = 32초(선택) |
+
+사전 확인은 도착 헬스와 이미지 일치를 확인하고, 데이터 확인은 출발 → 도착 복제 지연을 검사한다.
+모든 계획 종류(`PLANNED`·`FAILBACK`·`EMERGENCY`)가 같은 순서를 쓴다.
+
+### 서버 먼저 배포하는 호환 규칙(API-24)
+
+- `requiredRequests` 3개 `[a,b,c]`는 `[a,a,b,b,c,c]`로 펼친다. 3·6 이외 길이는 422다.
+- 3개를 명시한 요청만 `simulate.failAtStep` 옛 번호를 변환한다: `1→2, 2→4, 3→5, 4→7, 5→8`.
+  변환한 뒤 사유별 허용 단계를 검사한다. 6개 또는 생략이면 새 번호다.
+- 응답에는 항상 저장한 단계 목록과 번호가 나온다. 새 프론트(echo-frontend#109)는
+  `steps[].kind`·`index`·`minObserveSeconds`를 사용한다. 옛 5·6단계 저장 계획은 그대로 읽고 실행한다.
+  옛 계획의 최소 관찰은 0이며, 8-1 이전 필요 건수가 없는 계획은 비율 단계 순서대로 20·50·50건을 쓴다.
+- 서버와 마이그레이션을 먼저 배포하고 프론트를 갱신한다. 옛 프론트의 3개 요청은 계속 받는다.
 
 ### DB 쓰기 전환 단계 `DB_CUTOVER` (API 서버 17, [SPEC](../../specs/api-17-cutover-step.md))
 
@@ -101,13 +117,13 @@
 
   종료 코드를 모르거나 사라졌거나 상한을 넘었어도 이 계획 행이 있으면 그 행으로 판정한다. 종료 1 의 근거 우선순위는 **결과 행 > 지금 쓰기 담당 확인 > 로그 표식**이다(로그는 Job 이 끝날 때 기록이라 지금보다 오래될 수 있다). `DB_CUTOVER_UNKNOWN` 뒤 사람이 할 일(쓰기 담당 확인 → 가중치 수동 조정 → 새 계획)은 [SPEC 4-4a](../../specs/api-17-cutover-step.md).
 - **중단·일꾼 상실**: Job 을 요청한 뒤에는 Job 이 끝나 판정할 때까지 되돌리지 않는다(그 사이 트래픽을 되돌리면 쓰기 담당과 어긋난다). 판정이 통과면 중단 요청이 있어도 `SUCCEEDED` 다.
-- **응답**: `steps[5].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
-- **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 3)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.
+- **응답**: `steps[8].cutover = {jobName, jobKind, allowPromote, exitCode, reason, jobFinished, jobLost, startFailure, run}`(그 밖의 단계는 null). `run` 은 결과 행(`writePauseMs`·`rowsTotal`·`missingRows`·`duplicateRows`·`mode`·`rpoEstimateMs` 등). 계획 단위 `result` 도 이 행을 그대로 싣는다(고객 DB 를 다시 읽지 않는다).
+- **재난 긴급 이전 + DB 쓰기 전환**: 원본 DB 에 닿지 않아 데이터 확인(단계 5)이 지연을 못 재면 실패 대신 `DATA_SYNC_SKIPPED`(WARN, data.reason `EMERGENCY_SOURCE_UNREACHABLE`)를 남기고 승격 Job 까지 간다. 상세 `promoteWarning` 은 승격 위험 고지(되돌릴 수 없음·쓰기 손실 가능·복귀에 resync)이고, 이 계획만 승인에 `acknowledgePromote: true` 가 필요하다(동의는 승인 감사 줄에 남는다). 그 밖의 계획은 `promoteWarning: null`.
 - **단계 결과 cutover 추가 칸**: `startUncertain`(생성 응답 유실) · `startConfirmed`(같은 이름 조회로 다시 찾음) · `pollErrors`(상태 조회 연속 실패 수) · `writer`(종료 1 뒤 확인한 쓰기 담당 SOURCE·TARGET·UNKNOWN).
 - **로그 코드**: `DB_CUTOVER_JOB_CREATED` · `DB_CUTOVER_JOB_FINISHED` · `DB_CUTOVER_OK` · `DB_CUTOVER_FAILED`(원인 문장 붙음) · `DB_CUTOVER_MANUAL_REQUIRED`(자동으로 되돌리지 않음). data 에 Job 이름·종류·종료 코드·이유·결과 숫자.
 - **감사**: SYSTEM(`migration-worker`) `MIGRATION_DB_CUTOVER_STARTED`(Job 만듦) · `MIGRATION_DB_CUTOVER_FINISHED`(판정, 실패면 `errorCode`).
 
-단계 예상 = `MIGRATION_STEP_OVERHEAD_SECONDS`(2) + (SHIFT 면 min(`maxWaitSeconds`, ceil(필요 건수 ÷ (`MIGRATION_EXPECTED_RPS` × 비율 ÷ 100)))). 계획 예상 = 합(기본 50 rps 기준 **17초**). 비율 목록은 바꿀 수 없고, 단계별 사람 승인은 없다.
+비율 단계 예상 = `MIGRATION_STEP_OVERHEAD_SECONDS`(2) + max(`minObserveSeconds`, min(`maxWaitSeconds`, ceil(필요 건수 ÷ (`MIGRATION_EXPECTED_RPS` × 비율 ÷ 100)))). 기본 50 rps에서 `ceil(N*100/(50*w))`는 비율 순서대로 `3·2·2·2·1·1초`이므로 각 비율 단계는 `2 + max(3, min(30, 건수 충족 초)) = 5초`다. 계획 예상은 합이며 기본 **34초**(`2 + 6 × (2 + 3) + 2`), DB 쓰기 전환 포함 **66초**(`34 + 32`)다. 여유 2초는 표시용으로 실제 대기를 추가하지 않는다. 가짜 시계와 기본 50 rps에서 여섯 비율 단계의 실제 관찰 합은 **18초**다(네트워크·일꾼 지연 제외). 비율 목록은 고정이며 단계별 사람 승인은 없다.
 
 ## 승인 · 거절 · 취소
 
@@ -147,7 +163,7 @@
 
 ## 실행 (일꾼)
 
-- 비율 단계마다 트래픽 실행기로 두 연결 비율을 적용(멱등 키 `{planId}:{index}`)하고, **적용했다고 답했을 때만** 두 연결의 `trafficWeight` 를 한 트랜잭션에서 함께 적는다(서비스 합계 100). 그 뒤 **건수를 센다**(아래). 필요 건수를 채우면 헬스체크(도착 환경별 주소 + 도착 현재 배포의 헬스 경로) 한 번으로 판정하고, 통과하면 사람 개입 없이 다음 단계로 간다.
+- 비율 단계마다 트래픽 실행기로 두 연결 비율을 적용(멱등 키 `{planId}:{index}`)하고, **적용했다고 답했을 때만** 두 연결의 `trafficWeight` 를 한 트랜잭션에서 함께 적는다(서비스 합계 100). 그 뒤 **건수를 센다**(아래). 필요 건수를 채우면 헬스체크(도착 환경별 주소 + 도착 현재 배포의 헬스 경로)로 판정하고, 비율 적용 시각부터 저장된 최소 관찰 시간도 지났으면 다음 단계로 간다. 건수 또는 LOW_TRAFFIC 판정 뒤 아직 최소 관찰 전이면 JUDGE에 머물며 매 폴링 때 헬스를 다시 확인한다. 실패는 관찰 시간을 기다리지 않고 롤백한다.
 - 판정 실패 원인: 도착 5xx 가 허용 초과 `THRESHOLD_EXCEEDED`(그 순간 바로), 도착 미수신 `TARGET_NOT_RECEIVING`, 카운터를 읽지 못함·오래됨 `METRICS_UNAVAILABLE`(판단 불가), 헬스 2xx 아님 `HEALTH_CHECK_FAILED`, 복제 지연 초과 `DATA_LAG_EXCEEDED`(없으면 `METRICS_UNAVAILABLE`), 비율 적용 실패 `TRAFFIC_APPLY_FAILED`.
 - 실패·판단 불가·적용 실패·**중단**(`ABORTED`)·**일꾼 상실**(`WORKER_LOST`, 임대 3번 상실)은 `ROLLING_BACK` 으로 가서 출발 100%·도착 0% 를 적용한다(키 `{planId}:rollback:{n}`). 적용되면 `ROLLED_BACK`(`rollbackStatus = SUCCEEDED`), 3번(`MIGRATION_ROLLBACK_MAX_ATTEMPTS`) 다 실패하면 `FAILED`(`rollbackStatus = FAILED`, `errorCode` 는 원래 원인, 비율은 마지막으로 적용된 값). 임대를 잃은 뒤에도 남은 롤백 시도는 한다.
 - 단계 0 사전 확인 실패는 트래픽을 바꾼 적이 없어 `FAILED`(`PREFLIGHT_FAILED`, `rollbackStatus = NOT_NEEDED`). 시작 전(`APPROVED`) 일꾼 상실도 `FAILED`(`WORKER_LOST`, `NOT_NEEDED`).
@@ -162,7 +178,7 @@
 - **허용 5xx** = max(1, floor(필요 건수 × `maxErrorRatePercent` ÷ 100)). 소수 계산은 정확히 한다(0.57% × 10000 = 57). 필요 건수 기준으로 고정한다.
 - 결론 순서(읽을 때마다):
   1. 도착 5xx > 허용 → 그 순간 `THRESHOLD_EXCEEDED` 롤백(건수를 채우기 전이라도).
-  2. 도착 센 요청 ≥ 필요 건수 → `JUDGE`(세기 끝 이유 `COUNT_REACHED`) → 헬스체크 → 통과면 다음 단계, 실패면 `HEALTH_CHECK_FAILED`.
+  2. 도착 센 요청 ≥ 필요 건수 → `JUDGE`(세기 끝 이유 `COUNT_REACHED`) → 헬스체크 → 통과면 최소 관찰 시간까지 기다린 뒤 다음 단계, 실패면 즉시 `HEALTH_CHECK_FAILED`.
   3. 최대 대기가 끝나지 않았으면 → 진행 숫자만 적고 다음 읽기(로그 줄 없음).
   4. 최대 대기 끝(건수 못 채움) → 마감 판정:
 
@@ -174,7 +190,7 @@
 | 출발 기준값 없음(출발 읽기 실패) | 미수신 판정을 건너뛰고 아래로 |
 | 그 밖(서비스 전체가 조용함) | **트래픽 적음** — 헬스체크 통과면 `PASSED` + `lowTraffic: true`(로그 `JUDGE_PASSED`, data `lowTraffic: true`), 실패면 `HEALTH_CHECK_FAILED` |
 
-- **도착 미수신**(정수식, src = 출발 센 요청, tgt = 도착 센 요청, N = 필요 건수, w = 도착 비율): w < 100 이면 `src × w ≥ N × (100 − w)`(도착에 N건 이상 갔어야 함) **그리고** `4 × tgt × (100 − w) < src × w`(실제가 기대의 4분의 1 미만). w = 100 이면 `src ≥ N` **그리고** `4 × tgt < src`(출발 비율이 0인데 출발로 계속 간다 = 진입점이 비율을 적용하지 않음). 예: 10% 단계 출발 180건 → 도착 4건 실패, 5건 트래픽 적음 통과.
+- **도착 미수신**(정수식, src = 출발 센 요청, tgt = 도착 센 요청, N = 필요 건수, w = 도착 비율): w < 100 이면 `src × w ≥ N × (100 − w)`(도착에 N건 이상 갔어야 함) **그리고** `4 × tgt × (100 − w) < src × w`(실제가 기대의 4분의 1 미만). w = 100 이면 `src ≥ N` **그리고** `4 × tgt < src`(출발 비율이 0인데 출발로 계속 간다 = 진입점이 비율을 적용하지 않음). 예: 5%·필요 10건 단계 출발 190건 → 도착 2건 실패, 3건 트래픽 적음 통과.
 - **카운터 재시작**: 지금 읽은 값이 직전 값보다 작으면(요청·5xx 중 하나라도) 진입점이 재시작해 0부터 다시 쌓였다고 보고, 그때까지 센 값을 이어 간다(로그 `COUNTERS_RESET`, 화면 숫자는 줄지 않는다). 예: 14건 센 뒤 읽기가 3 → 17.
 - **p95** 는 판정에 쓰지 않는다. 단계를 끝낼 때(통과·실패 모두) 지표 공급자에서 최근 `MIGRATION_P95_REFERENCE_WINDOW_SECONDS`(30초) p95 를 한 번 읽어 `metrics.p95Ms` 에 참고로 남긴다(못 읽으면 null).
 - 같은 환경을 쓰는 다른 서비스의 요청도 카운터에 섞인다(카운터·가중치가 환경 단위). 지금은 "환경당 고객 앱 1개" 를 전제로 한다(앱별 라우트·카운터는 진입점 후속).
@@ -199,7 +215,7 @@
 프론트 참고(API 서버 8-4 로컬 리허설, 실제 Envoy 진입점 + 50 rps):
 
 - 기준값을 읽는 순간 처리 중이던 요청 때문에 도착 `requests` 가 `errors5xx` 보다 잠깐 작게 나올 수 있다(예: 요청 2 < 5xx 3). 요청과 5xx 카운터가 같은 순간에 올라가지 않아서이고, 판정은 각 값의 증가분만 따로 쓰므로 영향이 없다. 화면은 이 경우를 오류로 다루지 않는다.
-- 단계별 실제 시간은 10% 3.5~6.7초, 50% 2.3~3.5초, 100% 약 1.2초였다(예상 시간 `expectedSeconds` 는 보수적으로 둔다). 1초 폴링이면 100% 단계의 진행 숫자는 0~1번만 보인다. 그 단계의 마지막 숫자는 단계 결과(`steps[4].result.metrics`)에 남는다.
+- 단계별 실제 시간은 10% 3.5~6.7초, 50% 2.3~3.5초, 100% 약 1.2초였다(예상 시간 `expectedSeconds` 는 보수적으로 둔다). 1초 폴링이면 100% 단계의 진행 숫자는 0~1번만 보인다. 그 단계의 마지막 숫자는 단계 결과에 남는다. 이 측정은 API-24 이전의 3개 비율 단계 기준이다.
 
 ### 컷오버 결과 `result` (단건 조회만, API 서버 16)
 
@@ -268,16 +284,16 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 | `reason` | 고를 수 있는 단계 | 결과 |
 |---|---|---|
-| `ERROR_RATE` | 1·2·4 | 첫 읽기(기준값)는 5xx 0, 그다음 읽기부터 도착 5xx 누적 = 허용 + 1 → 적용 약 1초 뒤 `THRESHOLD_EXCEEDED` |
+| `ERROR_RATE` | 1·2·3·4·6·7 | 첫 읽기(기준값)는 5xx 0, 그다음 읽기부터 도착 5xx 누적 = 허용 + 1 → 적용 약 1초 뒤 `THRESHOLD_EXCEEDED` |
 | `TARGET_NOT_RECEIVING` | 1·2 | 도착 카운터 고정, 출발은 100% 몫으로 증가(비율 미적용 흉내) → 최대 대기 끝에 `TARGET_NOT_RECEIVING` |
-| `LOW_TRAFFIC` | 1·2·4 | 두 카운터 고정 → 최대 대기 끝에 트래픽 적음 통과(`lowTraffic: true`) |
-| `HEALTH` | 1·2·4 | 건수는 정상, 헬스 503 → `HEALTH_CHECK_FAILED` |
-| `TRAFFIC` | 1·2·4 | 그 단계 비율 적용 실패(`metrics = null`) → `TRAFFIC_APPLY_FAILED` |
-| `DATA_LAG` | 3 | 복제 지연 30초 → `DATA_LAG_EXCEEDED` |
-| `DB_CUTOVER_FAIL` | 5(`includeCutover=true` 만) | Job 없이 종료 1 → 트래픽 롤백, `DB_CUTOVER_FAILED` |
-| `DB_CUTOVER_PARTIAL` | 5 | 종료 2 → `FAILED`(`DB_CUTOVER_PARTIAL`, `SKIPPED`) |
-| `DB_CUTOVER_TIMEOUT` | 5 | 끝나지 않음 → 상한 뒤 `FAILED`(`DB_CUTOVER_TIMEOUT`, `SKIPPED`) |
-| `DATA_INTEGRITY` | 5 | 종료 0, 누락 1건 → `FAILED`(`DATA_INTEGRITY_FAILED`, `SKIPPED`) |
+| `LOW_TRAFFIC` | 1·2·3·4·6·7 | 두 카운터 고정 → 최대 대기 끝에 트래픽 적음 통과(`lowTraffic: true`) |
+| `HEALTH` | 1·2·3·4·6·7 | 건수는 정상, 헬스 503 → `HEALTH_CHECK_FAILED` |
+| `TRAFFIC` | 1·2·3·4·6·7 | 그 단계 비율 적용 실패(`metrics = null`) → `TRAFFIC_APPLY_FAILED` |
+| `DATA_LAG` | 5 | 복제 지연 30초 → `DATA_LAG_EXCEEDED` |
+| `DB_CUTOVER_FAIL` | 8(`includeCutover=true` 만) | Job 없이 종료 1 → 트래픽 롤백, `DB_CUTOVER_FAILED` |
+| `DB_CUTOVER_PARTIAL` | 8 | 종료 2 → `FAILED`(`DB_CUTOVER_PARTIAL`, `SKIPPED`) |
+| `DB_CUTOVER_TIMEOUT` | 8 | 끝나지 않음 → 상한 뒤 `FAILED`(`DB_CUTOVER_TIMEOUT`, `SKIPPED`) |
+| `DATA_INTEGRITY` | 8 | 종료 0, 누락 1건 → `FAILED`(`DATA_INTEGRITY_FAILED`, `SKIPPED`) |
 
 `LATENCY` 는 8-1 에서 뺐다(요청 422). 저장된 옛 계획의 `LATENCY` 는 아무 실패도 만들지 않는다.
 
@@ -289,7 +305,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 - `failback`: 이 계획을 거꾸로 하는 복귀(도착 = 이 계획의 출발 환경)를 지금 만들 수 있는가. 출발 환경이 ACTIVE 이고 기준을 넘은 재난의 피해 환경이면 `{allowed: false, reason: "DISASTER_ACTIVE", disasterId}`, 아니면 `{allowed: true, reason: null, disasterId: null}`. 모든 계획에 같은 규칙이다([disasters.md](disasters.md#복귀-차단)).
 - `maxWaitSeconds` 는 계획 행의 `observe_seconds` 칸이다(새 계획은 단계 최대 대기, 8-1 전 계획은 그 계획의 지켜보기 초). 8-1 에서 `observeSeconds` 칸을 뺐다.
-- `steps[i]`: `requiredRequests`·`maxWaitSeconds` 는 비율 단계만 값이 있다(8-1 전 계획의 `requiredRequests` 는 null).
+- `steps[i]`: `requiredRequests`·`minObserveSeconds`는 비율 단계만 값이 있다(8-1 전 계획의 `requiredRequests`는 null). `minObserveSeconds`는 생성 시 설정 `MIGRATION_MIN_OBSERVE_SECONDS`를 저장한 값이며 옛 계획은 0이다. `maxWaitSeconds`는 비율 단계 또는 DB 전환 단계에 값이 있다.
 - `steps[i].result.metrics`: 비율 단계는 `requestCount`(도착 센 요청)·`errors5xx`·`allowedErrors5xx`·`errorRatePercent`(5xx ÷ 요청 × 100, 최대 100, 요청 0이면 null)·`sourceRequestCount`·`lowTraffic`·`p95Ms`(참고)·`healthStatus`. 데이터 확인 단계는 `replicationLagSeconds`, 사전 확인은 `healthStatus`. 재지 않은 값은 null. `p95Ms` 는 p95 를 못 읽었으면 null 이다(진입점 `/summary` 의 그 환경 `p95_ms` 가 null 인 경우 포함, 0 으로 바꾸지 않는다).
 - `simulated`(계획·로그 페이지): 계획을 만들 때 한 번 정해 계획 행에 저장한 값이고 응답 때 다시 계산하지 않는다. 규칙은 `EXECUTOR_MODE = fake` 이면 true 다. 이 모드의 실행기 묶음에는 빌드·배포·내리기·데이터 복제 확인이 늘 가짜라, **계획을 실행할 묶음에 가짜가 하나라도 있으면 true** 와 같다. 그래서 트래픽·카운터가 실제 진입점(`ENTRYPOINT_EXECUTOR_MODE=http`)이고 헬스체크가 실제(`HEALTH_CHECKER_MODE=http`)여도 지금은 true 이며, 데이터 복제 확인이 가짜라는 것을 정직하게 표시한다([executors.md](../executors.md)).
 
@@ -307,9 +323,15 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "mode": "PLANNED",
     "disasterId": null,
     "currentStep": 2,
-    "expectedSeconds": 17,
-    "createdBy": {"id": "u1…", "login": "dev-a"},
-    "approvedBy": {"id": "u2…", "login": "dev-b"},
+    "expectedSeconds": 34,
+    "createdBy": {
+      "id": "u1…",
+      "login": "dev-a"
+    },
+    "approvedBy": {
+      "id": "u2…",
+      "login": "dev-b"
+    },
     "selfApproved": false,
     "errorCode": null,
     "rollbackStatus": null,
@@ -319,27 +341,191 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "startedAt": "2026-11-03T03:01:00Z",
     "finishedAt": null,
     "expiresAt": "2026-11-04T03:00:00Z",
-    "rollbackConditions": {"maxErrorRatePercent": 1.0, "maxP95Ms": 800, "maxReplicationLagSeconds": 1.0, "healthCheck": true, "p95Advisory": true},
+    "rollbackConditions": {
+      "maxErrorRatePercent": 1.0,
+      "maxP95Ms": 800,
+      "maxReplicationLagSeconds": 1.0,
+      "healthCheck": true,
+      "p95Advisory": true
+    },
     "maxWaitSeconds": 30,
     "steps": [
-      {"index": 0, "kind": "PREFLIGHT", "sourceWeight": null, "targetWeight": null, "requiredRequests": null, "maxWaitSeconds": null, "expectedSeconds": 2,
-       "result": {"status": "PASSED", "startedAt": "2026-11-03T03:01:00Z", "finishedAt": "2026-11-03T03:01:00Z",
-                  "metrics": {"healthStatus": "OK", "errorRatePercent": null, "p95Ms": null, "requestCount": null, "errors5xx": null, "allowedErrors5xx": null, "sourceRequestCount": null, "lowTraffic": null, "replicationLagSeconds": null},
-                  "failureCode": null}},
-      {"index": 1, "kind": "SHIFT", "sourceWeight": 90, "targetWeight": 10, "requiredRequests": 20, "maxWaitSeconds": 30, "expectedSeconds": 6,
-       "result": {"status": "PASSED", "startedAt": "2026-11-03T03:01:00Z", "finishedAt": "2026-11-03T03:01:04Z",
-                  "metrics": {"healthStatus": "OK", "errorRatePercent": 0.0, "p95Ms": 120.0, "requestCount": 20, "errors5xx": 0, "allowedErrors5xx": 1, "sourceRequestCount": 180, "lowTraffic": false, "replicationLagSeconds": null},
-                  "failureCode": null}},
-      {"index": 2, "kind": "SHIFT", "sourceWeight": 50, "targetWeight": 50, "requiredRequests": 50, "maxWaitSeconds": 30, "expectedSeconds": 4,
-       "result": {"status": "RUNNING", "startedAt": "2026-11-03T03:01:04Z", "finishedAt": null, "metrics": null, "failureCode": null}},
-      {"index": 3, "kind": "DATA_SYNC_CHECK", "sourceWeight": null, "targetWeight": null, "requiredRequests": null, "maxWaitSeconds": null, "expectedSeconds": 2,
-       "result": {"status": "PENDING", "startedAt": null, "finishedAt": null, "metrics": null, "failureCode": null}},
-      {"index": 4, "kind": "SHIFT", "sourceWeight": 0, "targetWeight": 100, "requiredRequests": 50, "maxWaitSeconds": 30, "expectedSeconds": 3,
-       "result": {"status": "PENDING", "startedAt": null, "finishedAt": null, "metrics": null, "failureCode": null}}
+      {
+        "index": 0,
+        "kind": "PREFLIGHT",
+        "sourceWeight": null,
+        "targetWeight": null,
+        "requiredRequests": null,
+        "minObserveSeconds": null,
+        "maxWaitSeconds": null,
+        "expectedSeconds": 2,
+        "result": {
+          "status": "PASSED",
+          "startedAt": "2026-11-03T03:01:00Z",
+          "finishedAt": "2026-11-03T03:01:00Z",
+          "metrics": {
+            "healthStatus": "OK",
+            "errorRatePercent": null,
+            "p95Ms": null,
+            "requestCount": null,
+            "errors5xx": null,
+            "allowedErrors5xx": null,
+            "sourceRequestCount": null,
+            "lowTraffic": null,
+            "replicationLagSeconds": null
+          },
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 1,
+        "kind": "SHIFT",
+        "sourceWeight": 95,
+        "targetWeight": 5,
+        "requiredRequests": 7,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "PASSED",
+          "startedAt": "2026-11-03T03:01:00Z",
+          "finishedAt": "2026-11-03T03:01:03Z",
+          "metrics": {
+            "healthStatus": "OK",
+            "errorRatePercent": 0.0,
+            "p95Ms": 120.0,
+            "requestCount": 7,
+            "errors5xx": 0,
+            "allowedErrors5xx": 1,
+            "sourceRequestCount": 142,
+            "lowTraffic": false,
+            "replicationLagSeconds": null
+          },
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 2,
+        "kind": "SHIFT",
+        "sourceWeight": 90,
+        "targetWeight": 10,
+        "requiredRequests": 10,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "RUNNING",
+          "startedAt": "2026-11-03T03:01:03Z",
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 3,
+        "kind": "SHIFT",
+        "sourceWeight": 75,
+        "targetWeight": 25,
+        "requiredRequests": 20,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "PENDING",
+          "startedAt": null,
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 4,
+        "kind": "SHIFT",
+        "sourceWeight": 50,
+        "targetWeight": 50,
+        "requiredRequests": 30,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "PENDING",
+          "startedAt": null,
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 5,
+        "kind": "DATA_SYNC_CHECK",
+        "sourceWeight": null,
+        "targetWeight": null,
+        "requiredRequests": null,
+        "minObserveSeconds": null,
+        "maxWaitSeconds": null,
+        "expectedSeconds": 2,
+        "result": {
+          "status": "PENDING",
+          "startedAt": null,
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 6,
+        "kind": "SHIFT",
+        "sourceWeight": 25,
+        "targetWeight": 75,
+        "requiredRequests": 30,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "PENDING",
+          "startedAt": null,
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      },
+      {
+        "index": 7,
+        "kind": "SHIFT",
+        "sourceWeight": 0,
+        "targetWeight": 100,
+        "requiredRequests": 30,
+        "minObserveSeconds": 3,
+        "maxWaitSeconds": 30,
+        "expectedSeconds": 5,
+        "result": {
+          "status": "PENDING",
+          "startedAt": null,
+          "finishedAt": null,
+          "metrics": null,
+          "failureCode": null
+        },
+        "cutover": null
+      }
     ],
     "progress": {
-      "step": 2, "targetWeight": 50, "requests": 25, "requiredRequests": 50, "errors5xx": 0, "allowedErrors5xx": 1,
-      "sourceRequests": 25, "startedAt": "2026-11-03T03:01:04Z", "deadlineAt": "2026-11-03T03:01:34Z", "updatedAt": "2026-11-03T03:01:05Z"
+      "step": 2,
+      "targetWeight": 10,
+      "requests": 5,
+      "requiredRequests": 10,
+      "errors5xx": 0,
+      "allowedErrors5xx": 1,
+      "sourceRequests": 45,
+      "startedAt": "2026-11-03T03:01:03Z",
+      "deadlineAt": "2026-11-03T03:01:33Z",
+      "updatedAt": "2026-11-03T03:01:04Z"
     },
     "rejectedBy": null,
     "cancelledBy": null,
@@ -347,7 +533,11 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
     "abortRequestedAt": null,
     "errorMessage": null,
     "result": null,
-    "failback": {"allowed": true, "reason": null, "disasterId": null}
+    "failback": {
+      "allowed": true,
+      "reason": null,
+      "disasterId": null
+    }
   }
 }
 ```
@@ -359,17 +549,17 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | code | level | step | data |
 |---|---|---|---|
 | `DISASTER_TRIGGERED` | WARN | — | `disasterId`, `magnitude`, `distanceKm`(진원지 → 출발 환경). 재난이 만든 계획만, `PLAN_CREATED` 앞 |
-| `PLAN_CREATED` | INFO | — | `expectedSeconds`, `requiredRequests`(3개), `maxWaitSeconds`, `mode`(8-3 부터) |
+| `PLAN_CREATED` | INFO | — | `expectedSeconds`, `requiredRequests`(6개), `maxWaitSeconds`, `mode`(8-3 부터) |
 | `APPROVED` · `SELF_APPROVED` · `REJECTED` · `CANCELLED` · `EXPIRED` | INFO | — | |
 | `STALE` | WARN | — | `changed`(항목 이름 목록) |
 | `ABORT_REQUESTED` | WARN | — | |
 | `STARTED` · `PREFLIGHT_OK` | INFO | — · 0 | |
 | `PREFLIGHT_FAILED` | ERROR | 0 | |
-| `WEIGHT_APPLIED` | INFO | 1·2·4 | `sourceWeight`, `targetWeight` |
-| `WEIGHT_APPLY_FAILED` | WARN | 1·2·4 | `sourceWeight`, `targetWeight`(요청한 비율) |
-| `COUNTERS_RESET` | INFO | 1·2·4 | `counter`(`source`·`target`), `previousRequests`, `previousErrors5xx`, `requests`, `errors5xx` |
-| `JUDGE_PASSED` · `JUDGE_FAILED` | INFO · WARN | 1·2·4 | `requestCount`, `requiredRequests`, `errors5xx`, `allowedErrors5xx`, `sourceRequestCount`, `lowTraffic`. 트래픽 적음 통과면 문장 끝에 "(Low traffic: passed on the health check.)" |
-| `DATA_SYNC_OK` · `DATA_SYNC_FAILED` | INFO · WARN | 3 | `replicationLagSeconds` |
+| `WEIGHT_APPLIED` | INFO | 1·2·3·4·6·7 | `sourceWeight`, `targetWeight` |
+| `WEIGHT_APPLY_FAILED` | WARN | 1·2·3·4·6·7 | `sourceWeight`, `targetWeight`(요청한 비율) |
+| `COUNTERS_RESET` | INFO | 1·2·3·4·6·7 | `counter`(`source`·`target`), `previousRequests`, `previousErrors5xx`, `requests`, `errors5xx` |
+| `JUDGE_PASSED` · `JUDGE_FAILED` | INFO · WARN | 1·2·3·4·6·7 | `requestCount`, `requiredRequests`, `errors5xx`, `allowedErrors5xx`, `sourceRequestCount`, `lowTraffic`. 트래픽 적음 통과면 문장 끝에 "(Low traffic: passed on the health check.)" |
+| `DATA_SYNC_OK` · `DATA_SYNC_FAILED` | INFO · WARN | 5 | `replicationLagSeconds` |
 | `SUCCEEDED` | INFO | — | |
 | `ROLLBACK_STARTED` | WARN | 멈춘 단계 | |
 | `ROLLBACK_APPLIED` | INFO | — | `sourceWeight: 100`, `targetWeight: 0` |
@@ -377,7 +567,7 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `FAILED` | ERROR | — | (일꾼 상실·내부 오류·보안 게이트. 문장 = 원인 코드 문장) |
 | `SECURITY_GATE_PASSED` · `SECURITY_GATE_BLOCKED` | INFO · WARN | — | `policyVersion`, `phase`(`EXECUTION`), `blocking[{controlId, reasons}]`, `findingIds`, `exceptionIds`, `timedOutControlIds`(예산 초과 통제, 없으면 []). 게이트를 켰을 때만. 승인 때 막히면 계획 상태는 그대로이고 이 줄만 남는다 |
 
-성공한 계획의 줄 순서(게이트를 켜면 `APPROVED`·`STARTED` 앞에 `SECURITY_GATE_PASSED` 가 하나씩 더 있다): `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK, WEIGHT_APPLIED(1), JUDGE_PASSED(1), WEIGHT_APPLIED(2), JUDGE_PASSED(2), DATA_SYNC_OK(3), WEIGHT_APPLIED(4), JUDGE_PASSED(4), SUCCEEDED`(카운터가 재시작하면 그 단계 판정 줄 앞에 `COUNTERS_RESET`).
+성공한 계획의 줄 순서(게이트를 켜면 `APPROVED`·`STARTED` 앞에 `SECURITY_GATE_PASSED` 추가): `PLAN_CREATED, APPROVED, STARTED, PREFLIGHT_OK`, 비율 1·2·3·4 각각 `WEIGHT_APPLIED, JUDGE_PASSED`, `DATA_SYNC_OK(5)`, 비율 6·7 각각 `WEIGHT_APPLIED, JUDGE_PASSED`, `SUCCEEDED`. 카운터가 재시작하면 `COUNTERS_RESET`이 추가된다. 최소 관찰 대기만으로 로그를 추가하지 않는다.
 
 ## HTTP 오류
 
@@ -403,7 +593,8 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 
 | 환경변수 | 기본 | 뜻 |
 |---|---|---|
-| `MIGRATION_REQUIRED_REQUESTS_DEFAULT` | `20,50,50` | 비율 10·50·100% 단계의 필요 건수(각 1~10000) |
+| `MIGRATION_REQUIRED_REQUESTS_DEFAULT` | `7,10,20,30,30,30` | 비율 5·10·25·50·75·100% 순 필요 건수(각 1~10000) |
+| `MIGRATION_MIN_OBSERVE_SECONDS` | 3 | 비율 적용부터 최소 관찰 시간(0~60), 계획 생성 때 단계별 저장 |
 | `MIGRATION_MAX_WAIT_SECONDS_DEFAULT` | 30 | 비율 단계 최대 대기(5~300) |
 | `MIGRATION_EXPECTED_RPS` | 50 | 예상 rps(1~10000). 예상 시간·가짜 카운터·`simulate` 에 쓴다 |
 | `MIGRATION_COUNT_POLL_SECONDS` | 1 | 카운터 읽기 주기(1~10) |

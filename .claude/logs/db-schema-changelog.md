@@ -6,6 +6,7 @@
 
 <!-- 아래에 hook이 한 줄씩 prepend 한다 (이 마커 라인은 삭제하지 않는다) -->
 <!-- CHANGELOG-ENTRIES -->
+- 2026-11-07T11:00Z · app/models/migration_plan.py (Codex) · LAST_STEP_INDEX 5→8, 계획·로그 CHECK 확장(1d5d0b3b9598), 전용 빈 DB 왕복·덤프 확인
 - 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · processing 컬럼 추가
 - 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · processing 컬럼 추가
 - 2026-11-05T06:01Z · app/models/agent_run.py (Edit) · +5 −0

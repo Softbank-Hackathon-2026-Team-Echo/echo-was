@@ -65,6 +65,7 @@ from app.enums import (
     MigrationPlanMode,
     MigrationPlanStatus,
     MigrationSimulateReason,
+    MigrationStepKind,
     ServiceStatus,
 )
 from app.models import (
@@ -95,9 +96,9 @@ from app.services.migration_plan_support import (
     CONDITION_MAX_ERROR_RATE,
     CONDITION_MAX_P95_MS,
     CONDITION_MAX_REPLICATION_LAG,
-    SHIFT_STEPS,
     SIMULATE_FAIL_AT_STEP,
     SIMULATE_REASON,
+    STEP_KIND,
     STEP_REQUIRED_REQUESTS,
     build_steps,
     expected_seconds,
@@ -131,7 +132,7 @@ class _Outcome(StrEnum):
 @dataclass(frozen=True)
 class CreateMigrationPlanCommand:
     target_environment_id: uuid.UUID
-    # 비율 단계(10·50·100%) 순 필요 건수 3개와 단계 최대 대기(초). None 이면 설정 기본값.
+    # 비율 단계(5·10·25·50·75·100%) 순 필요 건수 6개와 단계 최대 대기(초). None 이면 설정 기본값.
     required_requests: Sequence[int] | None
     max_wait_seconds: int | None
     max_error_rate_percent: float
@@ -139,7 +140,7 @@ class CreateMigrationPlanCommand:
     max_replication_lag_seconds: float
     simulate_fail_at_step: int | None = None
     simulate_reason: MigrationSimulateReason | None = None
-    # 비율 100% 뒤에 DB 쓰기 전환 단계를 더한다(API 서버 17). 기본 false = 지금과 같은 5단계.
+    # 비율 100% 뒤에 DB 쓰기 전환 단계를 더한다(API 서버 17). 기본 false = 지금과 같은 8단계.
     include_db_cutover: bool = False
 
 
@@ -208,6 +209,7 @@ class MigrationPlanService:
         db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
         db_cutover_timeout_seconds: int = 180,
         db_cutover_on_disaster: bool = False,
+        min_observe_seconds: int = 3,
     ) -> None:
         self._session = session
         self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
@@ -220,6 +222,7 @@ class MigrationPlanService:
         self._max_wait_seconds_default = max_wait_seconds_default
         self._expected_rps = expected_rps
         self._step_overhead_seconds = step_overhead_seconds
+        self._min_observe_seconds = min_observe_seconds
         self._approval_ttl = timedelta(seconds=approval_ttl_seconds)
         self._services = ServiceRepository(session)
         self._environments = EnvironmentRepository(session)
@@ -343,7 +346,9 @@ class MigrationPlanService:
                 data={
                     "expectedSeconds": plan.expected_seconds,
                     "requiredRequests": [
-                        plan.steps[index][STEP_REQUIRED_REQUESTS] for index in SHIFT_STEPS
+                        step[STEP_REQUIRED_REQUESTS]
+                        for step in plan.steps
+                        if step[STEP_KIND] == MigrationStepKind.SHIFT.value
                     ],
                     "maxWaitSeconds": plan.observe_seconds,
                     "mode": plan.mode,
@@ -384,6 +389,7 @@ class MigrationPlanService:
             max_wait_seconds,
             self._expected_rps,
             self._step_overhead_seconds,
+            min_observe_seconds=self._min_observe_seconds,
             db_cutover_timeout_seconds=(
                 self._db_cutover_timeout_seconds if include_db_cutover else None
             ),

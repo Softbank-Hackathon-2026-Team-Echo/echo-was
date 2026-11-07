@@ -84,7 +84,7 @@ async def test_lost_create_response_reattaches_to_job_by_name(migration: Migrati
     fake = _install(migration, _AcceptedButLost(migration.harness.clock, 0))
 
     final = await _run(migration, includeCutover=True)
-    cutover = final["steps"][5]["cutover"]
+    cutover = final["steps"][8]["cutover"]
 
     assert final["status"] == "SUCCEEDED"
     assert fake.lookups == 1
@@ -109,7 +109,7 @@ async def test_lost_create_response_without_job_or_row_rolls_back(migration: Mig
 
     assert _outcome(final) == ("ROLLED_BACK", "DB_CUTOVER_FAILED", "SUCCEEDED")
     assert fake.lookups == 1
-    assert final["steps"][5]["cutover"]["startUncertain"] is True
+    assert final["steps"][8]["cutover"]["startUncertain"] is True
     assert await migration.weights() == (100, 0)
 
 
@@ -128,7 +128,7 @@ async def test_lost_create_response_unconfirmed_keeps_weights(migration: Migrati
     codes = await migration.log_codes(final["id"])
 
     assert _outcome(final) == ("FAILED", "DB_CUTOVER_UNKNOWN", "SKIPPED")
-    assert final["steps"][5]["cutover"]["reason"] == "START_UNCONFIRMED"
+    assert final["steps"][8]["cutover"]["reason"] == "START_UNCONFIRMED"
     assert fake.lookups == 1
     assert await migration.weights() == (0, 100)
     assert "DB_CUTOVER_MANUAL_REQUIRED" in codes and "ROLLBACK_STARTED" not in codes
@@ -187,7 +187,7 @@ async def test_exit_one_without_source_writer_evidence_keeps_weights(
     migration.harness.replace_executors(data_sync=checker)
 
     final = await _run(migration, includeCutover=True)
-    cutover = final["steps"][5]["cutover"]
+    cutover = final["steps"][8]["cutover"]
 
     assert _outcome(final) == ("FAILED", "DB_CUTOVER_UNKNOWN", "SKIPPED")
     assert (cutover["exitCode"], cutover["reason"]) == (1, reason)
@@ -206,7 +206,7 @@ async def test_exit_one_with_no_change_marker_rolls_back(migration: Migration) -
     final = await _run(migration, includeCutover=True)
 
     assert _outcome(final) == ("ROLLED_BACK", "DB_CUTOVER_FAILED", "SUCCEEDED")
-    assert final["steps"][5]["cutover"]["writer"] == "UNKNOWN"
+    assert final["steps"][8]["cutover"]["writer"] == "UNKNOWN"
     assert await migration.weights() == (100, 0)
 
 
@@ -224,7 +224,7 @@ async def test_target_writer_overrides_stale_no_change_marker(migration: Migrati
     migration.harness.replace_executors(data_sync=checker)
 
     final = await _run(migration, includeCutover=True)
-    cutover = final["steps"][5]["cutover"]
+    cutover = final["steps"][8]["cutover"]
 
     assert _outcome(final) == ("FAILED", "DB_CUTOVER_UNKNOWN", "SKIPPED")
     assert (cutover["writer"], cutover["reason"]) == ("TARGET", "TARGET_IS_WRITER")
@@ -240,7 +240,7 @@ async def test_exit_one_with_source_writer_rolls_back(migration: Migration) -> N
     final = await _run(migration, includeCutover=True)
 
     assert _outcome(final) == ("ROLLED_BACK", "DB_CUTOVER_FAILED", "SUCCEEDED")
-    assert final["steps"][5]["cutover"]["writer"] == "SOURCE"
+    assert final["steps"][8]["cutover"]["writer"] == "SOURCE"
 
 
 # --- P1-3: 원본 DB 단절 긴급 이전 ---
@@ -324,7 +324,7 @@ async def test_persistent_poll_errors_end_unknown_without_rollback(migration: Mi
     fake = _install(migration, _PollRaises(migration.harness.clock, 0, failures=1000, no_run=True))
 
     final = await _run(migration, includeCutover=True)
-    cutover = final["steps"][5]["cutover"]
+    cutover = final["steps"][8]["cutover"]
 
     assert _outcome(final) == ("FAILED", "DB_CUTOVER_UNKNOWN", "SKIPPED")
     assert (cutover["reason"], cutover["pollErrors"]) == ("POLL_ERRORS", MAX_CUTOVER_POLL_ERRORS)
@@ -341,7 +341,7 @@ async def test_transient_poll_errors_recover(migration: Migration) -> None:
     final = await _run(migration, includeCutover=True)
 
     assert final["status"] == "SUCCEEDED"
-    assert final["steps"][5]["cutover"]["pollErrors"] == 0
+    assert final["steps"][8]["cutover"]["pollErrors"] == 0
 
 
 # --- P2: 승격 동의 ---
@@ -369,7 +369,7 @@ async def test_emergency_cutover_plan_needs_promote_acknowledgement(tokyo: Migra
     plan_id = result["planId"]
     detail = await tokyo.get_plan(plan_id)
     assert (detail["mode"], detail["status"]) == ("EMERGENCY", "PENDING_APPROVAL")
-    assert detail["steps"][5]["kind"] == "DB_CUTOVER"
+    assert detail["steps"][8]["kind"] == "DB_CUTOVER"
     assert detail["promoteWarning"] == PROMOTE_WARNING
 
     missing = await tokyo.act(plan_id, "approve")
