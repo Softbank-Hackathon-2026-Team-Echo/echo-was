@@ -597,7 +597,8 @@ null 규칙(고객 DB 를 읽지 못해도 상세 조회는 늘 200 이다):
 | `MIGRATION_MIN_OBSERVE_SECONDS` | 3 | 비율 적용부터 최소 관찰 시간(0~60), 계획 생성 때 단계별 저장 |
 | `MIGRATION_MAX_WAIT_SECONDS_DEFAULT` | 30 | 비율 단계 최대 대기(5~300) |
 | `MIGRATION_EXPECTED_RPS` | 50 | 예상 rps(1~10000). 예상 시간·가짜 카운터·`simulate` 에 쓴다 |
-| `MIGRATION_COUNT_POLL_SECONDS` | 1 | 카운터 읽기 주기(1~10) |
+| `MIGRATION_COUNT_POLL_SECONDS` | 1 | 카운터 읽기 주기(0.2~10, 소수 가능) |
+| `WORKER_IDLE_POLL_SECONDS` | (없음 → `WORKER_POLL_INTERVAL_SECONDS`) | 일꾼이 할 일이 없을 때 쉬는 시간(0 초과~10). 다음 읽기·최소 관찰 끝을 이만큼 늦게 집을 수 있다 |
 | `MIGRATION_COUNTS_STALE_SECONDS` | 5 | 마감 때 도착 마지막 성공 읽기가 이보다 오래되면 판단 불가(1~60) |
 | `MIGRATION_P95_REFERENCE_WINDOW_SECONDS` | 30 | p95 참고 읽기 창(5~300) |
 | `MIGRATION_STEP_OVERHEAD_SECONDS` | 2 | 단계 예상 시간에 더하는 여유(0~60) |
