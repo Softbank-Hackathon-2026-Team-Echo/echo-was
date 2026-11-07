@@ -8,6 +8,7 @@ from app.clients.osv import AdvisoryFeed
 from app.core.config import Settings, get_settings
 from app.core.exceptions import CveWatchDisabledError, CveWatchSimulateNotAllowedError
 from app.dependencies import get_advisory_feed, get_cve_watch_service
+from app.schemas.cve_autofix import CveAutofixReceiptResponse, CveDiagnosisRequest
 from app.schemas.cve_watch import CveWatchInjectRequest, CveWatchRunResponse
 from app.schemas.response import ApiResponse
 from app.services.cve_watch_service import CveWatchService
@@ -51,12 +52,24 @@ async def inject_cve_advisory(
     return ApiResponse(data=CveWatchRunResponse.from_view(view))
 
 
-@router.post("/findings/{finding_id}/diagnosis", status_code=201)
+@router.post(
+    "/findings/{finding_id}/diagnosis",
+    status_code=201,
+    response_model=ApiResponse[CveAutofixReceiptResponse],
+)
 async def request_finding_diagnosis(
-    access: HumanDeveloperAccess, finding_id: uuid.UUID, service: CveWatch
-) -> None:
-    """증거의 고칠 방법(DEPENDENCY_BUMP)으로 AI 진단 실행을 만든다.
-
-    이슈 #98(CHANGE_PROPOSAL) 병합 전이라 지금은 404·409 검사 뒤 501 `NOT_IMPLEMENTED` 다.
-    """
-    await service.request_diagnosis(access.organization_id, finding_id)
+    access: HumanDeveloperAccess,
+    finding_id: uuid.UUID,
+    service: CveWatch,
+    settings: CurrentSettings,
+    request: Annotated[CveDiagnosisRequest | None, Body()] = None,
+) -> ApiResponse[CveAutofixReceiptResponse]:
+    """기본 OFF면 기존 501. 명시적 격리 fixture만 모델 없는 dependency-bump를 실행한다."""
+    receipt = await service.request_diagnosis(
+        access.organization_id,
+        finding_id,
+        settings=settings,
+        actor_user_id=access.user.id,
+        operation=request.operation if request else "START",
+    )
+    return ApiResponse(data=CveAutofixReceiptResponse.model_validate(receipt))
