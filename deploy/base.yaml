@@ -191,6 +191,10 @@ data:
   # 패치 승인 때 반영 실행(APPLY_PATCH)을 만든다(API 서버 10-2, 지민 11/6 결정). 러너가 ECHO_APPLY_PATCH=on 으로
   # capabilities 에 APPLY_PATCH 를 낼 때만 가져간다. 되돌리려면 "false" PR(ConfigMap 만 바뀌니 병합 뒤 api 재시작).
   PATCH_APPLY_ENABLED: "true"
+  # 승인된 진단 패치를 WAS 가 GitHub App(echoport-deploy)으로 서비스 저장소에 브랜치·커밋·PR 로 올리고 재배포를
+  # 그 커밋으로 만든다(SPEC api-19). App 권한 contents·pull_requests 쓰기 + 설치 범위에 서비스 저장소가 있어야 한다
+  # (11/7 켬). 되돌리려면 "false" PR(ConfigMap 만 바뀌니 병합 뒤 api 재시작).
+  AI_APPLY_COMMIT_ENABLED: "true"
   # 시연 조직 echo-demo 의 aws·gcp 환경 secretRef 자리 표시(실제 비밀 아님). aws·gcp 실행기와 접속 확인
   # 어댑터는 워크로드 신원으로 붙어 이 값을 읽지 않는다. 환경 등록은 secretRef 가 필수이고 접속 확인
   # 서비스가 어댑터 호출 전에 비밀이 "있는지" 조회하므로 지우지 않는다(API 서버 12 결정).
