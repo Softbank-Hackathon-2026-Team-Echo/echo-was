@@ -123,6 +123,8 @@ class FeedEventResponse(ApiModel):
     depth_km: float | None
     url: str | None
     nearest_distance_km: float | None
+    auto_dr_attempts: dict[str, dict[str, object]] = Field(default_factory=dict)
+    collected_at: datetime | None = None
 
     @classmethod
     def from_summary(cls, summary: dict[str, object] | None) -> Self | None:
@@ -157,6 +159,8 @@ class DisasterResponse(ApiModel):
     ended_at: datetime | None
     plans: list[DisasterPlanResponse]
     feed_event: FeedEventResponse | None
+    origin_source: str
+    radius_source: str
 
     @classmethod
     def from_view(cls, view: DisasterView) -> Self:
@@ -183,6 +187,14 @@ class DisasterResponse(ApiModel):
             ended_at=disaster.ended_at,
             plans=[DisasterPlanResponse.from_result(result) for result in view.plans],
             feed_event=FeedEventResponse.from_summary(disaster.feed_event),
+            origin_source=(
+                "LIVE_USGS" if disaster.source == DisasterSource.LIVE_FEED else "SYNTHETIC"
+            ),
+            radius_source=(
+                "ORGANIZATION_POLICY"
+                if disaster.source != DisasterSource.SIMULATED
+                else "DEMO_ASSUMPTION"
+            ),
         )
 
 
@@ -216,6 +228,7 @@ class LiveFeedStatusResponse(ApiModel):
     last_skipped_count: int
     threshold: LiveFeedThresholdResponse
     evacuation: str
+    automatic_enabled: bool = False
 
     @classmethod
     def from_view(cls, view: FeedStatusView) -> Self:
@@ -236,7 +249,8 @@ class LiveFeedStatusResponse(ApiModel):
             threshold=LiveFeedThresholdResponse(
                 min_magnitude=float(view.min_magnitude), radius_km=view.radius_km
             ),
-            evacuation="SUGGESTED",
+            evacuation="PREAUTHORIZED" if view.automatic_enabled else "SUGGESTED",
+            automatic_enabled=view.automatic_enabled,
         )
 
 

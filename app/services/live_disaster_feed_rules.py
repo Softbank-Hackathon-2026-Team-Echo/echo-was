@@ -89,6 +89,7 @@ class FeedEvent:
     def summary(self, nearest_distance_km: float | None) -> dict[str, Any]:
         """disasters.feed_event·응답 feedEvent 에 그대로 싣는 요약."""
         return {
+            "eventKeys": list(self.keys),
             "provider": self.provider,
             "eventId": self.event_id,
             "place": self.place,

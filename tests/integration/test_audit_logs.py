@@ -31,6 +31,8 @@ from app.executors.base import HealthHttpError
 from app.executors.fake import FakeBuildExecutor, FakeTeardownExecutor
 from app.main import app
 from app.models import AuditLog, Environment, Job, Service, User
+from app.services.auto_dr_policy import configuration_digest, security_policy_digest, snapshot
+from app.services.security_rules import POLICY_VERSION
 from app.services.service_variable_service import app_secret_name
 from tests.integration.auth_support import (
     create_agent_token,
@@ -144,12 +146,22 @@ def test_every_write_route_has_an_action_name() -> None:
     assert write_routes - {LOGOUT} == set(WRITE_ROUTE_ACTIONS) | set(RUNNER_ROUTE_ACTIONS)
     assert not set(WRITE_ROUTE_ACTIONS) & set(RUNNER_ROUTE_ACTIONS)
     assert LOGOUT in write_routes
-    assert len(WRITE_ROUTE_ACTIONS) == 40
+    # 기본 40개와 이 변경의 사전동의·철회를 구분해 누락/잘못된 이름을 잡는다.
+    consent_routes = {
+        ("POST", "/api/v1/orgs/{org_id}/disasters/auto-dr/consents"): (
+            AuditAction.DISASTER_AUTO_DR_CONSENTED
+        ),
+        ("POST", "/api/v1/orgs/{org_id}/disasters/auto-dr/consents/{consent_id}/revoke"): (
+            AuditAction.DISASTER_AUTO_DR_REVOKED
+        ),
+    }
+    assert {route: WRITE_ROUTE_ACTIONS[route] for route in consent_routes} == consent_routes
+    assert len(set(WRITE_ROUTE_ACTIONS) - consent_routes.keys()) == 40
     assert len(RUNNER_ROUTE_ACTIONS) == 4
 
 
-# --- AC-2: 쓰기 40개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
-# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개) ---
+# --- AC-2: 쓰기 42개 경로(API 서버 7 의 24개 + 기한부 예외 3개 + 사전 점검 4개 + 재난 2개
+# + 변수 복사 1개 + 배포 실패 진단 1개 + 실제 재난 피드 2개 + CVE 감시 3개 + 사전동의·철회 2개) ---
 
 
 @dataclass
@@ -181,7 +193,7 @@ class _Ledger:
         organization_id: uuid.UUID,
         target_type: str,
         target_id: str | uuid.UUID,
-        label: str,
+        label: str | None,
         details: dict[str, Any] | None = None,
     ) -> None:
         assert response.is_success, response.text
@@ -213,6 +225,64 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
     client = harness.client
     ledger = _Ledger(harness)
     await ledger.skip()
+
+    # 사전동의는 새 권한을 만드는 POST다. 같은 본문도 별도 동의이며 자동 실행은 켜지지 않는다.
+    consents_path = org_path(team_id, "/disasters/auto-dr/consents")
+    consent_expiry = harness.clock.now() + timedelta(hours=1)
+    consent_body = {
+        "serviceId": migration.service_id,
+        "sourceEnvironmentId": str(migration.aws.id),
+        "targetEnvironmentId": str(migration.gcp.id),
+        "expiresAt": consent_expiry.isoformat(),
+        "acknowledgeAutomaticExecution": True,
+    }
+    async with harness.session_factory() as session, session.begin():
+        fingerprint = await snapshot(
+            session, team_id, uuid.UUID(migration.service_id), migration.aws.id, migration.gcp.id
+        )
+        config_digest = await configuration_digest(
+            session, team_id, uuid.UUID(migration.service_id)
+        )
+    consent_details = {
+        **consent_body,
+        "fingerprint": fingerprint,
+        "configurationDigest": config_digest,
+        "policyVersion": POLICY_VERSION,
+        "policyDigest": security_policy_digest(),
+        "minMagnitude": str(harness.organization.live_feed_min_magnitude),
+        "radiusKm": harness.organization.live_feed_radius_km,
+        "allowDbCutover": False,
+    }
+    consent_ids = []
+    for _ in range(2):
+        consent = await client.post(consents_path, json=consent_body)
+        consent_ids.append(_data(consent)["consentId"])
+        await ledger.expect_one(
+            consent,
+            AuditAction.DISASTER_AUTO_DR_CONSENTED,
+            admin.user,
+            team_id,
+            "service",
+            migration.service_id,
+            None,
+            consent_details,
+        )
+    assert consent_ids[0] != consent_ids[1]
+    for consent_id in consent_ids:
+        revoke_path = f"{consents_path}/{consent_id}/revoke"
+        await ledger.expect_one(
+            await client.post(revoke_path),
+            AuditAction.DISASTER_AUTO_DR_REVOKED,
+            admin.user,
+            team_id,
+            "service",
+            migration.service_id,
+            None,
+            {"consentId": consent_id},
+        )
+        await ledger.expect_none(await client.post(revoke_path))
+    assert not harness.settings.auto_dr_enabled
+    assert not harness.settings.live_disaster_feed_enabled
 
     # 조직
     created = await client.post("/api/v1/orgs", json={"slug": "acme-co", "name": "Acme"})
@@ -829,7 +899,7 @@ async def test_every_write_route_records_one_user_line_and_idempotent_retries_no
         "EARTHQUAKE M6.0",
     )
 
-    # 40개 가운데 39개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
+    # 42개 가운데 41개를 지났다(CVE 진단 연결은 501 이라 감사 줄이 없다). 어느 줄에도 토큰 원문·
     # 환경 변수 값·비밀 참조가 없다.
     assert ledger.seen == set(WRITE_ROUTE_ACTIONS.values()) - {AuditAction.CVE_DIAGNOSIS_REQUESTED}
     everything = await _rows(harness)

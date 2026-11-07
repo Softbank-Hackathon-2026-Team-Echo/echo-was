@@ -47,7 +47,7 @@ async def main() -> None:
     app_secret_store = build_app_secret_store(settings, clock)
     tls_checker = build_public_tls_checker(settings)
     feed_poller = (
-        LiveDisasterFeedPoller(session_factory, clock, settings)
+        LiveDisasterFeedPoller(session_factory, clock, settings, tls_checker=tls_checker)
         if settings.live_disaster_feed_enabled
         else None
     )

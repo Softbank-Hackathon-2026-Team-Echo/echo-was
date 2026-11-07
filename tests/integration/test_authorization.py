@@ -179,6 +179,9 @@ ROLE_TABLE: list[tuple[str, str, dict[str, str]]] = [
     # --- AI 3: 데이터 레지던시 요약(읽기만이라 뷰어·에이전트) ---
     _org("GET", "/ai/residency", V),
     # --- API 서버 9: 재난(조회·미리보기는 뷰어·에이전트, 만들기·종료는 개발자 이상 사람) ---
+    _org("GET", "/disasters/history", V),
+    _org("POST", "/disasters/auto-dr/consents", A, human_only=True),
+    _org("POST", "/disasters/auto-dr/consents/{consent_id}/revoke", A, human_only=True),
     _org("GET", "/disasters/preview", V),
     _org("GET", "/disasters", V),
     _org("GET", "/disasters/{disaster_id}", V),

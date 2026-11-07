@@ -47,6 +47,7 @@
 """
 
 import logging
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -107,6 +108,7 @@ from app.models.service import DEFAULT_HEALTH_CHECK_PATH
 from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.services.auto_dr_policy import AutoDrAuthorization, AutoDrRefusedError
 from app.services.deploy_support import SNAPSHOT_HEALTH_CHECK_PATH, public_url
 from app.services.job_lease import JobLease, JobOutcome
 from app.services.migration_counting import (
@@ -264,6 +266,8 @@ class MigrationPlanProcessor:
         status = MigrationPlanStatus(plan.status)
         if status.is_terminal:
             return self._closed()
+        if not await self._check_automatic(plan):
+            return self._closed()
         match status:
             case MigrationPlanStatus.APPROVED:
                 return await self._start()
@@ -274,6 +278,61 @@ class MigrationPlanProcessor:
             case _:
                 # 승인 전 계획에는 할 일이 없다.
                 return JobOutcome.done()
+
+    async def _check_automatic(self, plan: MigrationPlan, *, check_security: bool = False) -> bool:
+        binding = plan.fingerprint.get("autoDr")
+        if binding is None:
+            return True
+        try:
+            if plan.status == MigrationPlanStatus.ROLLING_BACK:
+                raise AutoDrRefusedError("ROLLBACK_NOT_PREAUTHORIZED")
+            if check_security and self._security_gate is not None:
+                decision = await self._security_gate.evaluate_plan(plan.id)
+                if decision.is_blocked:
+                    raise AutoDrRefusedError("SECURITY_GATE_BLOCKED")
+            async with self._session.begin():
+                await AutoDrAuthorization(
+                    self._session,
+                    self._clock,
+                    self._settings,
+                    uuid.UUID(binding["consentId"]),
+                    uuid.UUID(binding["disasterId"]),
+                ).validate(plan, starting=plan.status == MigrationPlanStatus.APPROVED)
+            return True
+        except AutoDrRefusedError as exc:
+            async with self._session.begin():
+                locked = await self._lock()
+                plan = locked.plan
+                status = MigrationPlanStatus(plan.status)
+                if status.is_terminal:
+                    return False
+                now = self._clock.now()
+                if await self._plans.transition(
+                    plan.id,
+                    status,
+                    {
+                        "status": MigrationPlanStatus.FAILED,
+                        "error_code": MigrationErrorCode.SECURITY_GATE_BLOCKED,
+                        "rollback_status": (
+                            MigrationRollbackStatus.NOT_NEEDED
+                            if status == MigrationPlanStatus.APPROVED
+                            else MigrationRollbackStatus.SKIPPED
+                        ),
+                        "step_results": skip_pending_steps(plan.step_results),
+                        "finished_at": now,
+                        "updated_at": now,
+                    },
+                ):
+                    await self._log.append(
+                        plan,
+                        MigrationLogCode.SECURITY_GATE_BLOCKED,
+                        now,
+                        data={"autoDrReason": exc.reason},
+                    )
+                    await self._record_finished(
+                        plan, MigrationPlanStatus.FAILED, MigrationErrorCode.SECURITY_GATE_BLOCKED
+                    )
+            return False
 
     def _closed(self) -> JobOutcome:
         if self._lease.is_exhausted:
@@ -502,6 +561,8 @@ class MigrationPlanProcessor:
                 )
         targets = await self._targets(plan)
         await self._lease.extend()
+        if not await self._check_automatic(plan, check_security=True):
+            return self._closed()
         result = await self._executors.traffic.set_weights(
             targets.route,
             (

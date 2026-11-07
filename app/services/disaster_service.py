@@ -491,6 +491,38 @@ class DisasterService:
                 AuditAction.DISASTER_DECLARED, disaster, actor_user_id, {"skippedPlans": skipped}
             )
 
+    async def choose_automatic_target(
+        self,
+        organization_id: uuid.UUID,
+        disaster_id: uuid.UUID,
+        service_id: uuid.UUID,
+        permitted_target_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+    ) -> tuple[uuid.UUID, float] | str:
+        """기존 도착 판정을 재사용하되 사전 허용 대상 한 곳으로만 한정한다."""
+        async with self._session.begin():
+            disaster = await self._get_in_organization(organization_id, disaster_id)
+            environments = await self._environments.search_all_live(organization_id)
+            facts = {environment.id: _facts(environment) for environment in environments}
+            blocking = await self._disasters.search_blocking_by_organization(organization_id)
+            blocked = {uuid.UUID(item) for row in blocking for item in row.affected_environment_ids}
+            context = _TriggerContext(
+                organization_id,
+                actor_user_id,
+                disaster_id,
+                float(disaster.magnitude),
+                Coordinates(disaster.epicenter_lat, disaster.epicenter_lng),
+                facts,
+                frozenset(uuid.UUID(item) for item in disaster.affected_environment_ids),
+                (frozenset(uuid.UUID(item) for item in disaster.safe_environment_ids) - blocked)
+                & {permitted_target_id},
+                False,
+            )
+        choice = await self._choose_target(context, service_id)
+        if isinstance(choice, DisasterPlanResult):
+            return choice.reason or "NO_SAFE_TARGET"
+        return choice.environment_id, choice.source_distance_km
+
     # --- 피드 재난의 대피 계획 만들기(API 서버 18) ---
 
     async def evacuate_disaster(

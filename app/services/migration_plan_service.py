@@ -88,6 +88,7 @@ from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
+from app.services.auto_dr_policy import AutoDrAuthorization
 from app.services.deploy_request_service import INVALID_CURSOR_REASON
 from app.services.integrity import violated_constraint_name
 from app.services.migration_plan_log import MigrationPlanLogWriter
@@ -208,7 +209,9 @@ class MigrationPlanService:
         db_cutover_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED,
         db_cutover_timeout_seconds: int = 180,
         db_cutover_on_disaster: bool = False,
+        automatic: AutoDrAuthorization | None = None,
     ) -> None:
+        self._automatic = automatic
         self._session = session
         self._db_cutover_enabled = db_cutover_mode is not DbCutoverExecutorMode.DISABLED
         self._db_cutover_timeout_seconds = db_cutover_timeout_seconds
@@ -245,10 +248,21 @@ class MigrationPlanService:
     ) -> None:
         self._audit.record(
             organization_id=organization_id,
-            actor=AuditActor.user(actor_user_id),
+            actor=(
+                AuditActor.system("disaster-auto-dr")
+                if self._automatic
+                else AuditActor.user(actor_user_id)
+            ),
             action=action,
             target=await migration_plan_target(self._session, plan),
-            details=details,
+            details={
+                **(details or {}),
+                **(
+                    {"autoDr": self._automatic.binding(), "consentedByUserId": str(actor_user_id)}
+                    if self._automatic
+                    else {}
+                ),
+            },
         )
 
     # --- 만들기 ---
@@ -324,6 +338,9 @@ class MigrationPlanService:
             plan.fingerprint = await read_fingerprint(
                 self._session, service, connections, source.id, target.id
             )
+            if self._automatic is not None:
+                await self._automatic.validate(plan, starting=True)
+                plan.fingerprint = {**plan.fingerprint, "autoDr": self._automatic.binding()}
             await self._insert(plan)
             if disaster is not None:
                 await self._log.append(
@@ -581,7 +598,13 @@ class MigrationPlanService:
             organization = await self._organizations.find_by_id(organization_id)
             if organization is None:
                 raise OrganizationNotFoundError
-            if plan.created_by_user_id == actor_user_id and not organization.allow_self_approval:
+            if self._automatic is not None:
+                await self._automatic.validate(plan, starting=True)
+            if (
+                plan.created_by_user_id == actor_user_id
+                and not organization.allow_self_approval
+                and self._automatic is None
+            ):
                 raise SelfApprovalForbiddenError
         decision = (
             await self._security_gate.evaluate_plan(plan_id)
@@ -606,7 +629,9 @@ class MigrationPlanService:
                     plan_id=str(plan.id),
                 )
             is_self = plan.created_by_user_id == actor_user_id
-            if is_self and not organization.allow_self_approval:
+            if self._automatic is not None:
+                await self._automatic.validate(plan, starting=True)
+            if is_self and not organization.allow_self_approval and self._automatic is None:
                 raise SelfApprovalForbiddenError
             if await self._expire_if_due(plan, now):
                 rejection = (_Outcome.EXPIRED, [])
