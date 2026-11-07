@@ -32,6 +32,13 @@ from app.services.service_teardown_processor import ServiceTeardownProcessor
 logger = logging.getLogger(__name__)
 
 
+def idle_poll_seconds(settings: Settings) -> float:
+    """할 일이 없을 때 쉬는 시간(WORKER_IDLE_POLL_SECONDS, 없으면 WORKER_POLL_INTERVAL_SECONDS)."""
+    if settings.worker_idle_poll_seconds is not None:
+        return settings.worker_idle_poll_seconds
+    return settings.worker_poll_interval_seconds
+
+
 class UnknownJobKindError(Exception):
     """처리기가 없는 할 일 종류. 조용히 DONE 으로 닫지 않고 올린다(임대가 끝나면 다시 집힌다)."""
 
@@ -107,7 +114,7 @@ class Worker:
                 group.create_task(self._loop(stop, index))
 
     async def _loop(self, stop: asyncio.Event, index: int) -> None:
-        interval = self._settings.worker_poll_interval_seconds
+        interval = idle_poll_seconds(self._settings)
         while not stop.is_set():
             try:
                 worked = await self.run_once()

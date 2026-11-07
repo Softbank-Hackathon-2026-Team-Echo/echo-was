@@ -255,6 +255,10 @@ class Settings(BaseSettings):
 
     # 일꾼(python -m app.worker).
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    # 할 일이 없을 때 다시 집으러 가기까지 쉬는 시간(초). 비우면 worker_poll_interval_seconds.
+    # 이전 계획의 다음 읽기·최소 관찰 끝을 이 간격만큼 늦게 집을 수 있어 따로 뺐다
+    # (배포·내리기의 실행기 재조회 주기 worker_poll_interval_seconds 는 그대로).
+    worker_idle_poll_seconds: float | None = Field(default=None, gt=0, le=10)
     worker_lease_seconds: float = Field(default=30.0, gt=0)
     worker_concurrency: int = Field(default=1, ge=1, le=32)
 
@@ -270,7 +274,8 @@ class Settings(BaseSettings):
     )
     migration_expected_rps: int = Field(default=50, ge=1, le=10000)
     migration_min_observe_seconds: int = Field(default=3, ge=0, le=60)
-    migration_count_poll_seconds: int = Field(default=1, ge=1, le=10)
+    # 카운터 읽기 주기. 1초 미만도 받는다(필요 건수·5xx 판정은 그대로, 읽는 간격만 짧아진다).
+    migration_count_poll_seconds: float = Field(default=1.0, ge=0.2, le=10)
     migration_counts_stale_seconds: int = Field(default=5, ge=1, le=60)
     migration_p95_reference_window_seconds: int = Field(default=30, ge=5, le=300)
     migration_step_overhead_seconds: int = Field(default=2, ge=0, le=60)
