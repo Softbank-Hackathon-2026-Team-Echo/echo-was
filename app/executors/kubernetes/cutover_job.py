@@ -94,7 +94,8 @@ def cutover_job_name(request: DbCutoverRequest) -> str:
 def cutover_job_manifest(
     request: DbCutoverRequest, *, namespace: str, image: str
 ) -> dict[str, Any]:
-    """VAP 가 받는 모양 그대로의 Job(job.example.yaml)."""
+    """legacy 또는 정적 db-pair/v1 fixture. v1 실행 허가는 start와 별개다."""
+    pair_env = request.pair_snapshot.job_environment() if request.pair_snapshot is not None else {}
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -124,6 +125,10 @@ def cutover_job_manifest(
                                     "name": "ALLOW_PROMOTE",
                                     "value": "true" if request.allow_promote else "false",
                                 },
+                                *(
+                                    {"name": name, "value": value}
+                                    for name, value in pair_env.items()
+                                ),
                             ],
                             "resources": {
                                 "requests": {"cpu": "50m", "memory": "64Mi"},
@@ -222,6 +227,9 @@ class KubernetesDbCutoverExecutor:
         return f"/apis/batch/v1/namespaces/{self._namespace}/jobs"
 
     async def start(self, request: DbCutoverRequest) -> DbCutoverStartResult:
+        if request.pair_snapshot is not None:
+            # 現 이미지·VAP는 명시 DB쌍을 소비하지 않는다. POST/legacy fallback 금지.
+            return DbCutoverStartFailed("DB_PAIR_WORKER_NOT_READY", not_sent=True)
         name = cutover_job_name(request)
         manifest = cutover_job_manifest(request, namespace=self._namespace, image=self._image)
         try:
@@ -356,9 +364,23 @@ def log_reason(text: str) -> str | None:
 def _same_job(body: dict[str, Any], request: DbCutoverRequest) -> bool:
     try:
         containers = body["spec"]["template"]["spec"]["containers"]
-        env = {item["name"]: item.get("value") for item in containers[0].get("env") or []}
+        entries = containers[0].get("env") or []
+        env = {item["name"]: item.get("value") for item in entries}
     except (KeyError, IndexError, TypeError):
         return False
+    if request.pair_snapshot is not None:
+        expected = {
+            "PLAN_ID": str(request.plan_id),
+            "KIND": request.job_kind.value,
+            "ALLOW_PROMOTE": "true" if request.allow_promote else "false",
+            **request.pair_snapshot.job_environment(),
+        }
+        return (
+            len(containers) == 1
+            and len(entries) == len(env)
+            and env == expected
+            and all(set(item) == {"name", "value"} for item in entries)
+        )
     return env.get("PLAN_ID") == str(request.plan_id) and env.get("KIND") == request.job_kind.value
 
 

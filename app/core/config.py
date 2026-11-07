@@ -1,7 +1,7 @@
 import re
 from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -165,6 +165,8 @@ class Settings(BaseSettings):
     # DB 쓰기 전환 단계(API 서버 17). kubernetes 면 image 는 echo-infra deploy/values.env 의
     # CUTOVER_IMAGE(@sha256 digest, VAP 가 고정)와 글자까지 같아야 한다. 결과 행은 위 cutover_runs_*
     # 연결로 계획 id 로 읽으므로 data_sync_checker_mode = postgres 가 필요하다.
+    migration_pair_guard_enabled: bool = False
+    migration_pair_registry: dict[str, Any] = Field(default_factory=dict)
     db_cutover_executor_mode: DbCutoverExecutorMode = DbCutoverExecutorMode.DISABLED
     db_cutover_namespace: str = "echo-ops"
     db_cutover_job_image: str | None = None

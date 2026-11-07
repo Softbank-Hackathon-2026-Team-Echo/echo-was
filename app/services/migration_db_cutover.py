@@ -32,6 +32,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.enums import CutoverKind, MigrationErrorCode, MigrationPlanMode
 from app.executors.base import (
     CutoverRun,
@@ -41,6 +43,9 @@ from app.executors.base import (
     DbCutoverJobKind,
     DbCutoverRequest,
 )
+from app.executors.migration_pair_job import validate_pair_result
+from app.schemas.migration_capability import MigrationPairSnapshot
+from app.services.migration_pair_registry import MigrationPairBlockedError
 
 EXIT_DONE = 0
 EXIT_NO_CHANGE = 1
@@ -111,12 +116,30 @@ def db_cutover_request(
     target_environment_kind: str,
     *,
     promote_consented: bool,
+    pair_snapshot: MigrationPairSnapshot | None = None,
 ) -> DbCutoverRequest:
     """계획 종류별 Job 값. 복귀는 rollback, 재난 긴급 이전은 A 에 닿지 않으면 승격 허용.
 
     승격은 재난 긴급 이전이고 만들 때 승격 허용 표시를 단 단계(승인 때 acknowledgePromote 로 동의를
     받은 계획, promote_consented)일 때만 허용한다.
     """
+    if pair_snapshot is not None:
+        if (
+            pair_snapshot.job_kind is None
+            or pair_snapshot.target_environment_id != target_environment_id
+        ):
+            raise ValueError("DB_PAIR_REQUEST_MISMATCH")
+        kind = DbCutoverJobKind(pair_snapshot.job_kind)
+        return DbCutoverRequest(
+            plan_id=plan_id,
+            job_kind=kind,
+            allow_promote=pair_snapshot.operation == "disasterPromote" and promote_consented,
+            target=CutoverRunTarget(target_environment_id, target_environment_kind),
+            result_kind=CutoverKind.ROLLBACK
+            if kind is DbCutoverJobKind.ROLLBACK
+            else CutoverKind.CUTOVER,
+            pair_snapshot=pair_snapshot,
+        )
     plan_mode = MigrationPlanMode(mode)
     is_failback = plan_mode is MigrationPlanMode.FAILBACK
     return DbCutoverRequest(
@@ -138,6 +161,9 @@ def judge_db_cutover(
     run_result: CutoverRunResult | None,
     writer: str | None = None,
     poll_failed: bool = False,
+    plan_id: uuid.UUID | None = None,
+    pair_snapshot: MigrationPairSnapshot | dict[str, Any] | None = None,
+    pair_receipt: dict[str, Any] | None = None,
 ) -> CutoverVerdict:
     """Job 이 끝났거나(finished) 사라졌거나(lost) 상한을 넘었을 때(timed_out) 판정한다.
 
@@ -145,6 +171,20 @@ def judge_db_cutover(
     끊은 경우다.
     """
     run = run_result if isinstance(run_result, CutoverRun) else None
+    if pair_snapshot is not None:
+        try:
+            if plan_id is None:
+                raise MigrationPairBlockedError()
+            validate_pair_result(
+                plan_id, MigrationPairSnapshot.model_validate(pair_snapshot), pair_receipt or {}
+            )
+        except (MigrationPairBlockedError, ValidationError):
+            return _fail(
+                MigrationErrorCode.DATA_INTEGRITY_FAILED,
+                CutoverRecovery.MANUAL,
+                "DB_PAIR_RESULT_MISMATCH",
+                run,
+            )
     if finished and exit_code == EXIT_NO_CHANGE:
         if run is not None:
             # 이 계획 행이 있으면 전환은 끝났다(종료 코드와 어긋나도 행이 근거다).

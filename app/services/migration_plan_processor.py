@@ -107,6 +107,7 @@ from app.models.service import DEFAULT_HEALTH_CHECK_PATH
 from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.schemas.migration_capability import MigrationPairSnapshot
 from app.services.deploy_support import SNAPSHOT_HEALTH_CHECK_PATH, public_url
 from app.services.job_lease import JobLease, JobOutcome
 from app.services.migration_counting import (
@@ -143,6 +144,12 @@ from app.services.migration_db_cutover import (
     db_cutover_request,
     judge_db_cutover,
     run_to_json,
+)
+from app.services.migration_pair_plan_guard import PAIR_FINGERPRINT_KEY, MigrationPairPlanGuard
+from app.services.migration_pair_registry import (
+    MigrationPairBlockedError,
+    MigrationPairRegistry,
+    blocked,
 )
 from app.services.migration_plan_log import MigrationPlanLogWriter
 from app.services.migration_plan_support import (
@@ -282,7 +289,43 @@ class MigrationPlanProcessor:
 
     # --- APPROVED: 지문 확인 → RUNNING ---
 
+    def _pair_guard_required(self, plan: MigrationPlan) -> bool:
+        return (
+            self._settings.migration_pair_guard_enabled or PAIR_FINGERPRINT_KEY in plan.fingerprint
+        )
+
+    async def _check_pair_execution(self, locked: _Locked) -> bool:
+        """잠금 안에서 재검사한다. 거절은 트래픽 롤백 없이 끝내며 legacy로 내리지 않는다."""
+        plan = locked.plan
+        if not self._pair_guard_required(plan):
+            return True
+        try:
+            if not self._settings.migration_pair_guard_enabled:
+                raise blocked("DB_PAIR_GUARD_DISABLED")
+            if locked.source is None or locked.target is None:
+                raise blocked("DB_BINDING_UNREGISTERED")
+            MigrationPairPlanGuard(
+                MigrationPairRegistry.from_config(self._settings.migration_pair_registry)
+            ).check_execution(locked.service, locked.source, locked.target, plan, self._clock.now())
+        except MigrationPairBlockedError as exc:
+            reason = exc.details[0].reason if exc.details else "DB_PAIR_UNKNOWN"
+            await self._fail(
+                plan,
+                MigrationErrorCode.DB_CUTOVER_UNKNOWN,
+                self._clock.now(),
+                pair_reason=reason,
+            )
+            return False
+        return True
+
     async def _start(self) -> JobOutcome | None:
+        # 잠금 전 TLS 판정도 부수효과다. 쌍 gate를 먼저 통과해야 한다.
+        async with self._session.begin():
+            locked = await self._lock()
+            if locked.plan.status != MigrationPlanStatus.APPROVED:
+                return None
+            if not await self._check_pair_execution(locked):
+                return self._closed()
         decision = (
             await self._security_gate.evaluate_plan(self._plan_id)
             if self._security_gate is not None
@@ -403,6 +446,8 @@ class MigrationPlanProcessor:
                 return self._closed()
             # 컷오버 Job 을 요청한 뒤에는 판정할 때까지 중단·임대 상실로 되돌리지 않는다.
             if not _cutover_in_flight(plan):
+                if not await self._check_pair_execution(locked):
+                    return self._closed()
                 if self._lease.is_exhausted:
                     await self._start_rollback(plan, MigrationErrorCode.WORKER_LOST, now)
                     return None
@@ -837,6 +882,11 @@ class MigrationPlanProcessor:
                 environment.id,
                 environment.kind,
                 promote_consented=needs_promote_ack(plan.steps),
+                pair_snapshot=(
+                    MigrationPairSnapshot.model_validate(plan.fingerprint[PAIR_FINGERPRINT_KEY])
+                    if PAIR_FINGERPRINT_KEY in plan.fingerprint
+                    else None
+                ),
             )
 
     async def _cutover_apply(self, plan: MigrationPlan) -> JobOutcome | None:
@@ -847,6 +897,15 @@ class MigrationPlanProcessor:
         (_settle_uncertain_start). 분명한 거절만 곧바로 트래픽 원복이다.
         """
         index = plan.current_step
+        if self._pair_guard_required(plan):
+            async with self._session.begin():
+                locked = await self._lock()
+                if not _is_at(
+                    locked.plan, MigrationPlanStatus.RUNNING, index, MigrationStepPhase.APPLY
+                ):
+                    return None
+                if not await self._check_pair_execution(locked):
+                    return self._closed()
         request = await self._cutover_request(plan)
         timeout = timedelta(seconds=int(plan.steps[index][STEP_MAX_WAIT_SECONDS]))
         simulated = _simulated_failure(plan, index)
@@ -1183,6 +1242,13 @@ class MigrationPlanProcessor:
             run_result=run_result,
             writer=writer,
             poll_failed=poll_errors >= MAX_CUTOVER_POLL_ERRORS,
+            plan_id=plan.id,
+            pair_snapshot=(
+                plan.fingerprint.get(PAIR_FINGERPRINT_KEY, {})
+                if self._pair_guard_required(plan)
+                else None
+            ),
+            pair_receipt=run_result.pair_receipt if isinstance(run_result, CutoverRun) else None,
         )
         if verdict.reason is not None:
             cutover[CUTOVER_REASON] = verdict.reason
@@ -1603,6 +1669,7 @@ class MigrationPlanProcessor:
         now: datetime,
         *,
         preceding_lines: Sequence[_LogLine] = (),
+        pair_reason: str | None = None,
     ) -> None:
         """트래픽을 바꾸기 전(APPROVED) 또는 방어용으로 FAILED 로 끝낸다(잠근 트랜잭션 안).
 
@@ -1614,6 +1681,8 @@ class MigrationPlanProcessor:
             if status is MigrationPlanStatus.APPROVED
             else MigrationRollbackStatus.FAILED
         )
+        if pair_reason is not None and status is MigrationPlanStatus.RUNNING:
+            rollback_status = MigrationRollbackStatus.SKIPPED
         if await self._plans.transition(
             plan.id,
             status,
@@ -1629,7 +1698,13 @@ class MigrationPlanProcessor:
         ):
             for line_code, data in preceding_lines:
                 await self._log.append(plan, line_code, now, data=data)
-            await self._log.append(plan, MigrationLogCode.FAILED, now, error_code=code)
+            await self._log.append(
+                plan,
+                MigrationLogCode.FAILED,
+                now,
+                error_code=code,
+                data={"migrationPairReason": pair_reason} if pair_reason is not None else None,
+            )
             await self._record_finished(plan, MigrationPlanStatus.FAILED, code)
         self._report("migration failed", plan, error_code=code)
 
@@ -1670,12 +1745,26 @@ class MigrationPlanProcessor:
         assert plan is not None
         await self._lease.hold()
         by_id = {item.id: item for item in connections}
+        source = by_id.get(plan.source_service_environment_id)
+        target = by_id.get(plan.target_service_environment_id)
+        if self._pair_guard_required(plan):
+            # lock_live_by_service는 environment 관계를 eager load하지 않는다.
+            source = (
+                await self._connections.find_by_id(plan.source_service_environment_id)
+                if source is not None
+                else None
+            )
+            target = (
+                await self._connections.find_by_id(plan.target_service_environment_id)
+                if target is not None
+                else None
+            )
         return _Locked(
             service=service,
             connections=connections,
             plan=plan,
-            source=by_id.get(plan.source_service_environment_id),
-            target=by_id.get(plan.target_service_environment_id),
+            source=source,
+            target=target,
         )
 
     async def _targets(self, plan: MigrationPlan) -> MigrationTargets:

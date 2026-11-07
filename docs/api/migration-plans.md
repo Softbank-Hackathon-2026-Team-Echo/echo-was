@@ -5,6 +5,10 @@
 - 경로는 `/api/v1/orgs/{orgId}` 아래, 공통 봉투 `ApiResponse`, camelCase, 모든 응답 칸은 항상 있고 값이 없으면 null([environments.md](environments.md#공통-규칙)).
 - 트래픽 나눠 보내기·요청 카운터·지표·데이터 복제 확인은 실행기 틀 + **가짜**(`simulated: true`)다. 실제 연결은 고정 진입점(Envoy, `GET /counters`·`GET /summary`)·인프라 7(복제)이 실행기만 바꿔 붙인다([executors.md](../executors.md)). 실제 연결 전 운영은 비율 칸만 바뀐다.
 
+## 명시 DB쌍 1단계 (API 서버 20)
+
+지원 조회 `GET /services/{serviceId}/migration-capabilities?sourceEnvironmentId=UUID&targetEnvironmentId=UUID`, 등록표·snapshot·409 `MIGRATION_PAIR_UNSUPPORTED`·worker 차단 계약은 [migration-capabilities.md](migration-capabilities.md)에 있다. `MIGRATION_PAIR_GUARD_ENABLED=false`가 기본이다. ON이면 유효한 쌍도 이미지/VAP/엔진 계약 미완으로 `DB_PAIR_WORKER_NOT_READY` 거절하며 `executionReady=false`다. 이 변경을 6방향 이전 운영 지원으로 해석하지 않는다.
+
 ## 엔드포인트
 
 | 메서드 · 경로 | 성공 | 대표 실패 | 최소 역할 |
