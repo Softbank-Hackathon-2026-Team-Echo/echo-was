@@ -401,9 +401,13 @@ async def test_dry_run_reports_would_do_and_changes_nothing(migration: Migration
     assert await _audit(harness, AuditAction.DEMO_RESTORE) == []
 
 
-async def test_db_cutover_plan_since_snapshot_is_db_writer_manual_required(
+async def test_db_cutover_plan_cancelled_before_running_is_db_writer_ok(
     migration: Migration,
 ) -> None:
+    """승인 전에 취소된 DB 쓰기 전환 계획은 Job 이 돌지 않았다: 쓰기 담당은 스냅샷 그대로다.
+
+    (돌았을 수 있는 계획의 MANUAL_REQUIRED 는 test_demo_snapshot_safety.py 가 본다.)
+    """
     harness = migration.harness
     harness.use_settings(db_cutover_executor_mode=DbCutoverExecutorMode.FAKE)
     await _snapshot(harness)
@@ -413,13 +417,14 @@ async def test_db_cutover_plan_since_snapshot_is_db_writer_manual_required(
 
     (item,) = _steps(result)["DB_WRITER"]["items"]
     assert (item["status"], item["code"], item["targetId"]) == (
-        "MANUAL_REQUIRED",
-        "DB_CUTOVER_SINCE_SNAPSHOT",
+        "OK",
+        "DB_CUTOVER_NOT_STARTED",
         plan["id"],
     )
-    assert "DB_WRITER" in result["manualRequired"]
+    assert "DB_WRITER" not in result["manualRequired"]
     # 계획 자체는 1 단계가 정리한다(DB 쓰기 담당은 건드리지 않는다).
     assert await _plan_status(harness, plan["id"]) == "CANCELLED"
+    assert result["restored"] is True
 
 
 async def test_open_precheck_since_snapshot_is_cancelled(migration: Migration) -> None:

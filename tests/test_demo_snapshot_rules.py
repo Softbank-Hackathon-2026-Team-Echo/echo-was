@@ -6,6 +6,8 @@
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from app.services.demo_snapshot_service import (
     UNCHANGED,
     DemoAction,
@@ -20,6 +22,7 @@ from app.services.demo_snapshot_service import (
     SnapshotService,
     changed_anything,
     compare_kept_settings,
+    db_cutover_may_have_run,
     has_db_cutover_step,
     is_restored,
     manual_required_steps,
@@ -193,3 +196,43 @@ def test_db_cutover_step_detection() -> None:
     assert has_db_cutover_step([{"kind": "SHIFT"}, {"kind": "DB_CUTOVER"}]) is True
     assert has_db_cutover_step([{"kind": "PREFLIGHT"}, {"kind": "SHIFT"}]) is False
     assert has_db_cutover_step([]) is False
+
+
+_CUTOVER_STEPS = [{"kind": "PREFLIGHT"}, {"kind": "DB_CUTOVER"}, {"kind": "SHIFT"}]
+
+
+def _results(cutover: str) -> list[dict[str, str]]:
+    return [{"status": "PASSED"}, {"status": cutover}, {"status": "PENDING"}]
+
+
+@pytest.mark.parametrize(
+    ("status", "cutover_result", "may_have_run"),
+    [
+        # 승인 전에는 Job 이 없다.
+        ("PENDING_APPROVAL", "PENDING", False),
+        # 열린 계획은 곧 돌거나 도는 중이라 모른다.
+        ("APPROVED", "PENDING", True),
+        ("RUNNING", "RUNNING", True),
+        ("ROLLING_BACK", "FAILED", True),
+        # 끝난 계획: 그 단계가 돌지 않았을 때만 쓰기 담당이 그대로다.
+        ("CANCELLED", "SKIPPED", False),
+        ("EXPIRED", "SKIPPED", False),
+        ("ROLLED_BACK", "PENDING", False),
+        ("SUCCEEDED", "PASSED", True),
+        ("ROLLED_BACK", "FAILED", True),
+        ("FAILED", "RUNNING", True),
+    ],
+)
+def test_db_cutover_may_have_run(status: str, cutover_result: str, may_have_run: bool) -> None:
+    assert db_cutover_may_have_run(status, _CUTOVER_STEPS, _results(cutover_result)) is (
+        may_have_run
+    )
+
+
+def test_db_cutover_may_have_run_edges() -> None:
+    # DB 쓰기 전환 단계가 없으면 늘 False.
+    assert (
+        db_cutover_may_have_run("SUCCEEDED", [{"kind": "SHIFT"}], [{"status": "PASSED"}]) is False
+    )
+    # 결과 칸이 모자라면(읽을 수 없음) 모른다.
+    assert db_cutover_may_have_run("FAILED", _CUTOVER_STEPS, [{"status": "PASSED"}]) is True

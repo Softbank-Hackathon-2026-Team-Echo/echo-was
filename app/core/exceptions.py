@@ -813,3 +813,10 @@ class DemoStateNotCleanError(ConflictError):
     """시연 스냅샷은 깨끗한 상태에서만 딴다. details 에 막은 이유(reason)·대상 id(value)."""
 
     code = "DEMO_STATE_NOT_CLEAN"
+
+
+class DemoRestoreInProgressError(ConflictError):
+    """같은 조직의 다른 시연 복귀가 아직 돌고 있다. 그 호출이 끝난 뒤 다시 부른다."""
+
+    code = "DEMO_RESTORE_IN_PROGRESS"
+    retryable = True

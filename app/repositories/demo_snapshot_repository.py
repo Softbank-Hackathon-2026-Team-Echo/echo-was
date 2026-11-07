@@ -19,6 +19,7 @@ from app.enums import (
     OPEN_MIGRATION_PLAN_STATUSES,
     AgentRunKind,
     AgentRunStatus,
+    AuditResult,
     DeployRequestStatus,
     DisasterStatus,
 )
@@ -43,16 +44,33 @@ class DemoSnapshotRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def find_latest_snapshot(self, organization_id: uuid.UUID) -> AuditLog | None:
+    async def find_latest_snapshot(
+        self, organization_id: uuid.UUID, details_key: str
+    ) -> AuditLog | None:
+        """성공(SUCCEEDED)이고 details 에 스냅샷이 든 가장 늦은 DEMO_SNAPSHOT 줄.
+
+        같은 action 이름으로 거부(DENIED) 줄도 쌓인다(권한 없는 POST /demo/snapshot, details 빈 값).
+        그 줄을 고르면 정상 스냅샷이 가려지므로 결과·스냅샷 존재로 거른다.
+        """
         return await self._session.scalar(
             select(AuditLog)
             .where(
                 AuditLog.organization_id == organization_id,
                 AuditLog.action == AuditAction.DEMO_SNAPSHOT.value,
+                AuditLog.result == AuditResult.SUCCEEDED.value,
+                AuditLog.details.has_key(details_key),
             )
             .order_by(AuditLog.seq.desc())
             .limit(1)
         )
+
+    async def find_plan(self, plan_id: uuid.UUID) -> MigrationPlan | None:
+        statement = (
+            select(MigrationPlan)
+            .where(MigrationPlan.id == plan_id)
+            .execution_options(populate_existing=True)
+        )
+        return await self._session.scalar(statement)
 
     async def search_live_services(self, organization_id: uuid.UUID) -> list[Service]:
         statement = (

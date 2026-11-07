@@ -11,20 +11,32 @@
   객체를 만료시키므로 부르는 사이에 ORM 객체를 들고 있지 않는다(값만 넘긴다).
 - 한 번에 끝나지 않는 일(중단 롤백 → 복귀 이전 → 되돌리기 배포)은 일꾼이 끝낸 뒤 다시 부르면 이어
   간다. 여러 번 불러도 안전하다.
+- 같은 조직의 복귀(dryRun 제외)는 한 번에 하나만 돈다(조직별 PostgreSQL advisory lock). 겹치면
+  409 DEMO_RESTORE_IN_PROGRESS 이고, 앞 호출이 끝난 뒤 다시 부른다.
 - DB 쓰기 담당·데모 앱 데이터·AI 수정 PR 은 WAS 가 하지 않는다(수동 필요로만 알린다).
   보안 예외·환경·조직 설정은 되돌리지 않고 달라졌는지만 알린다. 감사 로그는 지우지 않는다.
+- **복귀는 DB 쓰기 전환(컷오버) Job 을 만들지 않는다.** 새로 만드는 복귀 계획에 DB 쓰기 전환을 넣지
+  않고, 이미 있는 승인 대기 계획 중 DB 쓰기 전환이 든 것은 승인하지 않고 취소한다(승인하면 일꾼이
+  FAILBACK 을 rollback Job 으로 만든다). 승인 직전에 계획을 다시 읽어 한 번 더 막는다.
+- DB 쓰기 담당 확인(DB_WRITER)은 트래픽(TRAFFIC)보다 **먼저** 돈다. 스냅샷 뒤 DB 쓰기 전환이 돌았을
+  수 있는 계획이 있는 서비스는 쓰기 담당을 모르므로 트래픽·배포를 되돌리지 않고 MANUAL_REQUIRED
+  (DB_WRITER_UNCONFIRMED)로 둔다 — 컷오버 처리기 원칙(migration_db_cutover: 쓰기 담당을 모르면
+  가중치를 되돌리지 않는다)과 같다. 응답의 단계 순서(1~11)는 그대로다.
 """
 
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from functools import partial
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.audit.actions import AuditAction, AuditTargetType
 from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
@@ -32,22 +44,27 @@ from app.core.clock import Clock
 from app.core.exceptions import (
     AlreadyCurrentError,
     AppError,
+    DemoRestoreInProgressError,
     DemoSnapshotNotFoundError,
     DemoStateNotCleanError,
     DisasterNotActiveError,
     ErrorField,
     MigrationInProgressError,
+    MigrationPlanOpenError,
     OrganizationNotFoundError,
     PatchStaleError,
     PlanExpiredError,
+    PlanNotPendingError,
     RunNotActiveError,
     SelfApprovalForbiddenError,
 )
 from app.enums import (
+    OPEN_MIGRATION_PLAN_STATUSES,
     AgentPatchStatus,
     AgentRunKind,
     MigrationPlanStatus,
     MigrationStepKind,
+    MigrationStepStatus,
     ServiceStatus,
 )
 from app.models import AuditLog, Organization
@@ -61,6 +78,7 @@ from app.services.migration_plan_support import (
     DEFAULT_MAX_ERROR_RATE_PERCENT,
     DEFAULT_MAX_P95_MS,
     DEFAULT_MAX_REPLICATION_LAG_SECONDS,
+    RESULT_STATUS,
     STEP_KIND,
 )
 from app.services.precheck_patch_service import PrecheckPatchService
@@ -142,6 +160,8 @@ class DemoAction(StrEnum):
     WAIT_DEPLOY_REQUEST = "WAIT_DEPLOY_REQUEST"
     CREATE_FAILBACK_PLAN = "CREATE_FAILBACK_PLAN"
     APPROVE_FAILBACK_PLAN = "APPROVE_FAILBACK_PLAN"
+    # 쓰기 담당을 모르거나 복귀 계획에 DB 쓰기 전환이 들어 트래픽·배포를 되돌리지 않고 둔다.
+    HOLD_FOR_DB_WRITER = "HOLD_FOR_DB_WRITER"
     ROLLBACK_DEPLOYMENT = "ROLLBACK_DEPLOYMENT"
     CHECK_DB_WRITER = "CHECK_DB_WRITER"
     RESET_APP_DATA = "RESET_APP_DATA"
@@ -162,6 +182,17 @@ CONNECTION_MISSING = "CONNECTION_MISSING"
 NOT_DEPLOYED = "NOT_DEPLOYED"
 DB_CUTOVER_SINCE_SNAPSHOT = "DB_CUTOVER_SINCE_SNAPSHOT"
 NO_DB_CUTOVER_SINCE_SNAPSHOT = "NO_DB_CUTOVER_SINCE_SNAPSHOT"
+# 스냅샷 뒤 DB 쓰기 전환 단계가 든 계획이지만 그 Job 이 돌지 않았다(승인 대기·건너뜀).
+DB_CUTOVER_NOT_STARTED = "DB_CUTOVER_NOT_STARTED"
+# 쓰기 담당이 스냅샷 때와 같은지 모른다: 트래픽·배포를 되돌리지 않는다.
+DB_WRITER_UNCONFIRMED = "DB_WRITER_UNCONFIRMED"
+# 위 이유로 트래픽을 두었으니 배포도 되돌리지 않는다.
+TRAFFIC_HELD_FOR_DB_WRITER = "TRAFFIC_HELD_FOR_DB_WRITER"
+# 승인 대기 복귀 계획에 DB 쓰기 전환이 들었다: 승인하지 않는다(취소한다).
+FAILBACK_PLAN_INCLUDES_DB_CUTOVER = "FAILBACK_PLAN_INCLUDES_DB_CUTOVER"
+INCLUDE_DB_CUTOVER_DETAIL = "includeDbCutover=true"
+# 조직별 복귀 잠금(pg advisory lock) 키 앞부분.
+RESTORE_LOCK_NAMESPACE = "echo:demo-restore"
 APP_RESET_ENDPOINT_MISSING = "APP_RESET_ENDPOINT_MISSING"
 PULL_REQUEST_OPENED = "PULL_REQUEST_OPENED"
 AUDIT_LOGS_NOT_DELETABLE = "AUDIT_LOGS_NOT_DELETABLE"
@@ -322,6 +353,44 @@ def has_db_cutover_step(steps: Iterable[dict[str, Any]]) -> bool:
     return any(step.get(STEP_KIND) == MigrationStepKind.DB_CUTOVER.value for step in steps)
 
 
+# DB 쓰기 전환 단계 결과 중 「Job 이 돌지 않았다」는 뜻(아직 안 함·건너뜀).
+_CUTOVER_NOT_RUN_RESULTS = frozenset(
+    {MigrationStepStatus.PENDING.value, MigrationStepStatus.SKIPPED.value}
+)
+
+
+def db_cutover_may_have_run(
+    status: MigrationPlanStatus | str,
+    steps: Sequence[dict[str, Any]],
+    step_results: Sequence[dict[str, Any]],
+) -> bool:
+    """이 계획의 DB 쓰기 전환 Job 이 돌았거나 돌 수 있다(= 쓰기 담당이 스냅샷 때와 다를 수 있다).
+
+    - DB 쓰기 전환 단계가 없으면 False.
+    - 승인 대기(PENDING_APPROVAL)는 일꾼이 손대지 않았으므로 False(승인 없이는 Job 이 없다).
+    - 열린 계획(승인됨·실행 중·롤백 중)은 곧 돌거나 도는 중이라 True(모름).
+    - 끝난 계획은 그 단계 결과가 PENDING·SKIPPED(돌지 않음)일 때만 False. 결과가 없거나
+      RUNNING·PASSED·FAILED 면 True(종료 1·부분 상태도 쓰기 담당을 모를 수 있다).
+    """
+    indexes = [
+        index
+        for index, step in enumerate(steps)
+        if step.get(STEP_KIND) == MigrationStepKind.DB_CUTOVER.value
+    ]
+    if not indexes:
+        return False
+    plan_status = MigrationPlanStatus(status)
+    if plan_status is MigrationPlanStatus.PENDING_APPROVAL:
+        return False
+    if plan_status in OPEN_MIGRATION_PLAN_STATUSES:
+        return True
+    for index in indexes:
+        result = step_results[index] if index < len(step_results) else None
+        if result is None or result.get(RESULT_STATUS) not in _CUTOVER_NOT_RUN_RESULTS:
+            return True
+    return False
+
+
 # --- JSON 변환(감사 줄 details.snapshot) ---
 
 
@@ -443,6 +512,8 @@ class _OpenPlan:
     status: MigrationPlanStatus
     abort_requested: bool
     target_environment_id: uuid.UUID | None
+    # DB 쓰기 전환 단계가 들었다. 이런 계획은 복귀가 승인하지 않는다(FAILBACK 이면 rollback Job).
+    include_db_cutover: bool
 
 
 @dataclass(frozen=True)
@@ -462,6 +533,11 @@ class _RestoreContext:
     snapshot: DemoSnapshotView
     # 앞 단계가 아직 끝나지 않아 비율·배포 단계를 미룰 서비스.
     blocked_service_ids: set[uuid.UUID] = field(default_factory=set)
+    # DB_WRITER 확인: 스냅샷 뒤 DB 쓰기 전환이 돌았을 수 있어 쓰기 담당을 모르는 서비스.
+    writer_unconfirmed_service_ids: set[uuid.UUID] = field(default_factory=set)
+    # 사람이 먼저 해야 해서(쓰기 담당 확인·컷오버 든 복귀 계획) 비율·배포를 되돌리지 않은 서비스.
+    # 다시 불러도 저절로 풀리지 않으므로 WAITING 이 아니라 MANUAL_REQUIRED 로 알린다.
+    held_service_ids: set[uuid.UUID] = field(default_factory=set)
 
 
 class DemoSnapshotService:
@@ -523,7 +599,9 @@ class DemoSnapshotService:
 
     async def get_snapshot(self, organization_id: uuid.UUID) -> DemoSnapshotView:
         async with self._session.begin():
-            audit_log = await self._repository.find_latest_snapshot(organization_id)
+            audit_log = await self._repository.find_latest_snapshot(
+                organization_id, SNAPSHOT_DETAILS_KEY
+            )
             if audit_log is None:
                 raise DemoSnapshotNotFoundError("demo snapshot not found")
             return _snapshot_view(audit_log)
@@ -643,7 +721,69 @@ class DemoSnapshotService:
     async def restore(
         self, organization_id: uuid.UUID, actor_user_id: uuid.UUID, *, dry_run: bool
     ) -> DemoRestoreResult:
+        """조직별로 한 번에 하나(dryRun 은 아무것도 바꾸지 않아 잠그지 않는다)."""
         snapshot = await self.get_snapshot(organization_id)
+        if dry_run:
+            return await self._restore(organization_id, actor_user_id, snapshot, dry_run=True)
+        async with self._restore_lock(organization_id):
+            return await self._restore(organization_id, actor_user_id, snapshot, dry_run=False)
+
+    @asynccontextmanager
+    async def _restore_lock(self, organization_id: uuid.UUID) -> AsyncIterator[None]:
+        """조직별 세션 advisory lock. 복귀는 여러 트랜잭션을 커밋하므로 트랜잭션 잠금을 쓸 수 없어
+        별도 연결 하나로 잡고, 끝나면 푼다. 이미 잡혀 있으면 기다리지 않고 409.
+
+        풀기에 실패하면 연결을 버린다(invalidate). 연결이 닫히면 서버가 잠금을 푼다.
+        """
+        bind = self._session.bind
+        if bind is None:
+            raise RuntimeError("session has no bind")
+        engine = bind.engine if isinstance(bind, AsyncConnection) else bind
+        key = f"{RESTORE_LOCK_NAMESPACE}:{organization_id}"
+        async with engine.connect() as connection:
+            acquired = await connection.scalar(
+                text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"), {"key": key}
+            )
+            await connection.commit()
+            if not acquired:
+                logger.info(
+                    "demo restore already running",
+                    extra={
+                        "action": "restore_demo_snapshot",
+                        "organization_id": str(organization_id),
+                    },
+                )
+                raise DemoRestoreInProgressError(
+                    "another demo restore is running for this organization; "
+                    "call again after it finishes"
+                )
+            try:
+                yield
+            finally:
+                try:
+                    await connection.execute(
+                        text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"),
+                        {"key": key},
+                    )
+                    await connection.commit()
+                except SQLAlchemyError:
+                    logger.exception(
+                        "demo restore lock not released; dropping connection",
+                        extra={
+                            "action": "restore_demo_snapshot",
+                            "organization_id": str(organization_id),
+                        },
+                    )
+                    await connection.invalidate()
+
+    async def _restore(
+        self,
+        organization_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        snapshot: DemoSnapshotView,
+        *,
+        dry_run: bool,
+    ) -> DemoRestoreResult:
         context = _RestoreContext(organization_id, actor_user_id, dry_run, snapshot)
         steps = [
             await self._restore_plans(context),
@@ -651,10 +791,12 @@ class DemoSnapshotService:
             await self._clean_ai_runs(context),
             await self._wait_deploy_requests(context),
         ]
-        traffic = await self._restore_traffic(context)
-        steps.append(traffic)
+        # DB 쓰기 담당 확인을 트래픽보다 먼저 한다(모르면 트래픽·배포를 되돌리지 않는다).
+        # 응답의 단계 순서는 그대로 둔다(7번째).
+        db_writer = await self._check_db_writer(context)
+        steps.append(await self._restore_traffic(context))
         steps.append(await self._restore_deployments(context))
-        steps.append(await self._check_db_writer(context))
+        steps.append(db_writer)
         steps.append(_demo_app_data_step(snapshot.state))
         steps.append(await self._list_fix_pull_requests(context))
         steps.append(await self._compare_kept_settings(context))
@@ -712,10 +854,12 @@ class DemoSnapshotService:
             )
             target = ("migration_plan", plan.plan_id, None)
             if plan.status is MigrationPlanStatus.PENDING_APPROVAL:
-                if is_failback:
-                    # 스냅샷 서비스 중 환경으로 돌아가는 계획이다. 비율 단계가 승인한다.
+                if is_failback and not plan.include_db_cutover:
+                    # 스냅샷 서비스 중 환경으로 돌아가는 DB 전환 없는 계획. 비율 단계가 승인한다.
                     items.append(_item(DemoAction.KEEP_FAILBACK_PLAN, DemoStepStatus.OK, target))
                     continue
+                # DB 쓰기 전환이 든 계획은 복귀 계획이라도 남기지 않는다. 승인하면 일꾼이 DB Job 을
+                # 만들기 때문이다(FAILBACK 이면 rollback). 쓰기 담당은 사람이 DB_WRITER 로 맡는다.
                 items.append(
                     await self._call(
                         context,
@@ -729,6 +873,7 @@ class DemoSnapshotService:
                         ),
                         done=DemoStepStatus.DONE,
                         settled_errors=(PlanExpiredError,),
+                        detail=INCLUDE_DB_CUTOVER_DETAIL if plan.include_db_cutover else None,
                     )
                 )
             elif plan.status is MigrationPlanStatus.ROLLING_BACK:
@@ -900,19 +1045,42 @@ class DemoSnapshotService:
             if serving is not None and serving.traffic_weight == 100:
                 items.append(_item(DemoAction.NONE, DemoStepStatus.OK, target))
                 continue
+            writer_unconfirmed = service.service_id in context.writer_unconfirmed_service_ids
             plan = open_plans.get(service.service_id)
             if plan is not None and plan.target_environment_id == service.serving_environment_id:
-                if plan.status is MigrationPlanStatus.PENDING_APPROVAL:
-                    item = await self._approve_failback(context, plan.plan_id, target)
-                else:
+                if plan.status is not MigrationPlanStatus.PENDING_APPROVAL:
+                    # 이미 승인돼 도는 복귀(사람이 승인)다. 끝나길 기다린다.
                     item = _item(
                         DemoAction.WAIT_PLAN,
                         DemoStepStatus.WAITING,
                         ("migration_plan", plan.plan_id, service.name),
                         FAILBACK_IN_PROGRESS,
                     )
+                elif plan.include_db_cutover:
+                    # 1 단계가 취소했어야 한다(dryRun·취소 실패). 승인하지 않는다.
+                    item = _hold(
+                        context,
+                        service.service_id,
+                        target,
+                        FAILBACK_PLAN_INCLUDES_DB_CUTOVER,
+                        f"migrationPlanId={plan.plan_id}",
+                    )
+                elif writer_unconfirmed:
+                    item = _hold(
+                        context,
+                        service.service_id,
+                        target,
+                        DB_WRITER_UNCONFIRMED,
+                        f"migrationPlanId={plan.plan_id}",
+                    )
+                else:
+                    item = await self._approve_failback(context, plan.plan_id, target)
                 items.append(item)
                 context.blocked_service_ids.add(service.service_id)
+                continue
+            if writer_unconfirmed:
+                # 컷오버 처리기 원칙: 쓰기 담당을 모르면 가중치를 되돌리지 않는다.
+                items.append(_hold(context, service.service_id, target, DB_WRITER_UNCONFIRMED))
                 continue
             if service.service_id in context.blocked_service_ids:
                 items.append(
@@ -937,6 +1105,14 @@ class DemoSnapshotService:
                     context.actor_user_id,
                     _failback_command(service.serving_environment_id),
                 )
+            except MigrationPlanOpenError as error:
+                # 읽은 뒤 누군가 이 서비스에 계획을 열었다. 다시 부르면 그 계획을 1·5 단계가 다룬다.
+                items.append(
+                    _item(
+                        DemoAction.CREATE_FAILBACK_PLAN, DemoStepStatus.WAITING, target, error.code
+                    )
+                )
+                continue
             except AppError as error:
                 items.append(
                     _item(
@@ -954,6 +1130,13 @@ class DemoSnapshotService:
         target: tuple[str, uuid.UUID, str | None],
     ) -> DemoItemResult:
         detail = f"migrationPlanId={plan_id}"
+        # 승인 직전에 계획을 다시 읽어 DB 쓰기 전환이 들었으면 승인하지 않는다(복귀는 DB Job 을
+        # 만들지 않는다). 만든 계획에는 넣지 않지만 다른 경로가 넣을 수 있어 한 번 더 본다.
+        async with self._session.begin():
+            plan = await self._repository.find_plan(plan_id)
+            includes_cutover = plan is not None and has_db_cutover_step(plan.steps)
+        if includes_cutover:
+            return _hold(context, target[1], target, FAILBACK_PLAN_INCLUDES_DB_CUTOVER, detail)
         if context.dry_run:
             return _item(
                 DemoAction.APPROVE_FAILBACK_PLAN, DemoStepStatus.WOULD_DO, target, detail=detail
@@ -961,6 +1144,11 @@ class DemoSnapshotService:
         try:
             await self._migration_plans.approve_plan(
                 context.organization_id, plan_id, context.actor_user_id
+            )
+        except PlanNotPendingError as error:
+            # 읽은 뒤 누군가 승인·취소했다. 다시 부르면 지금 상태로 이어 간다.
+            return _item(
+                DemoAction.APPROVE_FAILBACK_PLAN, DemoStepStatus.WAITING, target, error.code, detail
             )
         except SelfApprovalForbiddenError:
             # 자기 승인이 꺼진 조직: 계획은 승인 대기로 남는다. 다른 개발자 이상이 승인한다.
@@ -1015,8 +1203,9 @@ class DemoSnapshotService:
                 and item.current_deployment_id is not None
             ]
             blocked = service.service_id in context.blocked_service_ids
+            held = service.service_id in context.held_service_ids
             serving_item = await self._rollback_connection(
-                context, service, serving, live_by_connection, blocked=blocked
+                context, service, serving, live_by_connection, blocked=blocked, held=held
             )
             items.append(serving_item)
             serving_settled = serving_item.status in _SETTLED and not blocked
@@ -1024,16 +1213,16 @@ class DemoSnapshotService:
                 if serving_settled:
                     items.append(
                         await self._rollback_connection(
-                            context, service, item, live_by_connection, blocked=False
+                            context, service, item, live_by_connection, blocked=False, held=False
                         )
                     )
                 elif not _same_image(item, live_by_connection):
                     items.append(
                         _item(
                             DemoAction.ROLLBACK_DEPLOYMENT,
-                            DemoStepStatus.WAITING,
+                            DemoStepStatus.MANUAL_REQUIRED if held else DemoStepStatus.WAITING,
                             _connection_target(service, item),
-                            SERVING_ROLLBACK_FIRST,
+                            TRAFFIC_HELD_FOR_DB_WRITER if held else SERVING_ROLLBACK_FIRST,
                         )
                     )
         return DemoStepResult(DemoStep.DEPLOYMENTS, items)
@@ -1046,6 +1235,7 @@ class DemoSnapshotService:
         live_by_connection: dict[uuid.UUID, _LiveConnection],
         *,
         blocked: bool,
+        held: bool,
     ) -> DemoItemResult:
         target = _connection_target(service, snapshot)
         live = live_by_connection.get(snapshot.service_environment_id)
@@ -1055,6 +1245,14 @@ class DemoSnapshotService:
             )
         if _same_image(snapshot, live_by_connection):
             return _item(DemoAction.NONE, DemoStepStatus.OK, target)
+        if held:
+            # 트래픽을 DB 쓰기 담당 때문에 두었다. 사람이 그 일을 끝낸 뒤 다시 부르면 이어 간다.
+            return _item(
+                DemoAction.ROLLBACK_DEPLOYMENT,
+                DemoStepStatus.MANUAL_REQUIRED,
+                target,
+                TRAFFIC_HELD_FOR_DB_WRITER,
+            )
         if blocked:
             return _item(
                 DemoAction.ROLLBACK_DEPLOYMENT,
@@ -1084,14 +1282,28 @@ class DemoSnapshotService:
     # 7~10. 수동 필요·유지 안내(읽기만)
 
     async def _check_db_writer(self, context: _RestoreContext) -> DemoStepResult:
+        """스냅샷 뒤 DB 쓰기 전환 단계가 든 계획을 본다(읽기만). 트래픽 단계보다 먼저 돈다.
+
+        그 Job 이 돌았을 수 있는 계획(db_cutover_may_have_run)의 서비스는 쓰기 담당을 모르므로
+        트래픽·배포를 되돌리지 않게 표시하고 MANUAL_REQUIRED 다. 승인 대기·건너뜀으로 Job 이 돌지
+        않은 계획은 OK(DB_CUTOVER_NOT_STARTED).
+        """
         async with self._session.begin():
             plans = [
-                (plan.id, str(plan.status))
+                (
+                    plan.id,
+                    plan.service_id,
+                    str(plan.status),
+                    db_cutover_may_have_run(plan.status, plan.steps, plan.step_results),
+                )
                 for plan in await self._repository.search_plans_created_since(
                     context.organization_id, context.snapshot.taken_at
                 )
                 if has_db_cutover_step(plan.steps)
             ]
+        for _, service_id, _, may_have_run in plans:
+            if may_have_run:
+                context.writer_unconfirmed_service_ids.add(service_id)
         if not plans:
             return DemoStepResult(
                 DemoStep.DB_WRITER,
@@ -1108,11 +1320,11 @@ class DemoSnapshotService:
             [
                 _item(
                     DemoAction.CHECK_DB_WRITER,
-                    DemoStepStatus.MANUAL_REQUIRED,
+                    DemoStepStatus.MANUAL_REQUIRED if may_have_run else DemoStepStatus.OK,
                     ("migration_plan", plan_id, status),
-                    DB_CUTOVER_SINCE_SNAPSHOT,
+                    DB_CUTOVER_SINCE_SNAPSHOT if may_have_run else DB_CUTOVER_NOT_STARTED,
                 )
-                for plan_id, status in plans
+                for plan_id, _, status, may_have_run in plans
             ],
         )
 
@@ -1192,6 +1404,7 @@ class DemoSnapshotService:
                     target_environment_id=environment_by_connection.get(
                         plan.target_service_environment_id
                     ),
+                    include_db_cutover=has_db_cutover_step(plan.steps),
                 )
                 for plan in plans
             ]
@@ -1353,6 +1566,24 @@ def _connection_target(
         "service_environment",
         connection.service_environment_id,
         f"{service.name}@{connection.environment_name}",
+    )
+
+
+def _hold(
+    context: _RestoreContext,
+    service_id: uuid.UUID,
+    target: tuple[str, uuid.UUID, str | None],
+    code: str,
+    detail: str | None = None,
+) -> DemoItemResult:
+    """사람이 DB 쓰기 담당을 먼저 맡아야 하는 서비스: 비율·배포를 되돌리지 않는다.
+
+    다시 불러도 저절로 풀리지 않으므로 WAITING(callAgain)이 아니라 MANUAL_REQUIRED 다.
+    """
+    context.held_service_ids.add(service_id)
+    context.blocked_service_ids.add(service_id)
+    return _item(
+        DemoAction.HOLD_FOR_DB_WRITER, DemoStepStatus.MANUAL_REQUIRED, target, code, detail
     )
 
 
