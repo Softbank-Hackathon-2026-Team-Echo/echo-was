@@ -161,7 +161,7 @@ data:
   IMAGE_REGISTRY_MIRRORS: asia-northeast3-docker.pkg.dev/team-echo-final/echo=706878591119.dkr.ecr.ap-northeast-1.amazonaws.com/echo
   # 트래픽 비율·대표 주소·지표는 고정 진입점(Envoy 가중치 API, 진입점 VM 내부 주소)을 부른다.
   ENTRYPOINT_EXECUTOR_MODE: http
-  ENTRYPOINT_BASE_URL: http://10.60.0.6:8080
+  ENTRYPOINT_BASE_URL: http://10.60.0.6:8080/v1
   ENTRYPOINT_TOKEN_REF: env:ECHO_SECRET_ENTRYPOINT_TOKEN
   # 서비스 대시보드 지표 API(운영 2)가 같은 진입점 VM 의 Prometheus 를 직접 읽는다(VPC 내부).
   # 진입점 Prometheus 는 basic auth 를 쓴다(11/5 인프라 9, 사용자는 기본 echo-otel). 비밀번호는 SecretSync 가
