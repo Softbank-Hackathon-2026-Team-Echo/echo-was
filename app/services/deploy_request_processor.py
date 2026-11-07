@@ -8,8 +8,9 @@
 - 외부 호출은 트랜잭션 밖에서 하고, 우리 행 id 를 멱등 키로 넘긴다. 순서는 "요청함 시각 저장·커밋 →
   호출 → external_ref 저장"이다. 다시 시작한 일꾼은 요청함 시각만 있고 external_ref 가 없으면 같은
   키로 다시 부른다. 가짜 대표 주소 라우터만 I/O 가 없어 성공 처리 트랜잭션 안에서 부른다.
-- 배포 기록이 생긴 뒤의 실패는 모두 되돌리기를 불러 직전 버전을 유지하고 결과를 revert_status 에
+- 배포 기록이 생긴 뒤의 실패는 되돌리기를 불러 직전 버전을 유지하고 결과를 revert_status 에
   적는다. 직전 버전이 없으면 실패한 버전만 거두고 '실행 중인 버전 없음' 줄을 쓴다.
+  단 첫 apply 요청 전 보안 차단은 실제 변경이 없어 되돌리지 않는다.
 - 실행기가 컨테이너 실패 진단(사유·종료 코드·로그 마지막 50줄)을 돌려주면 되돌리기 전에
   환경 변수 값을 가려 배포 작업 로그에 남긴다(API 서버 4-1).
 - 배포 작업 로그는 그 줄을 일으킨 전환과 같은 트랜잭션에서, 전환이 반영됐을 때만 쓴다(DeployJobLog).
@@ -32,8 +33,9 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.actions import AuditComponent
+from app.audit.actions import AuditAction, AuditComponent, AuditTargetType
 from app.audit.lifecycle import record_deploy_request_finished
+from app.audit.recorder import AuditActor, AuditRecorder, AuditTarget
 from app.clients.app_secret_store import AppSecretStore
 from app.clients.source_repository import SourceRepositoryClient
 from app.core.clock import Clock
@@ -46,6 +48,7 @@ from app.core.exceptions import (
 from app.core.repo_url import parse_repo_url
 from app.core.secrets import SecretValue
 from app.enums import (
+    AuditResult,
     BuildStatus,
     DeployLogCode,
     DeploymentStatus,
@@ -86,6 +89,7 @@ from app.repositories.build_repository import BuildRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.deployment_repository import DeploymentRepository
 from app.repositories.environment_repository import EnvironmentRepository
+from app.repositories.finding_repository import FindingRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.migration_plan_repository import MigrationPlanRepository
 from app.repositories.service_environment_repository import ServiceEnvironmentRepository
@@ -101,6 +105,7 @@ from app.services.container_diagnostics import (
 )
 from app.services.deploy_job_log import DeployJobLog
 from app.services.deploy_log_messages import standby_skipped_message
+from app.services.deploy_security_gate import DeploySecurityGate
 from app.services.deploy_support import (
     SIMULATE_FAIL_AT,
     SNAPSHOT_ENV_VARS,
@@ -116,7 +121,7 @@ from app.services.deploy_support import (
 )
 from app.services.integrity import violated_constraint_name
 from app.services.job_lease import JobLease, JobOutcome
-from app.services.security_scan_collector import BuildSecurityScanCollector
+from app.services.security_scan_collector import BuildSecurityScanCollector, build_scan_source_ref
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +451,12 @@ class DeployRequestProcessor:
         match result:
             case BuildRunning():
                 return self._next_run_after_poll()
-            case BuildFailed(code=code):
+            case BuildFailed(code=code, artifact=artifact):
                 await self._close_build(build.id, code)
+                if artifact is not None:
+                    await BuildSecurityScanCollector(self._session, self._clock).collect(
+                        build.id, self._executors.build, failed_artifact=artifact
+                    )
             case BuildSucceeded(image_repository=image_repository, image_digest=image_digest):
                 async with self._session.begin():
                     await self._lock(lock_build=True)
@@ -467,7 +476,7 @@ class DeployRequestProcessor:
                 )
                 if succeeded:
                     # 같은 실행의 보안 검사 원문을 증거로 남긴다(보안·거버넌스 2·11).
-                    # 실패해도 배포는 계속한다.
+                    # 수집 실패는 적용 전 배포 게이트가 UNKNOWN 으로 차단한다.
                     await BuildSecurityScanCollector(self._session, self._clock).collect(
                         build.id, self._executors.build
                     )
@@ -531,6 +540,58 @@ class DeployRequestProcessor:
         self._log("deploy request deploying", request, DeployRequestStatus.DEPLOYING)
         return self._next_run_now()
 
+    async def _recover_build_scan(self, request: DeployRequest) -> None:
+        """성공 기록 뒤 수집 전에 중단됐거나 과거 형식만 있으면 적용 전 한 번 재수집."""
+        if request.build_id is None:
+            return
+        async with self._session.begin():
+            service = await self._services.find_by_id(request.service_id)
+            assert service is not None
+            collected = await FindingRepository(self._session).has_build_scan(
+                service.organization_id, build_scan_source_ref(request.build_id)
+            )
+        if not collected:
+            await self._lease.extend()
+            await BuildSecurityScanCollector(self._session, self._clock).collect(
+                request.build_id, self._executors.build
+            )
+
+    async def _check_deploy_security(self, request: DeployRequest, deployment: Deployment) -> bool:
+        """실제 적용/같은 멱등 키 재호출마다 최신 증거·예외를 판정하고 감사를 남긴다."""
+        async with self._session.begin():
+            locked = await self._lock(lock_build=True, hold=False)
+            service, _, environment = await self._target_rows(locked.request)
+            decision = await DeploySecurityGate(self._session, self._clock).check(
+                locked.request, locked.build, deployment, service, environment, self._clock.now()
+            )
+            await self._lease.hold()
+            AuditRecorder(self._session, self._clock).record(
+                organization_id=service.organization_id,
+                actor=AuditActor.system(AuditComponent.DEPLOY_WORKER),
+                action=AuditAction.DEPLOY_SECURITY_CHECKED,
+                target=AuditTarget(AuditTargetType.DEPLOY_REQUEST, request.id),
+                result=AuditResult.FAILED if decision.is_blocked else AuditResult.SUCCEEDED,
+                reason="SECURITY_GATE_BLOCKED" if decision.is_blocked else None,
+                details={
+                    **decision.log_data(),
+                    "buildId": str(request.build_id),
+                    "deploymentId": str(deployment.id),
+                    "imageDigest": deployment.image_digest,
+                    "commitSha": request.commit_sha,
+                    "serviceId": str(service.id),
+                    "environmentId": str(environment.id),
+                    "trigger": request.trigger,
+                },
+            )
+            await self._job_log.append(
+                locked.request,
+                DeployLogCode.SECURITY_CHECK_BLOCKED
+                if decision.is_blocked
+                else DeployLogCode.SECURITY_CHECK_PASSED,
+                self._clock.now(),
+            )
+        return not decision.is_blocked
+
     async def _deployment_snapshot(
         self, request: DeployRequest, service_environment_id: uuid.UUID
     ) -> dict[str, Any]:
@@ -586,18 +647,6 @@ class DeployRequestProcessor:
             return await self._fail(DeployRequestErrorCode.DEPLOY_TIMEOUT)
 
         if request.deploy_external_ref is None:
-            if request.deploy_requested_at is None:
-                async with self._session.begin():
-                    await self._lock()
-                    if await self._requests.update_if(
-                        request.id,
-                        [
-                            DeployRequest.status == DeployRequestStatus.DEPLOYING,
-                            DeployRequest.deploy_requested_at.is_(None),
-                        ],
-                        {"deploy_requested_at": now, "updated_at": now},
-                    ):
-                        await self._job_log.append(request, DeployLogCode.DEPLOY_REQUESTED, now)
             async with self._session.begin():
                 deployment = await self._deployments.find_by_id(request.deployment_id)
                 service, connection, environment = await self._target_rows(request)
@@ -609,6 +658,24 @@ class DeployRequestProcessor:
                 self._warn_env_secret(request, exc.keys)
                 return await self._fail(DeployRequestErrorCode.ENV_SECRET_UNAVAILABLE)
             await self._lease.extend()
+            if not self._executors.deploy.simulated:
+                await self._recover_build_scan(request)
+                if not await self._check_deploy_security(request, deployment):
+                    return await self._fail(DeployRequestErrorCode.SECURITY_GATE_BLOCKED)
+            if request.deploy_requested_at is None:
+                async with self._session.begin():
+                    await self._lock()
+                    if await self._requests.update_if(
+                        request.id,
+                        [
+                            DeployRequest.status == DeployRequestStatus.DEPLOYING,
+                            DeployRequest.deploy_requested_at.is_(None),
+                        ],
+                        {"deploy_requested_at": self._clock.now(), "updated_at": self._clock.now()},
+                    ):
+                        await self._job_log.append(
+                            request, DeployLogCode.DEPLOY_REQUESTED, self._clock.now()
+                        )
             try:
                 external_ref = await self._executors.deploy.apply(
                     deployment_spec(deployment, env_values),
@@ -1098,7 +1165,11 @@ class DeployRequestProcessor:
                 "error_code": code,
             },
         )
-        if request.deployment_id is not None:
+        # 조건부 UPDATE 뒤 ORM status 는 이전 값일 수 있어 이번 실패 코드로 판단한다.
+        if request.deployment_id is not None and not (
+            code == DeployRequestErrorCode.SECURITY_GATE_BLOCKED
+            and request.deploy_requested_at is None
+        ):
             await self._revert()
         return JobOutcome.done()
 
@@ -1263,6 +1334,12 @@ def _needs_revert(request: DeployRequest) -> bool:
         request.status == DeployRequestStatus.FAILED
         and request.deployment_id is not None
         and request.revert_status is None
+        # 첫 apply 를 요청하기 전 보안 거절은 클러스터를 전혀 건드리지 않는다.
+        # 요청 시각이 있으면 이전 프로세스가 적용했을 수도 있어 기존 복구를 유지한다.
+        and not (
+            request.error_code == DeployRequestErrorCode.SECURITY_GATE_BLOCKED
+            and request.deploy_requested_at is None
+        )
     )
 
 

@@ -148,7 +148,7 @@ async def test_build_success_records_image_findings_for_built_digest(
     assert findings[0].reason == SecurityFindingReason.FIXABLE_HIGH_VULNERABILITY
     assert {f.image_digest for f in findings} == {build.image_digest}
     assert {str(f.service_id) for f in findings} == {service["id"]}
-    assert {f.source_ref for f in findings} == {SOURCE_REF}
+    assert {f.source_ref for f in findings} == {f"build:{build.id}:{SOURCE_REF}"}
     assert {f.collected_at for f in findings} == {scanned_at}
     assert executor.scan_reads == [build.external_ref]
 
