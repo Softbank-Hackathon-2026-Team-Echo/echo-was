@@ -42,6 +42,7 @@ async def test_actual_was_to_weights_http_two_services_and_foreign_tenant(
     spec = importlib.util.spec_from_file_location("scoped_weights_contract", source)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    monkeypatch.syspath_prepend(str(Path(source).parent))
     monkeypatch.setenv("UPSTREAMS", "aws=127.0.0.1:18001,gcp=127.0.0.1:18002")
     spec.loader.exec_module(module)
     original_connect = socket.socket.connect

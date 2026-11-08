@@ -204,7 +204,7 @@ async def test_stale_or_unbound_evidence_cannot_authorize_apply(
             build = await session.get_one(Build, request.build_id)
             build.simulated = True
     # 다른 빌드의 PASS 만 있을 때 재수집도 실패한 상황.
-    if mutation == "other-build":
+    if mutation in ("other-build", "policy"):
         harness.executors.build._scan = lambda *_: None
     await harness.run_until_idle()
     assert (await harness.get_request(accepted["id"]))["errorCode"] == "SECURITY_GATE_BLOCKED"
@@ -421,3 +421,32 @@ async def test_current_pass_never_hides_other_valid_fail_for_same_digest(
     await harness.run_until_idle()
     assert (await harness.get_request(accepted["id"]))["errorCode"] == "SECURITY_GATE_BLOCKED"
     assert harness.executors.deploy.calls == []
+
+
+@pytest.mark.parametrize("age_seconds,expected", [(600, "SUCCEEDED"), (8 * 24 * 3600, "FAILED")])
+async def test_policy_rollover_recollects_original_scan_without_renewing_ttl(
+    harness: DeployHarness, age_seconds: int, expected: str
+) -> None:
+    from app.services.security_rules import POLICY_VERSION
+
+    install(harness)
+    harness.executors.build.scan_changes["scanned_at"] = harness.clock.now() - timedelta(
+        seconds=age_seconds
+    )
+    accepted = await request_deploy(harness)
+    await harness.run_until(accepted["id"], {DeployRequestStatus.DEPLOYING})
+    async with harness.session_factory.begin() as session:
+        rows = (await session.scalars(select(Finding))).all()
+        scanned_at = rows[0].collected_at
+        for row in rows:
+            row.policy_version = "sec-rules-2026.11.06"
+    await harness.run_until_idle()
+    assert (await harness.get_request(accepted["id"]))["status"] == expected
+    async with harness.session_factory() as session:
+        refreshed = (
+            await session.scalars(select(Finding).where(Finding.policy_version == POLICY_VERSION))
+        ).all()
+    assert len(refreshed) == 3
+    assert all(row.collected_at == scanned_at for row in refreshed)
+    assert all(row.expires_at <= scanned_at + timedelta(days=7) for row in refreshed)
+    assert bool(harness.executors.deploy.calls) == (expected == "SUCCEEDED")

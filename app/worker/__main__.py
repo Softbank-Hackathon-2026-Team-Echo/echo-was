@@ -16,6 +16,7 @@ import socket
 import uuid
 
 from app.clients.app_secret_store import build_app_secret_store
+from app.clients.environment_security import LiveEnvironmentSecurityReader
 from app.core.clock import SystemClock
 from app.core.config import ExecutorMode, get_settings
 from app.core.database import get_engine, get_session_factory
@@ -25,6 +26,7 @@ from app.executors import build_executor_set
 from app.executors.kubernetes.executors import KubernetesDeployExecutor
 from app.main import app as api_app
 from app.services.cve_watch_loop import CveWatchLoop
+from app.services.environment_security_collector import EnvironmentSecurityCollector
 from app.services.executor_environment_lookup import DbEnvironmentLookup
 from app.services.live_disaster_feed import LiveDisasterFeedPoller
 from app.services.onprem_pull_refresher import OnpremPullSecretRefresher
@@ -93,6 +95,11 @@ async def main() -> None:
                     session_factory, clock, settings, api_app, api_app.routes
                 )
                 group.create_task(self_test.run(stop))
+            if settings.security_environment_collector_enabled and settings.security_gate_enabled:
+                environment_security = EnvironmentSecurityCollector(
+                    session_factory, clock, settings, LiveEnvironmentSecurityReader(settings, clock)
+                )
+                group.create_task(environment_security.run(stop))
             if settings.cve_watch_enabled:
                 cve_watch = CveWatchLoop(
                     session_factory, get_advisory_feed(settings), clock, settings

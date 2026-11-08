@@ -145,7 +145,7 @@ async def test_self_test_records_passing_evidence_with_was_version_scope(
         assert finding.organization_id == harness.organization.id
         assert finding.was_version == WAS_VERSION
         assert (finding.environment_id, finding.service_id) == (None, None)
-        assert finding.policy_version == POLICY_VERSION == "sec-rules-2026.11.06"
+        assert finding.policy_version == POLICY_VERSION == "sec-rules-2026.11.08"
         assert finding.expires_at - finding.collected_at == EVIDENCE_TTL
     assert iam.reason == SecurityFindingReason.AGENT_WRITES_DENIED
     labels = {item["item_id"]: item for item in iam.items}

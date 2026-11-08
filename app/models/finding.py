@@ -145,3 +145,17 @@ class Finding(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         sort_order=APPENDED_COLUMN_SORT_ORDER + 1,
     )
+
+    # 자동 수집의 같은 스트림만 대체한다. 과거 결과 자체는 바꾸지 않는다.
+    collection_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER + 2
+    )
+    collection_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER + 2
+    )
+    environment_revision: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER + 2
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, sort_order=APPENDED_COLUMN_SORT_ORDER + 2
+    )

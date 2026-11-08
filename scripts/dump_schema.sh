@@ -12,7 +12,13 @@ output=".claude/rules/db-schema.sql"
   echo "-- 생성: scripts/dump_schema.sh (pg_dump --schema-only --no-owner --no-privileges)"
   echo "-- 마이그레이션 버전 표(alembic_version)는 뺀다."
   echo
-  docker compose exec -T db \
+  # 별도 worktree의 격리 DB도 같은 생성 절차를 쓴다.
+  if [[ -n "${SCHEMA_CONTAINER:-}" ]]; then
+    dump_cmd=(docker exec "$SCHEMA_CONTAINER")
+  else
+    dump_cmd=(docker compose exec -T db)
+  fi
+  "${dump_cmd[@]}" \
     pg_dump --username=echo --dbname=echo \
     --schema-only --no-owner --no-privileges --exclude-table=public.alembic_version \
     | grep -v -E '^(SET |SELECT pg_catalog\.set_config|--|\\restrict|\\unrestrict)' \

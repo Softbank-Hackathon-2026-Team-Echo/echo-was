@@ -76,3 +76,7 @@
 - 2026-11-01T08:37Z · app/models/base.py (Edit) · 신규/동일
 - 2026-11-01T08:36Z · app/models/base.py (Edit) · 신규/동일
 - 2026-11-01T08:36Z · app/models/base.py (Write) · 신규/동일
+
+## 2026-11-08 — 환경 자동 증거 이력 (4f8c2d1b7e91)
+
+findings에 collection_key·collection_started_at·environment_revision·superseded_at을 nullable로 추가했다. 기존 수동/이미지 증거는 그대로 두고 같은 자동 수집 흐름만 판정에서 교체한다. 모델 → Alembic → 격리 PostgreSQL → scripts/dump_schema.sh 순서로 생성한다. downgrade는 새 열을 제거하며 기존 finding 행을 삭제하지 않는다. 운영 미적용.

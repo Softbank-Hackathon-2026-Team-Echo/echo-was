@@ -10,6 +10,7 @@ from sqlalchemy.orm import load_only
 
 from app.enums import SecurityControlId, SecurityFindingMode, SecurityFindingSource
 from app.models import Finding
+from app.services.security_rules import POLICY_VERSION
 
 # 커서에서 한 번에 가져올 ORM 행 수. 판정 결과 전체를 자르는 상한이 아니다.
 FINDING_FETCH_BATCH_SIZE = 500
@@ -54,6 +55,8 @@ class FindingRepository:
                     Finding.mode,
                     Finding.source,
                     Finding.policy_version,
+                    Finding.environment_revision,
+                    Finding.collection_key,
                     Finding.reviewer_user_id,
                     Finding.basis_url,
                     Finding.confirmation,
@@ -65,6 +68,7 @@ class FindingRepository:
             .where(
                 Finding.organization_id == organization_id,
                 Finding.expires_at > now,
+                Finding.superseded_at.is_(None),
                 Finding.mode != SecurityFindingMode.SIMULATED,
             )
             .order_by(Finding.collected_at.desc(), Finding.id)
@@ -100,6 +104,8 @@ class FindingRepository:
                     Finding.mode,
                     Finding.source,
                     Finding.policy_version,
+                    Finding.environment_revision,
+                    Finding.collection_key,
                     Finding.reviewer_user_id,
                     Finding.basis_url,
                     Finding.confirmation,
@@ -114,6 +120,7 @@ class FindingRepository:
                 Finding.image_digest == image_digest,
                 Finding.control_id.in_((SecurityControlId.IMG_1, SecurityControlId.IMG_2)),
                 Finding.expires_at > now,
+                Finding.superseded_at.is_(None),
                 Finding.mode != SecurityFindingMode.SIMULATED,
             )
             .execution_options(yield_per=FINDING_FETCH_BATCH_SIZE)
@@ -131,6 +138,7 @@ class FindingRepository:
             .where(
                 Finding.organization_id == organization_id,
                 Finding.source_ref.startswith(build_prefix),
+                Finding.policy_version == POLICY_VERSION,
             )
             .limit(1)
         )
@@ -151,6 +159,7 @@ class FindingRepository:
             .where(
                 Finding.organization_id == organization_id,
                 Finding.expires_at > now,
+                Finding.superseded_at.is_(None),
                 Finding.mode != SecurityFindingMode.SIMULATED,
                 or_(
                     Finding.service_id == service_id,

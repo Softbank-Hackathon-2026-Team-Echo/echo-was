@@ -38,7 +38,7 @@ from app.enums import (
 )
 
 # 규칙표 버전. 판정·사전 승인·이전 계획 지문에 넣는다. 규칙을 바꾸면 날짜를 올린다.
-POLICY_VERSION = "sec-rules-2026.11.06"
+POLICY_VERSION = "sec-rules-2026.11.08"
 
 # 기한부 예외의 최대 길이(만든 시각 → 만료).
 EXCEPTION_MAX_DURATION = timedelta(days=7)
@@ -117,6 +117,7 @@ class SecurityTarget:
     environment_kind: str
     # 조직 스위치. 켜져 있을 때만 예외를 만든 사람이 스스로 승인한 예외가 유효하다.
     allow_self_approval: bool = False
+    environment_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,8 @@ class SecurityFinding:
     basis_url: str | None = None
     # AI 결과(AI_REVIEW)만 쓴다. None 은 UNCONFIRMED 와 같다.
     confirmation: AiFindingConfirmation | None = None
+    environment_revision: str | None = None
+    collection_key: str | None = None
 
     @property
     def is_ai(self) -> bool:
@@ -332,7 +335,7 @@ RULES: tuple[SecurityControlRule, ...] = (
         is_mandatory=False,
         phases=_PREP,
         scope_keys=frozenset({_K.ENVIRONMENT}),
-        sources=frozenset({_S.MANUAL_REVIEW}),
+        sources=frozenset({_S.MANUAL_REVIEW, _S.TLS_PROBE, _S.DATA_ENGINE}),
         max_age=_PREPARATION_MAX_AGE,
     ),
     SecurityControlRule(
@@ -362,7 +365,7 @@ RULES: tuple[SecurityControlRule, ...] = (
         is_mandatory=False,
         phases=_PREP,
         scope_keys=frozenset({_K.ENVIRONMENT}),
-        sources=frozenset({_S.MANUAL_REVIEW, _S.CLOUD_API}),
+        sources=frozenset({_S.MANUAL_REVIEW, _S.CLOUD_API, _S.KUBERNETES_API}),
         max_age=_PREPARATION_MAX_AGE,
     ),
     SecurityControlRule(
@@ -660,6 +663,11 @@ def _find_rejection(
         return SecurityReasonCode.SCOPE_MISMATCH
     if not finding.is_ai and finding.source not in rule.sources:
         return SecurityReasonCode.SOURCE_NOT_ALLOWED
+    if finding.collection_key is not None and (
+        finding.environment_revision is None
+        or finding.environment_revision != target.environment_revision
+    ):
+        return SecurityReasonCode.SCOPE_MISMATCH
     if finding.mode == SecurityFindingMode.SIMULATED:
         return SecurityReasonCode.EVIDENCE_SIMULATED
     if finding.policy_version != POLICY_VERSION:

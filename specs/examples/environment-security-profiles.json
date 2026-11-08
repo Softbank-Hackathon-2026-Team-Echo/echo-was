@@ -1,0 +1,181 @@
+[
+  {
+    "organization_id": "00000000-0000-0000-0000-000000000001",
+    "environment_id": "10000000-0000-0000-0000-000000000001",
+    "subjects": [
+      {
+        "id": "app-ksa",
+        "kind": "kubernetes",
+        "name": "app",
+        "namespace": "demo-example",
+        "allowed_actions": [
+          "core:pods:get"
+        ],
+        "allowed_namespaces": [
+          "demo-example"
+        ],
+        "workloads": [
+          "app"
+        ]
+      },
+      {
+        "id": "executor",
+        "kind": "aws",
+        "name": "arn:aws:iam::123456789012:role/example-executor",
+        "allowed_actions": [
+          "eks:DescribeCluster"
+        ],
+        "allowed_resources": [
+          "arn:aws:eks:ap-northeast-1:123456789012:cluster/example"
+        ]
+      }
+    ],
+    "transports": [
+      {
+        "id": "management",
+        "kind": "http",
+        "url": "https://10.0.0.10:6443",
+        "ca_file": "/etc/echo-security/cluster-ca.pem"
+      },
+      {
+        "id": "origin",
+        "kind": "entrypoint",
+        "url": "https://10.0.10.10",
+        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
+        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "route": "svc_00000000000000000000000000000001_10000000000000000000000000000001",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "replication",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-clients",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-servers",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      }
+    ]
+  },
+  {
+    "organization_id": "00000000-0000-0000-0000-000000000001",
+    "environment_id": "10000000-0000-0000-0000-000000000002",
+    "subjects": [
+      {
+        "id": "app-ksa",
+        "kind": "kubernetes",
+        "name": "app",
+        "namespace": "demo-example",
+        "allowed_actions": [
+          "core:pods:get"
+        ],
+        "allowed_namespaces": [
+          "demo-example"
+        ],
+        "workloads": [
+          "app"
+        ]
+      },
+      {
+        "id": "executor",
+        "kind": "gcp",
+        "name": "executor@example-project.iam.gserviceaccount.com",
+        "project_id": "example-project",
+        "allowed_actions": [
+          "container.clusters.get"
+        ]
+      }
+    ],
+    "transports": [
+      {
+        "id": "management",
+        "kind": "http",
+        "url": "https://10.0.1.10:6443",
+        "ca_file": "/etc/echo-security/cluster-ca.pem"
+      },
+      {
+        "id": "origin",
+        "kind": "entrypoint",
+        "url": "https://10.0.10.10",
+        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
+        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "route": "svc_00000000000000000000000000000001_10000000000000000000000000000002",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "replication",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-clients",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-servers",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      }
+    ]
+  },
+  {
+    "organization_id": "00000000-0000-0000-0000-000000000001",
+    "environment_id": "10000000-0000-0000-0000-000000000003",
+    "subjects": [
+      {
+        "id": "app-ksa",
+        "kind": "kubernetes",
+        "name": "app",
+        "namespace": "demo-example",
+        "allowed_actions": [
+          "core:pods:get"
+        ],
+        "allowed_namespaces": [
+          "demo-example"
+        ],
+        "workloads": [
+          "app"
+        ]
+      }
+    ],
+    "transports": [
+      {
+        "id": "management",
+        "kind": "http",
+        "url": "https://10.0.2.10:6443",
+        "ca_file": "/etc/echo-security/cluster-ca.pem"
+      },
+      {
+        "id": "origin",
+        "kind": "entrypoint",
+        "url": "https://10.0.10.10",
+        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
+        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "route": "svc_00000000000000000000000000000001_10000000000000000000000000000003",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "replication",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-clients",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      },
+      {
+        "id": "pool-servers",
+        "kind": "database",
+        "snapshot_revision": "v1"
+      }
+    ]
+  }
+]

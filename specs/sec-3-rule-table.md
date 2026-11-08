@@ -83,10 +83,10 @@
 | C-IMG-3 | — | 예 | 실행 | 서비스 | WAS_STATE | 2분 | 1초 |
 | C-CFG-1 | policy | 아니요 | 준비 | 설정 커밋 | TRIVY_CONFIG | 7일 | — |
 | C-TLS-1 | encryption | 예 | 준비·실행 | 서비스·환경 | TLS_PROBE | 준비 1시간 / 실행 2분 | 5초 |
-| C-TLS-2 | encryption | 아니요 | 준비 | 환경 | MANUAL_REVIEW | 7일 | — |
+| C-TLS-2 | encryption | 아니요 | 준비 | 환경 | MANUAL_REVIEW·TLS_PROBE·DATA_ENGINE | 수동7일/자동30분 | — |
 | C-NET-1 | policy | 아니요 | 준비 | 환경 | MANUAL_REVIEW·CLOUD_API | 7일 | — |
 | C-NET-2 | policy | 아니요 | 준비 | 환경 | MANUAL_REVIEW·KUBERNETES_API | 7일 | — |
-| C-IAM-1 | iam | 아니요 | 준비 | 환경 | MANUAL_REVIEW·CLOUD_API | 7일 | — |
+| C-IAM-1 | iam | 아니요 | 준비 | 환경 | MANUAL_REVIEW·CLOUD_API·KUBERNETES_API | 수동7일/자동30분 | — |
 | C-IAM-2 | iam | 예 | 준비 | WAS 버전 | WAS_TEST·AUDIT_LOG | 7일 | — |
 | C-SEC-1 | encryption | 예 | 준비·실행 | 서비스·환경 (11/6, 1-2 SPEC) | WAS_STATE·MANUAL_REVIEW | 7일 | 1초 |
 | C-AUD-1 | auditLog | 예 | 준비 | WAS 버전 | WAS_TEST·AUDIT_LOG | 7일 | — |
@@ -154,3 +154,9 @@
 ## 10. 구현 계획으로 위임한 세부사항
 
 - 저장 표 이름(`findings`·`security_exceptions`·`security_decisions` 가칭)과 JSON 모양, 사유 코드의 API 표기, 시점별 범위 항목을 판정 대상에서 채우는 방법.
+
+### 2026-11-08 정책 변경
+
+sec-rules-2026.11.08: 환경 자동 관측 출처·설정 지문을 추가했다. 선택/비차단 정책은 유지한다. 자동 증거는 같은 collection_key/조직/환경/정책의 이전 수집만 superseded 처리하며 수동·다른 흐름 FAIL은 유지한다. 정책 변경 뒤 빌드 게이트는 이전 버전만 있을 경우 원본 산출물을 재수집한다(원래 검사 시각 유지). 운영 적용 전 현재 배포 재수집은 `python -m app.worker.refresh_security_evidence --organization-id UUID`로 대상을 보고 `--apply`로 수행한다. TLS·플랫폼 자기 시험은 worker의 기존 주기로 재생성한다. 상세 [환경 관측 SPEC](sec-7-environment-evidence.md).
+
+정책 상승은 collector OFF에서도 기존 수동6건·실제 PRECHECK 등 과거 버전 증거를 무효화한다. 점검자의 재확인/새 정책 기록·필수 증거 인수 전 단독 운영 배포하지 않는다. 수동 FAIL/예외를 자동 갱신하거나 PASS로 바꾸지 않는다. 공용 평문 FAIL·사설 평문 WARN의 실제 관측 기준은 환경 관측 SPEC을 따른다.
