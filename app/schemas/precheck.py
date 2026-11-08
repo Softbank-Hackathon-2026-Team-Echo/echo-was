@@ -47,6 +47,7 @@ class DecidePrecheckPatchRequest(ApiRequestModel):
     """승인·거절 본문. patchHash 는 화면이 본 패치의 해시다."""
 
     patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
+    review_evidence_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)] | None = None
     reason: (
         Annotated[str, Field(min_length=1, max_length=PATCH_DECISION_REASON_MAX_LENGTH)] | None
     ) = None
@@ -150,6 +151,7 @@ class PrecheckPatchResponse(ApiModel):
 
     id: str
     patch_hash: str
+    review_evidence: dict[str, Any] | None = None
     files: list[str]
     diff: str
     reason: str

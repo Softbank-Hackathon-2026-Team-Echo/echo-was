@@ -205,3 +205,8 @@ SPEC [api-10-3](../../specs/api-10-3-apply-run-detail.md). 부모 상세의 `pat
 ## 감사
 
 `PRECHECK_REQUESTED`·`PRECHECK_CANCELLED` 는 USER 줄(대상 `agent_run`, 이름표 = 서비스 이름, `details: {serviceId, targetEnvironmentId}`)이다. `AGENT_PATCH_APPROVED`(`{patchId, patchHash, applyRunId}`, `applyRunId` 는 null 가능)·`AGENT_PATCH_REJECTED`(`{patchId, patchHash}`)도 USER 줄이고 대상은 부모 실행이다. 멱등 200 은 줄을 쓰지 않고, 사유 원문은 결정 행에만 있다. 러너 쪽 줄은 [audit-logs.md](audit-logs.md) 를 본다.
+
+
+## 독립 검토 증거 (선택 계약 후보)
+
+`patches[].reviewEvidence`는 null 또는 기준 커밋·시험 정의/결과·별도 검토를 결속한 증거다. 검토된 패치를 승인할 때 본문에 화면에서 본 `reviewEvidenceHash`를 함께 전달한다. 누락/변경이면 409 PATCH_STALE. 기존 증거 없는 패치 요청은 그대로다. 새 정책은 `AI_PATCH_REVIEW_REQUIRED=false` 기본 OFF이며 기존 실행에 소급하지 않는다. 상세 필드·크기·해시 및 배포 순서는 [독립 검토 명세](../../specs/ai-independent-review.md)를 따른다.

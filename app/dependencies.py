@@ -644,6 +644,7 @@ def get_diagnosis_service(
         deploy_requests,
         simulate_enabled=settings.ai_diagnosis_simulate_enabled,
         runner_enabled=settings.ai_diagnosis_runner_enabled,
+        review_required=settings.ai_patch_review_required,
         apply_commit=ApplyCommitService(
             session, clock, repo_writer, enabled=settings.ai_apply_commit_enabled
         ),

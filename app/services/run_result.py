@@ -125,7 +125,10 @@ def compute_patch_status(
 def _with_recalculated_status(patch: Mapping[str, Any]) -> dict[str, Any]:
     reason = patch_block_reason(patch)
     status = AgentPatchStatus.BLOCKED if reason is not None else AgentPatchStatus.PROPOSED
-    return {**patch, "status": status.value, "blockReason": reason.value if reason else None}
+    stored = {**patch, "status": status.value, "blockReason": reason.value if reason else None}
+    if stored.get("reviewEvidence") is None:
+        stored.pop("reviewEvidence", None)
+    return stored
 
 
 def _with_confirmation(finding: Mapping[str, Any]) -> dict[str, Any]:

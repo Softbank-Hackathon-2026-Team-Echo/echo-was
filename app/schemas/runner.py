@@ -318,6 +318,7 @@ class RunPatchCheckRequest(ApiRequestModel):
 
 
 class RunPatchRequest(ApiRequestModel):
+    review_evidence: dict[str, Any] | None = None
     id: Annotated[str, Field(min_length=1, max_length=64)]
     patch_hash: Annotated[str, Field(pattern=PATCH_HASH_PATTERN)]
     files: Annotated[list[Text], Field(min_length=1)]
@@ -339,6 +340,15 @@ class RunPatchRequest(ApiRequestModel):
         """PD-14: patchHash 는 diff 의 해시여야 한다. 승인 지문이 diff 에 묶이게 다시 계산한다."""
         if self.patch_hash != compute_patch_hash(self.diff):
             raise ValueError("patchHash must be sha256 of diff")
+        if self.review_evidence is not None:
+            from app.core.review_evidence import validate_evidence
+
+            validate_evidence(
+                self.review_evidence,
+                self.diff,
+                self.review_evidence.get("sourceCommitSha"),
+                self.files,
+            )
         return self
 
 

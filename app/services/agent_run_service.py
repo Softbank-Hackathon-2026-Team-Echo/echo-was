@@ -42,6 +42,7 @@ from app.models.agent_run import OPEN_STATUSES
 from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
 from app.repositories.agent_run_event_repository import AgentRunEventRepository
 from app.repositories.agent_run_repository import AgentRunRepository
+from app.services.patch_review import validate_apply_review, validate_patch_review
 from app.services.run_result import NormalizedApplyResult, NormalizedRunResult, compute_patch_hash
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,13 @@ class AgentRunService:
             run = await self._runs.find_by_id(run_id)
             if run is None or run.status not in OPEN_STATUSES:
                 raise ResultAlreadySubmittedError(str(run_id))
+            try:
+                for patch in normalized.result.get("patches", []):
+                    validate_patch_review(run.input_snapshot, patch, simulated=normalized.simulated)
+            except (ValueError, TypeError) as error:
+                raise ResultInvalidError(
+                    [ErrorField("patches.reviewEvidence", "REVIEW_BINDING_INVALID")]
+                ) from error
             is_finished = await self._finish_or_expire(
                 run,
                 now,
@@ -405,6 +413,16 @@ def _check_apply_fingerprint(
         raise ResultInvalidError(
             [ErrorField("inputSnapshot.patch.diff", PATCH_HASH_MISMATCH_REASON)]
         )
+    try:
+        validate_apply_review(
+            run.input_snapshot,
+            approval.checks_digest,
+            review_required=approval.policy_version.startswith("syntax-review-"),
+        )
+    except (ValueError, TypeError) as error:
+        raise ResultInvalidError(
+            [ErrorField("reviewEvidence", "REVIEW_BINDING_INVALID")]
+        ) from error
     if normalized.result["branch"] != run.input_snapshot.get("branch"):
         raise ResultInvalidError([ErrorField("branch", BRANCH_MISMATCH_REASON)])
 

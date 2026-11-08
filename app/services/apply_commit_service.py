@@ -36,9 +36,11 @@ from app.core.log_masking import mask_secrets
 from app.core.repo_url import InvalidRepoUrlError, parse_repo_url
 from app.enums import AgentRunKind, AgentRunStatus, RefType
 from app.models import AgentRun, DeployRequest
+from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.deploy_request_repository import DeployRequestRepository
 from app.repositories.user_repository import UserRepository
+from app.services.patch_review import validate_apply_review
 from app.services.patch_text import (
     PatchApplyError,
     UnsafePathError,
@@ -326,6 +328,29 @@ class ApplyCommitService:
         snapshot = apply_run.input_snapshot or {}
         patch = snapshot.get("patch") or {}
         diff = _diff(apply_run)
+        # Re-read the human decision before any remote mutation, including legacy/missing fields.
+        async with self._session.begin():
+            approval = await AgentPatchApprovalRepository(self._session).find_by_run_and_patch(
+                parent.id, patch.get("id", "")
+            )
+        review_required = approval is not None and approval.policy_version.startswith(
+            "syntax-review-"
+        )
+        if (
+            review_required
+            or snapshot.get("reviewPolicy") is not None
+            or patch.get("reviewEvidence") is not None
+        ):
+            try:
+                if approval is None:
+                    raise ValueError("REVIEW_APPROVAL_MISSING")
+                validate_apply_review(
+                    snapshot, approval.checks_digest, review_required=review_required
+                )
+            except (ValueError, TypeError) as error:
+                raise RepoCommitError(
+                    RepoCommitErrorCode.PATCH_CONFLICT, "REVIEW_BINDING_INVALID"
+                ) from error
         if compute_patch_hash(diff) != patch.get("patchHash"):
             raise RepoCommitError(RepoCommitErrorCode.PATCH_CONFLICT, "PATCH_HASH")
         try:

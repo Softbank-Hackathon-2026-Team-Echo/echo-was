@@ -97,6 +97,7 @@ async def approve_precheck_patch(
         access.user.id,
         request.patch_hash,
         request.reason,
+        review_evidence_hash=request.review_evidence_hash,
     )
     if view.apply_run is not None:
         # 가짜 진단의 반영은 승인 때 바로 성공으로 끝나므로 여기서 재배포를 잇는다(SPEC api-98).
@@ -124,5 +125,6 @@ async def reject_precheck_patch(
         access.user.id,
         request.patch_hash,
         request.reason,
+        review_evidence_hash=request.review_evidence_hash,
     )
     return ApiResponse(data=PrecheckPatchResponse.from_view(view))

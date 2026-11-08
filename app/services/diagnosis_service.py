@@ -114,6 +114,7 @@ class DiagnosisService:
         *,
         simulate_enabled: bool,
         runner_enabled: bool = False,
+        review_required: bool = False,
         apply_commit: ApplyCommitService | None = None,
     ) -> None:
         self._session = session
@@ -121,6 +122,7 @@ class DiagnosisService:
         self._deploy_request_service = deploy_requests
         self._simulate_enabled = simulate_enabled
         self._runner_enabled = runner_enabled
+        self._review_required = review_required
         self._apply_commit = apply_commit
         self._runs = AgentRunRepository(session)
         self._events = AgentRunEventRepository(session)
@@ -176,6 +178,10 @@ class DiagnosisService:
             if open_run is not None and simulate is None:
                 raise PrecheckInProgressError(str(open_run.id))
             snapshot = await self._build_input_snapshot(service, environment, request)
+            if self._review_required and simulate is None:
+                from app.core.review_evidence import REVIEW_POLICY
+
+                snapshot["reviewPolicy"] = REVIEW_POLICY
             run = AgentRun(
                 organization_id=organization_id,
                 service_id=service.id,

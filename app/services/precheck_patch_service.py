@@ -32,6 +32,7 @@ from app.core.exceptions import (
     SelfApprovalForbiddenError,
 )
 from app.core.log_masking import mask_secrets_in_json
+from app.core.review_evidence import REVIEW_POLICY, approval_digest
 from app.enums import AgentPatchDecision, AgentPatchStatus, AgentRunKind, AgentRunStatus
 from app.models import AgentPatchApproval, AgentRun
 from app.repositories.agent_patch_approval_repository import AgentPatchApprovalRepository
@@ -44,9 +45,9 @@ from app.services.agent_run_service import (
     run_target,
 )
 from app.services.integrity import violated_constraint_name
+from app.services.patch_review import validate_patch_review
 from app.services.precheck_service import (
     PrecheckPatchView,
-    compute_checks_digest,
     compute_input_hash,
     insert_agent_run,
     load_patch_decisions,
@@ -84,6 +85,7 @@ class PrecheckPatchService:
         actor_user_id: uuid.UUID,
         patch_hash: str,
         reason: str | None,
+        review_evidence_hash: str | None = None,
     ) -> PrecheckPatchView:
         return await self._decide(
             organization_id,
@@ -93,6 +95,7 @@ class PrecheckPatchService:
             AgentPatchDecision.APPROVED,
             patch_hash,
             reason,
+            review_evidence_hash,
         )
 
     async def reject_patch(
@@ -103,6 +106,7 @@ class PrecheckPatchService:
         actor_user_id: uuid.UUID,
         patch_hash: str,
         reason: str | None,
+        review_evidence_hash: str | None = None,
     ) -> PrecheckPatchView:
         return await self._decide(
             organization_id,
@@ -112,6 +116,7 @@ class PrecheckPatchService:
             AgentPatchDecision.REJECTED,
             patch_hash,
             reason,
+            review_evidence_hash,
         )
 
     async def _decide(
@@ -123,6 +128,7 @@ class PrecheckPatchService:
         decision: AgentPatchDecision,
         patch_hash: str,
         reason: str | None,
+        review_evidence_hash: str | None = None,
     ) -> PrecheckPatchView:
         now = self._clock.now()
         is_approval = decision == AgentPatchDecision.APPROVED
@@ -139,6 +145,28 @@ class PrecheckPatchService:
                 raise PatchBlockedError(stored.get("blockReason"))
             approval = await self._approvals.find_by_run_and_patch(run.id, patch_id)
             is_new = False
+            if is_approval:
+                try:
+                    validate_patch_review(run.input_snapshot, stored, simulated=run.simulated)
+                    evidence = stored.get("reviewEvidence")
+                    if (
+                        approval is not None
+                        and approval.policy_version.startswith("syntax-review-")
+                        and evidence is None
+                    ):
+                        raise ValueError("REVIEW_REQUIRED")
+                    if evidence is not None:
+                        if (
+                            review_evidence_hash != evidence["evidenceHash"]
+                            or patch_hash != stored["patchHash"]
+                        ):
+                            raise ValueError("REVIEW_APPROVAL_CHANGED")
+                        if approval is not None and approval.checks_digest != approval_digest(
+                            dict(stored)
+                        ):
+                            raise ValueError("REVIEW_APPROVAL_CHANGED")
+                except (ValueError, TypeError) as error:
+                    raise PatchStaleError("reviewEvidence", "REVIEW_BINDING_INVALID") from error
             if approval is None:
                 _check_not_stale(run, stored, patch_hash, now)
                 if is_approval:
@@ -216,8 +244,10 @@ class PrecheckPatchService:
                     run_id=run.id,
                     patch_id=patch_id,
                     patch_hash=stored["patchHash"],
-                    checks_digest=compute_checks_digest(stored["checks"]),
-                    policy_version=PATCH_POLICY_VERSION,
+                    checks_digest=approval_digest(dict(stored)),
+                    policy_version=REVIEW_POLICY
+                    if stored.get("reviewEvidence")
+                    else PATCH_POLICY_VERSION,
                     decision=decision,
                     decided_by_user_id=actor_user_id,
                     reason=reason,
@@ -245,6 +275,8 @@ class PrecheckPatchService:
         decision: AgentPatchDecision,
     ) -> None:
         details: dict[str, Any] = {"patchId": stored["id"], "patchHash": stored["patchHash"]}
+        if stored.get("reviewEvidence") is not None:
+            details["reviewEvidenceHash"] = stored["reviewEvidence"]["evidenceHash"]
         if decision == AgentPatchDecision.APPROVED:
             details["applyRunId"] = str(approval.apply_run_id) if approval.apply_run_id else None
         self._audit.record(
@@ -327,6 +359,12 @@ def _build_apply_run(
         "repo": APPLY_REPOSITORY,
         "branch": branch,
     }
+    if stored.get("reviewEvidence") is not None:
+        snapshot["patch"]["reviewEvidence"] = stored["reviewEvidence"]
+        snapshot["patch"]["checks"] = stored["checks"]
+        snapshot["approvalChecksDigest"] = approval_digest(dict(stored))
+    if run.input_snapshot.get("reviewPolicy") is not None:
+        snapshot["reviewPolicy"] = run.input_snapshot["reviewPolicy"]
     if run.kind == AgentRunKind.CHANGE_PROPOSAL:
         deploy_request = run.input_snapshot.get("deployRequest") or {}
         snapshot["repo"] = deploy_request.get("repo") or APPLY_REPOSITORY
