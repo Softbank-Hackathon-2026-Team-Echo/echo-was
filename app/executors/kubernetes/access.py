@@ -217,6 +217,13 @@ class ClusterAccessProvider:
 
     # --- aws ---
 
+    async def credentials_for_security_read(self, config: AwsEnvironmentConfig) -> Credentials:
+        """전달된 설정의 역할 신원. 수집기는 검사 전용 역할로 바꾼 설정을 전달한다."""
+        role_arn = config.role_arn or self._default_aws_role_arn
+        if not role_arn:
+            raise ClusterConfigError
+        return await self._aws_role_credentials(role_arn, config.region, refresh=False)
+
     async def _eks_access(self, config: AwsEnvironmentConfig, *, refresh: bool) -> ClusterAccess:
         role_arn = config.role_arn or self._default_aws_role_arn
         if not role_arn:

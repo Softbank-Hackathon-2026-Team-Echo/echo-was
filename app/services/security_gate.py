@@ -40,6 +40,7 @@ from app.repositories.service_environment_variable_repository import (
     ServiceEnvironmentVariableRepository,
 )
 from app.repositories.service_repository import ServiceRepository
+from app.security_environment.revision import current_revision
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import SecurityFindingService, to_security_finding
 from app.services.security_normalizers import (
@@ -110,6 +111,7 @@ class _Snapshot:
     source_deployment_id: uuid.UUID | None
     target_deployment_id: uuid.UUID | None
     hosts: tuple[str, ...]
+    environment_revision: str | None = None
     exceptions: list[SecurityException] = field(default_factory=list)
 
     @property
@@ -181,6 +183,7 @@ class SecurityGate:
                 was_version=self._was_version,
             ),
             environment_kind=snapshot.target_environment_kind,
+            environment_revision=snapshot.environment_revision,
             allow_self_approval=snapshot.allow_self_approval,
         )
         decision = evaluate_security(
@@ -351,6 +354,16 @@ class SecurityGate:
                 service_id=service.id,
                 target_environment_id=target.environment_id if target is not None else None,
                 target_environment_kind=target.environment.kind if target is not None else "",
+                environment_revision=(
+                    current_revision(
+                        service.organization_id,
+                        target.environment_id,
+                        target.environment.config,
+                        target.environment.secret_ref,
+                    )
+                    if target is not None
+                    else None
+                ),
                 source_connection_id=source.id if source is not None else None,
                 target_connection_id=target.id if target is not None else None,
                 source_environment_id=source.environment_id if source is not None else None,

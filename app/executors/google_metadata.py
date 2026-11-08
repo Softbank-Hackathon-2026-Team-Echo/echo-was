@@ -81,6 +81,16 @@ class GoogleMetadataClient:
             raise MetadataAuthError
         return SecretValue(token)
 
+    async def service_account_email(self) -> str:
+        """현재 workload 신원 확인. 자격 값은 반환하지 않는다."""
+        response = await self._get(
+            "/computeMetadata/v1/instance/service-accounts/default/email", {}
+        )
+        email = response.text.strip()
+        if not email.endswith(".iam.gserviceaccount.com") or "@" not in email:
+            raise MetadataAuthError
+        return email
+
     async def aclose(self) -> None:
         if self._http is not None:
             await self._http.aclose()

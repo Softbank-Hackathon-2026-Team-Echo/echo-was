@@ -395,8 +395,11 @@ erDiagram
 | `reviewer_user_id`·`basis_url` | uuid·text | Y | `source = MANUAL_REVIEW` 면 둘 다 필수 | 사람 점검자·근거 링크 |
 | `confirmation` | varchar | Y | `source = AI_REVIEW` 일 때만 있음 | AI 결과의 사람 확인 상태 |
 | `collected_at`·`expires_at` | timestamptz | N | `expires_at > collected_at` | 수집 시각·만료(수집 + 통제 유효기간) |
+| `collection_key`·`environment_revision` | varchar(64) | Y | | 자동 수집 흐름 ID와 조직/환경 프로필·환경 설정 SHA-256 |
+| `collection_started_at`·`superseded_at` | timestamptz | Y | | 자동 검사 시작과 후속 검사로 대체된 시각. 결과·원래 관측시각은 변경하지 않음 |
 
 - `source = AI_REVIEW` 인 행은 `result` 가 `WARN`·`FAIL`·`UNKNOWN` 만 된다(`ck_findings_ai_result_not_pass`). AI 결과로 PASS 를 만들 수 없다.
+- 환경 자동 수집은 같은 조직/환경/흐름/정책의 옛 행만 대체한다. 판정 조회는 superseded 행을 제외하고 일반 이력 조회는 보존한다. 수동·다른 흐름 FAIL은 교체하지 않는다. 자동 증거 지문은 매번 현재 설정과 대조한다.
 - 인덱스 `(organization_id, control_id, collected_at)`. 판정용 조회는 만료 전 증거를 최신순으로 최대 500건 읽는다.
 
 ### `security_exceptions` — 기한부 예외 (보안·거버넌스 3)

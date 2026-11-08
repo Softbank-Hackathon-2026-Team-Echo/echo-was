@@ -46,6 +46,7 @@ from app.repositories.service_environment_variable_repository import (
 )
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
+from app.security_environment.revision import current_revision
 from app.services.security_exception_service import to_security_exception
 from app.services.security_finding_service import to_security_finding
 from app.services.security_normalizers import normalize_secret_delivery
@@ -375,6 +376,9 @@ def _evaluate_row(
             was_version=judgement.was_version,
         ),
         environment_kind=environment.kind,
+        environment_revision=current_revision(
+            judgement.organization_id, environment.id, environment.config, environment.secret_ref
+        ),
         allow_self_approval=judgement.allow_self_approval,
     )
     service_targets: list[tuple[uuid.UUID | None, SecurityTarget]] = [

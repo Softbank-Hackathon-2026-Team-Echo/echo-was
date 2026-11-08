@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.secrets import InvalidSecretRefError, parse_secret_ref
+from app.security_environment.types import EnvironmentSecurityProfile
 
 DEFAULT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS = 5.0
 # 퍼블릭 주소가 DNS 이름 최대 길이(253)를 넘지 않게 한다. 지금 주소는 레이블 하나(63자 이하)
@@ -285,6 +286,26 @@ class Settings(BaseSettings):
     # 보안 게이트(보안·거버넌스 5). 켜면 이전 승인과 일꾼 실행 시작 때 필수 보안 통제를 판정해
     # 막는다(실행 직전 TLS 접속 시험 포함). 기본은 꺼짐이고, 꺼져 있으면 판정·기록을 하지 않는다.
     security_gate_enabled: bool = False
+    security_environment_collector_enabled: bool = False
+    security_environment_interval_seconds: int = Field(default=900, ge=60, le=900)
+    security_environment_profiles: tuple[EnvironmentSecurityProfile, ...] = ()
+
+    @model_validator(mode="after")
+    def require_security_environment_profiles(self) -> "Settings":
+        if self.security_environment_collector_enabled and not self.security_environment_profiles:
+            raise ValueError("environment security collection requires explicit profiles")
+        return self
+
+    @field_validator("security_environment_profiles")
+    @classmethod
+    def validate_environment_profiles(
+        cls, profiles: tuple[EnvironmentSecurityProfile, ...]
+    ) -> tuple[EnvironmentSecurityProfile, ...]:
+        keys = [(p.organization_id, p.environment_id) for p in profiles]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate environment security profile")
+        return profiles
+
     # 게이트가 켜진 일꾼이 공개 경로 TLS 를 주기로 시험해 C-TLS-1 준비 증거(유효 1시간)를
     # 남기는 간격. 증거가 비지 않게 유효기간보다 짧아야 한다(최대 50분).
     security_tls_probe_interval_seconds: int = Field(default=1800, ge=60, le=3000)
