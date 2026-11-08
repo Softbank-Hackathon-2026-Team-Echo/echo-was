@@ -52,6 +52,31 @@
 
 상태 값: `OK`(이미 같음) · `DONE`(이번에 조치) · `STARTED`(조치 시작, 일꾼이 끝냄) · `WAITING`(앞 단계·진행 중 작업 대기) · `MANUAL_REQUIRED` · `FAILED`(기존 함수가 거절, `code` = 그 오류 코드) · `KEPT` · `WOULD_DO`(dryRun). 단계 상태 = 항목 중 가장 급한 것(`FAILED` > `MANUAL_REQUIRED` > `WAITING` > `STARTED` > `WOULD_DO` > `DONE` > `KEPT` > `OK`).
 
+## 알려진 한계: 스냅샷과 동시에 만든 DB 쓰기 전환 계획
+
+7 단계는 `MigrationPlan.created_at >= 스냅샷 taken_at` 으로 「스냅샷 뒤 계획」을 고른다(`search_plans_created_since`). 그런데 두 시각은 트랜잭션 순서와 맞물리지 않는다.
+
+- `create_plan` 은 `created_at` 시각을 **먼저** 찍고 트랜잭션을 연 뒤 서비스 행 잠금(`FOR UPDATE`)을 기다려 저장한다(`migration_plan_service.py` `now = self._clock.now()`).
+- `take_snapshot` 은 잠금 없이 열린 계획을 읽고(READ COMMITTED), 그 뒤에 감사 줄 시각으로 `taken_at` 을 찍는다.
+
+그래서 아래처럼 겹치면 7 단계가 그 계획을 놓친다.
+
+```text
+t0  누군가 DB 쓰기 전환이 든 이전 계획 생성 시작 → created_at = t0 (아직 커밋 전)
+t1  어드민이 스냅샷 → 열린 계획 없음으로 읽음 → taken_at = t1 (t0 < t1), 「깨끗함」으로 저장
+t2  계획 커밋 → 승인 → 실행 → 컷오버로 쓰기 담당 A→B, 계획 끝남
+t3  restore: 1 단계는 끝난 계획이라 건너뜀, 7 단계는 created_at(t0) < taken_at(t1) 이라 못 찾음
+    → `NO_DB_CUTOVER_SINCE_SNAPSHOT`, 5 단계가 DB 쓰기 전환 없는 복귀 이전을 만들고 승인
+```
+
+- 결과: 쓰기 담당이 B 인데 트래픽만 스냅샷 환경으로 돌아가고, 응답은 「스냅샷 뒤 컷오버 없음」이라고 한다. 원래라면 그 서비스는 `DB_WRITER_UNCONFIRMED` 로 멈춰야 한다.
+- 영향이 작은 이유
+  - 스냅샷과 계획 생성이 거의 동시에(수 ms, 잠금 대기·WAS 파드 사이 시계 차이만큼) 겹쳐야 한다. 그 계획이 승인·실행돼 컷오버까지 끝난 뒤에 `restore` 를 불러야 한다.
+  - 컷오버 뒤에는 양쪽 PgBouncer 가 같은 쓰기 DB 를 가리키므로(echo-infra `replication/k8s/scripts/common.sh` `writer_side`), 트래픽이 돌아가도 데이터가 둘로 갈라지지는 않는다. 지연이 늘고, 운영자가 쓰기 담당을 잘못 알 수 있다. 다음 컷오버는 사전 점검(preflight)에서 어긋남으로 멈출 수 있다.
+  - 권한 문제는 아니다. `restore` 는 사람 어드민이 자기 조직에만 부르고, 승인·보안 게이트 검사를 그대로 탄다.
+- 운영 수칙: 스냅샷을 따는 동안 같은 조직에서 이전 계획을 만들지 않는다. 직전에 컷오버를 돌렸다면 응답이 `NO_DB_CUTOVER_SINCE_SNAPSHOT` 이어도 쓰기 담당을 컷오버 도구로 직접 확인한다.
+- 고칠 방법(시연 뒤): ① `take_snapshot` 이 열린 계획을 읽기 전에 조직의 서비스 행을 `FOR SHARE` 로 잠가 `create_plan` 과 순서를 맞춘다. 또는 ② 7 단계가 `created_at` 대신 「스냅샷 때 열려 있지 않았고 `updated_at >= taken_at` 인 계획」을 고른다.
+
 ## 응답 `DemoRestore`
 
 `{snapshotId, snapshotTakenAt, dryRun, restored, callAgain, manualRequired: [step], steps: [{step, status, items: [{action, status, targetType, targetId, label, code, detail}]}]}`
