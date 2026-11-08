@@ -124,9 +124,29 @@ class TransportTarget(StrictModel):
         return self
 
 
+class ReaderAccess(StrictModel):
+    """검사 전용 신원 참조. 실행기 자격으로 대체하지 않는다."""
+
+    google_service_account: (
+        Annotated[str, Field(pattern=r"^[a-z0-9-]+@[a-z0-9.-]+\.iam\.gserviceaccount\.com$")] | None
+    ) = None
+    aws_role_arn: (
+        Annotated[str, Field(pattern=r"^arn:aws:iam::[0-9]{12}:role/[a-zA-Z0-9_+=,.@/\-]+$")] | None
+    ) = None
+    onprem_token_ref: str | None = None
+
+    @field_validator("onprem_token_ref")
+    @classmethod
+    def validate_token_ref(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_secret_ref(value)
+        return value
+
+
 class EnvironmentSecurityProfile(StrictModel):
     organization_id: uuid.UUID
     environment_id: uuid.UUID
+    reader: ReaderAccess | None = None
     subjects: tuple[IamSubject, ...] = Field(min_length=1, max_length=32)
     transports: tuple[TransportTarget, ...] = Field(min_length=1, max_length=64)
 

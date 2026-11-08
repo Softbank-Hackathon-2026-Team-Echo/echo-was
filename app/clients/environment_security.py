@@ -5,6 +5,7 @@ import logging
 import httpx
 
 from app.adapters.aws import AwsEnvironmentConfig
+from app.adapters.gcp import GcpEnvironmentConfig
 from app.clients.environment_cloud_iam import inspect_aws_subject, inspect_gcp_subject
 from app.clients.environment_iam import CLOUD, KUBE, check, inspect_kubernetes_subject
 from app.clients.environment_transport import (
@@ -22,6 +23,7 @@ from app.executors.base import ClusterEnvironment
 from app.executors.google_metadata import GoogleMetadataClient
 from app.executors.kubernetes.access import ClusterAccessProvider
 from app.executors.kubernetes.api import KubeApi, KubeHttpClients, default_kube_http_factory
+from app.security_environment.access import reader_environment
 from app.security_environment.types import EnvironmentSecurityProfile, EvidenceCheck, unknown
 
 logger = logging.getLogger(__name__)
@@ -32,13 +34,14 @@ class LiveEnvironmentSecurityReader:
         self, settings: Settings, clock: Clock, secrets: SecretClient | None = None
     ) -> None:
         self._clock = clock
+        self._executor_role = settings.executor_aws_role_arn
         self._secrets = secrets or EnvVarSecretClient()
         self._metadata = GoogleMetadataClient(settings.google_metadata_base_url, clock)
         self._provider = ClusterAccessProvider(
             metadata=self._metadata,
             secret_client=self._secrets,
             clock=clock,
-            default_aws_role_arn=settings.executor_aws_role_arn,
+            default_aws_role_arn=None,
             timeout_seconds=5,
         )
         self._clients = KubeHttpClients(default_kube_http_factory, 5)
@@ -47,6 +50,14 @@ class LiveEnvironmentSecurityReader:
     async def inspect(
         self, profile: EnvironmentSecurityProfile, environment: ClusterEnvironment
     ) -> dict[SecurityControlId, list[EvidenceCheck]]:
+        environment = reader_environment(profile, environment, self._executor_role)
+        if isinstance(environment.config, (AwsEnvironmentConfig, GcpEnvironmentConfig)):
+            assert profile.reader is not None
+            if (
+                await self._metadata.service_account_email()
+                != profile.reader.google_service_account
+            ):
+                raise ValueError("unexpected collector workload identity")
         api = KubeApi(environment, self._provider, self._clients)
         iam: list[EvidenceCheck] = []
         transport: list[EvidenceCheck] = []

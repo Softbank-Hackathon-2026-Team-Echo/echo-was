@@ -192,45 +192,64 @@ class EnvironmentSecurityCollector:
         self._clock = clock
         self._settings = settings
         self._reader = reader
+        self.failed_environments = 0
 
     async def run_once(self) -> int:
         total = 0
+        self.failed_environments = 0
         for profile in self._settings.security_environment_profiles:
-            started_at = self._clock.now()
-            async with self._session_factory() as session, session.begin():
-                row = await EnvironmentEvidenceRepository(session).find_environment(
-                    profile.organization_id, profile.environment_id
-                )
-                if row is None or row.is_deleted or row.organization_id != profile.organization_id:
-                    continue
-                revision = profile.revision(row.config, row.secret_ref)
             try:
-                environment = ClusterEnvironment(
-                    row.id, row.kind, row.name, row.parsed_config(), row.secret_ref
-                )
-                async with asyncio.timeout(60):
-                    checks = await self._reader.inspect(profile, environment)
+                recorded, incomplete = await self._collect_profile(profile)
+                total += recorded
+                self.failed_environments += int(incomplete)
             except Exception as exc:
+                self.failed_environments += 1
                 logger.warning(
-                    "environment security inspection failed",
+                    "environment security collection failed",
                     extra={
                         "action": "collect_environment_security",
                         "environment_id": str(profile.environment_id),
                         "error_type": type(exc).__name__,
                     },
                 )
-                checks = {
-                    control: [
-                        unknown("collector", "COLLECTION_FAILED", self._clock.now(), sources[0])
-                    ]
-                    for control, sources in _CONTROL_SOURCES.items()
-                }
-            findings = normalize_environment_checks(checks, profile, revision, self._clock.now())
-            async with self._session_factory() as session:
-                total += await EnvironmentEvidenceService(session).record_snapshot(
-                    profile, revision, findings, started_at
-                )
         return total
+
+    async def _collect_profile(self, profile: EnvironmentSecurityProfile) -> tuple[int, bool]:
+        started_at = self._clock.now()
+        async with self._session_factory() as session, session.begin():
+            row = await EnvironmentEvidenceRepository(session).find_environment(
+                profile.organization_id, profile.environment_id
+            )
+            if row is None or row.is_deleted or row.organization_id != profile.organization_id:
+                raise ValueError("configured environment unavailable")
+            revision = profile.revision(row.config, row.secret_ref)
+        try:
+            environment = ClusterEnvironment(
+                row.id, row.kind, row.name, row.parsed_config(), row.secret_ref
+            )
+            async with asyncio.timeout(60):
+                checks = await self._reader.inspect(profile, environment)
+        except Exception as exc:
+            logger.warning(
+                "environment security inspection failed",
+                extra={
+                    "action": "collect_environment_security",
+                    "environment_id": str(profile.environment_id),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            checks = {
+                control: [unknown("collector", "COLLECTION_FAILED", self._clock.now(), sources[0])]
+                for control, sources in _CONTROL_SOURCES.items()
+            }
+        findings = normalize_environment_checks(checks, profile, revision, self._clock.now())
+        async with self._session_factory() as session:
+            recorded = await EnvironmentEvidenceService(session).record_snapshot(
+                profile, revision, findings, started_at
+            )
+        return recorded, recorded == 0 or any(
+            value.finding.result == SecurityResult.UNKNOWN for value in findings
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         try:

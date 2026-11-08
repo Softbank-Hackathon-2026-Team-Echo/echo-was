@@ -51,6 +51,21 @@ class EnvironmentEvidenceRepository:
         )
         return True
 
+    async def count_active_old_policy(
+        self, organization_id: uuid.UUID, policy_version: str, now: datetime
+    ) -> int:
+        count = await self._session.scalar(
+            select(func.count())
+            .select_from(Finding)
+            .where(
+                Finding.organization_id == organization_id,
+                Finding.policy_version != policy_version,
+                Finding.superseded_at.is_(None),
+                Finding.expires_at > now,
+            )
+        )
+        return count or 0
+
     async def current_builds(self, organization_id: uuid.UUID) -> list[uuid.UUID]:
         query = (
             select(Build.id)

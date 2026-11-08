@@ -15,7 +15,7 @@
 고객·AI 입력이나 Terraform 파일만으로 운영 PASS를 만들지 않는다.
 환경 프로필은 실제 환경 전체를 자동 발견하지 않으므로, 목록의 완전성은 운영 인수 조건이다.
 
-- SECURITY_GATE_ENABLED와 SECURITY_ENVIRONMENT_COLLECTOR_ENABLED가 모두 true인 worker만 수집한다.
+- 두 스위치가 true인 별도 `python -m app.worker.environment_security` 프로세스만 수집한다. 일반 배포 worker에서는 이 수집기를 시작하지 않는다.
 - 기본 OFF, 시작 즉시 및 기본900초 간격(60~900초), 자동 증거 TTL1800초.
 - 조직/환경/프로필·환경 config·secretRef 지문/정책/출처/원래 관측 시각을 저장한다.
 - 환경 잠금 후 같은 자동 스트림의 과거 행만 superseded 처리한다. 늦게 끝난 옛 수집은 버린다.
@@ -34,7 +34,7 @@
 [3환경 형식 예제](examples/environment-security-profiles.json)는 전부 가상 UUID·주소다.
 실제 UUID, 실행기/검사기/앱·컷오버/노드 신원, 검토한 allowlist,
 서비스별 origin·관리 API·복제·앱→풀·풀→DB를 담당자와 빠짐없이 매핑한 뒤 활성화한다.
-API와 worker는 같은 프로필을 받아야 한다. JSON 배열을 환경변수 값으로 제공한다.
+API·worker·전용 collector는 같은 프로필을 받아야 한다. JSON 배열을 환경변수 값으로 제공한다.
 
 entrypoint 대상은 HTTPS **고정 IP origin**(경로 없음)과 신뢰 CA, 별도 token_ref를 요구한다.
 env 참조는 기존 형식 env:ECHO_SECRET_* 이며 운영에는 조직 접두사를 쓴다.
@@ -79,7 +79,7 @@ WAS 전체 pytest에는 신규 모델의 migration upgrade/downgrade/check·pg_c
 외부 API는 Stubber/MockTransport로 검사하고 실제 AWS/GCP 운영 권한 시험과 구분한다.
 infra는 실제 격리 Envoy·PostgreSQL·PgBouncer와 코드 회귀를 검증한다.
 
-현재 어댑터는 기존 ClusterAccessProvider/worker 자격을 재사용한다. 읽기 API만 호출하지만 독립 최소 권한 신원 적용은 #24에서 인수해야 한다.
+feat/sec-observer-runtime에서는 별도 workload 신원으로 실행한다. reader.aws_role_arn/reader.onprem_token_ref만 선택하며 실행기 자격 fallback을 금지한다. AWS/GCP는 metadata의 GSA 이메일을 reader.google_service_account와 대조한다. 실제 IAM/RBAC 생성·바인딩과 유효 권한은 운영 인수 사항이다.
 
 운영 인수: 동옥/지민은 정확한 신원/읽기 권한과 HTTPS/CA·서비스 route,
 도현은 DB/PgBouncer 통계 계정/실제 연결 매핑/관측기 적용,
@@ -97,3 +97,13 @@ infra main87a64cff 기반 weights32·observer9·journal14 PASS.
 PG17 집계/권한 거부와 PgBouncer1.26.1 stats 관측/PAUSE 거부 PASS.
 Docker 두 이미지 build PASS. Terraform fmt/validate PASS(기존 provider 경고), tflint는 미설치로 실행하지 못했다.
 자동 수집의 실제 운영 적용·3환경 IAM API 호출·CNI/RBAC 실집행·브라우저 인수와 구분한다.
+
+## 전용 runtime 인계 (feat/sec-observer-runtime)
+
+- 일반 배포 worker는 더 이상 환경 수집기를 시작하지 않는다. API/worker에는 프로필 참조만 동일하게 공급하고, 검사 전용 GSA·AWS role·onprem 토큰·WAS DB 로그인은 별도 workload에 둔다.
+- `python -m app.worker.environment_security --preflight`: 환경 존재·전용 자격 참조와 조직별 이전 정책 유효 증거 수를 읽는다. `configurationReady`는 형식·환경 연결 준비만 뜻하며, 실제 권한·CA·네트워크·정책 인수 성공이 아니다. 비밀값을 읽거나 외부 API/DB 쓰기를 실행하지 않는다. `policyTransition=REVIEW_REQUIRED`, `operationalAcceptance=NOT_VERIFIED`를 유지한다.
+- `--once`: 한 주기를 실행한다. 옵션 없으면 15분 주기 loop, SIGTERM 정상 종료. 설정 누락/권한 실패는 UNKNOWN으로 남고, 다른 환경 처리를 계속한다. UNKNOWN이나 저장 실패 환경이 있으면 단발 명령은 종료 코드1을 반환한다. 관측된 WARN/FAIL은 수집 성공과 구분하며 그대로 보관한다.
+- infra의 `collector-db.sql`은 별도 역할에 findings INSERT/이력 교체와 환경 SELECT를 허용한다. PostgreSQL 행 잠금을 위해 environments.updated_at 한 열의 UPDATE 권한이 필요하다. config/secret_ref/배포 실행/기존 판정 수정 권한은 주지 않는다. 이 역할은 증거 작성 신원이므로 그 로그인도 별도 Secret으로 보호한다.
+- 새 DB schema 변경은 없다. 앞선 자동화 migration 4f8c2d1b7e91 적용은 여전히 필요하다. 기존 정책 전환·사람 점검 재확인·실환경 3곳 인수 절차는 그대로 남는다.
+
+검증 재현 시 `TEST_DATABASE_URL`(폐기용 *_test DB), `ECHO_INFRA_WEIGHTS_APP`(짝 app.py 절대 경로), `ECHO_INFRA_OBSERVER_DIR`(짝 security/environment-observer 절대 경로)를 설정해 pytest를 실행한다. 경로를 빼면 교차 저장소 계약 시험이 skip되므로 최종 인수에서는 경로를 반드시 준다.

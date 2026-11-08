@@ -41,8 +41,8 @@
         "id": "origin",
         "kind": "entrypoint",
         "url": "https://10.0.10.10",
-        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
-        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "token_ref": "env:ECHO_SECRET_SECURITY_READ_TOKEN",
+        "ca_file": "/etc/echo-security-ca/entrypoint-ca.crt",
         "route": "svc_00000000000000000000000000000001_10000000000000000000000000000001",
         "snapshot_revision": "v1"
       },
@@ -61,7 +61,11 @@
         "kind": "database",
         "snapshot_revision": "v1"
       }
-    ]
+    ],
+    "reader": {
+      "google_service_account": "security-reader@example.iam.gserviceaccount.com",
+      "aws_role_arn": "arn:aws:iam::123456789012:role/example-security-reader"
+    }
   },
   {
     "organization_id": "00000000-0000-0000-0000-000000000001",
@@ -103,8 +107,8 @@
         "id": "origin",
         "kind": "entrypoint",
         "url": "https://10.0.10.10",
-        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
-        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "token_ref": "env:ECHO_SECRET_SECURITY_READ_TOKEN",
+        "ca_file": "/etc/echo-security-ca/entrypoint-ca.crt",
         "route": "svc_00000000000000000000000000000001_10000000000000000000000000000002",
         "snapshot_revision": "v1"
       },
@@ -123,7 +127,10 @@
         "kind": "database",
         "snapshot_revision": "v1"
       }
-    ]
+    ],
+    "reader": {
+      "google_service_account": "security-reader@example.iam.gserviceaccount.com"
+    }
   },
   {
     "organization_id": "00000000-0000-0000-0000-000000000001",
@@ -156,8 +163,8 @@
         "id": "origin",
         "kind": "entrypoint",
         "url": "https://10.0.10.10",
-        "token_ref": "env:ECHO_SECRET_TEAM_ECHO__SECURITY_READ",
-        "ca_file": "/etc/echo-security/entrypoint-ca.pem",
+        "token_ref": "env:ECHO_SECRET_SECURITY_READ_TOKEN",
+        "ca_file": "/etc/echo-security-ca/entrypoint-ca.crt",
         "route": "svc_00000000000000000000000000000001_10000000000000000000000000000003",
         "snapshot_revision": "v1"
       },
@@ -176,6 +183,9 @@
         "kind": "database",
         "snapshot_revision": "v1"
       }
-    ]
+    ],
+    "reader": {
+      "onprem_token_ref": "env:ECHO_SECRET_SECURITY_ONPREM_TOKEN"
+    }
   }
 ]
