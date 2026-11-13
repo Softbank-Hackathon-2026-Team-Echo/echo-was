@@ -1,5 +1,26 @@
 # echo-was — Echo Control API
 
+> 🛑 **The demo service (app.echoport.uk · api.echoport.uk) was shut down after the SoftBank Hackathon 2026 finals (2026-11-08).** The addresses in this README no longer respond; the code and docs stay here for reference.
+> 🛑 **데모 서비스는 해커톤 본선(2026-11-08)이 끝난 뒤 내렸다.** 이 문서의 주소들은 더 이상 응답하지 않고, 코드와 문서는 참고용으로 남겨 둔다.
+
+## English summary
+
+**echo-was** is the control-plane API of **EchoPort**, Team Echo's multi-cloud BCDR platform (SoftBank Hackathon 2026 in Korea, Finals 2nd place). Python 3 · FastAPI · PostgreSQL.
+
+- **Environments**: registers AWS EKS, GCP GKE and on-premises k3s clusters behind per-kind adapters.
+- **One-touch deploy**: build once, deploy the same image digest to every environment, switch only after the health check passes; history and rollback.
+- **Migration plans**: move a running service between clouds with staged traffic weights (5 → 10 → 25 → 50 → 75 → 100%), judged by served requests and 5xx, with automatic rollback; the DB writer switch is driven by the infra repo's migration engine.
+- **Guardrails**: GitHub login, organizations and roles, read-only agent tokens, a security gate on deploys and migrations with time-boxed exceptions, audit logs.
+- **Worker**: `python -m app.worker` runs jobs from a DB job table with leases and idempotency keys, so work survives restarts.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Softbank-Hackathon-2026-Team-Echo/.github/main/profile/assets/architecture-final.png" width="100%" alt="EchoPort architecture at the finals: Cloudflare LB → GCP network LB → Envoy → AWS Tokyo EKS · GCP Seoul GKE · on-prem k3s kit; control plane (echo-was, control DB) and AI sandbox in GCP Seoul" />
+  <br/><sub>Architecture at the finals (2026-11-08). The environment has since been torn down.</sub>
+</p>
+
+---
+
+
 Team Echo 멀티 클라우드 관리 플랫폼의 API 서버(관리 평면)다.
 
 ## 시스템 내 위치
@@ -233,6 +254,8 @@ GITHUB_APP_INSTALL_URL=https://github.com/apps/<app>/installations/new
 ```
 
 ### 데모 배포 주소
+
+> 🛑 아래 주소는 해커톤 본선(2026-11-08) 뒤 서비스를 내려 지금은 응답하지 않는다. 기록으로만 남긴다.
 
 도메인 `echoport.uk`(11/2 구매, Cloudflare Registrar, 1년만 쓰고 자동 갱신 꺼 둠). 배포 환경 값은 `.env.example` 의 "데모 배포 주소" 블록에 있다.
 
